@@ -67,4 +67,4 @@ if __name__ == '__main__':
     im.resize((1280, int(im.size[1] * sc)), Image.LANCZOS).save('render/preview-full.png')
     print('preview-full', im.size, '->', (1280, int(im.size[1] * sc)))
     crop('crop-top.png', 30, 12, 1660, 330, ox=ox, oy=oy)
-    crop('crop-nodes.png', 30, 540, 1700, 810, ox=ox, oy=oy)
+    crop('crop-nodes.png', 30, 540, 1700, 720, ox=ox, oy=oy)
