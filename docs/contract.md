@@ -419,3 +419,42 @@ Store.LIMITS.MODULE_STATUSES     // ['todo','doing','review','approved']
 2. 进入 ① → 看到「本模块要做什么」（目标 / 要做的事 / 产出 / 验收要点）→ 点「完成并提交审核」→ 徽标变 `⏳ 待审核`，出现「确定（通过）」「打回重做」。
 3. 点「确定（通过）」→ ① 变 `approved`（卡片徽标 ✓），**并自动跳到 ②**。
 4. 刷新页面 → 9 个模块、① 的 `approved`、说明卡内容全部保留（`fa_state_v1`）。
+
+---
+
+## 13. 项目管理（本地多项目，v6 新增）
+
+- **当前项目** = `state.modules`（键 `fa_state_v1`）+ 项目名（键 `research_workspace_meta_v1` 的 `name` 字段，由 `workspace.js` 读写；store 只读写其中 name）
+- **归档项目** = 键 `fa_projects_v1`：`[{ id, name, savedAt, modules, activeModuleId }]`
+
+### 13.1 新增 API
+
+```js
+Store.createProject(name)    // -> { ok, name, archived }；先把当前工作区归档进历史，再清空模块并写入新项目名
+Store.openProject(id)        // -> { ok, name, moduleCount }；当前工作区先归档，再载入所选项目的模块
+Store.listProjects()         // -> [{ id, name, savedAt, moduleCount }]（轻量视图，不含模块内容）
+Store.currentProjectName()   // -> string（读 meta 键的 name，缺失回「我的研究项目」）
+Store.PROJECTS_KEY           // 'fa_projects_v1'
+Store.PROJECT_META_KEY       // 'research_workspace_meta_v1'
+```
+
+### 13.2 新增事件
+
+| type | payload | 触发时机 |
+|---|---|---|
+| `project:create` | `{ name, archived }` | 新建项目成功后（archived 为归档结果的 `{id,name}` 或 null） |
+| `project:open` | `{ id, name }` | 打开历史项目成功后 |
+
+### 13.3 界面约定
+
+- 侧栏「当前项目」文字右侧的 `+` 按钮（`.project-add-btn`，`title="新建项目"`）→ 展开 `.project-new-bar`
+  （输入框 + 确定 / 取消；Enter 确定、Esc 取消）。输入框独占一行、按钮另起一行——侧栏太窄，同排会把按钮挤成竖排文字。
+- 确定后执行 `location.reload()`：项目名存在 workspace 的 meta 键里，刷新一次保证侧栏/详情/页面标题三处一致。
+- `.project-history`：存在归档时列出「历史项目 (N)」与各项（`名称（N 模块）`），点击即切换（切换前同样先归档当前工作区）。
+- **没有任何模块的当前项目不会被归档**（避免产生空归档）。
+- 样式：`.project-*` 位于 `css/style.css` 追加分区 A（sidebar.js 归 A）。
+
+### 13.4 手工验收（已实测通过）
+
+1. 点「当前项目」右侧 `+` → 输入「实验二：投稿返修」→ 确定：项目名（侧栏 + 页面标题）变为新名、模块清空为 0、出现「历史项目 (1) · 我的研究项目（9 模块）」。
+2. 点历史项 → 切回：项目名恢复「我的研究项目」、9 个模块回归、① 的 `approved` 状态完好、历史项目列表清空。

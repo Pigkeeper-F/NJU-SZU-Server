@@ -575,6 +575,75 @@ body.sidebar-collapsed .sidebar-hint { display: none; }
 .sidebar.sidebar-collapsed .sidebar-flow-btn,
 body.sidebar-collapsed .sidebar-flow-btn { display: none; }
 
+/* 项目管理：「当前项目」右侧的 + / 新建输入条 / 历史项目列表（sidebar.js） */
+.project-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.project-add-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text);
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.project-add-btn:hover { background: var(--accent); color: #ffffff; border-color: var(--accent); }
+
+.sidebar-projects { margin: 6px 12px 10px; }
+/* 侧栏很窄：输入框独占一行、按钮另起一行，避免「确定/取消」被挤成竖排 */
+.project-new-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.project-new-input {
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.project-new-ok,
+.project-new-cancel {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  cursor: pointer;
+}
+.project-new-ok { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+.project-new-ok:hover { filter: brightness(1.08); }
+.project-new-cancel:hover { background: #f7f8fa; }
+
+.project-history { margin-top: 8px; }
+.project-history-head { margin-bottom: 4px; font-size: 11px; color: var(--muted); }
+.project-history-item {
+  display: block;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text);
+  background: #ffffff;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-history-item:hover { background: #f7f8fa; border-style: solid; }
+
+.sidebar.sidebar-collapsed .sidebar-projects,
+body.sidebar-collapsed .sidebar-projects { display: none; }
+
 /* ---- 分区 B：模块条（tabs.js）与消息区（chat.js msg-list） —— 负责人：B ---- */
 
 /* ---- 分区 共用：跨模块公共样式 / 主题变量调整 —— 双方确认后由提交者追加 ---- */

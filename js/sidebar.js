@@ -137,6 +137,119 @@
     if (hint.textContent !== HINT_TEXT) hint.textContent = HINT_TEXT;
   }
 
+  // ---------------------------------------------- 项目管理（新建 / 历史切换）
+
+  var elProjectPanel = null;
+  var elProjectInput = null;
+
+  /** 新建项目输入条（默认隐藏；Enter 确定、Esc 取消） */
+  function buildNewProjectBar() {
+    var bar = doc.createElement('div');
+    bar.className = 'project-new-bar';
+    bar.hidden = true;
+
+    elProjectInput = doc.createElement('input');
+    elProjectInput.type = 'text';
+    elProjectInput.className = 'project-new-input';
+    elProjectInput.placeholder = '新项目名称';
+    elProjectInput.maxLength = 40;
+
+    var ok = doc.createElement('button');
+    ok.type = 'button';
+    ok.className = 'project-new-ok';
+    ok.textContent = '确定';
+
+    var cancel = doc.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'project-new-cancel';
+    cancel.textContent = '取消';
+
+    function submitNewProject() {
+      if (!Store || typeof Store.createProject !== 'function') return;
+      var result = Store.createProject(elProjectInput.value);
+      // createProject 会先把当前工作区归档进历史，不会丢数据；项目名存在 workspace 的 meta 键里，
+      // 刷新一次让侧栏/详情/标题处的项目名一致。
+      if (result && result.ok) { location.reload(); return; }
+      elProjectInput.focus();
+    }
+
+    ok.addEventListener('click', submitNewProject);
+    elProjectInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); submitNewProject(); }
+      else if (e.key === 'Escape') { bar.hidden = true; }
+    });
+    cancel.addEventListener('click', function () { bar.hidden = true; });
+
+    bar.appendChild(elProjectInput);
+    bar.appendChild(ok);
+    bar.appendChild(cancel);
+    return bar;
+  }
+
+  /** 项目管理区（新建输入条 + 历史项目列表）：只创建一次，插在「当前项目」卡片之后 */
+  function ensureProjectPanel() {
+    if (elProjectPanel) return elProjectPanel;
+    elProjectPanel = doc.createElement('div');
+    elProjectPanel.className = 'sidebar-projects';
+    elProjectPanel.appendChild(buildNewProjectBar());
+    var history = doc.createElement('div');
+    history.className = 'project-history';
+    elProjectPanel.appendChild(history);
+
+    var anchor = elSidebar.querySelector ? elSidebar.querySelector('#project-shortcut') : null;
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(elProjectPanel, anchor.nextSibling);
+    else elSidebar.appendChild(elProjectPanel);
+    return elProjectPanel;
+  }
+
+  /** 「当前项目」文字右侧的 + 按钮 */
+  function ensureProjectAdd() {
+    var label = elSidebar.querySelector ? elSidebar.querySelector('.project-label') : null;
+    if (!label || label.querySelector('.project-add-btn')) return;
+    var btn = doc.createElement('button');
+    btn.type = 'button';
+    btn.className = 'project-add-btn';
+    btn.textContent = '+';
+    btn.title = '新建项目';
+    btn.setAttribute('aria-label', '新建项目');
+    btn.addEventListener('click', function () {
+      var panel = ensureProjectPanel();
+      var bar = panel.querySelector('.project-new-bar');
+      bar.hidden = !bar.hidden;
+      if (!bar.hidden) { elProjectInput.value = ''; elProjectInput.focus(); }
+    });
+    label.appendChild(btn);
+  }
+
+  /** 历史项目列表：点开即切换（当前工作区会先归档，不丢数据） */
+  function renderProjectHistory() {
+    var panel = ensureProjectPanel();
+    var box = panel.querySelector('.project-history');
+    if (!box || !Store || typeof Store.listProjects !== 'function') return;
+    var list = Store.listProjects();
+    box.innerHTML = '';
+    if (!list.length) { box.hidden = true; return; }
+    box.hidden = false;
+    var head = doc.createElement('div');
+    head.className = 'project-history-head';
+    head.textContent = '历史项目 (' + list.length + ')';
+    box.appendChild(head);
+    for (var i = 0; i < list.length; i++) {
+      (function (p) {
+        var item = doc.createElement('button');
+        item.type = 'button';
+        item.className = 'project-history-item';
+        item.textContent = p.name + '（' + p.moduleCount + ' 模块）';
+        item.title = '打开该项目（当前项目会先归档）';
+        item.addEventListener('click', function () {
+          var r = Store.openProject(p.id);
+          if (r && r.ok) location.reload();
+        });
+        box.appendChild(item);
+      })(list[i]);
+    }
+  }
+
   // ------------------------------------------------------------ render
 
   function render() {
@@ -173,6 +286,10 @@
     flowBtn.hidden = missing === 0;
     var label = missing ? '按业务流程初始化 ' + missing + ' 个模块' : FLOW_BTN_TEXT;
     if (flowBtn.textContent !== label) flowBtn.textContent = label;
+
+    // 6) 项目管理：「当前项目」右侧的 + 与历史项目列表
+    ensureProjectAdd();
+    renderProjectHistory();
   }
 
   // ------------------------------------------------------------ 事件

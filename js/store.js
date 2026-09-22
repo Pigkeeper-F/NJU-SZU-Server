@@ -288,6 +288,137 @@
   }
 
   /* ------------------------------------------------------------------
+   * 项目管理（本地多项目）
+   *   当前项目 = state.modules（键 fa_state_v1）+ 项目名（键 research_workspace_meta_v1，
+   *   由 workspace.js 读写；这里只读写其中的 name 字段）。
+   *   归档项目 = 键 fa_projects_v1：[{ id, name, savedAt, modules, activeModuleId }]
+   *   新建项目会把当前工作区（模块+消息）归档后再清空，因此不会丢数据；
+   *   历史项目可随时打开（打开前同样会先归档当前工作区）。
+   * ------------------------------------------------------------------ */
+  var PROJECTS_KEY = 'fa_projects_v1';
+  var PROJECT_META_KEY = 'research_workspace_meta_v1';
+  var PROJECT_NAME_DEFAULT = '我的研究项目';
+
+  function readJSON(key, fallback) {
+    try {
+      if (!root.localStorage || typeof root.localStorage.getItem !== 'function') return fallback;
+      var raw = root.localStorage.getItem(key);
+      if (!raw) return fallback;
+      var parsed = JSON.parse(raw);
+      return parsed === null || parsed === undefined ? fallback : parsed;
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function writeJSON(key, value) {
+    try {
+      if (!root.localStorage || typeof root.localStorage.setItem !== 'function') return false;
+      root.localStorage.setItem(key, JSON.stringify(value));
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /** 当前项目名（取自 workspace.js 的 meta 键；缺失时用默认名） */
+  function currentProjectName() {
+    var meta = readJSON(PROJECT_META_KEY, null);
+    if (meta && typeof meta === 'object' && typeof meta.name === 'string' && meta.name.trim()) {
+      return meta.name.trim();
+    }
+    return PROJECT_NAME_DEFAULT;
+  }
+
+  /** 只更新 meta 里的 name，保留 note */
+  function setProjectName(name) {
+    var meta = readJSON(PROJECT_META_KEY, null);
+    var note = (meta && typeof meta.note === 'string') ? meta.note : '';
+    return writeJSON(PROJECT_META_KEY, { name: name, note: note });
+  }
+
+  /** 历史项目列表（轻量视图，不含模块内容） */
+  function listProjects() {
+    var list = readJSON(PROJECTS_KEY, []);
+    if (!Array.isArray(list)) return [];
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      if (!p || typeof p.id !== 'string') continue;
+      out.push({
+        id: p.id,
+        name: (typeof p.name === 'string' && p.name) ? p.name : PROJECT_NAME_DEFAULT,
+        savedAt: (typeof p.savedAt === 'string') ? p.savedAt : '',
+        moduleCount: Array.isArray(p.modules) ? p.modules.length : 0
+      });
+    }
+    return out;
+  }
+
+  /** 把当前工作区归档进项目历史；没有模块时不归档 -> { id, name } | null */
+  function archiveCurrentProject() {
+    if (!state.modules.length) return null;
+    var list = readJSON(PROJECTS_KEY, []);
+    if (!Array.isArray(list)) list = [];
+    var entry = {
+      id: uid('prj_'),
+      name: currentProjectName(),
+      savedAt: nowISO(),
+      modules: deepClone(state.modules),
+      activeModuleId: state.activeModuleId
+    };
+    list.push(entry);
+    if (!writeJSON(PROJECTS_KEY, list)) return null;
+    return { id: entry.id, name: entry.name };
+  }
+
+  /** 新建项目：先归档当前工作区，再清空模块，并写入新项目名（界面刷新后即为新项目） */
+  function createProject(name) {
+    var nm = (typeof name === 'string') ? name.trim() : '';
+    if (!nm) return { ok: false, reason: '项目名不能为空' };
+    var archived = archiveCurrentProject();
+    state.modules = [];
+    state.activeModuleId = null;
+    setProjectName(nm);
+    emit('project:create', { name: nm, archived: archived });
+    return { ok: true, name: nm, archived: archived };
+  }
+
+  /** 打开历史项目：当前工作区先归档，再把所选项目的模块恢复为当前工作区 */
+  function openProject(id) {
+    var list = readJSON(PROJECTS_KEY, []);
+    if (!Array.isArray(list)) return { ok: false, reason: '项目不存在' };
+    var target = null;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].id === id) { target = list[i]; break; }
+    }
+    if (!target) return { ok: false, reason: '项目不存在' };
+
+    archiveCurrentProject();                   // 当前内容先存起来，避免丢失
+    var fresh = readJSON(PROJECTS_KEY, []);
+    if (!Array.isArray(fresh)) fresh = [];
+    var remaining = [];
+    for (var j = 0; j < fresh.length; j++) {
+      if (fresh[j] && fresh[j].id === id) continue;   // 被打开的项目移出历史
+      remaining.push(fresh[j]);
+    }
+    writeJSON(PROJECTS_KEY, remaining);
+
+    var seen = {};
+    var modules = [];
+    var incoming = Array.isArray(target.modules) ? target.modules : [];
+    for (var k = 0; k < incoming.length; k++) {
+      var mod = normalizeModule(incoming[k], seen);
+      if (mod) { modules.push(mod); seen[mod.id] = true; }
+    }
+    state.modules = modules;
+    state.activeModuleId = modules.length ? pickModuleId({ modules: modules }, target.activeModuleId) : null;
+    setProjectName((typeof target.name === 'string' && target.name) ? target.name : PROJECT_NAME_DEFAULT);
+    emit('project:open', { id: id, name: target.name });
+    return { ok: true, name: target.name, moduleCount: modules.length };
+  }
+
+  /* ------------------------------------------------------------------
    * 流程模块规格（FLOW_STEPS）
    *   按业务流程图整理：两阶段共 9 步，每步给出「目标 / 要做的事 / 产出 / 验收要点」，
    *   供模块空间展示"这个模块要做什么"。文案可自行修改，改这里即可。
@@ -602,6 +733,11 @@
     submitModule: submitModule,
     approveModule: approveModule,
     rejectModule: rejectModule,
+    // —— 项目管理（本地多项目：归档 / 新建 / 打开）
+    createProject: createProject,
+    openProject: openProject,
+    listProjects: listProjects,
+    currentProjectName: currentProjectName,
     // —— 侧栏 / 选项卡
     setSidebar: setSidebar,
     selectTab: selectTab,
@@ -617,7 +753,9 @@
       TAB_SELECT: 'tab:select',
       STATE_RESET: 'state:reset',
       MODULE_STATUS: 'module:status',
-      FLOW_INIT: 'flow:init'
+      FLOW_INIT: 'flow:init',
+      PROJECT_CREATE: 'project:create',
+      PROJECT_OPEN: 'project:open'
     },
     LIMITS: {
       STORAGE_KEY: STORAGE_KEY,
@@ -628,6 +766,9 @@
       MODULE_STATUSES: MODULE_STATUSES.slice()
     },
     // 流程规格（只读快照）：9 步的 key / 名称 / 说明
-    FLOW_STEPS: deepClone(FLOW_STEPS)
+    FLOW_STEPS: deepClone(FLOW_STEPS),
+    // 存储键常量（项目管理用）
+    PROJECTS_KEY: PROJECTS_KEY,
+    PROJECT_META_KEY: PROJECT_META_KEY
   };
 })(typeof window !== 'undefined' ? window : this);
