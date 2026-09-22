@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>流程智能体</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- 顶层 flex 容器：左栏 + 主区 -->
+  <div class="app-shell">
+
+    <!-- ======================= 左侧栏（T2: js/sidebar.js 负责渲染） ======================= -->
+    <aside id="sidebar" class="sidebar">
+      <div id="sidebar-header" class="sidebar-header">
+        <span class="sidebar-title">流程智能体</span>
+        <button id="btn-sidebar-toggle" class="icon-btn" type="button"
+                title="折叠 / 展开侧栏" aria-label="折叠或展开侧栏">&#9776;</button>
+      </div>
+      <!-- 选项卡列表容器：由 sidebar.js 渲染 .sidebar-tab / .sidebar-tab-active -->
+      <div id="sidebar-tabs" class="sidebar-tabs"></div>
+      <!-- 右侧拖拽手柄（cursor: col-resize） -->
+      <div id="sidebar-resizer" class="sidebar-resizer" title="拖拽调整侧栏宽度"></div>
+    </aside>
+
+    <!-- ================================ 主区 ================================ -->
+    <main id="main" class="main">
+
+      <!-- 顶部模块选项卡条：T3: js/tabs.js 渲染 #module-tabs 内容 -->
+      <div class="module-tabs-bar">
+        <div id="module-tabs" class="module-tabs"></div>
+        <!-- 依赖链概览容器（如「模块1 → 模块2 → 模块3」），T3 渲染，可为空 -->
+        <div id="module-chain" class="module-chain"></div>
+        <button id="btn-add-module" class="module-tab-add" type="button"
+                title="新增模块（追加到依赖链尾）">&#65291;</button>
+      </div>
+
+      <!-- 模块独立空间：T4: js/chat.js 渲染 .msg-list / .empty-state -->
+      <div id="module-space" class="module-space"></div>
+
+      <!-- 底部输入区：T4: js/chat.js 绑定 #composer-input / #btn-send -->
+      <div id="composer" class="composer">
+        <div class="composer-row">
+          <textarea id="composer-input" class="composer-input" rows="1"
+                    placeholder="输入内容…（Enter 发送，Shift+Enter 换行）"></textarea>
+          <button id="btn-send" class="btn-send" type="button">发送</button>
+        </div>
+        <div class="composer-hint">Enter 发送 · Shift+Enter 换行 · 每个模块记忆独立</div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- 脚本顺序不可调整：数据层 -> 三个 UI 模块 -> 装配 -->
+  <script src="js/store.js"></script>
+  <script src="js/sidebar.js"></script>
+  <script src="js/tabs.js"></script>
+  <script src="js/chat.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

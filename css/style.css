@@ -1,0 +1,545 @@
+/* ============================================================================
+ * 流程智能体 —— 全站样式（零依赖，无外部字体/图片/CDN）
+ * 布局：.app-shell = 左侧栏 <aside id="sidebar"> + 主区 <main id="main">
+ *
+ * 关键类清单
+ *   骨架   : .app-shell .sidebar .sidebar-header .sidebar-title .icon-btn .sidebar-resizer
+ *   折叠   : .sidebar-collapsed（加在 #sidebar 上；也兼容 body.sidebar-collapsed）
+ *   侧栏项 : .sidebar-tabs .sidebar-tab .sidebar-tab-active
+ *   模块条 : .module-tabs-bar .module-tabs .module-tab .module-tab-title .module-dep
+ *            .module-tab-del .module-tab-active .module-tab-add
+ *   消息区 : .module-space .msg-list .msg .msg-user .msg-assistant .msg-system .msg-text .msg-meta .empty-state
+ *   输入区 : .composer .composer-row .composer-input .btn-send .composer-hint
+ *   工具类 : .hidden   拖拽中禁用过渡：body.sidebar-resizing
+ * ========================================================================== */
+
+/* ----------------------------------------------------------- 主题变量 */
+:root {
+  --sidebar-w: 240px;              /* 由 js/sidebar.js 写入实际宽度（Store.state.sidebar.width） */
+  --sidebar-collapsed-w: 44px;     /* 折叠态宽度：仅留展开按钮 */
+  --sidebar-min: 180px;            /* 与 Store.LIMITS.SIDEBAR_MIN 一致 */
+  --sidebar-max: 520px;            /* 与 Store.LIMITS.SIDEBAR_MAX 一致 */
+
+  --font: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --mono: ui-monospace, Consolas, "Courier New", monospace;
+
+  /* 白色主题：页面 / 面板 / 次级面全部白化，强调色用近黑以保证纯白底上的对比度 */
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #f7f8fa;
+  --border: #e8eaee;
+  --text: #111827;
+  --muted: #6b7280;
+  --accent: #111827;
+  --accent-soft: rgba(17, 24, 39, 0.08);
+  --accent-line: rgba(17, 24, 39, 0.28);
+  --danger: #d92d20;
+  --danger-soft: rgba(217, 45, 32, 0.10);
+
+  --radius: 8px;
+  --radius-lg: 14px;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 8px 24px rgba(16, 24, 40, 0.06);
+  --transition: 0.18s ease;
+  --content-max: 880px;
+}
+
+/* 全局固定白色主题：不跟随系统深色模式（主人指定主题色为白色） */
+
+/* --------------------------------------------------------------- 基础 */
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button { font: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* 滚动条美化（含横向：模块选项卡条） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(140, 150, 165, 0.45) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(140, 150, 165, 0.42);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(140, 150, 165, 0.72); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* 工具类 */
+.hidden { display: none !important; }
+
+/* --------------------------------------------------------- 顶层布局 */
+.app-shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ======================================================= 左侧栏 */
+.sidebar {
+  position: relative;
+  flex: 0 0 auto;
+  width: var(--sidebar-w, 240px);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  transition: width var(--transition);
+  z-index: 2;
+}
+
+/* 拖拽中：禁用过渡，跟随鼠标实时变化 */
+body.sidebar-resizing .sidebar { transition: none; }
+body.sidebar-resizing { cursor: col-resize; user-select: none; }
+
+/* 折叠态：宽度收到 44px，仅留展开按钮 */
+.sidebar.sidebar-collapsed,
+body.sidebar-collapsed .sidebar { width: var(--sidebar-collapsed-w); }
+
+.sidebar.sidebar-collapsed #sidebar-tabs,
+body.sidebar-collapsed #sidebar-tabs,
+.sidebar.sidebar-collapsed .sidebar-title,
+body.sidebar-collapsed .sidebar-title,
+.sidebar.sidebar-collapsed #sidebar-resizer,
+body.sidebar-collapsed #sidebar-resizer { display: none; }
+
+.sidebar.sidebar-collapsed #sidebar-header,
+body.sidebar-collapsed #sidebar-header { justify-content: center; padding: 0; }
+
+/* 栏头：标题 + 折叠按钮 */
+.sidebar-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 48px;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-title {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icon-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.icon-btn:hover { background: var(--panel-2); color: var(--text); }
+.icon-btn:active { transform: translateY(1px); }
+
+/* 选项卡列表（目前只有「流程」，逻辑通用） */
+.sidebar-tabs {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.sidebar-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.sidebar-tab:hover { background: var(--panel-2); }
+.sidebar-tab-active {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+/* 侧栏底部小字提示（T2 追加到 #sidebar 内） */
+.sidebar-hint {
+  flex: 0 0 auto;
+  padding: 8px 12px 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+}
+.sidebar.sidebar-collapsed .sidebar-hint,
+body.sidebar-collapsed .sidebar-hint { display: none; }
+
+/* 右侧拖拽手柄 */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 6;
+  transition: background var(--transition);
+}
+.sidebar-resizer:hover,
+.sidebar-resizer.is-active { background: rgba(17, 24, 39, 0.35); }
+
+/* ========================================================= 主区 */
+.main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* --------------------------------------------- 顶部模块选项卡条 */
+.module-tabs-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.module-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 2px 4px;
+}
+
+/* 依赖链概览（条内右侧，如 模块1 → 模块2 → 模块3），内容由 T3 渲染 */
+.module-chain {
+  flex: 0 0 auto;
+  max-width: 38%;
+  padding-left: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-left: 1px solid var(--border);
+}
+.module-chain:empty { display: none; border-left: 0; padding-left: 0; }
+
+.module-tab {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  max-width: 320px;
+  padding: 0 6px 0 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+.module-tab:hover { border-color: var(--accent-line); }
+.module-tab-active {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.module-tab-active:hover { border-color: var(--accent); }
+
+.module-tab-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+/* 依赖徽标（显示上游模块名，如「← 流程」「⇠ 模块1」） */
+.module-dep {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+}
+.module-tab-active .module-dep {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.38);
+}
+
+/* 模块卡删除按钮 */
+.module-tab-del {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  opacity: 0.55;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), opacity var(--transition);
+}
+.module-tab-del:hover { opacity: 1; color: var(--danger); background: var(--danger-soft); }
+.module-tab-del[disabled] { opacity: 0.22; cursor: not-allowed; }
+.module-tab-del[disabled]:hover { color: inherit; background: transparent; }
+.module-tab-active .module-tab-del:hover { color: #fff; background: rgba(255, 255, 255, 0.25); }
+
+/* 新增模块按钮（依赖链尾追加） */
+.module-tab-add {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.module-tab-add:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+/* ---------------------------------------------- 模块独立空间 */
+.module-space {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 16px 10px;
+  overflow-y: auto;
+}
+
+.msg-list {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 模块空间头部（模块名 / 依赖来源 / 消息数），T4 渲染，可选用 */
+.module-header {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto 12px;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.module-header-title { font-size: 15px; font-weight: 600; }
+.module-header-meta { font-size: 12px; color: var(--muted); }
+
+.msg {
+  align-self: flex-start;
+  max-width: min(78%, 720px);
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  border-bottom-left-radius: 4px;
+  box-shadow: var(--shadow);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg-text { margin: 0; }
+
+.msg-user {
+  align-self: flex-end;
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+  border-bottom-left-radius: var(--radius-lg);
+  border-bottom-right-radius: 4px;
+}
+
+.msg-assistant {
+  align-self: flex-start;
+  background: var(--panel);
+}
+
+.msg-system {
+  align-self: center;
+  max-width: 92%;
+  color: var(--muted);
+  font-size: 12.5px;
+  text-align: center;
+  background: transparent;
+  border-style: dashed;
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.msg-meta {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--muted);
+}
+.msg-user .msg-meta { color: rgba(255, 255, 255, 0.78); text-align: right; }
+
+/* 空状态（无模块 / 无消息） */
+.empty-state {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px 20px;
+  color: var(--muted);
+  text-align: center;
+}
+.empty-state-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.empty-state-hint { max-width: 420px; font-size: 13px; }
+
+/* ------------------------------------------------- 底部输入区 */
+.composer {
+  flex: 0 0 auto;
+  padding: 10px 14px 8px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+.composer-row {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.composer-input {
+  flex: 1 1 auto;
+  min-height: 40px;
+  max-height: 180px;      /* 自适应高度上限，超出后内部滚动 */
+  padding: 9px 12px;
+  font: inherit;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  resize: none;
+  overflow-y: auto;
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.composer-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.composer-input::placeholder { color: var(--muted); }
+.composer-input:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.btn-send {
+  flex: 0 0 auto;
+  height: 40px;
+  padding: 0 18px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: filter var(--transition), transform var(--transition);
+}
+.btn-send:hover { filter: brightness(1.06); }
+.btn-send:active { transform: translateY(1px); }
+.btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.composer-hint {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 6px auto 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* --------------------------------------------------------- 响应式 */
+@media (max-width: 760px) {
+  .sidebar { width: min(var(--sidebar-w, 240px), 62vw); }
+  .sidebar.sidebar-collapsed,
+  body.sidebar-collapsed .sidebar { width: var(--sidebar-collapsed-w); }
+  #sidebar-resizer { display: none; }
+  .composer-hint { display: none; }
+  .module-chain { display: none; }
+  .msg { max-width: 88%; }
+  .module-space { padding: 14px 10px 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
