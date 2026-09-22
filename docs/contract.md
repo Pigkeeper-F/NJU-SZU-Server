@@ -26,10 +26,11 @@ flow-agent-web/
 
 ## 2. 硬性技术约定
 
-1. **零依赖**：不用任何框架/库；禁用 ES module（`import`/`export`/`type="module"`）、`fetch`、
+1. **零依赖**：不用任何框架/库；禁用 ES module（`import`/`export`/`type="module"`）、
    `crypto.subtle`、外部 CDN、外部字体与图片。全部用传统 `<script src>` 普通脚本。
-2. **file:// 直接可用**：双击 `index.html` 即可运行；允许使用 `localStorage`（同 origin）、`prompt`、
-   `alert`、`console`。**不得**使用需要 http(s) 或跨域的能力。
+2. **两种运行模式**：双击 `index.html` 可使用本地 UI 与 localStorage；要启用 AI 回复则运行
+   `npm start` 并从 `http://localhost:8123/` 打开。前端只允许以 `fetch` 调用同源
+   `POST /api/ai/chat`，不得直接访问第三方模型服务或携带 API Key。
 3. **全局对象约定**：每个 UI 模块挂载一个全局对象，只暴露 `render()`（**名字以各任务说明为准，务必一致**）：
    - `window.Sidebar     = { render: function () {} }`  ← T2（js/sidebar.js）
    - `window.ModuleTabs  = { render: function () {} }`  ← T3（js/tabs.js）

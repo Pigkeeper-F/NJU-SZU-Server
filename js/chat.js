@@ -10,7 +10,7 @@
  *  2) 交互：脚本加载期只绑定一次 #btn-send click、#composer-input keydown / input。
  *     Enter（非 Shift、且非输入法合成中）发送；Shift+Enter 换行；输入框高度自适应（上限 180px）。
  *
- * 约束：零依赖；无 module / fetch / crypto.subtle / 外部 CDN；脚本在 </body> 之前，
+ * 约束：零依赖；无 module / crypto.subtle / 外部 CDN；脚本在 </body> 之前，
  *      不使用 DOMContentLoaded；不调用其它模块的 render；render() 幂等、可高频调用；
  *      消息文本一律用 textContent 写入（不做 HTML 拼接）。
  *      不写 Store（无选中模块时仅在渲染层兜底取链尾模块，不改状态）。
@@ -24,7 +24,7 @@
   var PLACEHOLDER_NO_ACTIVE = '请选择一个模块';
   var EMPTY_NO_MODULE_TITLE = '还没有模块';
   var EMPTY_NO_MODULE_HINT = '点击上方 ＋ 添加第一个模块';
-  var HINT_TEXT = '演示前端：未接入模型服务，消息仅保存在本地浏览器';
+  var HINT_TEXT = 'AI 回复由本地服务代理；API Key 不会发送到浏览器';
   var MAX_INPUT_HEIGHT = 180; // 与 css/style.css 中 .composer-input { max-height } 保持一致
 
   var ROLE_CLASS = {
@@ -38,6 +38,7 @@
   var inputEl = document.getElementById('composer-input');
   var sendEl = document.getElementById('btn-send');
   var hintEl = document.querySelector('#composer .composer-hint');
+  var pendingModules = {};
 
   // -------------------------------------------------------------------- 工具
 
@@ -128,6 +129,39 @@
     return mod ? mod.id : null;
   }
 
+  function messagesFor(moduleId) {
+    var Store = getStore();
+    var state = Store ? Store.getState() : null;
+    var mod = state ? findModule(state.modules || [], moduleId) : null;
+    if (!mod) return [];
+    return (mod.messages || []).map(function (message) {
+      return { role: message.role, text: message.text };
+    });
+  }
+
+  function requestReply(moduleId) {
+    pendingModules[moduleId] = true;
+    render();
+    return fetch('/api/ai/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: messagesFor(moduleId) })
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error(data.error || 'AI 服务请求失败');
+        if (!data || typeof data.text !== 'string') throw new Error('AI 服务返回了无效响应');
+        return data.text;
+      });
+    }).then(function (text) {
+      getStore().appendMessage(moduleId, text, 'assistant');
+    }).catch(function (error) {
+      getStore().appendMessage(moduleId, 'AI 回复失败：' + (error && error.message ? error.message : '未知错误'), 'system');
+    }).finally(function () {
+      delete pendingModules[moduleId];
+      render();
+    });
+  }
+
   // ------------------------------------------------------------------ 渲染
 
   /**
@@ -177,11 +211,15 @@
       }
       spaceEl.appendChild(list);
 
+      if (pendingModules[active.id]) {
+        spaceEl.appendChild(el('div', 'ai-pending', 'AI 正在思考…'));
+      }
+
       // 有明确选中的模块才允许输入；兜底渲染（activeModuleId 缺失）时保持禁用
       if (fallback) {
         setComposerEnabled(false, PLACEHOLDER_NO_ACTIVE);
       } else {
-        setComposerEnabled(true, PLACEHOLDER_DEFAULT);
+        setComposerEnabled(!pendingModules[active.id], pendingModules[active.id] ? 'AI 正在回复…' : PLACEHOLDER_DEFAULT);
       }
     }
 
@@ -202,6 +240,7 @@
     inputEl.value = '';
     autoGrow(inputEl);
     render();                                           // 自渲染兜底（app.js 订阅后也会再渲染一次）
+    requestReply(id);
   }
 
   // -------------------------------------------------------------- 加载期绑定

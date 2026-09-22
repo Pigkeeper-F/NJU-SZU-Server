@@ -3,8 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>流程智能体</title>
+  <title>研序 · 研究工作台</title>
+  <meta name="description" content="整理研究模块、交流想法与保存工作记录的研究工作台。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231c263c'/%3E%3Cpath d='M9 9h5v14H9m9-14h5v14h-5' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/workspace.css">
 </head>
 <body>
   <!-- 顶层 flex 容器：左栏 + 主区 -->
@@ -13,26 +16,38 @@
     <!-- ======================= 左侧栏（T2: js/sidebar.js 负责渲染） ======================= -->
     <aside id="sidebar" class="sidebar">
       <div id="sidebar-header" class="sidebar-header">
-        <span class="sidebar-title">流程智能体</span>
+        <span class="sidebar-title"><span class="brand-mark">[r]</span> 研序 <small>RESEARCH</small></span>
         <button id="btn-sidebar-toggle" class="icon-btn" type="button"
                 title="折叠 / 展开侧栏" aria-label="折叠或展开侧栏">&#9776;</button>
       </div>
       <!-- 选项卡列表容器：由 sidebar.js 渲染 .sidebar-tab / .sidebar-tab-active -->
-      <div id="sidebar-tabs" class="sidebar-tabs"></div>
+      <div class="workspace-label">个人工作空间 <span>⌄</span></div>
+      <div class="nav-label">工作台</div>
+      <nav class="workspace-nav" aria-label="主导航">
+        <button class="nav-item is-active" data-view="workspace" type="button"><span class="nav-icon">▦</span>研究空间</button>
+        <button class="nav-item" data-view="records" type="button"><span class="nav-icon">▤</span>工作记录<span id="records-count" class="nav-count">0</span></button>
+      </nav>
+      <div class="nav-label project-label">当前项目</div>
+      <button id="project-shortcut" class="project-shortcut" type="button"><span class="project-symbol">R</span><span id="sidebar-project-name">我的研究项目</span></button>
+      <div id="sidebar-tabs" class="sidebar-tabs" hidden></div>
+      <div class="sidebar-bottom"><span class="profile-avatar">研</span><div>个人工作空间<small>保存在此浏览器</small></div></div>
       <!-- 右侧拖拽手柄（cursor: col-resize） -->
       <div id="sidebar-resizer" class="sidebar-resizer" title="拖拽调整侧栏宽度"></div>
     </aside>
 
     <!-- ================================ 主区 ================================ -->
     <main id="main" class="main">
-
+      <header class="topbar"><div class="breadcrumb">工作台 <span>/</span> <strong id="view-breadcrumb">研究空间</strong></div><div class="topbar-actions"><span class="local-tag">本地项目</span><button id="export-project" class="quiet-button" type="button">↓ <span>导出记录</span></button><button id="toggle-details" class="icon-btn" type="button" aria-label="切换项目详情" aria-expanded="true">◫</button></div></header>
+      <section class="project-heading"><div><div class="eyebrow">RESEARCH WORKSPACE</div><div class="project-title-row"><h1 id="project-title">我的研究项目</h1><button id="rename-project" class="icon-btn" type="button" aria-label="修改项目名称">✎</button></div><p>把研究中的想法、讨论与记录，留在同一个空间。</p></div><button class="primary-button" data-new-module type="button">＋ 新建模块</button></section>
+      <div class="workspace-body"><section class="work-area" aria-label="模块工作区">
+      <div class="section-heading"><span id="section-name">模块工作区</span><span id="module-count">0 个模块</span></div>
       <!-- 顶部模块选项卡条：T3: js/tabs.js 渲染 #module-tabs 内容 -->
       <div class="module-tabs-bar">
-        <div id="module-tabs" class="module-tabs"></div>
+        <div id="module-tabs" class="module-tabs" role="tablist" aria-label="研究模块"></div>
         <!-- 依赖链概览容器（如「模块1 → 模块2 → 模块3」），T3 渲染，可为空 -->
         <div id="module-chain" class="module-chain"></div>
         <button id="btn-add-module" class="module-tab-add" type="button"
-                title="新增模块（追加到依赖链尾）">&#65291;</button>
+                title="新增模块（追加到依赖链尾）" aria-label="快速新增模块">&#65291;</button>
       </div>
 
       <!-- 模块独立空间：T4: js/chat.js 渲染 .msg-list / .empty-state -->
@@ -40,16 +55,27 @@
 
       <!-- 底部输入区：T4: js/chat.js 绑定 #composer-input / #btn-send -->
       <div id="composer" class="composer">
+        <div class="composer-mode"><select id="conversation-mode" aria-label="输入模式"><option value="notes">✎ 记录模式</option><option value="ai">✧ AI 对话</option></select><span id="mode-description">记录想法，随时继续</span></div>
         <div class="composer-row">
-          <textarea id="composer-input" class="composer-input" rows="1"
+          <textarea id="composer-input" class="composer-input" rows="1" aria-label="工作记录或对话内容"
                     placeholder="输入内容…（Enter 发送，Shift+Enter 换行）"></textarea>
           <button id="btn-send" class="btn-send" type="button">发送</button>
         </div>
         <div class="composer-hint">Enter 发送 · Shift+Enter 换行 · 每个模块记忆独立</div>
       </div>
-
+      <section id="records-view" class="records-view" hidden><div id="records-list"></div></section>
+      </section><aside id="project-details" class="project-details" aria-label="项目详情">
+        <div class="details-heading">项目详情<span class="tiny-label">OVERVIEW</span></div>
+        <div class="detail-summary"><span class="project-symbol large">R</span><h2 id="detail-project-name">我的研究项目</h2><p>个人研究 · 本地工作空间</p></div>
+        <div class="stats-row"><div><strong id="stat-modules">0</strong><span>研究模块</span></div><div><strong id="stat-messages">0</strong><span>工作记录</span></div></div>
+        <section class="note-section"><div class="detail-section-heading"><h3>项目备忘</h3><span id="note-status">仅本地保存</span></div><label class="sr-only" for="project-note">项目备忘</label><textarea id="project-note" placeholder="写下研究目标、待办，或下一次想继续的事情…"></textarea></section>
+        <section class="activity-section"><div class="detail-section-heading"><h3>最近记录</h3></div><div id="recent-activity"></div></section>
+        <div class="detail-footer"><span>⌘</span><p>一个模块，一段独立讨论。<br>切换模块时，记录会为你保留。</p></div>
+      </aside></div>
     </main>
   </div>
+  <dialog id="name-dialog"><form id="name-form"><div class="dialog-top"><span id="dialog-eyebrow" class="eyebrow">NEW MODULE</span><button class="icon-btn" id="close-dialog" type="button" aria-label="关闭">×</button></div><h2 id="dialog-title">新建研究模块</h2><p id="dialog-description">给这段工作起个名字，之后可以随时调整。</p><label for="name-input" id="name-label">模块名称</label><input id="name-input" maxlength="80" autocomplete="off" required placeholder="例如：文献阅读、数据整理、研究讨论"><div class="dialog-actions"><button id="cancel-dialog" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">确定</button></div></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
 
   <!-- 脚本顺序不可调整：数据层 -> 三个 UI 模块 -> 装配 -->
   <script src="js/store.js"></script>
@@ -57,5 +83,6 @@
   <script src="js/tabs.js"></script>
   <script src="js/chat.js"></script>
   <script src="js/app.js"></script>
+  <script src="js/workspace.js"></script>
 </body>
 </html>

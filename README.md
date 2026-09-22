@@ -1,5 +1,9 @@
 # 流程智能体 · 演示前端
 
+当前首页已升级为「研序 · 研究工作台」：提供研究空间、工作记录汇总、项目命名、备忘和 Markdown 导出。新增界面层位于 `css/workspace.css` 与 `js/workspace.js`，沿用原有模块及消息存储。默认的「记录模式」只保存本地记录；手动切换「AI 对话」后才使用下方说明的已配置服务。此次界面不预设具体科研流程。
+
+项目名称和备忘使用独立的本地存储键 `research_workspace_meta_v1`；原有模块及消息仍使用 `fa_state_v1`。下文保留原基础组件及接口说明，首页外观和默认输入模式以当前界面为准。
+
 一句话：**「流程智能体」演示前端 —— 左侧栏「流程」选项卡 + 顶部强依赖模块选项卡（A → B → C）+ 每个模块独立的会话空间 + 底部输入框。**
 
 零依赖（无框架 / 无打包 / 无 CDN / 无 ES module），双击 `index.html` 即可运行。
@@ -10,15 +14,17 @@
 
 ### 方式一：双击直开（推荐）
 
-直接双击 `index.html`，浏览器以 `file://` 打开即可用。无需构建、无需联网、无需服务器。
+直接双击 `index.html`，浏览器以 `file://` 打开即可查看与编辑本地消息。AI 回复需要按下方方式启动本地服务。
 
 ### 方式二：本地静态服务器（可选）
 
 ```bash
-python -m http.server 8123 --directory D:\zcode-work\report\flow-agent-web
+cp .env.example .env
+# 编辑 .env，填写 AI_API_KEY（不要提交该文件）
+npm start
 ```
 
-然后浏览器访问 <http://localhost:8123/>。
+然后浏览器访问 <http://localhost:8123/>。服务端会代理 `POST /api/ai/chat`，密钥不会暴露给浏览器。
 
 > 两种方式行为一致（同源 localStorage）；只有跨 `file://` 与 `http://` 切换时数据不共享。
 
@@ -93,15 +99,9 @@ flow-agent-web/
 
 ---
 
-## ⚠️ 未接入模型服务
+## AI 接口配置
 
-**本项目是纯前端演示，没有接入任何模型服务：消息只会保存在本地 localStorage，不会发出任何网络请求。**
-源码中不含 `fetch` / `XMLHttpRequest` / `WebSocket` / `crypto.subtle` / 外部 CDN（可自行检索确认），
-因此发完消息不会收到「助手回复」。需要演示助手气泡时，可在控制台手工追加：
-
-```js
-Store.appendMessage(Store.getState().activeModuleId, '（本地手工插入的助手回复）', 'assistant');
-```
+默认按 OpenAI Responses API 调用。复制 `.env.example` 为 `.env` 后填写 `AI_API_KEY`；可用 `AI_MODEL` 改模型。若使用 OpenAI 兼容的 Chat Completions 服务，设置 `AI_API_BASE_URL`、`AI_MODEL`，并将 `AI_API_PROTOCOL` 改为 `chat-completions`。前端只调用同源 `/api/ai/chat`，不会拿到密钥。
 
 > 📄 **想接入模型让它直接编辑模块内容？** 调研结论、CORS 与密钥安全、工具调用（tool_calls）设计、
 > 契约变更提案与分阶段实施计划，见 [`docs/llm-integration-research.md`](docs/llm-integration-research.md)
