@@ -99,6 +99,17 @@
     title.setAttribute('title', mod.name);
     tab.appendChild(title);
 
+    // 状态徽标（流程模块的审核状态：待开始 / 进行中 / 待审核 / 已通过）
+    var statusMeta = { todo: '○', doing: '◐', review: '⏳', approved: '✓' };
+    var statusText = { todo: '待开始', doing: '进行中', review: '待审核', approved: '已通过' };
+    var st = statusMeta[mod.status] ? mod.status : 'todo';
+    var chip = doc.createElement('span');
+    chip.className = 'module-status';
+    chip.textContent = statusMeta[st];
+    chip.setAttribute('data-status', st);
+    chip.setAttribute('title', '状态：' + statusText[st]);
+    tab.appendChild(chip);
+
     // 依赖徽标：首模块「起点」，其余「← 上游模块名」
     var dep = doc.createElement('span');
     dep.className = 'module-dep';

@@ -133,8 +133,17 @@ async function handleChat(req, res) {
   sendJson(res, 200, { text: text.trim() });
 }
 
+// 请求路径解析：不用 new URL(req.url, base) —— 请求 "//" 会抛 ERR_INVALID_URL 直接把整个服务打崩；
+// 非法的百分号编码（如 "/%"）也会抛 URIError。这里统一降级为安全字符串，并把重复斜杠折叠掉。
+function safePathname(rawUrl) {
+  const pathOnly = String(rawUrl || '/').split('?')[0].split('#')[0];
+  let decoded;
+  try { decoded = decodeURIComponent(pathOnly); } catch (error) { decoded = pathOnly; }
+  return decoded.replace(/\/{2,}/g, '/');
+}
+
 function serveStatic(req, res) {
-  const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  const pathname = safePathname(req.url);
   const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const filePath = path.resolve(ROOT, relative);
   if (!filePath.startsWith(ROOT + path.sep) && filePath !== ROOT) { res.writeHead(403); res.end(); return; }
@@ -143,7 +152,8 @@ function serveStatic(req, res) {
     const type = path.extname(filePath) === '.html' ? 'text/html; charset=utf-8'
       : path.extname(filePath) === '.js' ? 'text/javascript; charset=utf-8'
       : path.extname(filePath) === '.css' ? 'text/css; charset=utf-8' : 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': type }); res.end(data);
+    // 开发期务必 no-store：否则改了 js/css 后浏览器仍用旧缓存（静态资源无版本号，排查起来很费时）
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' }); res.end(data);
   });
 }
 

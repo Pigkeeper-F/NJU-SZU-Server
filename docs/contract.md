@@ -363,3 +363,59 @@ body > .app-shell
 6. 折叠按钮 → 侧栏收到 44px，刷新后仍是折叠态。
 7. 刷新页面：模块链、消息、侧栏宽度/折叠态全部恢复（localStorage `fa_state_v1`）。
 8. 控制台 `Store.resetAll()` → 回到初始状态。
+
+---
+
+## 12. 流程模块与人工审核门控（v5 新增）
+
+按业务流程图把 9 个步骤做成"带说明 + 带审核状态"的模块。**契约先行补记**（对应提交：流程模块说明卡与审核流转）。
+
+### 12.1 数据结构新增字段（module 上，均可缺省、向后兼容）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `step` | string \| 缺省 | 流程步骤 key（`literature` / `question` / `data` / `model` / `chart` / `writing` / `submit` / `rebuttal` / `proof`）。手工新建的模块没有该字段 |
+| `spec` | object \| 缺省 | 任务说明：`{ goal, todo: string[], output, acceptance }`——即界面上「本模块要做什么」卡片的四行 |
+| `status` | `'todo' \| 'doing' \| 'review' \| 'approved'` | 审核状态；缺省/非法值一律按 `'todo'` 处理 |
+| `approvedAt` | string \| 缺省 | 审核通过时间（ISO） |
+
+> ⚠️ **归一化陷阱（已修）**：`normalizeModule()` 在文件开头加载 localStorage 时就会用到 `MODULE_STATUSES`。
+> 该常量必须与其他常量一起声明在**文件顶部**——若声明在文件后段，`var` 提升会让加载期的值是 `undefined`，
+> 归一化抛错 → 整个状态回退成默认（表现为"刷新后模块全丢"）。
+
+### 12.2 新增 API（照抄调用）
+
+```js
+Store.initFlowModules()          // -> { created, firstId }；按 FLOW_STEPS 建缺失的流程模块（已存在同 step 的跳过）
+Store.setModuleStatus(id, st)    // -> boolean；st 取 todo|doing|review|approved
+Store.submitModule(id)           // -> boolean；doing|todo -> review（提交人工审核）
+Store.approveModule(id)          // -> { ok, nextId, nextName }；置 approved 并**自动把 activeModuleId 切到下一个模块**
+Store.rejectModule(id, note?)    // -> boolean；review -> doing，note 非空时写入一条 system 消息
+Store.FLOW_STEPS                 // 9 步只读快照：[{ key, name, spec }]，说明文案的唯一定义处
+Store.LIMITS.MODULE_STATUSES     // ['todo','doing','review','approved']
+```
+
+### 12.3 新增事件
+
+| type | payload | 触发时机 |
+|---|---|---|
+| `flow:init` | `{ created, ids }` | `initFlowModules()` 建出至少一个模块后 |
+| `module:status` | `{ id, status, nextId? }` | 状态变更（submit / approve / reject / setModuleStatus）后 |
+
+### 12.4 界面行为约定
+
+- **侧栏底部按钮**「按业务流程初始化 N 个模块」（`sidebar.js`，`.sidebar-flow-btn`）：缺几个提示几个，9 步齐了自动隐藏。
+  放在侧栏而非模块空间空状态的原因：`workspace.js` 的 `decorateSpace()` 在无模块时会 `replaceChildren` 换掉 `#module-space`，放那里的按钮会被覆盖。
+- **模块空间顶部顺序**：`模块头` → `状态条`（状态徽标 + 提示 + 动作按钮）→ `说明卡` → `消息列表`。
+  状态条放在最前是刻意的：保证「提交审核 / 确定（通过）」永远在首屏可见。
+- **滚动位置**：当前模块**没有消息时滚到顶部**（保证说明卡可见），有消息时才滚到底部。
+- **审核流转**：待开始/进行中 → `完成并提交审核` → 待审核 → `确定（通过）`（自动跳到下一模块）/ `打回重做`（回进行中，附系统提示）。
+- **模块卡片状态徽标**（`tabs.js`，`.module-status`）：○ 待开始 / ◐ 进行中 / ⏳ 待审核 / ✓ 已通过。
+- 样式位于 `css/style.css` 追加分区（`.spec-*` / `.status-*` / `.module-status` 在「共用」区，`.sidebar-flow-btn` 在「A」区）。
+
+### 12.5 手工验收（已实测通过）
+
+1. 侧栏点「按业务流程初始化 9 个模块」→ 生成 ①…⑨，全部 `todo`，卡片徽标 `○○○○○○○○○`。
+2. 进入 ① → 看到「本模块要做什么」（目标 / 要做的事 / 产出 / 验收要点）→ 点「完成并提交审核」→ 徽标变 `⏳ 待审核`，出现「确定（通过）」「打回重做」。
+3. 点「确定（通过）」→ ① 变 `approved`（卡片徽标 ✓），**并自动跳到 ②**。
+4. 刷新页面 → 9 个模块、① 的 `approved`、说明卡内容全部保留（`fa_state_v1`）。

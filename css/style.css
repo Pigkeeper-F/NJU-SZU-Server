@@ -559,6 +559,86 @@ body.sidebar-collapsed .sidebar-hint { display: none; }
 
 /* ---- 分区 A：侧栏（sidebar.js）与输入区（chat.js composer） —— 负责人：A ---- */
 
+/* 侧栏底部「按业务流程初始化 9 个模块」按钮（sidebar.js；9 步齐了自动 hidden） */
+.sidebar-flow-btn {
+  margin: 0 12px 10px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: #ffffff;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.sidebar-flow-btn:hover { filter: brightness(1.08); }
+.sidebar.sidebar-collapsed .sidebar-flow-btn,
+body.sidebar-collapsed .sidebar-flow-btn { display: none; }
+
 /* ---- 分区 B：模块条（tabs.js）与消息区（chat.js msg-list） —— 负责人：B ---- */
 
 /* ---- 分区 共用：跨模块公共样式 / 主题变量调整 —— 双方确认后由提交者追加 ---- */
+
+/* 流程模块：任务说明卡 + 人工审核门控（store.js / chat.js / tabs.js 共用）
+   模块带 spec（目标 / 要做的事 / 产出 / 验收要点）与 status（todo/doing/review/approved）；
+   审核通过后由 store.js 自动把选中切到下一个模块。 */
+
+.spec-card {
+  max-width: var(--content-max);
+  margin: 12px auto 0;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+}
+.spec-title { margin-bottom: 6px; font-size: 13px; font-weight: 700; color: var(--text); }
+.spec-row { display: flex; gap: 8px; margin-top: 4px; font-size: 12.5px; line-height: 1.55; }
+.spec-label { flex: 0 0 62px; color: var(--muted); }
+.spec-value { flex: 1 1 auto; color: var(--text); white-space: pre-line; }
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  max-width: var(--content-max);
+  margin: 10px auto 0;
+  padding: 8px 12px;
+  background: var(--panel-2, #f7f8fa);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+.status-chip {
+  padding: 2px 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.status-chip[data-status="doing"] { color: #24507e; background: #f2f7fd; border-color: #a9c4e0; }
+.status-chip[data-status="review"] { color: #b25000; background: #fff6ec; border-color: #e7b27a; }
+.status-chip[data-status="approved"] { color: #2f7a46; background: #f1faf3; border-color: #a9d5b6; }
+.status-hint { font-size: 12px; color: var(--muted); }
+.status-actions { display: flex; gap: 8px; margin-left: auto; }
+.status-btn {
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.status-btn:hover { background: #f7f8fa; }
+.status-btn-primary { color: #ffffff; background: var(--accent); border-color: var(--accent); }
+.status-btn-primary:hover { background: var(--accent); filter: brightness(1.08); }
+.flow-init-btn { margin-top: 12px; }
+
+.module-status { font-size: 11px; line-height: 1; color: var(--muted); }
+.module-status[data-status="doing"] { color: #24507e; }
+.module-status[data-status="review"] { color: #b25000; }
+.module-status[data-status="approved"] { color: #2f7a46; }

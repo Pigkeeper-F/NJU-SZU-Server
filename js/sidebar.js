@@ -46,6 +46,7 @@
   var DEFAULT_W = (typeof LIMITS.SIDEBAR_DEFAULT === 'number') ? LIMITS.SIDEBAR_DEFAULT : 240;
 
   var HINT_TEXT = '流程智能体 · 演示版';
+  var FLOW_BTN_TEXT = '按业务流程初始化 9 个模块';
 
   // 拖拽会话：active 为真时 render() 不写宽度（否则会与跟手值互相打架产生抖动）
   var drag = { active: false, pointerId: null, width: DEFAULT_W };
@@ -104,6 +105,27 @@
     tabsSig = sig;
   }
 
+  var elFlowBtn = null;
+
+  /**
+   * 侧栏「按流程图初始化」按钮：只创建一次。
+   * 放在侧栏（而非模块空间空状态）的原因：workspace.js 的 decorateSpace() 在无模块时会
+   * replaceChildren 换掉 #module-space 的内容，放在那里的按钮会被覆盖掉。
+   */
+  function ensureFlowButton() {
+    if (!elFlowBtn) {
+      elFlowBtn = doc.createElement('button');
+      elFlowBtn.type = 'button';
+      elFlowBtn.className = 'sidebar-flow-btn';
+      elFlowBtn.textContent = FLOW_BTN_TEXT;
+      elFlowBtn.addEventListener('click', function () {
+        if (Store && typeof Store.initFlowModules === 'function') Store.initFlowModules();
+      });
+      elSidebar.appendChild(elFlowBtn);   // 追加到 #sidebar 末尾
+    }
+    return elFlowBtn;
+  }
+
   /** 侧栏底部小字提示：只创建一次，之后仅更新文案（折叠时 CSS 自动隐藏） */
   function ensureHint() {
     var hint = elSidebar.querySelector ? elSidebar.querySelector('.sidebar-hint') : null;
@@ -139,6 +161,18 @@
 
     // 4) 底部小字提示
     ensureHint();
+
+    // 5) 流程初始化入口：按流程图缺几个模块就提示几个；9 个都齐了自动隐藏
+    var flowBtn = ensureFlowButton();
+    var have = {};
+    var list = state.modules || [];
+    for (var i = 0; i < list.length; i++) have[list[i].step] = true;
+    var steps = (Store.FLOW_STEPS || []);
+    var missing = 0;
+    for (var j = 0; j < steps.length; j++) if (!have[steps[j].key]) missing += 1;
+    flowBtn.hidden = missing === 0;
+    var label = missing ? '按业务流程初始化 ' + missing + ' 个模块' : FLOW_BTN_TEXT;
+    if (flowBtn.textContent !== label) flowBtn.textContent = label;
   }
 
   // ------------------------------------------------------------ 事件

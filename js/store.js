@@ -48,6 +48,9 @@
   var SIDEBAR_DEFAULT = 240;
   var TABS_DEFAULT = [{ id: 'flow', name: '流程' }];
   var ROLES = ['user', 'assistant', 'system'];
+  // 必须与其他常量一起放在顶部：normalizeModule() 在**文件开头加载 localStorage** 时就会用到它
+  // （若把它声明在文件后段，var 提升会让加载期的值为 undefined → 归一化抛错 → 状态回退成空）。
+  var MODULE_STATUSES = ['todo', 'doing', 'review', 'approved'];
 
   // ---------------------------------------------------------------- 工具
 
@@ -120,7 +123,34 @@
         });
       }
     }
-    return { id: id, name: name, dependsOn: dependsOn, createdAt: createdAt, messages: messages };
+    // 流程字段（v4 新增）：step / spec / status / approvedAt 必须在归一化时保留，
+    // 否则刷新页面后流程说明与审核状态会被丢掉。
+    var step = (typeof raw.step === 'string' && raw.step) ? raw.step : null;
+    var approvedAt = (typeof raw.approvedAt === 'string' && raw.approvedAt) ? raw.approvedAt : null;
+    var spec = null;
+    if (raw.spec && typeof raw.spec === 'object' && !Array.isArray(raw.spec)) {
+      var todo = [];
+      if (Array.isArray(raw.spec.todo)) {
+        for (var t = 0; t < raw.spec.todo.length; t++) {
+          if (typeof raw.spec.todo[t] === 'string') todo.push(raw.spec.todo[t]);
+        }
+      }
+      spec = {
+        goal: (typeof raw.spec.goal === 'string') ? raw.spec.goal : '',
+        todo: todo,
+        output: (typeof raw.spec.output === 'string') ? raw.spec.output : '',
+        acceptance: (typeof raw.spec.acceptance === 'string') ? raw.spec.acceptance : ''
+      };
+    }
+
+    var out = {
+      id: id, name: name, dependsOn: dependsOn, createdAt: createdAt,
+      messages: messages, status: normalizeStatus(raw.status)
+    };
+    if (step) out.step = step;
+    if (spec) out.spec = spec;
+    if (approvedAt) out.approvedAt = approvedAt;
+    return out;
   }
 
   /** 把任意 JS 值规整成合法 state；非法输入返回 null（调用方回默认值） */
@@ -257,6 +287,167 @@
     };
   }
 
+  /* ------------------------------------------------------------------
+   * 流程模块规格（FLOW_STEPS）
+   *   按业务流程图整理：两阶段共 9 步，每步给出「目标 / 要做的事 / 产出 / 验收要点」，
+   *   供模块空间展示"这个模块要做什么"。文案可自行修改，改这里即可。
+   * ------------------------------------------------------------------ */
+  var FLOW_STEPS = [
+    { key: 'literature', name: '① 文献调研', spec: {
+      goal: '弄清这个题目别人已经做到哪一步，空白在哪里。',
+      todo: ['围绕选题检索相关文献（近 5 年为主，含综述与高被引工作）',
+             '逐篇记录：研究问题、数据来源、方法、结论',
+             '归纳共识与分歧，指出现有工作的不足'],
+      output: '文献清单 + 综述要点（每篇的贡献与局限）',
+      acceptance: '覆盖主要工作；能指出至少 1 个具体空白；每条结论可溯源（作者/年份/来源）'
+    } },
+    { key: 'question', name: '② 科学问题的凝练与提取', spec: {
+      goal: '把文献空白转成可检验的科学问题。',
+      todo: ['从空白中提炼 1 个可验证的问题或假设',
+             '明确研究对象、关键变量与边界条件',
+             '说明为什么值得做（意义与预期贡献）'],
+      output: '一句话研究问题 + 假设 + 边界条件',
+      acceptance: '问题可验证；变量与边界清晰；与文献空白一一对应'
+    } },
+    { key: 'data', name: '③ 数据获取、清洗处理', spec: {
+      goal: '拿到可直接用于计算的高质量数据。',
+      todo: ['确定数据来源与获取方式（活动数据 / 公开数据集 / 文献挖掘）',
+             '用自然语言明确清洗标准（缺失、异常、单位、去重）',
+             '按不同数据类型采用不同清洗方法，并留存记录'],
+      output: '清洗后的数据集 + 清洗标准文档',
+      acceptance: '清洗标准经人工确认；获取与清洗可复现；异常处理有记录'
+    } },
+    { key: 'model', name: '④ 模型的选择与运行', spec: {
+      goal: '选定方法并把结果跑出来。',
+      todo: ['依据问题性质选择模型/方法，并说明选择理由',
+             '明确输入、参数与评价指标',
+             '运行并保存结果与运行日志'],
+      output: '模型/方法说明 + 结果数据 + 运行日志',
+      acceptance: '结果可复现（含参数与版本）；结果经人工检查'
+    } },
+    { key: 'chart', name: '⑤ 图表的绘制', spec: {
+      goal: '把结果组织成"一眼能读懂"的证据。',
+      todo: ['明确每张图要回答哪个问题',
+             '选择合适图型（趋势 / 对比 / 分布 / 关系）',
+             '统一坐标轴、单位、图例与配色'],
+      output: '图表文件（矢量优先）+ 图注',
+      acceptance: '每张图配图注即可独立读懂；无坐标/量纲/误导性刻度问题'
+    } },
+    { key: 'writing', name: '⑥ 文章的撰写和修改', spec: {
+      goal: '形成逻辑闭环的完整稿件。',
+      todo: ['按目标期刊结构撰写（引言/方法/结果/讨论/结论）',
+             '让每个结论都能追溯到图表或数据',
+             '逐轮修改，保留版本以便回看'],
+      output: '稿件全文（含图表与参考文献）',
+      acceptance: '结论均有数据支撑；结构完整；格式符合目标期刊要求'
+    } },
+    { key: 'submit', name: '⑦ 投稿前的全流程校验与投稿', spec: {
+      goal: '投出去之前把全流程自查一遍。',
+      todo: ['校验数据 / 代码 / 图表 / 稿件四者一致（文中数字与图一致）',
+             '核对格式、作者信息、资助与伦理声明',
+             '生成投稿材料并完成投稿'],
+      output: '投稿材料 + 自查清单',
+      acceptance: '自查清单逐项通过；稿件版本与投稿材料一致'
+    } },
+    { key: 'rebuttal', name: '⑧ 回复评审意见与最终校验', spec: {
+      goal: '逐条回应评审意见并完成终稿。',
+      todo: ['拆解评审意见并分类（接受 / 需补充 / 有异议）',
+             '补实验或补充说明，撰写逐点回复',
+             '修改稿件后做一次全文一致性校验'],
+      output: '逐点回复 + 修改稿',
+      acceptance: '每条意见都有明确落点（改了哪里）；修改后全文数字与图表一致'
+    } },
+    { key: 'proof', name: '⑨ 文章接收后校稿阶段的校验', spec: {
+      goal: '保证见刊版与终稿一致。',
+      todo: ['逐项核对校样与终稿差异',
+             '检查作者、单位、基金、图表编号与引用',
+             '确认版权与出版信息'],
+      output: '校样确认 + 勘误记录（如有）',
+      acceptance: '校样差异逐项确认；无遗留的编号/引用错误'
+    } }
+  ];
+
+  function normalizeStatus(value) {
+    return MODULE_STATUSES.indexOf(value) >= 0 ? value : 'todo';
+  }
+
+  /** 按流程一次性创建缺失的 9 个模块（已存在同 key 的跳过），并选中第一个新建模块 */
+  function initFlowModules() {
+    var created = [];
+    for (var i = 0; i < FLOW_STEPS.length; i++) {
+      var step = FLOW_STEPS[i];
+      var exists = null;
+      for (var j = 0; j < state.modules.length; j++) {
+        if (state.modules[j].step === step.key) { exists = state.modules[j]; break; }
+      }
+      if (exists) continue;
+      var last = state.modules.length ? state.modules[state.modules.length - 1] : null;
+      var mod = {
+        id: uid('mod_'),
+        name: step.name,
+        step: step.key,
+        spec: deepClone(step.spec),
+        status: 'todo',
+        dependsOn: last ? last.id : null,
+        createdAt: nowISO(),
+        messages: []
+      };
+      state.modules.push(mod);
+      created.push(deepClone(mod));
+    }
+    if (!created.length) return { created: 0, firstId: null };
+    if (!findModule(state.activeModuleId)) state.activeModuleId = created[0].id;
+    emit('flow:init', { created: created.length, ids: created.map(function (m) { return m.id; }) });
+    return { created: created.length, firstId: created[0].id };
+  }
+
+  /** 改模块状态：todo | doing | review | approved（非法值按 todo 处理） */
+  function setModuleStatus(id, status) {
+    var mod = findModule(id);
+    if (!mod) return false;
+    var next = normalizeStatus(status);
+    if (mod.status === next) return true;
+    mod.status = next;
+    emit('module:status', { id: id, status: next });
+    return true;
+  }
+
+  /** 提交人工审核（doing -> review） */
+  function submitModule(id) {
+    return setModuleStatus(id, 'review');
+  }
+
+  /**
+   * 人工审核通过：置 approved，并自动把选中模块切到链上的下一个模块。
+   * -> { ok, nextId, nextName }（已是最后一个模块时 nextId 为 null）
+   */
+  function approveModule(id) {
+    var mod = findModule(id);
+    if (!mod) return { ok: false, reason: '模块不存在' };
+    var idx = indexOfModule(id);
+    var next = (idx >= 0 && idx + 1 < state.modules.length) ? state.modules[idx + 1] : null;
+    mod.status = 'approved';
+    mod.approvedAt = nowISO();
+    if (next) state.activeModuleId = next.id;
+    emit('module:status', {
+      id: id, status: 'approved', nextId: next ? next.id : null
+    });
+    return { ok: true, nextId: next ? next.id : null, nextName: next ? next.name : null };
+  }
+
+  /** 人工审核打回（review -> doing），可附一句原因（写入系统消息） */
+  function rejectModule(id, note) {
+    var mod = findModule(id);
+    if (!mod) return false;
+    var text = (typeof note === 'string') ? note.trim() : '';
+    mod.status = 'doing';
+    if (text) {
+      mod.messages.push({ id: uid('msg_'), role: 'system', text: '审核打回：' + text, at: nowISO() });
+    }
+    emit('module:status', { id: id, status: 'doing', note: text });
+    return true;
+  }
+
   /** 追加模块到链尾：dependsOn = 当前最后一个模块 id（保证强依赖 A→B→C）；同时选中新模块 */
   function addModule(name) {
     var list = state.modules;
@@ -273,6 +464,7 @@
       id: uid('mod_'),
       name: nm,
       dependsOn: last ? last.id : null,
+      status: 'todo',
       createdAt: nowISO(),
       messages: []
     };
@@ -404,6 +596,12 @@
     removeModule: removeModule,
     renameModule: renameModule,
     appendMessage: appendMessage,
+    // —— 流程模块与人工审核（规格 + 状态机）
+    initFlowModules: initFlowModules,
+    setModuleStatus: setModuleStatus,
+    submitModule: submitModule,
+    approveModule: approveModule,
+    rejectModule: rejectModule,
     // —— 侧栏 / 选项卡
     setSidebar: setSidebar,
     selectTab: selectTab,
@@ -417,14 +615,19 @@
       MESSAGE_APPEND: 'message:append',
       SIDEBAR_CHANGE: 'sidebar:change',
       TAB_SELECT: 'tab:select',
-      STATE_RESET: 'state:reset'
+      STATE_RESET: 'state:reset',
+      MODULE_STATUS: 'module:status',
+      FLOW_INIT: 'flow:init'
     },
     LIMITS: {
       STORAGE_KEY: STORAGE_KEY,
       SIDEBAR_MIN: SIDEBAR_MIN,
       SIDEBAR_MAX: SIDEBAR_MAX,
       SIDEBAR_DEFAULT: SIDEBAR_DEFAULT,
-      ROLES: ROLES.slice()
-    }
+      ROLES: ROLES.slice(),
+      MODULE_STATUSES: MODULE_STATUSES.slice()
+    },
+    // 流程规格（只读快照）：9 步的 key / 名称 / 说明
+    FLOW_STEPS: deepClone(FLOW_STEPS)
   };
 })(typeof window !== 'undefined' ? window : this);

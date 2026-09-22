@@ -162,6 +162,110 @@
     });
   }
 
+  // ------------------------------------------- 流程规格与人工审核（说明卡 + 状态门控）
+
+  var STATUS_META = {
+    todo: { glyph: '○', text: '待开始' },
+    doing: { glyph: '◐', text: '进行中' },
+    review: { glyph: '⏳', text: '待审核' },
+    approved: { glyph: '✓', text: '已通过' }
+  };
+
+  var STATUS_HINT = {
+    todo: '先读上方说明，做完后点「完成并提交审核」',
+    doing: '进行中：在下方记录进展，做完后提交人工审核',
+    review: '待人工审核：确认无误点「确定（通过）」，会自动跳到下一个模块',
+    approved: '已通过人工审核'
+  };
+
+  function statusOf(mod) {
+    var s = mod && mod.status;
+    return STATUS_META[s] ? s : 'todo';
+  }
+
+  function specRow(label, value) {
+    var row = el('div', 'spec-row');
+    row.appendChild(el('div', 'spec-label', label));
+    row.appendChild(el('div', 'spec-value', value));
+    return row;
+  }
+
+  /** 任务说明卡：目标 / 要做的事 / 产出 / 验收要点（无 spec 的模块返回 null） */
+  function buildSpecCard(mod) {
+    var spec = mod && mod.spec;
+    if (!spec) return null;
+    var card = el('div', 'spec-card');
+    card.appendChild(el('div', 'spec-title', '本模块要做什么'));
+    if (spec.goal) card.appendChild(specRow('目标', spec.goal));
+    if (spec.todo && spec.todo.length) {
+      var lines = [];
+      for (var i = 0; i < spec.todo.length; i++) lines.push((i + 1) + '. ' + spec.todo[i]);
+      card.appendChild(specRow('要做的事', lines.join('\n')));
+    }
+    if (spec.output) card.appendChild(specRow('产出', spec.output));
+    if (spec.acceptance) card.appendChild(specRow('验收要点', spec.acceptance));
+    return card;
+  }
+
+  function actionButton(text, kind, onClick) {
+    var btn = el('button', 'status-btn' + (kind === 'primary' ? ' status-btn-primary' : ''), text);
+    btn.type = 'button';
+    btn.addEventListener('click', function () {
+      onClick();
+      render();
+    });
+    return btn;
+  }
+
+  /** 状态条：状态徽标 + 审核动作（提交审核 / 通过 / 打回 / 进入下一模块） */
+  function buildStatusBar(mod, modules) {
+    var bar = el('div', 'status-bar');
+    var st = statusOf(mod);
+    var chip = el('span', 'status-chip', STATUS_META[st].glyph + ' ' + STATUS_META[st].text);
+    chip.setAttribute('data-status', st);
+    bar.appendChild(chip);
+    bar.appendChild(el('span', 'status-hint', STATUS_HINT[st] || ''));
+
+    var actions = el('div', 'status-actions');
+    if (st === 'todo' || st === 'doing') {
+      actions.appendChild(actionButton('完成并提交审核', 'primary', function () {
+        getStore().submitModule(mod.id);
+      }));
+    } else if (st === 'review') {
+      actions.appendChild(actionButton('确定（通过）', 'primary', function () {
+        getStore().approveModule(mod.id);      // 内部已把选中切到下一模块
+      }));
+      actions.appendChild(actionButton('打回重做', 'ghost', function () {
+        getStore().rejectModule(mod.id, '需要补充后再提交');
+      }));
+    } else if (st === 'approved') {
+      var idx = -1;
+      for (var i = 0; i < modules.length; i++) if (modules[i].id === mod.id) { idx = i; break; }
+      var next = (idx >= 0 && idx + 1 < modules.length) ? modules[idx + 1] : null;
+      if (next) {
+        actions.appendChild(actionButton('进入下一模块：' + next.name + ' →', 'primary', function () {
+          getStore().selectModule(next.id);
+        }));
+      } else {
+        actions.appendChild(el('span', 'status-hint', '已是最后一个模块'));
+      }
+    }
+    if (actions.childNodes.length) bar.appendChild(actions);
+    return bar;
+  }
+
+  /** 空状态里的一键初始化：按业务流程图建 9 个模块（各自带任务说明） */
+  function flowInitButton() {
+    var btn = el('button', 'status-btn status-btn-primary flow-init-btn', '按业务流程初始化 9 个模块');
+    btn.type = 'button';
+    btn.addEventListener('click', function () {
+      var Store = getStore();
+      if (Store && Store.initFlowModules) Store.initFlowModules();
+      render();
+    });
+    return btn;
+  }
+
   // ------------------------------------------------------------------ 渲染
 
   /**
@@ -177,6 +281,7 @@
     var modules = (state && state.modules) ? state.modules : [];
     var active = findModule(modules, state ? state.activeModuleId : null);
     var fallback = false; // activeModuleId 缺失时的渲染层兜底（不写 Store）
+    var messageless = true; // 当前模块没有消息（决定渲染后滚到顶部还是底部）
 
     if (!active && modules.length) {
       active = modules[modules.length - 1];
@@ -186,8 +291,10 @@
     spaceEl.innerHTML = '';
 
     if (!modules.length) {
-      // 无模块：空状态 + 禁用输入
-      spaceEl.appendChild(emptyState(EMPTY_NO_MODULE_TITLE, EMPTY_NO_MODULE_HINT));
+      // 无模块：空状态 + 一键按流程图初始化 + 禁用输入
+      var emptyBox = emptyState(EMPTY_NO_MODULE_TITLE, EMPTY_NO_MODULE_HINT);
+      emptyBox.appendChild(flowInitButton());
+      spaceEl.appendChild(emptyBox);
       setComposerEnabled(false, PLACEHOLDER_NO_MODULE);
     } else if (!active) {
       // 理论上不可达（modules 非空必有兜底），保底走同一分支
@@ -195,12 +302,18 @@
       setComposerEnabled(false, PLACEHOLDER_NO_MODULE);
     } else {
       var messages = active.messages || [];
+      messageless = messages.length === 0;
 
       var header = el('div', 'module-header');
       header.appendChild(el('div', 'module-header-title', active.name));
       header.appendChild(el('div', 'module-header-meta',
         '依赖：' + depLabel(modules, active) + ' · 消息 ' + messages.length + ' 条'));
       spaceEl.appendChild(header);
+
+      // 先状态条（动作优先：提交审核 / 确定通过 一眼可见），再任务说明卡（"这个模块要做什么"）
+      spaceEl.appendChild(buildStatusBar(active, modules));
+      var specCard = buildSpecCard(active);
+      if (specCard) spaceEl.appendChild(specCard);
 
       var list = el('div', 'msg-list');
       if (!messages.length) {
@@ -223,8 +336,10 @@
       }
     }
 
-    // 渲染完成 -> 滚到底部
-    spaceEl.scrollTop = spaceEl.scrollHeight;
+    // 滚动位置：有消息滚到底部；没有消息则停在顶部，保证「本模块要做什么」说明卡与审核状态条
+    // 一进入模块就能看到（否则说明卡会被滚出视野）。
+    if (messageless) spaceEl.scrollTop = 0;
+    else spaceEl.scrollTop = spaceEl.scrollHeight;
   }
 
   // ------------------------------------------------------------------ 发送
