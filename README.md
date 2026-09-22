@@ -30,6 +30,7 @@ python -m http.server 8123 --directory D:\zcode-work\report\flow-agent-web
 flow-agent-web/
 ├── index.html          # 单页骨架 + 全部 DOM 挂载点 + 脚本引入顺序
 ├── README.md           # 本文件
+├── CONTRIBUTING.md     # 协作规则：文件分区 / 可并发范围 / 慎重改动清单 / Git 流程
 ├── css/
 │   └── style.css       # 全站样式（白色主题 + 响应式 + 主题变量，不跟随系统深色模式）
 ├── js/
@@ -38,6 +39,8 @@ flow-agent-web/
 │   ├── tabs.js         # 顶部模块条 window.ModuleTabs：模块卡 + 依赖链 + 删除保护
 │   ├── chat.js         # 模块空间 window.ModuleSpace：消息渲染 + 底部输入
 │   └── app.js          # 装配层 window.App：首次渲染 + 订阅调度 + 存在性守卫
+├── tools/
+│   └── check-contract.js  # 契约自检脚本（提交前跑：node tools/check-contract.js）
 └── docs/
     └── contract.md     # 接口契约（模块边界、API 签名、DOM id / CSS 类清单、验收清单）
 ```
