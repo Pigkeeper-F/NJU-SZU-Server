@@ -3,3 +3,4 @@ dc33e9a17ecaa0d769333723ef8c7b70 *v1/build_process_chart.py
 cd683092b4be6bb7143ae78ba569be9a *v2/build_process_chart.py
 2265a5faa75d3094daf07821af085dab *v2/flow-agent-process.drawio
 6e072178fb9b44135a21babaf29ebb03 *v2/render_previews.py
+427918aaa9d293a9a54c5a971eea8e73 *v3/flow-agent-process.drawio

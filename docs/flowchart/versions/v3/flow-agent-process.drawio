@@ -1,0 +1,261 @@
+<mxfile host="Electron">
+  <diagram id="flowAgentProcess" name="流程智能体业务流程">
+    <mxGraphModel dx="2002" dy="1460" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1720" pageHeight="1360" math="0" shadow="0" adaptiveColors="auto">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="lt1" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=30;fontColor=#1F2933;fontStyle=1;fontFamily=Microsoft YaHei;" value="流程智能体 · 业务流程与能力节点" vertex="1">
+          <mxGeometry height="34" width="1000" x="40" y="22" as="geometry" />
+        </mxCell>
+        <mxCell id="lt2" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=15;fontColor=#5B6B7C;fontFamily=Microsoft YaHei;" value="两阶段主流程（研究写作 6 步 → 投稿发表 3 步）+ 数据/参数两条流水线 → 计算（两种方式）" vertex="1">
+          <mxGeometry height="22" width="1000" x="40" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="lgbox" parent="1" style="rounded=1;html=1;fillColor=#FFFFFF;strokeColor=#DCDCDC;fontFamily=Microsoft YaHei;" value="" vertex="1">
+          <mxGeometry height="68" width="502" x="1178" y="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lg1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="" vertex="1">
+          <mxGeometry height="18" width="34" x="1190" y="26" as="geometry" />
+        </mxCell>
+        <mxCell id="lt3" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=15;fontColor=#1F2933;fontFamily=Microsoft YaHei;" value="智能体自动执行" vertex="1">
+          <mxGeometry height="20" width="200" x="1230" y="24" as="geometry" />
+        </mxCell>
+        <mxCell id="lg2" parent="1" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=16;fontFamily=Microsoft YaHei;" value="" vertex="1">
+          <mxGeometry height="26" width="30" x="1420" y="22" as="geometry" />
+        </mxCell>
+        <mxCell id="lt4" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=15;fontColor=#1F2933;fontFamily=Microsoft YaHei;" value="人工审核 / 判断" vertex="1">
+          <mxGeometry height="20" width="220" x="1456" y="24" as="geometry" />
+        </mxCell>
+        <mxCell id="lg3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=16;fontFamily=Microsoft YaHei;" value="" vertex="1">
+          <mxGeometry height="18" width="34" x="1190" y="56" as="geometry" />
+        </mxCell>
+        <mxCell id="lt5" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=15;fontColor=#1F2933;fontFamily=Microsoft YaHei;" value="输出 / 成果" vertex="1">
+          <mxGeometry height="20" width="200" x="1230" y="54" as="geometry" />
+        </mxCell>
+        <mxCell id="lg4" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#999999;dashed=1;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;" value="未通过 → 回退修正">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1420" y="69" as="sourcePoint" />
+            <mxPoint x="1520" y="69" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="phase1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#B3B3B3;container=1;collapsible=0;verticalAlign=top;fontSize=16;fontFamily=Microsoft YaHei;" value="" vertex="1">
+          <mxGeometry height="216" width="1640" x="40" y="96" as="geometry" />
+        </mxCell>
+        <mxCell id="lt6" parent="phase1" style="text;html=1;align=left;verticalAlign=middle;fontSize=19;fontColor=#1F2933;fontStyle=1;fontFamily=Microsoft YaHei;" value="阶段一 · 研究写作过程（6 步）" vertex="1">
+          <mxGeometry height="26" width="700" x="20" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="s1" parent="phase1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="&lt;b&gt;① 文献调研&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;相关知识检索与整理&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="246" x="24" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" parent="phase1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="&lt;b&gt;② 科学问题的凝练与提取&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;从文献中提炼研究问题&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="246" x="296" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="es2" edge="1" parent="phase1" source="s1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="s2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" parent="phase1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="&lt;b&gt;③ 数据获取、清洗处理&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;清洗标准由自然语言确定&lt;br&gt;不同类型用不同方法&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="246" x="568" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="es3" edge="1" parent="phase1" source="s2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="s3" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s4" parent="phase1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="&lt;b&gt;④ 模型的选择与运行&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;运行模型 → 得到结果&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="246" x="840" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="es4" edge="1" parent="phase1" source="s3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="s4" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s5" parent="phase1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="&lt;b&gt;⑤ 图表的绘制&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;结果可视化&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="246" x="1112" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="es5" edge="1" parent="phase1" source="s4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="s5" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s6" parent="phase1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="&lt;b&gt;⑥ 文章的撰写和修改&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;成稿与迭代修改&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="246" x="1384" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="es6" edge="1" parent="phase1" source="s5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="s6" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="badge3" parent="phase1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=12;fontColor=#B25000;" value="▲ 人工审核：确定验收标准" vertex="1">
+          <mxGeometry height="18" width="246" x="568" y="146" as="geometry" />
+        </mxCell>
+        <mxCell id="badge4" parent="phase1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=12;fontColor=#B25000;" value="▲ 结果要人审核（有问题 → 回退）" vertex="1">
+          <mxGeometry height="18" width="246" x="840" y="146" as="geometry" />
+        </mxCell>
+        <mxCell id="p1note" parent="phase1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=13;align=left;fontColor=#7A8794;" value="说明：③④ 两步由人工确认验收标准与结果，未通过则回到清洗与标准设定。" vertex="1">
+          <mxGeometry height="20" width="900" x="24" y="176" as="geometry" />
+        </mxCell>
+        <mxCell id="phase2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#B3B3B3;container=1;collapsible=0;verticalAlign=top;fontSize=16;fontFamily=Microsoft YaHei;" value="" vertex="1">
+          <mxGeometry height="196" width="1640" x="40" y="336" as="geometry" />
+        </mxCell>
+        <mxCell id="lt7" parent="phase2" style="text;html=1;align=left;verticalAlign=middle;fontSize=19;fontColor=#1F2933;fontStyle=1;fontFamily=Microsoft YaHei;" value="阶段二 · 投稿—审稿—发表过程（3 步）" vertex="1">
+          <mxGeometry height="26" width="800" x="20" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="u1" parent="phase2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="&lt;b&gt;⑦ 投稿前的全流程校验与投稿&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;研究过程（数据/代码/图表/稿件）校验后投稿&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="460" x="40" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="u2" parent="phase2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="&lt;b&gt;⑧ 回复评审意见与最终校验&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;按评审意见修改并回复，最终校验&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="460" x="600" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="eu2" edge="1" parent="phase2" source="u1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="u2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="u3" parent="phase2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="&lt;b&gt;⑨ 文章接收后校稿阶段的校验&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;校样核对与最终版确认&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="460" x="1160" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="eu3" edge="1" parent="phase2" source="u2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="u3" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2badge" parent="phase2" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=12;fontColor=#B25000;" value="▲ 智能体定位问题 / 生成修改建议，人工确认后进入下一步" vertex="1">
+          <mxGeometry height="18" width="700" x="40" y="146" as="geometry" />
+        </mxCell>
+        <mxCell id="ph_link" edge="1" parent="1" source="phase1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="phase2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lt8" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=20;fontColor=#1F2933;fontStyle=1;fontFamily=Microsoft YaHei;" value="能力节点细化：数据流水线 ＋ 参数流水线 → 计算（两种方式）→ 结果审核" vertex="1">
+          <mxGeometry height="28" width="1100" x="40" y="552" as="geometry" />
+        </mxCell>
+        <mxCell id="nodeA" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#B3B3B3;container=1;collapsible=0;verticalAlign=top;fontSize=16;fontFamily=Microsoft YaHei;" value="" vertex="1">
+          <mxGeometry height="300" width="780" x="40" y="588" as="geometry" />
+        </mxCell>
+        <mxCell id="lt9" parent="nodeA" style="text;html=1;align=left;verticalAlign=middle;fontSize=18;fontColor=#1F2933;fontStyle=1;fontFamily=Microsoft YaHei;" value="数据pipeline · 活动数据" vertex="1">
+          <mxGeometry height="26" width="700" x="20" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" parent="nodeA" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="下载更新数据&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;（活动数据）&lt;/font&gt;" vertex="1">
+          <mxGeometry height="68" width="210" x="30" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" parent="nodeA" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="数据清洗&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;自然语言确定清洗标准；&lt;br&gt;不同类型不同方法&lt;/font&gt;" vertex="1">
+          <mxGeometry height="92" width="250" x="280" y="58" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" parent="nodeA" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=16;fontFamily=Microsoft YaHei;" value="人工审核：&lt;br&gt;验收标准通过？" vertex="1">
+          <mxGeometry height="112" width="200" x="570" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="ea1" edge="1" parent="nodeA" source="a1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="a2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ea2" edge="1" parent="nodeA" source="a2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="a3" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ea_loop" edge="1" parent="nodeA" source="a3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#999999;dashed=1;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=0.5;exitY=1;entryX=0.75;entryY=1;" target="a2" value="未通过：更新清洗与验收标准">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="670" y="210" />
+              <mxPoint x="467" y="210" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="a_note" parent="nodeA" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=13;align=left;fontColor=#7A8794;" value="产出：清洗后的活动数据（计算输入之一）" vertex="1">
+          <mxGeometry height="30" width="720" x="30" y="248" as="geometry" />
+        </mxCell>
+        <mxCell id="nodeB" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#B3B3B3;container=1;collapsible=0;verticalAlign=top;fontSize=16;fontFamily=Microsoft YaHei;" value="" vertex="1">
+          <mxGeometry height="300" width="820" x="860" y="588" as="geometry" />
+        </mxCell>
+        <mxCell id="lt10" parent="nodeB" style="text;html=1;align=left;verticalAlign=middle;fontSize=18;fontColor=#1F2933;fontStyle=1;fontFamily=Microsoft YaHei;" value="参数pipeline · 参数与文献（威源的完整流程）" vertex="1">
+          <mxGeometry height="26" width="700" x="20" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="b1" parent="nodeB" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="更新参数数据" vertex="1">
+          <mxGeometry height="68" width="200" x="30" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="b2" parent="nodeB" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="文献数据挖掘&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;（威源的完整流程）&lt;/font&gt;" vertex="1">
+          <mxGeometry height="92" width="250" x="276" y="58" as="geometry" />
+        </mxCell>
+        <mxCell id="b3" parent="nodeB" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=16;fontFamily=Microsoft YaHei;" value="人工审核：&lt;br&gt;确定验收标准" vertex="1">
+          <mxGeometry height="112" width="200" x="566" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="eb1" edge="1" parent="nodeB" source="b1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="b2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb2" edge="1" parent="nodeB" source="b2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="b3" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eb_loop" edge="1" parent="nodeB" source="b3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#999999;dashed=1;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=0.5;exitY=1;entryX=0.75;entryY=1;" target="b2" value="未通过：更新清洗与验收标准">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="666" y="210" />
+              <mxPoint x="463" y="210" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="b_note" parent="nodeB" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=13;align=left;fontColor=#7A8794;" value="产出：参数数据（计算输入之一）" vertex="1">
+          <mxGeometry height="30" width="760" x="30" y="248" as="geometry" />
+        </mxCell>
+        <mxCell id="nodeC" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#B3B3B3;container=1;collapsible=0;verticalAlign=top;fontSize=16;fontFamily=Microsoft YaHei;" value="" vertex="1">
+          <mxGeometry height="392" width="1640" x="40" y="916" as="geometry" />
+        </mxCell>
+        <mxCell id="lt11" parent="nodeC" style="text;html=1;align=left;verticalAlign=middle;fontSize=18;fontColor=#1F2933;fontStyle=1;fontFamily=Microsoft YaHei;" value="计算（两种方式）与结果审核 —— 输入：清洗后的活动数据 ＋ 参数数据" vertex="1">
+          <mxGeometry height="26" width="1200" x="20" y="8" as="geometry" />
+        </mxCell>
+        <mxCell id="c_m1" parent="nodeC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="方式一 · 直接计算&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;计算方法不变，直接改 input 得到结果&lt;/font&gt;" vertex="1">
+          <mxGeometry height="84" width="320" x="40" y="56" as="geometry" />
+        </mxCell>
+        <mxCell id="c_m2lab" parent="nodeC" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=13;align=left;fontColor=#3F5A73;" value="方式二 · 接入新模块" vertex="1">
+          <mxGeometry height="24" width="320" x="40" y="154" as="geometry" />
+        </mxCell>
+        <mxCell id="c_align" parent="nodeC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="数据对齐&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;自然语言形成对齐文档 + 人工审核&lt;/font&gt;" vertex="1">
+          <mxGeometry height="84" width="320" x="40" y="184" as="geometry" />
+        </mxCell>
+        <mxCell id="c_code" parent="nodeC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="对齐方法写成代码" vertex="1">
+          <mxGeometry height="84" width="240" x="400" y="184" as="geometry" />
+        </mxCell>
+        <mxCell id="c_calc" parent="nodeC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=16;fontFamily=Microsoft YaHei;" value="计算&lt;br&gt;&lt;font style=&quot;font-size:13px;color:#5B6B7C&quot;&gt;两个方式共用&lt;br&gt;同一套计算方法&lt;/font&gt;" vertex="1">
+          <mxGeometry height="212" width="210" x="690" y="56" as="geometry" />
+        </mxCell>
+        <mxCell id="c_out" parent="nodeC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=16;fontFamily=Microsoft YaHei;" value="输出数据" vertex="1">
+          <mxGeometry height="84" width="170" x="950" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="c_audit" parent="nodeC" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=16;fontFamily=Microsoft YaHei;" value="人工审核：&lt;br&gt;结果是否存在问题？" vertex="1">
+          <mxGeometry height="120" width="230" x="1170" y="102" as="geometry" />
+        </mxCell>
+        <mxCell id="c_plot" parent="nodeC" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=12;fontColor=#7A8794;" value="（若有需求）绘图查看是否符合规律" vertex="1">
+          <mxGeometry height="26" width="190" x="950" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="c_ok" parent="nodeC" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=13;fontColor=#3F7A46;" value="无问题 → 计算完成，数据可用于后续步骤" vertex="1">
+          <mxGeometry height="26" width="270" x="1330" y="232" as="geometry" />
+        </mxCell>
+        <mxCell id="c_locate" parent="nodeC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=16;fontFamily=Microsoft YaHei;" value="有问题 → 自动定位（数据 / 对齐 / 运行代码）→ 查看更新清洗与验收标准" vertex="1">
+          <mxGeometry height="62" width="650" x="950" y="286" as="geometry" />
+        </mxCell>
+        <mxCell id="ec1" edge="1" parent="nodeC" source="c_m1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.3;" target="c_calc" value="直接算">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ec2" edge="1" parent="nodeC" source="c_align" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="c_code" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ec3" edge="1" parent="nodeC" source="c_code" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.75;" target="c_calc" value="对齐后算">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ec4" edge="1" parent="nodeC" source="c_calc" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="c_out" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ec5" edge="1" parent="nodeC" source="c_out" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="c_audit" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ec6" edge="1" parent="nodeC" source="c_audit" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=0.35;exitY=1;entryX=0.5;entryY=0;" target="c_locate" value="有问题">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ec7" edge="1" parent="nodeC" source="c_locate" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#999999;dashed=1;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=0;exitY=0.5;entryX=0.5;entryY=1;" target="c_align" value="按定位结果回退修正">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="70" y="317" />
+              <mxPoint x="200" y="317" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="in_param" edge="1" parent="1" source="b3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#333333;endArrow=classic;endSize=4;fontSize=15;fontFamily=Microsoft YaHei;exitX=0.5;exitY=1;entryX=0.65;entryY=0;exitDx=0;exitDy=0;" target="c_calc" value="参数数据">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1526" y="962" />
+              <mxPoint x="866.5" y="962" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lt12" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=14;fontColor=#8A8A8A;fontFamily=Microsoft YaHei;" value="内容来源：业务说明（两阶段 9 步）+ 模块能力说明表；菱形与橙色标注为人工环节，虚线为未通过/定位后的回退路径。「参数数据进入计算」为依据&quot;直接改 input 得到结果&quot;的推断，待业务确认。" vertex="1">
+          <mxGeometry height="24" width="1400" x="40" y="1324" as="geometry" />
+        </mxCell>
+        <mxCell id="8o1MNfwivDfn5LJOa1cA-4" edge="1" parent="1" source="a3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="c_calc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

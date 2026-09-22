@@ -2,20 +2,21 @@
 """流程智能体 —— 业务流程与能力节点流程图（draw.io）
 
 内容来源：
-1. 业务说明：流程智能体分两步 —— 研究写作过程（6 步）+ 投稿审稿到发表过程（3 步）
-2. 模块能力说明表（v3 按新理解重绘）：
-   - 两条并行准备流水线：数据流水线（下载更新数据 → 数据清洗 → 人工审核验收标准）
-     与参数流水线（更新参数数据 → 文献数据挖掘 → 人工审核验收标准）
-   - 两条流水线的产物（清洗后的活动数据 + 参数数据）共同构成「计算」的输入
-   - 计算有两种方式：① 直接计算（计算方法不变，直接改 input 得到结果）；
-     ② 接入新模块（先「数据对齐」并把对齐方法写成代码，再运行计算）
-   - 计算输出后：结果要人审核 → 有问题则自动定位（数据 / 对齐 / 运行代码）→ 回退修正
+1. 业务说明：研究写作过程（6 步）+ 投稿审稿到发表过程（3 步）
+2. 模块能力说明表：
+   - 数据流水线（下载更新数据 → 数据清洗 → 人工审核确定验收标准）
+   - 参数流水线（更新参数数据 → 文献数据挖掘 → 人工审核确定验收标准）
+   - 两条流水线的产出共同构成「计算」的输入
+   - 计算为一个模块，分两种方式：① 直接计算（方法不变，直接改 input 得到结果）；
+     ② 接入模块后（完成数据对齐 → 把对齐方法写成代码 → 运行计算）
+   - 计算得到输出数据后：结果要人审核 → 有问题则自动定位（数据 / 对齐 / 运行代码）→ 回退修正
 
-设计约定（沿用 drawio-flowcharts 既有风格 + 论文流程图规范）：
-- 主流程横向（阶段一 6 步 / 阶段二 3 步）；流水线与计算区内部按行/列展开
-- 蓝色圆角框 = 智能体自动执行；橙色菱形 = 人工审核/判断；绿色 = 输出；紫色 = 定位与诊断
-- 虚线灰箭头 = 未通过/定位后的回退路径；全部正交走线，无阴影无渐变
-- 全图中文字体：Microsoft YaHei；字号统一按 FONT_SCALE 放大，保证缩到论文宽度仍可读
+v4 布局（按需求调整）：
+- 左侧竖排两条流水线：数据流水线在上、参数流水线在下（各自横向展开）
+- 右侧为「计算（竖图）」：一个计算模块 → 分支 1. 直接计算 / 2. 接入模块后 → 输出数据
+- 底部独立一行：结果审核与回退
+
+全图中文字体：Microsoft YaHei；字号统一按 FONT_SCALE 放大，保证缩到论文宽度仍可读。
 """
 import os
 import re
@@ -23,8 +24,6 @@ import xml.dom.minidom as minidom
 from xml.sax.saxutils import quoteattr
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-# 全图字号统一放大系数：画布 1660pt 宽，正文 12pt 缩到论文宽度后仅约 3pt 不可读，
-# 放大后正文 16pt，配合"整页横向插图"排版可读。
 FONT_SCALE = 1.35
 
 
@@ -47,7 +46,6 @@ def E(cid, style, source, target, value="", points=None, offset=None, parent="1"
 
 
 def scale_fonts(xml_str):
-    """把 XML 里所有显式字号（style 的 fontSize=N 与 html 值里的 font-size:Npx）按 FONT_SCALE 放大。"""
     xml_str = re.sub(r'fontSize=(\d+(?:\.\d+)?)',
                      lambda m: 'fontSize=%d' % round(float(m.group(1)) * FONT_SCALE), xml_str)
     xml_str = re.sub(r'font-size:(\d+(?:\.\d+)?)px',
@@ -63,7 +61,7 @@ def wrap(did, name, W, H, cells):
            f'pageHeight="{H}" math="0" shadow="0" adaptiveColors="auto">'
            f'<root><mxCell id="0"/><mxCell id="1" parent="0"/>{body}</root>'
            f'</mxGraphModel></diagram></mxfile>')
-    minidom.parseString(xml)          # 校验 XML 合法
+    minidom.parseString(xml)
     return xml
 
 
@@ -92,19 +90,17 @@ def title_txt(x, y, w, h, text, size=14, align='left', color='#1F2933', bold=Tru
 
 
 def small(t, size=9.5, color='#5B6B7C'):
-    """框内第二行小字注解"""
     return f'<font style="font-size:{size}px;color:{color}">{t}</font>'
 
 
 cells = []
-PAGE_W, PAGE_H = 1720, 1360
+PAGE_W, PAGE_H = 1720, 1420
 
 # ---------------- 标题与图例 ----------------
 cells.append(title_txt(40, 22, 1000, 34, '流程智能体 · 业务流程与能力节点', 22))
 cells.append(title_txt(40, 60, 1000, 22,
-                       '两阶段主流程（研究写作 6 步 → 投稿发表 3 步）+ 数据/参数两条流水线 → 计算（两种方式）',
+                       '两阶段主流程（研究写作 6 步 → 投稿发表 3 步）+ 数据/参数流水线 → 计算（一个模块，两种方式）',
                        11, 'left', '#5B6B7C', False))
-
 cells.append(V('lgbox', '', 'rounded=1;html=1;fillColor=#FFFFFF;strokeColor=#DCDCDC;' + F,
                1178, 16, 502, 68))
 cells.append(V('lg1', '', AUTO, 1190, 26, 34, 18))
@@ -158,92 +154,107 @@ for i, (sid, name, detail) in enumerate(S2):
                        S2[i - 1][0], sid, parent='phase2'))
 cells.append(V('p2badge', '▲ 智能体定位问题 / 生成修改建议，人工确认后进入下一步',
                TXT + 'fontSize=9;fontColor=#B25000;', 40, 146, 700, 18, parent='phase2'))
-
 cells.append(E('ph_link', EDG + 'exitX=0.5;exitY=1;entryX=0.5;entryY=0;', 'phase1', 'phase2'))
 
 # ================================================================
-# 能力节点（v3 重绘）：数据/参数两条流水线 → 计算（两种方式）
+# 能力节点（v4）：左侧竖排两条流水线 + 右侧计算竖图 + 底部结果审核
 # ================================================================
-cells.append(title_txt(40, 552, 1100, 28,
-                       '能力节点细化：数据流水线 ＋ 参数流水线 → 计算（两种方式）→ 结果审核', 15))
+cells.append(title_txt(40, 552, 1200, 28,
+                       '能力节点细化：左侧两条流水线（数据 / 参数）→ 右侧计算（一个模块，两种方式）→ 结果审核', 15))
 
-# ---- A：数据流水线（活动数据） ----
-cells.append(V('nodeA', '', CONT, 40, 588, 780, 300))
-cells.append(title_txt(20, 10, 700, 26, '数据流水线 · 活动数据', 13, parent='nodeA'))
-cells.append(V('a1', '下载更新数据<br>' + small('（活动数据）'), AUTO, 30, 70, 210, 68, parent='nodeA'))
-cells.append(V('a2', '数据清洗<br>' + small('自然语言确定清洗标准；<br>不同类型不同方法'),
-               AUTO, 280, 58, 250, 92, parent='nodeA'))
-cells.append(V('a3', '人工审核：<br>验收标准通过？', HUMAN, 570, 50, 200, 112, parent='nodeA'))
-cells.append(E('ea1', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;', 'a1', 'a2', parent='nodeA'))
-cells.append(E('ea2', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;', 'a2', 'a3', parent='nodeA'))
-cells.append(E('ea_loop', DASH + 'exitX=0.5;exitY=1;entryX=0.75;entryY=1;', 'a3', 'a2',
-               value='未通过：更新清洗与验收标准', points=[(670, 210), (467, 210)], parent='nodeA'))
-cells.append(V('a_note', '产出：清洗后的活动数据（计算输入之一）',
-               TXT + 'fontSize=9.5;align=left;fontColor=#7A8794;', 30, 248, 720, 30, parent='nodeA'))
 
-# ---- B：参数流水线（参数 / 文献） ----
-cells.append(V('nodeB', '', CONT, 860, 588, 820, 300))
-cells.append(title_txt(20, 10, 700, 26, '参数流水线 · 参数与文献（威源的完整流程）', 13, parent='nodeB'))
-cells.append(V('b1', '更新参数数据', AUTO, 30, 70, 200, 68, parent='nodeB'))
-cells.append(V('b2', '文献数据挖掘<br>' + small('（威源的完整流程）'), AUTO, 276, 58, 250, 92, parent='nodeB'))
-cells.append(V('b3', '人工审核：<br>确定验收标准', HUMAN, 566, 50, 200, 112, parent='nodeB'))
-cells.append(E('eb1', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;', 'b1', 'b2', parent='nodeB'))
-cells.append(E('eb2', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;', 'b2', 'b3', parent='nodeB'))
-cells.append(E('eb_loop', DASH + 'exitX=0.5;exitY=1;entryX=0.75;entryY=1;', 'b3', 'b2',
-               value='未通过：更新清洗与验收标准', points=[(666, 210), (463, 210)], parent='nodeB'))
-cells.append(V('b_note', '产出：参数数据（计算输入之一）',
-               TXT + 'fontSize=9.5;align=left;fontColor=#7A8794;', 30, 248, 760, 30, parent='nodeB'))
+def pipeline(prefix, x, y, title, s1_text, s1_small, s2_text, s2_small, s3_text, note):
+    """一条流水线容器：步骤1 → 步骤2 → 人工审核（含未通过回流）
 
-# ---- C：计算（两种方式）与结果审核 ----
-cells.append(V('nodeC', '', CONT, 40, 916, 1640, 392))
-cells.append(title_txt(20, 8, 1200, 26,
-                       '计算（两种方式）与结果审核 —— 输入：清洗后的活动数据 ＋ 参数数据', 13, parent='nodeC'))
+    容器 id 统一为 node+大写前缀（nodeA / nodeB），与跨容器连线的引用保持一致。
+    """
+    cid = 'node' + prefix.upper()
+    out = []
+    out.append(V(cid, '', CONT, x, y, 720, 280))
+    out.append(title_txt(20, 10, 660, 26, title, 13, parent=cid))
+    out.append(V(prefix + '1', s1_text + '<br>' + small(s1_small), AUTO, 30, 62, 200, 64, parent=cid))
+    out.append(V(prefix + '2', s2_text + '<br>' + small(s2_small), AUTO, 252, 52, 240, 84, parent=cid))
+    out.append(V(prefix + '3', s3_text, HUMAN, 512, 40, 190, 108, parent=cid))
+    out.append(E('e' + prefix + '1', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;',
+                 prefix + '1', prefix + '2', parent=cid))
+    out.append(E('e' + prefix + '2', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;',
+                 prefix + '2', prefix + '3', parent=cid))
+    out.append(E('e' + prefix + '_loop', DASH + 'exitX=0.5;exitY=1;entryX=0.5;entryY=1;',
+                 prefix + '3', prefix + '2', value='未通过：更新清洗与验收标准',
+                 points=[(607, 200), (372, 200)], parent=cid))
+    out.append(V(prefix + '_note', note, TXT + 'fontSize=9.5;align=left;fontColor=#7A8794;',
+                 30, 228, 660, 30, parent=cid))
+    return out
 
-# 方式一：直接计算
-cells.append(V('c_m1', '方式一 · 直接计算<br>' + small('计算方法不变，直接改 input 得到结果'),
-               AUTO, 40, 56, 320, 84, parent='nodeC'))
-# 方式二：接入新模块（先对齐、再写代码、再计算）
-cells.append(V('c_m2lab', '方式二 · 接入新模块', TXT + 'fontSize=9.5;align=left;fontColor=#3F5A73;',
-               40, 154, 320, 24, parent='nodeC'))
+
+# 左列上：数据流水线；左列下：参数流水线（按需求放在数据流水线下方）
+cells += pipeline('a', 40, 588, '数据流水线 · 活动数据',
+                  '下载更新数据', '（活动数据）',
+                  '数据清洗', '自然语言确定清洗标准；<br>不同类型不同方法',
+                  '人工审核：<br>验收标准通过？',
+                  '产出：清洗后的活动数据（计算输入之一）')
+cells += pipeline('b', 40, 888, '参数流水线 · 参数与文献',
+                  '更新参数数据', '（参数数据）',
+                  '文献数据挖掘', '（威源的完整流程）',
+                  '人工审核：<br>确定验收标准',
+                  '产出：参数数据（计算输入之一）')
+
+# ---------------- 右列：计算（竖图） ----------------
+cells.append(V('nodeC', '', CONT, 800, 588, 880, 580))
+cells.append(title_txt(20, 8, 840, 26, '计算（竖图）· 一个计算模块，两种方式', 13, parent='nodeC'))
+cells.append(V('c_calc', '<b>计算</b><br>' + small('输入：清洗后的活动数据 ＋ 参数数据<br>两种方式共用同一套计算方法'),
+               AUTO, 330, 46, 220, 96, parent='nodeC'))
+cells.append(V('c_m1', '<b>1. 直接计算</b><br>' + small('计算方法不变，直接改 input 得到结果'),
+               AUTO, 80, 186, 270, 76, parent='nodeC'))
+cells.append(V('c_m2', '<b>2. 接入模块后</b><br>' + small('先做数据对齐，再写代码运行'),
+               AUTO, 450, 186, 270, 66, parent='nodeC'))
 cells.append(V('c_align', '数据对齐<br>' + small('自然语言形成对齐文档 + 人工审核'),
-               AUTO, 40, 184, 320, 84, parent='nodeC'))
-cells.append(V('c_code', '对齐方法写成代码', AUTO, 400, 184, 240, 84, parent='nodeC'))
-# 共用的计算
-cells.append(V('c_calc', '计算<br>' + small('两个方式共用<br>同一套计算方法'),
-               AUTO, 690, 56, 210, 212, parent='nodeC'))
-# 输出与审核
-cells.append(V('c_out', '输出数据', OUTB, 950, 120, 170, 84, parent='nodeC'))
-cells.append(V('c_audit', '人工审核：<br>结果是否存在问题？', HUMAN, 1170, 102, 230, 120, parent='nodeC'))
-cells.append(V('c_plot', '（若有需求）绘图查看是否符合规律',
-               TXT + 'fontSize=9;fontColor=#7A8794;', 950, 210, 190, 26, parent='nodeC'))
-cells.append(V('c_ok', '无问题 → 计算完成，数据可用于后续步骤',
-               TXT + 'fontSize=9.5;fontColor=#3F7A46;', 1330, 232, 270, 26, parent='nodeC'))
-cells.append(V('c_locate', '有问题 → 自动定位（数据 / 对齐 / 运行代码）→ 查看更新清洗与验收标准',
-               PARAM, 950, 286, 650, 62, parent='nodeC'))
+               AUTO, 450, 272, 270, 66, parent='nodeC'))
+cells.append(V('c_code', '对齐方法写成代码', AUTO, 450, 358, 270, 56, parent='nodeC'))
+cells.append(V('c_run', '运行计算', AUTO, 450, 434, 270, 56, parent='nodeC'))
+cells.append(V('c_out', '输出数据', OUTB, 300, 500, 280, 56, parent='nodeC'))
+# 计算模块 → 两种方式的分支
+cells.append(E('ec_b1', EDG + 'exitX=0.25;exitY=1;entryX=0.5;entryY=0;', 'c_calc', 'c_m1',
+               points=[(385, 158), (215, 158)], parent='nodeC'))
+cells.append(E('ec_b2', EDG + 'exitX=0.75;exitY=1;entryX=0.5;entryY=0;', 'c_calc', 'c_m2',
+               points=[(495, 158), (585, 158)], parent='nodeC'))
+# 方式二的链路
+cells.append(E('ec_al', EDG + 'exitX=0.5;exitY=1;entryX=0.5;entryY=0;', 'c_m2', 'c_align', parent='nodeC'))
+cells.append(E('ec_cd', EDG + 'exitX=0.5;exitY=1;entryX=0.5;entryY=0;', 'c_align', 'c_code', parent='nodeC'))
+cells.append(E('ec_rn', EDG + 'exitX=0.5;exitY=1;entryX=0.5;entryY=0;', 'c_code', 'c_run', parent='nodeC'))
+# 两条分支汇入输出数据
+cells.append(E('ec_o1', EDG + 'exitX=0.5;exitY=1;entryX=0.25;entryY=0;', 'c_m1', 'c_out',
+               points=[(215, 480), (370, 480)], parent='nodeC'))
+cells.append(E('ec_o2', EDG + 'exitX=0.5;exitY=1;entryX=0.75;entryY=0;', 'c_run', 'c_out',
+               points=[(585, 480), (510, 480)], parent='nodeC'))
 
-cells.append(E('ec1', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.3;', 'c_m1', 'c_calc',
-               value='直接算', parent='nodeC'))
-cells.append(E('ec2', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;', 'c_align', 'c_code', parent='nodeC'))
-cells.append(E('ec3', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.75;', 'c_code', 'c_calc',
-               value='对齐后算', parent='nodeC'))
-cells.append(E('ec4', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;', 'c_calc', 'c_out', parent='nodeC'))
-cells.append(E('ec5', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;', 'c_out', 'c_audit', parent='nodeC'))
-cells.append(E('ec6', EDG + 'exitX=0.35;exitY=1;entryX=0.5;entryY=0;', 'c_audit', 'c_locate',
-               value='有问题', parent='nodeC'))
-cells.append(E('ec7', DASH + 'exitX=0;exitY=0.5;entryX=0.5;entryY=1;', 'c_locate', 'c_align',
-               value='按定位结果回退修正', points=[(70, 317), (200, 317)], parent='nodeC'))
+# 两条流水线的产出汇入计算模块（跨容器连线，从右边缘进入计算左侧）
+cells.append(E('in_data', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.35;', 'nodeA', 'c_calc',
+               value='活动数据', points=[(790, 728), (790, 668)]))
+cells.append(E('in_param', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.65;', 'nodeB', 'c_calc',
+               value='参数数据', points=[(775, 1028), (775, 696)], offset=(170, 0)))
 
-# 两条流水线的产出汇入计算（跨容器连线：活动数据 + 参数数据 一起构成计算输入）
-cells.append(E('in_data', EDG + 'exitX=0.5;exitY=1;entryX=0.35;entryY=0;', 'nodeA', 'c_calc',
-               value='活动数据', points=[(430, 956), (803, 956)]))
-cells.append(E('in_param', EDG + 'exitX=0.5;exitY=1;entryX=0.65;entryY=0;', 'nodeB', 'c_calc',
-               value='参数数据', points=[(1270, 962), (866, 962)]))
+# ---------------- 底部：结果审核与回退 ----------------
+cells.append(V('nodeR', '', CONT, 40, 1188, 1640, 172))
+cells.append(title_txt(20, 8, 600, 24, '结果审核与回退', 13, parent='nodeR'))
+cells.append(V('r1', '人工审核：<br>结果是否存在问题？', HUMAN, 60, 46, 260, 104, parent='nodeR'))
+cells.append(V('r2', '有问题 → 自动定位（数据 / 对齐 / 运行代码）', PARAM, 380, 58, 400, 80, parent='nodeR'))
+cells.append(V('r3', '→ 查看更新清洗与验收标准，按定位结果回退修正', PARAM, 820, 58, 480, 80, parent='nodeR'))
+cells.append(V('r4', '无问题 → 计算完成，数据可用于后续步骤',
+               TXT + 'fontSize=9.5;fontColor=#3F7A46;', 1300, 58, 310, 80, parent='nodeR'))
+cells.append(E('er1', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;', 'r1', 'r2',
+               value='有问题', parent='nodeR'))
+cells.append(E('er2', EDG + 'exitX=1;exitY=0.5;entryX=0;entryY=0.5;', 'r2', 'r3', parent='nodeR'))
+# 回退：定位到数据/参数问题 → 回到流水线；定位到对齐/运行代码 → 回到计算竖图
+cells.append(E('er_back1', DASH + 'exitX=0.25;exitY=0;entryX=0.75;entryY=1;', 'r2', 'nodeB',
+               value='数据问题 → 回退流水线'))
+cells.append(E('er_back2', DASH + 'exitX=0.66;exitY=0;entryX=0.34;entryY=1;', 'r3', 'nodeC',
+               value='对齐/代码问题 → 回退计算'))
 
 # 底部来源说明
-cells.append(title_txt(40, 1324, 1400, 24,
-                       '内容来源：业务说明（两阶段 9 步）+ 模块能力说明表；'
-                       '菱形与橙色标注为人工环节，虚线为未通过/定位后的回退路径。'
-                       '「参数数据进入计算」为依据"直接改 input 得到结果"的推断，待业务确认。',
+cells.append(title_txt(40, 1384, 1500, 24,
+                       '内容来源：业务说明（两阶段 9 步）+ 模块能力说明表；菱形与橙色标注为人工环节，'
+                       '虚线为未通过 / 定位后的回退路径。「参数数据进入计算」为依据"直接改 input 得到结果"的推断，待业务确认。',
                        10, 'left', '#8A8A8A', False))
 
 # ---------------- 输出 ----------------
