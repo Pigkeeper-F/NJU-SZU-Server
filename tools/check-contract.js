@@ -8,7 +8,8 @@
  *   3. 脚本里 getElementById / querySelector('#id') 引用的 DOM id 是否都在 index.html 中
  *   4. 脚本里 classList 用到的 CSS 类是否都在 css/style.css 中定义
  *   5. 四个 UI 模块是否都导出了全局对象（window.X = … 或 IIFE 的 root.X = …）
- *   6. 是否出现禁用能力（ES module / fetch / crypto.subtle / 外部 URL）
+ *   6. 联网与禁用能力：ES module / crypto.subtle / XMLHttpRequest / WebSocket 一律禁；
+ *      fetch 只允许 js/chat.js，且只允许同源 /api/… 路径（契约 §2）；data: 内联图标不算外部依赖
  *   7. 静态节点保护：#composer-input / #btn-send / #btn-add-module /
  *      #btn-sidebar-toggle / #sidebar-resizer 是否被脚本重建（禁止重建，只许改属性）
  *
@@ -33,7 +34,9 @@ const UI_MODULES = [
   ["App", "js/app.js"]
 ];
 const STATIC_NODES = ["composer-input", "btn-send", "btn-add-module", "btn-sidebar-toggle", "sidebar-resizer"];
-const EXPECTED_SCRIPTS = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js"];
+const EXPECTED_SCRIPTS = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/workspace.js"];
+// 契约 §2「两种运行模式」：前端只允许 js/chat.js 里对同源 /api/… 的 fetch；其余脚本零联网。
+const FETCH_ALLOWED = ["js/chat.js"];
 
 // ---------- 读取 ----------
 for (const f of JS_FILES.concat(["index.html", "css/style.css", "docs/contract.md"])) {
@@ -110,14 +113,46 @@ for (const pair of UI_MODULES) {
 }
 passed.push("全局对象导出齐备: " + UI_MODULES.map((p) => "window." + p[0]).join(", "));
 
-// ---------- 6. 禁用能力（剥离注释后扫描） ----------
+// ---------- 6. 联网与禁用能力（按 contract.md §2「两种运行模式」扫描） ----------
 for (const f of JS_FILES.concat(["index.html"])) {
   const raw = read(f);
-  const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/[^\n]*/g, "$1").replace(/<!--[\s\S]*?-->/g, "");
-  if (/\btype\s*=\s*["']module["']|crypto\.subtle|\bfetch\s*\(/.test(src)) problems.push("[" + f + "] 出现禁用能力（ES module / fetch / crypto.subtle）");
-  if (/https?:\/\//.test(src)) problems.push("[" + f + "] 出现外部 URL（本项目要求零外部依赖）");
+  const src = raw
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|\s)\/\/[^\n]*/g, "$1")
+    .replace(/<!--[\s\S]*?-->/g, "");
+  const noData = src.replace(/data:[^"'\s)]+/g, "data-uri");   // 内联 data: 图标（含 SVG 命名空间）不算外部依赖
+  if (/\btype\s*=\s*["']module["']|crypto\.subtle/.test(noData)) {
+    problems.push("[" + f + "] 出现禁用能力（ES module / crypto.subtle）");
+  }
+  if (noData.indexOf("fetch(") !== -1 && FETCH_ALLOWED.indexOf(f) === -1) {
+    problems.push("[" + f + "] 出现 fetch()：按契约只有 " + FETCH_ALLOWED.join("、") + " 允许调用同源 AI 接口");
+  }
+  const xw = noData.match(/\b(XMLHttpRequest|WebSocket)\b/);
+  if (xw) problems.push("[" + f + "] 出现 " + xw[1] + "：前端只允许同源 fetch /api/ai/chat");
+  if (FETCH_ALLOWED.indexOf(f) !== -1) {
+    for (const m of noData.matchAll(/fetch\(\s*["']([^"']+)["']/g)) {
+      if (m[1].indexOf("/api/") !== 0) {
+        problems.push("[" + f + "] fetch 目标必须是同源 /api/… 路径，实际：" + m[1]);
+      }
+    }
+  }
+  // 外部 URL：HTML 只认资源引用上下文（src= / href= / url( / fetch 目标），避免 data: 内联图标里的
+  // XML 命名空间（http://www.w3.org/2000/svg）被误判；JS 只认非 data: 的字符串字面量。
+  let ext = null;
+  if (f.slice(-5) === ".html") {
+    ext = noData.match(/(?:src|href)\s*=\s*["']https?:\/\//) ||
+          noData.match(/url\(\s*["']?https?:\/\//) ||
+          noData.match(/fetch\(\s*["']https?:\/\//);
+  } else {
+    for (const m of noData.matchAll(/["'`]([^"'`\n]{0,200})["'`]/g)) {
+      if (m[1].indexOf("data:") === -1 && /https?:\/\//.test(m[1])) { ext = m[1]; break; }
+    }
+  }
+  if (ext) {
+    problems.push("[" + f + "] 出现外部 URL（前端不得直连第三方服务）：" + String(ext).slice(0, 70));
+  }
 }
-passed.push("禁用能力与外部 URL 扫描通过（已剥离注释）");
+passed.push("联网规则通过：仅 " + FETCH_ALLOWED.join("、") + " 允许同源 /api/ 调用，其余脚本无 fetch / 外部 URL");
 
 // ---------- 7. 静态节点保护 ----------
 for (const id of STATIC_NODES) {
