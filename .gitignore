@@ -1,0 +1,15 @@
+# ---- 密钥与本地配置：绝不入库（详见 docs/llm-integration-research.md §4.7） ----
+.env
+.env.*
+.dev.vars
+*.key
+js/llm.config.local.js
+js/*.local.js
+
+# ---- 编辑器 / 系统杂项 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*~

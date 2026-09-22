@@ -42,7 +42,8 @@ flow-agent-web/
 ├── tools/
 │   └── check-contract.js  # 契约自检脚本（提交前跑：node tools/check-contract.js）
 └── docs/
-    └── contract.md     # 接口契约（模块边界、API 签名、DOM id / CSS 类清单、验收清单）
+    ├── contract.md     # 接口契约（模块边界、API 签名、DOM id / CSS 类清单、验收清单）
+    └── llm-integration-research.md  # 接入模型（让模型编辑模块内容）的调研与落地方案
 ```
 
 脚本引入顺序固定：`store.js → sidebar.js → tabs.js → chat.js → app.js`（全部在 `</body>` 之前，不使用 `DOMContentLoaded`）。
@@ -101,6 +102,10 @@ flow-agent-web/
 ```js
 Store.appendMessage(Store.getState().activeModuleId, '（本地手工插入的助手回复）', 'assistant');
 ```
+
+> 📄 **想接入模型让它直接编辑模块内容？** 调研结论、CORS 与密钥安全、工具调用（tool_calls）设计、
+> 契约变更提案与分阶段实施计划，见 [`docs/llm-integration-research.md`](docs/llm-integration-research.md)
+> （**目前仅调研文档，代码未实施**；`.gitignore` 已预先屏蔽本地密钥文件）。
 
 ---
 
