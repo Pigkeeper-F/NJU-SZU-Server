@@ -301,3 +301,29 @@
 .settings-about dt{color:var(--muted);white-space:nowrap}
 .settings-about dd{margin:0;color:var(--text);word-break:break-all}
 .settings-about dd.mono{font-family:var(--mono);font-size:12px;color:var(--muted)}
+
+
+/* ==================================================================
+   【体验升级 · 2026-10-13】记录搜索框 / 备份恢复按钮
+   ================================================================== */
+.records-search-row{margin:0 0 18px}
+.records-search{width:100%;max-width:420px;padding:9px 13px;border:1px solid #dfe5ef;border-radius:8px;font-size:13px;background:#fff;color:var(--text);outline:none}
+.records-search:focus{border-color:#94a6c2;box-shadow:0 0 0 3px #24364e14}
+.records-search::placeholder{color:#a3adbb}
+
+/* 【体验升级 · 2026-10-13】消息区迷你 Markdown 渲染样式 */
+.msg-text .md-p{margin:0}
+.msg-text .md-p+.md-p{margin-top:10px}
+.msg-text .md-h{font-weight:650;line-height:1.5;margin:10px 0 6px}
+.msg-text .md-h1{font-size:19px}
+.msg-text .md-h2{font-size:17px}
+.msg-text .md-h3{font-size:15px}
+.msg-text .md-ul,.msg-text .md-ol{margin:8px 0;padding-left:22px}
+.msg-text .md-ul li,.msg-text .md-ol li{margin:3px 0}
+.msg-text .md-code{background:#eef1f6;border:1px solid #e3e8f0;border-radius:4px;padding:1px 5px;font:12.5px/1.5 Consolas,"Courier New",monospace;color:#3c4a61}
+.msg-text .md-pre{background:#f5f7fa;border:1px solid #e6eaf1;border-radius:8px;padding:12px 14px;margin:10px 0;overflow-x:auto}
+.msg-text .md-pre code{font:12.5px/1.7 Consolas,"Courier New",monospace;color:#33415a;white-space:pre}
+
+.settings-field textarea{width:100%;resize:vertical;min-height:64px;border:1px solid #d5dce8;border-radius:7px;padding:9px 11px;font-size:13px;line-height:1.7;color:#33415a;background:#fff;outline:none;font-family:inherit}
+.settings-field textarea:focus{border-color:var(--accent-line);background:#fff}
+.settings-field textarea::placeholder{color:#a6afbc}

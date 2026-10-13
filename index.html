@@ -37,7 +37,7 @@
 
     <!-- ================================ 主区 ================================ -->
     <main id="main" class="main">
-      <header class="topbar"><div class="breadcrumb">工作台 <span>/</span> <strong id="view-breadcrumb">研究空间</strong></div><div class="topbar-actions"><span class="local-tag">本地项目</span><button id="export-project" class="quiet-button" type="button">↓ <span>导出记录</span></button><button id="toggle-details" class="icon-btn" type="button" aria-label="切换项目详情" aria-expanded="true">◫</button></div></header>
+      <header class="topbar"><div class="breadcrumb">工作台 <span>/</span> <strong id="view-breadcrumb">研究空间</strong></div><div class="topbar-actions"><span class="local-tag">本地项目</span><button id="export-project" class="quiet-button" type="button">↓ <span>导出记录</span></button><button id="backup-project" class="quiet-button" type="button" title="导出完整数据备份（JSON，可跨浏览器恢复）">⤓ <span>备份</span></button><button id="import-project" class="quiet-button" type="button" title="从备份文件恢复数据">⤒ <span>恢复</span></button><button id="toggle-details" class="icon-btn" type="button" aria-label="切换项目详情" aria-expanded="true">◫</button></div></header>
       <section class="project-heading"><div><div class="eyebrow">RESEARCH WORKSPACE</div><div class="project-title-row"><h1 id="project-title">我的研究项目</h1><button id="rename-project" class="icon-btn" type="button" aria-label="修改项目名称">✎</button></div><p>把研究中的想法、讨论与记录，留在同一个空间。</p></div><button class="primary-button" data-new-module type="button">＋ 新建模块</button></section>
       <div class="workspace-body"><section class="work-area" aria-label="模块工作区">
       <div class="section-heading"><span id="section-name">模块工作区</span><span id="module-count">0 个模块</span></div>
@@ -63,7 +63,7 @@
         </div>
         <div class="composer-hint">Enter 发送 · Shift+Enter 换行 · 每个模块记忆独立</div>
       </div>
-      <section id="records-view" class="records-view" hidden><div id="records-list"></div></section>
+      <section id="records-view" class="records-view" hidden><div class="records-search-row"><input id="records-search" class="records-search" type="search" placeholder="搜索记录（按内容筛选）…" autocomplete="off"></div><div id="records-list"></div></section>
       </section><aside id="project-details" class="project-details" aria-label="项目详情">
         <div class="details-heading">项目详情<span class="tiny-label">OVERVIEW</span></div>
         <div class="detail-summary"><span class="project-symbol large">R</span><h2 id="detail-project-name">我的研究项目</h2><p>个人研究 · 本地工作空间</p></div>
@@ -76,6 +76,7 @@
   </div>
   <dialog id="name-dialog"><form id="name-form"><div class="dialog-top"><span id="dialog-eyebrow" class="eyebrow">NEW MODULE</span><button class="icon-btn" id="close-dialog" type="button" aria-label="关闭">×</button></div><h2 id="dialog-title">新建研究模块</h2><p id="dialog-description">给这段工作起个名字，之后可以随时调整。</p><label for="name-input" id="name-label">模块名称</label><input id="name-input" maxlength="80" autocomplete="off" required placeholder="例如：文献阅读、数据整理、研究讨论"><div class="dialog-actions"><button id="cancel-dialog" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">确定</button></div></form></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
+  <input id="import-file" type="file" accept=".json,application/json" hidden>
 
   <!-- 脚本顺序不可调整：账号 -> 守卫 -> 数据层 -> 三个 UI 模块 -> 装配 -->
   <script src="js/auth-config.js"></script>

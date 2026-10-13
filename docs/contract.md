@@ -476,3 +476,34 @@ Store.PROJECT_META_KEY       // 'research_workspace_meta_v1'
 
 ### 14.3 手工验收（已实测）
 错误测试码拦截 / 正确码解锁 / 密码不一致拦截 / 注册成功跳登录 / 重复账号拦截 / 错误密码拦截 / 登录进工作台 / 侧栏显示用户名 / 刷新保持登录 / 退出回登录页 / 未登录直闯 index.html 被挡。
+
+
+## 15. 体验升级（2026-10-13）
+
+### 15.1 数据备份 / 恢复
+- 顶栏「⤓ 备份」：把工作台数据打包为 JSON 下载（`app:"yanxu-workspace"`, version 1, data 含
+  `fa_state_v1` / `fa_projects_v1` / `research_workspace_meta_v1` / `fa_current_project_id_v1`）。
+  **不含 `fa_llm_settings_v1`（其中含 API Key，绝不进备份文件）**。
+- 顶栏「⤒ 恢复」：选择备份文件 → 校验 `app` 与 `data` 结构 → confirm 覆盖 → 写入 localStorage → reload。
+  账号（wa_accounts / wa_session）不受恢复影响。
+- 实现位置：js/workspace.js；相关 id：`backup-project` / `import-project` / `import-file`。
+
+### 15.2 记录搜索
+- 工作记录视图顶部搜索框 `#records-search`：按消息文本做大小写不敏感过滤，实时重渲染；
+  匹配数显示于 intro（「匹配 N 条记录：」），无匹配显示空状态提示。
+
+### 15.3 消息迷你 Markdown 渲染
+- 用户 / AI 消息经 `renderRichText()`（js/chat.js）渲染支持子集：``` 代码块、`行内代码`、
+  **加粗**、*斜体*、- / 1. 列表、# ~ ### 标题；系统消息保持纯文本。
+- **实现约束（安全）**：全部经 document.createElement / textContent 构造，零 innerHTML，
+  与「消息文本零 HTML 拼接」的注入防护完全兼容；不渲染链接（避免钓鱼面）。
+- 渲染后 `.msg-text` 的 textContent 为去标记的纯文本（如 `**x**` → `x`）。
+
+### 15.4 AI 系统提示词（可选）
+- 齿轮「模型」页新增 `#llm-system-prompt`（textarea，上限 2000 字），保存于 `fa_llm_settings_v1.systemPrompt`。
+- 请求体 settings 透传（js/chat.js readLlmSettings）→ 服务端注入：chat-completions 协议在 messages
+  头部插入 `{role:"system"}`；responses 协议使用顶层 `instructions` 字段。留空则不注入。
+
+### 15.5 手工验收（已自动化实测）
+备份 toast / 导入恢复（模块、消息、项目名）/ 搜索过滤与空态 / Markdown 各语法渲染 + XSS 防护 /
+系统提示词保存与请求体透传 —— 全部通过（测试脚本 cdp-features.mjs，26 项）。

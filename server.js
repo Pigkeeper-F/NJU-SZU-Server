@@ -149,6 +149,8 @@ async function handleChat(req, res) {
   const cliBase = (typeof s.baseUrl === 'string') ? s.baseUrl.trim() : '';
   const cliModel = (typeof s.model === 'string') ? s.model.trim() : '';
   const cliProto = (s.protocol === 'responses' || s.protocol === 'chat-completions') ? s.protocol : '';
+  // 【体验升级 · 2026-10-13】系统提示词（可选）：前端「模型设置」填写，注入为 system 指令。
+  const sysPrompt = (typeof s.systemPrompt === 'string') ? s.systemPrompt.trim().slice(0, 2000) : '';
   const apiKey = cliKey || process.env.AI_API_KEY || '';
   if (!apiKey) {
     sendJson(res, 503, {
@@ -163,13 +165,14 @@ async function handleChat(req, res) {
   let requestBody;
   if (protocol === 'chat-completions') {
     url = baseUrl + '/chat/completions';
-    requestBody = { model, messages };
+    requestBody = { model, messages: sysPrompt ? [{ role: 'system', content: sysPrompt }].concat(messages) : messages };
   } else {
     url = baseUrl + '/responses';
     requestBody = {
       model,
       input: messages.map((message) => ({ role: message.role, content: message.content }))
     };
+    if (sysPrompt) requestBody.instructions = sysPrompt;
   }
 
   let upstream;

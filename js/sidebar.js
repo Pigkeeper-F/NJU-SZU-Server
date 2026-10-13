@@ -413,6 +413,20 @@
 
     body.appendChild(settingsField('API Key', 'llm-api-key', 'sk-…', 'password'));
 
+    // 【体验升级 · 2026-10-13】系统提示词（可选）：随请求发到本机服务，注入为 system 指令
+    var sysWrap = doc.createElement('label');
+    sysWrap.className = 'settings-field';
+    var sysCap = doc.createElement('span');
+    sysCap.textContent = '系统提示词（可选）';
+    var sysInput = doc.createElement('textarea');
+    sysInput.id = 'llm-system-prompt';
+    sysInput.rows = 3;
+    sysInput.maxLength = 2000;
+    sysInput.placeholder = '例如：你是科研写作助手，回答尽量简洁、给出可核查的依据。';
+    sysWrap.appendChild(sysCap);
+    sysWrap.appendChild(sysInput);
+    body.appendChild(sysWrap);
+
     var hint = doc.createElement('p');
     hint.className = 'settings-hint';
     hint.textContent = '留空则使用服务端 .env 里已配置的模型。密钥只保存在本机浏览器，' +
@@ -468,7 +482,8 @@
         baseUrl: doc.getElementById('llm-base-url').value.trim(),
         model: doc.getElementById('llm-model').value.trim(),
         protocol: doc.getElementById('llm-protocol').value,
-        apiKey: doc.getElementById('llm-api-key').value.trim()
+        apiKey: doc.getElementById('llm-api-key').value.trim(),
+        systemPrompt: doc.getElementById('llm-system-prompt') ? doc.getElementById('llm-system-prompt').value.trim() : ''
       };
       var ok = saveLlmSettings(keep);
       setSettingsStatus(ok ? '已保存。下一次发送就会使用这套配置。'
@@ -527,7 +542,7 @@
       list.appendChild(dt);
       list.appendChild(dd);
     }
-    row('版本', '2026-09-24 本地修复版');
+    row('版本', '2026-10-13 修复 · 账号 · 体验版');
     row('项目数', projects + ' 个');
     row('本地存储', used + ' / ' + keys.length + ' 个键，约 ' + Math.round(bytes / 1024) + ' KB');
     row('数据位置', '本机浏览器 localStorage（换浏览器或清缓存会丢）');
@@ -554,6 +569,7 @@
     if (doc.getElementById('llm-model')) doc.getElementById('llm-model').value = s.model || '';
     if (doc.getElementById('llm-api-key')) doc.getElementById('llm-api-key').value = s.apiKey || '';
     if (doc.getElementById('llm-protocol')) doc.getElementById('llm-protocol').value = s.protocol || 'chat-completions';
+    if (doc.getElementById('llm-system-prompt')) doc.getElementById('llm-system-prompt').value = s.systemPrompt || '';
   }
 
   function openSettingsDialog() {

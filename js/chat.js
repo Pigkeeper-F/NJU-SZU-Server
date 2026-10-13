@@ -112,13 +112,153 @@
     if (sendEl) sendEl.disabled = !enabled;
   }
 
-  /** 单条消息：.msg.msg-user|.msg-assistant|.msg-system > .msg-text + .msg-meta */
+  /* ------------------------------------------------------------------
+   * 迷你 Markdown 渲染（体验升级 · 2026-10-13）
+   *   只支持安全子集：``` 代码块、`行内代码`、**加粗**、*斜体*、- / 1. 列表、#~### 标题。
+   *   全部经 document.createElement / textContent 构造，**不使用任何 innerHTML**，
+   *   与「消息文本零 HTML 拼接」的注入防护约束完全兼容；不渲染链接（避免钓鱼面）。
+   * ------------------------------------------------------------------ */
+
+  /** 行内解析：**加粗** / *斜体* / `行内代码` → DocumentFragment */
+  function renderInline(text) {
+    var frag = document.createDocumentFragment();
+    var pattern = /(\*\*[^*\n]+\*\*|\*[^*\n]+\*|`[^`\n]+`)/g;
+    var last = 0;
+    var m;
+    while ((m = pattern.exec(text)) !== null) {
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      var token = m[0];
+      if (token.indexOf('**') === 0) {
+        var strong = document.createElement('strong');
+        strong.textContent = token.slice(2, -2);
+        frag.appendChild(strong);
+      } else if (token.charAt(0) === '`') {
+        var codeEl = document.createElement('code');
+        codeEl.className = 'md-code';
+        codeEl.textContent = token.slice(1, -1);
+        frag.appendChild(codeEl);
+      } else {
+        var emEl = document.createElement('em');
+        emEl.textContent = token.slice(1, -1);
+        frag.appendChild(emEl);
+      }
+      last = m.index + token.length;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    return frag;
+  }
+
+  /** 块级解析：段落 / 代码块 / 标题 / 列表 → DocumentFragment（全部 DOM API 构造） */
+  function renderRichText(text) {
+    var container = document.createDocumentFragment();
+    var lines = String(text).split('\n');
+    var paragraph = [];
+    var i = 0;
+
+    function flushParagraph() {
+      if (!paragraph.length) return;
+      var p = document.createElement('div');
+      p.className = 'md-p';
+      for (var k = 0; k < paragraph.length; k++) {
+        if (k > 0) p.appendChild(document.createElement('br'));
+        p.appendChild(renderInline(paragraph[k]));
+      }
+      container.appendChild(p);
+      paragraph = [];
+    }
+
+    while (i < lines.length) {
+      var line = lines[i];
+
+      if (line.indexOf('```') === 0) {                      // 代码块
+        flushParagraph();
+        var buf = [];
+        i += 1;
+        while (i < lines.length && lines[i].indexOf('```') !== 0) { buf.push(lines[i]); i += 1; }
+        i += 1;                                             // 跳过结束围栏（缺失时容错）
+        var pre = document.createElement('pre');
+        pre.className = 'md-pre';
+        var code = document.createElement('code');
+        code.textContent = buf.join('\n');
+        pre.appendChild(code);
+        container.appendChild(pre);
+        continue;
+      }
+
+      var heading = line.match(/^(#{1,3})\s+(.+)$/);        // 标题（h1~h3 映射为 md-h1~3 字号）
+      if (heading) {
+        flushParagraph();
+        var hEl = document.createElement('div');
+        hEl.className = 'md-h md-h' + heading[1].length;
+        hEl.appendChild(renderInline(heading[2]));
+        container.appendChild(hEl);
+        i += 1;
+        continue;
+      }
+
+      var ul = line.match(/^\s*[-*]\s+(.+)$/);              // 无序列表
+      if (ul) {
+        flushParagraph();
+        var ulEl = document.createElement('ul');
+        ulEl.className = 'md-ul';
+        while (i < lines.length) {
+          var um = lines[i].match(/^\s*[-*]\s+(.+)$/);
+          if (!um) break;
+          var li = document.createElement('li');
+          li.appendChild(renderInline(um[1]));
+          ulEl.appendChild(li);
+          i += 1;
+        }
+        container.appendChild(ulEl);
+        continue;
+      }
+
+      var ol = line.match(/^\s*\d+[.)]\s+(.+)$/);           // 有序列表
+      if (ol) {
+        flushParagraph();
+        var olEl = document.createElement('ol');
+        olEl.className = 'md-ol';
+        while (i < lines.length) {
+          var om = lines[i].match(/^\s*\d+[.)]\s+(.+)$/);
+          if (!om) break;
+          var li2 = document.createElement('li');
+          li2.appendChild(renderInline(om[1]));
+          olEl.appendChild(li2);
+          i += 1;
+        }
+        container.appendChild(olEl);
+        continue;
+      }
+
+      if (!line.trim()) {                                   // 空行 = 段落分隔
+        flushParagraph();
+        i += 1;
+        continue;
+      }
+
+      paragraph.push(line);
+      i += 1;
+    }
+    flushParagraph();
+    return container;
+  }
+
+  /** 单条消息：.msg.msg-user|.msg-assistant|.msg-system > .msg-text + .msg-meta
+   *  【体验升级 · 2026-10-13】用户/AI 消息经迷你 Markdown 渲染（纯 DOM 构造，零 innerHTML）；
+   *  系统消息保持纯文本。 */
   function buildMessage(msg) {
     var role = (msg && msg.role) || 'user';
     var wrap = el('div', ROLE_CLASS[role] || ROLE_CLASS.user);
     if (msg && msg.id) wrap.setAttribute('data-id', msg.id);
     wrap.setAttribute('data-role', role);
-    wrap.appendChild(el('div', 'msg-text', (msg && typeof msg.text === 'string') ? msg.text : ''));
+    var textEl = el('div', 'msg-text');
+    var raw = (msg && typeof msg.text === 'string') ? msg.text : '';
+    if (role === 'system') {
+      textEl.textContent = raw;
+    } else {
+      textEl.appendChild(renderRichText(raw));
+    }
+    wrap.appendChild(textEl);
     var time = msg ? formatTime(msg.at) : '';
     if (time) wrap.appendChild(el('div', 'msg-meta', time));
     return wrap;
@@ -155,6 +295,8 @@
       if (typeof s.model === 'string' && s.model.trim()) out.model = s.model.trim();
       if (typeof s.apiKey === 'string' && s.apiKey.trim()) out.apiKey = s.apiKey.trim();
       if (s.protocol === 'responses' || s.protocol === 'chat-completions') out.protocol = s.protocol;
+      // 【体验升级 · 2026-10-13】系统提示词（可选）：由服务端注入为 system 指令
+      if (typeof s.systemPrompt === 'string' && s.systemPrompt.trim()) out.systemPrompt = s.systemPrompt.trim().slice(0, 2000);
       return Object.keys(out).length ? out : null;
     } catch (error) { return null; }
   }

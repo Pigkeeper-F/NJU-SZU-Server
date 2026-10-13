@@ -105,28 +105,45 @@
   ModuleSpace.render = function () { originalRender(); decorateSpace(); };
   function renderRecords(state) {
     const root = $('records-list');
+    const searchEl = $('records-search');
+    const query = (searchEl ? searchEl.value : '').trim().toLowerCase();
     root.replaceChildren();
-    const groups = state.modules.filter(mod => mod.messages.length);
+    // 【体验升级 · 2026-10-13】支持按内容搜索过滤（大小写不敏感；空查询显示全部）
+    const groups = state.modules
+      .map(mod => ({
+        mod: mod,
+        messages: query
+          ? mod.messages.filter(m => String(m.text || '').toLowerCase().includes(query))
+          : mod.messages
+      }))
+      .filter(group => group.messages.length);
     if (!groups.length) {
       const empty = node('div', 'records-empty');
-      empty.append(node('h2', '', '记录会在这里汇集'), node('p', '', '在任意模块中留下第一条记录，就可以在这里回顾。'));
+      if (query) {
+        empty.append(node('h2', '', '没有匹配的记录'), node('p', '', '换个关键词试试，或清空搜索框查看全部记录。'));
+      } else {
+        empty.append(node('h2', '', '记录会在这里汇集'), node('p', '', '在任意模块中留下第一条记录，就可以在这里回顾。'));
+      }
       root.append(empty);
       return;
     }
-    root.append(node('p', 'records-intro', '按模块回顾研究中的想法与讨论。'));
-    groups.forEach(mod => {
-      const group = node('section', 'record-group');
-      group.append(node('h2', '', mod.name));
-      mod.messages.forEach(message => {
+    root.append(node('p', 'records-intro', query
+      ? '匹配 ' + groups.reduce((n, g) => n + g.messages.length, 0) + ' 条记录：'
+      : '按模块回顾研究中的想法与讨论。'));
+    groups.forEach(group => {
+      const mod = group.mod;
+      const section = node('section', 'record-group');
+      section.append(node('h2', '', mod.name));
+      group.messages.forEach(message => {
         const card = node('article', 'record-item');
         card.append(node('small', '', ({ user: '我的记录', assistant: 'AI 回复', system: '系统提示' }[message.role]) + ' · ' + formatDate(message.at)), node('p', '', message.text));
-        group.append(card);
+        section.append(card);
       });
       const link = node('button', 'record-link', '返回此模块 ↗');
       link.type = 'button';
       link.addEventListener('click', () => { Store.selectModule(mod.id); switchView('workspace'); });
-      group.append(link);
-      root.append(group);
+      section.append(link);
+      root.append(section);
     });
   }
   function render() {
@@ -226,6 +243,61 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     toast('项目记录已导出');
   });
+
+  // ---------------- 数据备份 / 恢复（体验升级 · 2026-10-13） ----------------
+  // 完整备份工作台数据为 JSON，可跨浏览器/跨设备恢复；不含 fa_llm_settings_v1（其中含 API Key，不进备份文件）。
+  const BACKUP_KEYS = ['fa_state_v1', 'fa_projects_v1', 'research_workspace_meta_v1', 'fa_current_project_id_v1'];
+  function dateStamp() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes());
+  }
+  $('backup-project').addEventListener('click', () => {
+    const data = {};
+    BACKUP_KEYS.forEach(k => {
+      try { const v = localStorage.getItem(k); if (v !== null) data[k] = v; } catch (_) { /* 忽略 */ }
+    });
+    const payload = { app: 'yanxu-workspace', version: 1, exportedAt: new Date().toISOString(), data: data };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' }));
+    const link = node('a');
+    link.href = url;
+    link.download = '研序备份-' + dateStamp() + '.json';
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('备份已导出（不含 API Key）');
+  });
+  $('import-project').addEventListener('click', () => $('import-file').click());
+  $('import-file').addEventListener('change', event => {
+    const input = event.target;
+    const file = input.files && input.files[0];
+    input.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let payload = null;
+      try { payload = JSON.parse(String(reader.result)); } catch (_) { payload = null; }
+      if (!payload || payload.app !== 'yanxu-workspace' || !payload.data || typeof payload.data !== 'object') {
+        alert('备份文件无效：不是「研序」导出的备份，或文件已损坏。');
+        return;
+      }
+      if (!confirm('导入将覆盖当前浏览器内的工作台数据（账号与登录状态不受影响）。继续吗？')) return;
+      let ok = true;
+      BACKUP_KEYS.forEach(k => {
+        const v = payload.data[k];
+        if (typeof v === 'string') {
+          try { localStorage.setItem(k, v); } catch (_) { ok = false; }
+        }
+      });
+      if (ok) { toast('导入成功，正在恢复…'); setTimeout(() => location.reload(), 600); }
+      else alert('导入失败：浏览器本地存储不可用（隐私模式或空间已满）。');
+    };
+    reader.onerror = () => alert('读取文件失败，请重试。');
+    reader.readAsText(file, 'utf-8');
+  });
+  // 搜索框：输入即过滤工作记录视图
+  $('records-search').addEventListener('input', () => { if (currentView === 'records') render(); });
   if (matchMedia('(max-width: 640px)').matches) Store.setSidebar({ collapsed: true });
   if (matchMedia('(max-width: 980px)').matches) $('toggle-details').setAttribute('aria-expanded', 'false');
   Store.subscribe(render);
