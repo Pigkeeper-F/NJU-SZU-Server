@@ -263,6 +263,14 @@
     var id = tab.getAttribute('data-id');
     if (!id) return;
 
+    // 【安全修复 · 2026-10-13】优先走统一的命名 dialog（workspace.js 暴露），
+    // 交互风格与「新建模块 / 项目改名」一致；WorkspaceUI 未就绪时退回原生 prompt。
+    var ui = root.WorkspaceUI;
+    if (ui && typeof ui.openRenameDialog === 'function') {
+      ui.openRenameDialog(id, title.textContent || '');
+      return;
+    }
+
     var next = root.prompt ? root.prompt(RENAME_PROMPT, title.textContent || '') : null;
     if (next === null || typeof next === 'undefined') return; // 取消
     if (!String(next).trim()) return;                        // 空值忽略

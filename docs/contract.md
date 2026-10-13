@@ -458,3 +458,21 @@ Store.PROJECT_META_KEY       // 'research_workspace_meta_v1'
 
 1. 点「当前项目」右侧 `+` → 输入「实验二：投稿返修」→ 确定：项目名（侧栏 + 页面标题）变为新名、模块清空为 0、出现「历史项目 (1) · 我的研究项目（9 模块）」。
 2. 点历史项 → 切回：项目名恢复「我的研究项目」、9 个模块回归、① 的 `approved` 状态完好、历史项目列表清空。
+
+
+## 14. 账号系统（2026-10-13 集成）
+
+### 14.1 文件与引入顺序
+- 工作台 index.html：js/auth-config.js → js/auth-storage.js → js/guard.js →（原渲染脚本链）。守卫保证未登录访问工作台一律 `location.replace("login.html")`。
+- 登录/注册页 login.html / register.html：js/auth-config.js → js/auth-storage.js → js/auth-pages.js（+ css/auth.css）。已登录访问这两页自动跳 index.html。
+- 来源：`web-account-system` 项目整体移植；账号存储对象由 window.Store 改名 **window.AuthStore**（避免与工作台数据层 Store 撞名）；window.Session / window.AuthCrypto 保持原名。
+
+### 14.2 存储键与跳转规则
+- 账号表键 `wa_accounts`（username/salt/passHash/createdAt，盐化 SHA-256，前端演示级）；会话键 `wa_session`（字符串用户名）。
+- 注册：第一段测试码（js/auth-config.js 的 APP_CONFIG.testCode，当前 **nailong**；改测试码只改这一处并同步本节）→ 第二段账号+密码（≥6 位、两次一致、重复账号拒绝）→ 成功跳 login.html。
+- 登录：账号+密码校验（失败统一提示「账号或密码错误」，防账号枚举）→ 成功写会话跳 index.html（工作台）。
+- 退出：工作台左下角 ⎋ 按钮 → Session.clear() → location.replace("login.html")。
+- 工作台侧栏底部显示当前用户名（#auth-user，取 window.AuthUser）。
+
+### 14.3 手工验收（已实测）
+错误测试码拦截 / 正确码解锁 / 密码不一致拦截 / 注册成功跳登录 / 重复账号拦截 / 错误密码拦截 / 登录进工作台 / 侧栏显示用户名 / 刷新保持登录 / 退出回登录页 / 未登录直闯 index.html 被挡。

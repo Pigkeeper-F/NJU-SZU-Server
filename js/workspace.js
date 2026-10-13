@@ -10,6 +10,7 @@
   } catch (_) { /* Keep the in-memory workspace available. */ }
   let currentView = 'workspace';
   let dialogMode = 'module';
+  let renameTargetId = null;
   let toastTimer;
   const node = (tag, className, text) => {
     const el = document.createElement(tag);
@@ -30,16 +31,19 @@
   function formatDate(value) {
     return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
   }
-  function openDialog(mode) {
+  function openDialog(mode, extra) {
     dialogMode = mode;
-    const rename = mode === 'project';
-    $('dialog-title').textContent = rename ? '修改项目名称' : '新建研究模块';
-    $('dialog-eyebrow').textContent = rename ? 'PROJECT SETTINGS' : 'NEW MODULE';
-    $('name-label').textContent = rename ? '项目名称' : '模块名称';
-    $('dialog-description').textContent = rename ? '用一个清晰的名字，让研究更容易找到。' : '给这段工作起个名字，之后可以随时调整。';
-    $('name-input').value = rename ? meta.name : '';
+    const isProject = mode === 'project';
+    const isRename = mode === 'rename';
+    $('dialog-title').textContent = isRename ? '重命名模块' : isProject ? '修改项目名称' : '新建研究模块';
+    $('dialog-eyebrow').textContent = isRename ? 'RENAME MODULE' : isProject ? 'PROJECT SETTINGS' : 'NEW MODULE';
+    $('name-label').textContent = isRename ? '模块名称' : isProject ? '项目名称' : '模块名称';
+    $('dialog-description').textContent = isRename
+      ? '给模块换个名字，依赖链与已有记录都会保留。'
+      : isProject ? '用一个清晰的名字，让研究更容易找到。' : '给这段工作起个名字，之后可以随时调整。';
+    $('name-input').value = isProject ? meta.name : (isRename && extra ? (extra.name || '') : '');
     $('name-input').setCustomValidity('');
-    $('name-input').placeholder = rename ? '输入项目名称' : '例如：文献阅读、数据整理、研究讨论';
+    $('name-input').placeholder = isRename ? '输入新的模块名称' : isProject ? '输入项目名称' : '例如：文献阅读、数据整理、研究讨论';
     $('name-dialog').showModal();
     $('name-input').focus();
   }
@@ -49,11 +53,32 @@
   }
   function welcome() {
     const panel = node('div', 'welcome');
-    panel.append(node('div', 'welcome-symbol', '▤'), node('h2', '', '从一个研究模块开始'), node('p', '', '为手头的研究留一个专注的空间。整理想法、展开讨论，也记录每一步进展。'));
-    const button = node('button', 'primary-button', '＋ 创建第一个模块');
-    button.type = 'button';
-    button.addEventListener('click', () => openDialog('module'));
-    panel.append(button);
+    panel.append(node('div', 'welcome-symbol', '▤'), node('h2', '', '按业务流程开始'),
+      node('p', '', '这个项目按「研究写作 + 投稿发表」两阶段共 9 步推进。一次建好 9 个模块，每个模块都带自己的名字与任务说明。'));
+    const steps = (window.Store && window.Store.FLOW_STEPS) ? window.Store.FLOW_STEPS : [];
+    const actions = node('div', 'welcome-actions');
+    const firstName = steps.length ? steps[0].name : '第 1 步';
+    const initButton = node('button', 'primary-button', '开始业务流程：' + firstName);
+    initButton.type = 'button';
+    initButton.addEventListener('click', () => {
+      if (!window.Store) return;
+      if (typeof window.Store.startFlow === 'function') window.Store.startFlow();
+      else if (typeof window.Store.initFlowModules === 'function') window.Store.initFlowModules();
+      render();
+    });
+    actions.append(initButton);
+    const blankButton = node('button', 'quiet-button', '只建一个空白模块');
+    blankButton.type = 'button';
+    blankButton.addEventListener('click', () => openDialog('module'));
+    actions.append(blankButton);
+    panel.append(actions);
+    if (steps.length) {
+      panel.append(node('div', 'welcome-steps-title',
+        '流程共 ' + steps.length + ' 步，通过一步的审核后，下一步才会出现：'));
+      const list = node('ol', 'welcome-steps');
+      steps.forEach(step => list.append(node('li', '', step.name)));
+      panel.append(list);
+    }
     const features = node('div', 'welcome-features');
     [['◫', '独立讨论空间'], ['▤', '记录自动保留'], ['↗', '随时导出']].forEach(([icon, label]) => {
       const item = node('span', '', label);
@@ -145,6 +170,10 @@
     const name = $('name-input').value.trim();
     if (!name) { $('name-input').setCustomValidity('请输入名称'); $('name-input').reportValidity(); return; }
     if (dialogMode === 'project') { meta.name = name; toast(saveMeta() ? '项目名称已更新' : '名称已更新，当前浏览器无法持久保存'); }
+    else if (dialogMode === 'rename') {
+      if (!renameTargetId || !Store.renameModule(renameTargetId, name)) toast('重命名失败：模块不存在或名称无效');
+      renameTargetId = null;
+    }
     else { Store.addModule(name); currentView = 'workspace'; }
     $('name-dialog').close();
     render();
@@ -161,6 +190,8 @@
     const state = Store.getState();
     const text = $('composer-input').value.trim();
     if (!state.activeModuleId || !text) return;
+    const maxChars = (window.Store && window.Store.LIMITS && window.Store.LIMITS.MAX_MESSAGE_CHARS) || 20000;
+    if (text.length > maxChars) { toast('单条记录最长 ' + maxChars + ' 字，请拆分后再保存。'); return; }
     Store.appendMessage(state.activeModuleId, text, 'user');
     $('composer-input').value = '';
     $('composer-input').style.height = 'auto';
@@ -199,4 +230,20 @@
   if (matchMedia('(max-width: 980px)').matches) $('toggle-details').setAttribute('aria-expanded', 'false');
   Store.subscribe(render);
   render();
+  // 【集成 · 2026-10-13】账号：侧栏显示当前用户 + 退出登录（守卫 js/guard.js 已保证已登录）
+  const authUserEl = $('auth-user');
+  if (authUserEl) authUserEl.textContent = window.AuthUser || '已登录';
+  const logoutBtn = $('btn-logout');
+  if (logoutBtn) logoutBtn.addEventListener('click', () => {
+    try { if (window.Session) window.Session.clear(); } catch (_) { /* 忽略 */ }
+    location.replace('login.html');
+  });
+  // 【安全修复 · 2026-10-13】暴露重命名入口给 tabs.js（双击模块卡标题走统一命名 dialog，
+  // 替代原生 prompt：风格一致、带长度校验与取消按钮）。
+  window.WorkspaceUI = {
+    openRenameDialog: function (id, currentName) {
+      renameTargetId = (typeof id === 'string') ? id : null;
+      openDialog('rename', { name: currentName || '' });
+    }
+  };
 })();

@@ -17,3 +17,287 @@
 @media(max-width:980px){.project-details{display:none}.workspace-body.details-open .project-details{display:block;position:absolute;right:0;top:61px;bottom:0;z-index:5;width:282px;box-shadow:-10px 0 30px #24324a15}.project-heading p{font-size:12px}.sidebar{width:200px!important}.sidebar.sidebar-collapsed{width:56px!important}}
 @media(max-width:640px){.sidebar{width:56px!important}.sidebar-header{justify-content:center;padding:0}.sidebar-title,.workspace-label,.nav-label,.workspace-nav,.project-shortcut,.sidebar-bottom,.sidebar-resizer{display:none}.topbar{padding:0 14px;min-height:54px}.topbar-actions{gap:8px}.local-tag{display:none}.quiet-button{padding:6px 8px;font-size:12px}.breadcrumb{font-size:12px;gap:7px}.project-heading{padding:20px 17px;align-items:flex-start;flex-wrap:wrap;gap:14px}.project-title-row h1{font-size:21px}.project-heading p{font-size:12px;line-height:1.8}.project-heading>.primary-button{padding:7px 12px;font-size:12px}.eyebrow{font-size:9px}.section-heading{padding:0 17px;font-size:13px}.module-space{padding:0 17px 20px}.composer{padding:12px 14px}.composer-mode>span{display:none}.composer-input{font-size:13px}.welcome{padding:30px 0}.welcome h2{font-size:21px}.welcome>p{font-size:13px}.welcome-features{gap:13px;flex-wrap:wrap}.welcome-features>span{font-size:11px}.welcome-symbol{width:54px;height:54px;margin-bottom:18px}.project-heading .primary-button{align-self:flex-start}.records-view{padding:17px}.workspace-body.details-open .project-details{top:54px;max-width:calc(100vw - 56px)}.sidebar:not(.sidebar-collapsed){position:absolute;top:0;bottom:0;width:220px!important;box-shadow:10px 0 35px #22375420;z-index:8}.sidebar:not(.sidebar-collapsed) .sidebar-header{justify-content:space-between;padding:0 16px}.sidebar:not(.sidebar-collapsed) .sidebar-title,.sidebar:not(.sidebar-collapsed) .workspace-label,.sidebar:not(.sidebar-collapsed) .sidebar-bottom{display:flex}.sidebar:not(.sidebar-collapsed) .nav-label{display:block}.sidebar:not(.sidebar-collapsed) .workspace-nav{display:grid}.sidebar:not(.sidebar-collapsed) .project-shortcut{display:flex}.main{margin-left:56px}.sidebar.sidebar-collapsed+.main{margin-left:0}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+
+/* ==================================================================
+   【本地修复 · 2026-09-24】模块选项卡卡片：标题被压成 5px 高（视觉上只剩一条横缝）
+   现象：9 个流程模块的选项卡上，能看清的只有「← 上游模块名」依赖徽标，
+         模块标题（① 文献调研 …）几乎不可见 —— 因而也看不出「审核通过后自动跳到下一步」。
+   成因：本文件把 .module-tab 改成 display:flex / flex-direction:column / height:55px，
+         而 padding 是 9px + 9px = 18px，内容区只剩 37px；
+         两个子元素需要「标题 21.7px + 徽标 margin-top 3px + 行高 16px = 40.7px」，超出 3.7px。
+         标题本身带 overflow:hidden（style.css 的 .module-tab-title），按 flex 规范其
+         自动最小尺寸为 0 —— 于是被优先压扁：实测 rect 高度只剩 5px，文字被裁成一条缝。
+   修法：卡片高度改由内容决定（height:auto + min-height），并禁止两个子元素参与收缩。
+         纯覆盖式追加，不改动本文件既有规则；如需回退，删除本段即可。
+   ================================================================== */
+.module-tab{
+  height:auto;
+  min-height:56px;
+  padding:8px 30px 8px 12px;
+  justify-content:center;
+}
+.module-tab-title{
+  flex:0 0 auto;
+  font-size:13px;
+  line-height:1.35;
+}
+.module-tab .module-dep{
+  flex:0 0 auto;
+  line-height:1.3;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+/* 【本地修复 · 2026-09-24】项目列表：当前项目也要显示（标「当前」、不可点）。
+   原来列表只列非当前项目，点一个就把它从列表里删掉，看起来像"项目消失了"。 */
+.project-history-item.is-current{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:6px;
+  background:var(--accent-soft);
+  border:1px solid var(--accent-line);
+  cursor:default;
+}
+.project-history-item.is-current:hover{background:var(--accent-soft);border-style:solid}
+.project-history-tag{
+  flex:0 0 auto;
+  font-size:10px;
+  line-height:1.6;
+  color:var(--accent);
+  border:1px solid var(--accent-line);
+  border-radius:99px;
+  padding:0 5px;
+}
+
+
+/* 【本地修复 · 2026-09-24】空状态下的可见性修复
+   1) .module-tabs-bar.is-empty 原来被隐藏 -> 连带把「＋」按钮也藏了，
+      用户空手进页面时既看不到模块栏、也无法新建模块（契约 §11.1 要求「主区顶部只有 ＋」）。
+   2) 欢迎页新增 9 步清单与初始化按钮的样式。 */
+.module-tabs-bar.is-empty{display:flex}
+.welcome-steps{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:2px 22px;
+  margin:14px auto 4px;
+  padding:0;
+  max-width:560px;
+  list-style:none;
+  text-align:left;
+  counter-reset:wstep;
+}
+.welcome-steps>li{
+  counter-increment:wstep;
+  position:relative;
+  padding-left:26px;
+  font-size:13px;
+  line-height:2;
+  color:var(--text);
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.welcome-steps>li::before{
+  content:counter(wstep);
+  position:absolute;
+  left:0;top:4px;
+  width:17px;height:17px;
+  border-radius:50%;
+  background:var(--accent-soft);
+  border:1px solid var(--accent-line);
+  color:var(--accent);
+  font-size:11px;
+  line-height:17px;
+  text-align:center;
+}
+.welcome-blank-btn{margin-top:8px}
+.welcome-actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;align-items:center;margin-top:18px}
+.welcome-steps-title{margin-top:22px;font-size:12px;color:var(--muted)}
+.welcome-steps{
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  margin-top:10px;
+  max-width:760px;
+}
+.welcome-steps>li{font-size:12px;line-height:1.9}
+/* 把欢迎页收紧，保证「9 个模块名清单」也落在首屏内 */
+.welcome{padding:6px 0 14px}
+.welcome .welcome-symbol{width:50px;height:50px;margin-bottom:12px;font-size:21px;border-radius:14px}
+.welcome h2{font-size:20px;margin:0 0 6px}
+.welcome>p{font-size:13px;line-height:1.7;margin:0}
+.welcome-steps-title{margin-top:14px}
+.welcome-steps{margin-top:8px}
+.welcome-steps>li{line-height:1.75}
+
+
+/* ==================================================================
+   【本地修复 · 2026-09-24】项目右键删除 + 左下角「模型设置」齿轮
+   ================================================================== */
+
+/* 左下角齿轮：挂在 .sidebar-bottom 右端 */
+.sidebar-gear-btn{
+  margin-left:auto;
+  flex:0 0 auto;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:30px;
+  height:30px;
+  padding:0;
+  color:var(--muted);
+  background:transparent;
+  border:1px solid transparent;
+  border-radius:8px;
+  cursor:pointer;
+  transition:color var(--transition),background var(--transition),border-color var(--transition);
+}
+.sidebar-gear-btn:hover{
+  color:var(--accent);
+  background:#ffffff;
+  border-color:var(--border);
+}
+.sidebar-gear-btn svg{display:block}
+
+/* 项目右键菜单 */
+.proj-menu{
+  position:fixed;
+  z-index:60;
+  min-width:132px;
+  padding:4px;
+  background:#ffffff;
+  border:1px solid var(--border);
+  border-radius:9px;
+  box-shadow:0 12px 32px rgba(31,42,60,.16);
+}
+.proj-menu-item{
+  display:block;
+  width:100%;
+  padding:7px 12px;
+  font:inherit;
+  font-size:13px;
+  text-align:left;
+  color:var(--text);
+  background:transparent;
+  border:0;
+  border-radius:6px;
+  cursor:pointer;
+  white-space:nowrap;
+}
+.proj-menu-item:hover{background:#f2f5f9}
+.proj-menu-danger{color:var(--danger)}
+.proj-menu-danger:hover{background:var(--danger-soft)}
+
+/* 模型设置对话框 */
+.settings-dialog{
+  width:min(520px,92vw);
+  padding:0;
+  color:var(--text);
+  background:#ffffff;
+  border:1px solid var(--border);
+  border-radius:14px;
+  box-shadow:0 24px 60px rgba(25,35,52,.22);
+}
+.settings-dialog::backdrop{background:rgba(23,31,45,.34)}
+.settings-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:18px 20px 10px;
+}
+.settings-head h2{margin:0;font-size:17px;font-weight:500}
+.settings-body{display:grid;gap:12px;padding:4px 20px 2px}
+.settings-field{display:grid;gap:5px}
+.settings-field>span{font-size:12px;color:var(--muted)}
+.settings-field>input,
+.settings-field>select{
+  width:100%;
+  padding:8px 10px;
+  font:inherit;
+  font-size:13px;
+  color:var(--text);
+  background:#fbfcfe;
+  border:1px solid var(--border);
+  border-radius:8px;
+}
+.settings-field>input:focus,
+.settings-field>select:focus{outline:none;border-color:var(--accent-line);background:#ffffff}
+.settings-hint{
+  margin:2px 0 0;
+  font-size:12px;
+  line-height:1.75;
+  color:var(--muted);
+}
+.settings-actions{
+  display:flex;
+  justify-content:flex-end;
+  gap:8px;
+  padding:16px 20px 18px;
+}
+
+/* 折叠态下齿轮仍在（它就在底部条里） */
+.sidebar.sidebar-collapsed .sidebar-gear-btn{margin-left:0}
+
+
+.settings-status{
+  margin:0;
+  min-height:18px;
+  font-size:12px;
+  color:var(--muted);
+}
+.settings-status.is-ok{color:var(--ok, #0f6e56)}
+.settings-status.is-error{color:var(--danger)}
+
+
+/* 【本地修复 · 2026-09-24】设置对话框改为两栏：左「选项栏」+ 右内容区 */
+.settings-dialog{width:min(680px,94vw)}
+.settings-layout{
+  display:grid;
+  grid-template-columns:136px minmax(0,1fr);
+  border-top:1px solid var(--border);
+}
+.settings-nav{
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  padding:12px 10px;
+  background:#f7f9fc;
+  border-right:1px solid var(--border);
+}
+.settings-nav-item{
+  display:block;
+  width:100%;
+  padding:8px 12px;
+  font:inherit;
+  font-size:13px;
+  text-align:left;
+  color:var(--text);
+  background:transparent;
+  border:1px solid transparent;
+  border-radius:8px;
+  cursor:pointer;
+  transition:background var(--transition),color var(--transition),border-color var(--transition);
+}
+.settings-nav-item:hover{background:#eef2f8}
+.settings-nav-item.is-active{
+  color:var(--accent);
+  background:#ffffff;
+  border-color:var(--accent-line);
+  font-weight:500;
+}
+.settings-panes{padding:16px 20px 18px;min-height:300px}
+.settings-pane{display:none}
+.settings-pane.is-active{display:block}
+.settings-dialog .settings-body{padding:0;display:grid;gap:12px}
+.settings-dialog .settings-actions{padding:16px 0 0}
+.settings-about{
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  gap:7px 14px;
+  margin:0 0 14px;
+  font-size:13px;
+}
+.settings-about dt{color:var(--muted);white-space:nowrap}
+.settings-about dd{margin:0;color:var(--text);word-break:break-all}
+.settings-about dd.mono{font-family:var(--mono);font-size:12px;color:var(--muted)}

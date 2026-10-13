@@ -26,7 +26,8 @@ const problems = [];
 const passed = [];
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
 
-const JS_FILES = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js"];
+// 【集成 · 2026-10-13】js/auth-pages.js 纳入检查（其 DOM id / CSS 类引用落在账号页，见 htmlIds / css 的扩展源）
+const JS_FILES = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/workspace.js", "js/auth-pages.js"];
 const UI_MODULES = [
   ["Sidebar", "js/sidebar.js"],
   ["ModuleTabs", "js/tabs.js"],
@@ -34,12 +35,15 @@ const UI_MODULES = [
   ["App", "js/app.js"]
 ];
 const STATIC_NODES = ["composer-input", "btn-send", "btn-add-module", "btn-sidebar-toggle", "sidebar-resizer"];
-const EXPECTED_SCRIPTS = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/workspace.js"];
+// 【集成 · 2026-10-13】账号系统上工作台：index.html 在数据层之前先加载账号配置/存储与守卫
+const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.js", "js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/workspace.js"];
+// 账号系统独立文件（登录/注册页自带脚本，不进工作台 index.html 的渲染链）
+const AUTH_FILES = ["js/auth-config.js", "js/auth-storage.js", "js/auth-pages.js", "js/guard.js", "login.html", "register.html", "css/auth.css"];
 // 契约 §2「两种运行模式」：前端只允许 js/chat.js 里对同源 /api/… 的 fetch；其余脚本零联网。
 const FETCH_ALLOWED = ["js/chat.js"];
 
 // ---------- 读取 ----------
-for (const f of JS_FILES.concat(["index.html", "css/style.css", "docs/contract.md"])) {
+for (const f of JS_FILES.concat(AUTH_FILES, ["index.html", "css/style.css", "docs/contract.md"])) {
   if (!fs.existsSync(path.join(ROOT, f))) {
     problems.push("缺少契约要求的文件: " + f);
   }
@@ -50,9 +54,16 @@ if (problems.length) {
 }
 
 const html = read("index.html");
-const css = read("css/style.css");
+// 【安全修复 · 2026-10-13】样式检查覆盖全部样式表：index.html 同时引入 style.css 与 workspace.css，
+// 只查 style.css 会把设置界面（settings-*）等 workspace.css 里的类误报为未定义。
+// 【集成 · 2026-10-13】再并入 css/auth.css（登录/注册页样式）。
+const css = read("css/style.css") + "\n" + read("css/workspace.css") + "\n" + read("css/auth.css");
 const storeSrc = read("js/store.js");
-const htmlIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+// 【集成 · 2026-10-13】DOM id 扫描源并入 login/register.html（js/auth-pages.js 的引用落点在账号页）
+let htmlIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+for (const ah of ["login.html", "register.html"]) {
+  for (const m of read(ah).matchAll(/\bid="([^"]+)"/g)) htmlIds.add(m[1]);
+}
 const cssClasses = new Set([...css.matchAll(/\.([A-Za-z][\w-]*)/g)].map((m) => m[1]));
 
 // ---------- 1. 脚本顺序 ----------
@@ -145,7 +156,10 @@ for (const f of JS_FILES.concat(["index.html"])) {
           noData.match(/fetch\(\s*["']https?:\/\//);
   } else {
     for (const m of noData.matchAll(/["'`]([^"'`\n]{0,200})["'`]/g)) {
-      if (m[1].indexOf("data:") === -1 && /https?:\/\//.test(m[1])) { ext = m[1]; break; }
+      if (m[1].indexOf("data:") === -1 && /https?:\/\//.test(m[1])) {
+        if (m[1].indexOf("例如") === 0) continue; // placeholder 示例文案（提示用户填什么格式），非真实请求
+        ext = m[1]; break;
+      }
     }
   }
   if (ext) {

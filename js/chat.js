@@ -39,6 +39,11 @@
   var sendEl = document.getElementById('btn-send');
   var hintEl = document.querySelector('#composer .composer-hint');
   var pendingModules = {};
+  // 【安全修复 · 2026-10-13】增量渲染追踪：消息是 append-only 的（Store 没有 edit/remove
+  // 单条消息的 API），同模块且状态未变时只需向 .msg-list 追加新消息，避免每次状态变更
+  // 全量重建整个消息列表（数百条消息时 O(n²) 卡顿）。任何不满足条件的场景落回全量。
+  var msgListState = { moduleId: null, count: -1, firstId: null, status: null, pending: false };
+  var MAX_INPUT_CHARS = (root.Store && root.Store.LIMITS && root.Store.LIMITS.MAX_MESSAGE_CHARS) || 20000; // 加载期与 Store 同步
 
   // -------------------------------------------------------------------- 工具
 
@@ -139,13 +144,28 @@
     });
   }
 
+  /** 读取本机保存的模型设置（左下角齿轮）；没有配置返回 null */
+  function readLlmSettings() {
+    try {
+      var raw = root.localStorage ? root.localStorage.getItem('fa_llm_settings_v1') : null;
+      var s = raw ? JSON.parse(raw) : null;
+      if (!s || typeof s !== 'object') return null;
+      var out = {};
+      if (typeof s.baseUrl === 'string' && s.baseUrl.trim()) out.baseUrl = s.baseUrl.trim();
+      if (typeof s.model === 'string' && s.model.trim()) out.model = s.model.trim();
+      if (typeof s.apiKey === 'string' && s.apiKey.trim()) out.apiKey = s.apiKey.trim();
+      if (s.protocol === 'responses' || s.protocol === 'chat-completions') out.protocol = s.protocol;
+      return Object.keys(out).length ? out : null;
+    } catch (error) { return null; }
+  }
+
   function requestReply(moduleId) {
     pendingModules[moduleId] = true;
     render();
     return fetch('/api/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: messagesFor(moduleId) })
+      body: JSON.stringify({ messages: messagesFor(moduleId), settings: readLlmSettings() })
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
         if (!response.ok) throw new Error(data.error || 'AI 服务请求失败');
@@ -287,6 +307,50 @@
       active = modules[modules.length - 1];
       fallback = true;
     }
+    var messages = (active && active.messages) ? active.messages : [];
+
+    // ---- 增量快速路径：纯消息追加（含 AI pending 指示翻转），其余一律全量 ----
+    var pendingNow = active ? !!pendingModules[active.id] : false;
+    var canFast = !!active && !fallback &&
+      msgListState.moduleId === active.id &&
+      msgListState.count >= 0 &&
+      messages.length >= msgListState.count &&
+      (msgListState.count === 0 || messages[0].id === msgListState.firstId) &&
+      (active.status || 'todo') === msgListState.status &&
+      pendingNow === msgListState.pending;
+    if (canFast) {
+      try {
+        var fastList = spaceEl.querySelector('.msg-list');
+        if (!fastList) throw new Error('msg-list missing');
+        if (msgListState.count === 0) { // 首条消息：移除模块空状态提示
+          var staleEmpty = fastList.querySelector('.empty-state');
+          if (staleEmpty) staleEmpty.remove();
+        }
+        for (var fi = msgListState.count; fi < messages.length; fi++) {
+          fastList.appendChild(buildMessage(messages[fi]));
+        }
+        // 模块名可能被重命名 / 条数变化：头部整体重建（节点少，代价可忽略）
+        var oldHeader = spaceEl.querySelector('.module-header');
+        if (oldHeader) {
+          var fastHeader = el('div', 'module-header');
+          fastHeader.appendChild(el('div', 'module-header-title', active.name));
+          fastHeader.appendChild(el('div', 'module-header-meta',
+            '依赖：' + depLabel(modules, active) + ' · 消息 ' + messages.length + ' 条'));
+          oldHeader.replaceWith(fastHeader);
+        }
+        // AI pending 指示翻转
+        var pendingEl = spaceEl.querySelector('.ai-pending');
+        if (pendingNow && !pendingEl) spaceEl.appendChild(el('div', 'ai-pending', 'AI 正在思考…'));
+        if (!pendingNow && pendingEl) pendingEl.remove();
+        msgListState.count = messages.length;
+        setComposerEnabled(!pendingNow, pendingNow ? 'AI 正在回复…' : PLACEHOLDER_DEFAULT);
+        spaceEl.scrollTop = spaceEl.scrollHeight;
+        return; // 快速路径完成
+      } catch (e) {
+        msgListState.moduleId = null; // 任何意外：作废增量状态，走全量兜底
+      }
+    }
+    msgListState.moduleId = null;
 
     spaceEl.innerHTML = '';
 
@@ -301,7 +365,6 @@
       spaceEl.appendChild(emptyState(EMPTY_NO_MODULE_TITLE, EMPTY_NO_MODULE_HINT));
       setComposerEnabled(false, PLACEHOLDER_NO_MODULE);
     } else {
-      var messages = active.messages || [];
       messageless = messages.length === 0;
 
       var header = el('div', 'module-header');
@@ -338,6 +401,14 @@
 
     // 滚动位置：有消息滚到底部；没有消息则停在顶部，保证「本模块要做什么」说明卡与审核状态条
     // 一进入模块就能看到（否则说明卡会被滚出视野）。
+    // 记录本轮全量渲染结果，供下一次增量快速路径比对
+    msgListState = {
+      moduleId: (active && !fallback) ? active.id : null,
+      count: (active && !fallback) ? messages.length : -1,
+      firstId: (active && messages.length) ? messages[0].id : null,
+      status: (active && !fallback) ? (active.status || 'todo') : null,
+      pending: (active && !fallback) ? !!pendingModules[active.id] : false
+    };
     if (messageless) spaceEl.scrollTop = 0;
     else spaceEl.scrollTop = spaceEl.scrollHeight;
   }
@@ -350,7 +421,12 @@
     if (!inputEl) return;
     var id = activeModuleId();
     if (!id) return;                                    // 无选中模块 / 模块不存在 -> 忽略
-    var msg = getStore().appendMessage(id, inputEl.value, 'user');
+    var raw = inputEl.value;
+    if (String(raw).trim().length > MAX_INPUT_CHARS) {  // 超长拦截（Store 同样会拒绝，这里提前给提示）
+      if (root.alert) root.alert('单条记录最长 ' + MAX_INPUT_CHARS + ' 字，请拆分后再发送。');
+      return;
+    }
+    var msg = getStore().appendMessage(id, raw, 'user');
     if (!msg) return;                                   // 空文本被 Store 拒绝 -> 保留原输入
     inputEl.value = '';
     autoGrow(inputEl);

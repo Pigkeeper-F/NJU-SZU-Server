@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>注册 - 研序 · 研究工作台</title>
+  <link rel="stylesheet" href="css/auth.css">
+</head>
+<body>
+  <main class="page">
+    <section class="card">
+      <h1 class="page-title">注册账号</h1>
+
+      <div id="reg-msg" class="msg" role="alert"></div>
+
+      <!-- 第一段：测试码关卡 -->
+      <div id="reg-form1">
+        <div class="form-row">
+          <label for="reg-code">测试码</label>
+          <input class="input" type="text" id="reg-code" placeholder="请输入测试码"
+                 autocomplete="off" maxlength="64">
+        </div>
+        <p class="hint">测试码由管理员提供，验证通过后才能设置账号密码。</p>
+        <div class="actions">
+          <button class="btn btn-primary btn-block" type="button" id="reg-step1">验证测试码</button>
+        </div>
+      </div>
+
+      <!-- 第二段：账号 + 密码（测试码验证通过后显示） -->
+      <div id="reg-form2" class="stage-hidden">
+        <div class="form-row">
+          <label for="reg-user">账号</label>
+          <input class="input" type="text" id="reg-user" placeholder="请输入账号"
+                 autocomplete="off" maxlength="32">
+        </div>
+        <div class="form-row">
+          <label for="reg-pass">密码</label>
+          <input class="input" type="password" id="reg-pass" placeholder="至少 6 位">
+        </div>
+        <div class="form-row">
+          <label for="reg-pass2">确认密码</label>
+          <input class="input" type="password" id="reg-pass2" placeholder="请再次输入密码">
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary btn-block" type="button" id="reg-step2">注册</button>
+        </div>
+      </div>
+
+      <p class="hint">已有账号？<a href="login.html">去登录</a></p>
+    </section>
+  </main>
+
+  <script src="js/auth-config.js"></script>
+  <script src="js/auth-storage.js"></script>
+  <script src="js/auth-pages.js"></script>
+</body>
+</html>

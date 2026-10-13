@@ -46,6 +46,10 @@
   var SIDEBAR_MIN = 180;
   var SIDEBAR_MAX = 520;
   var SIDEBAR_DEFAULT = 240;
+  // 【安全修复 · 2026-10-13】单条记录上限。原来不限长，超长输入（MB 级）会撑爆 localStorage
+  // 配额，persist() 静默失败降级为纯内存，刷新即丢且用户无感知。2 万字远超日常单条记录，
+  // 又远离配额红线；超长时 appendMessage 返回 null，由 UI 层给出明确提示。
+  var MAX_MESSAGE_CHARS = 20000;
   var TABS_DEFAULT = [{ id: 'flow', name: '流程' }];
   var ROLES = ['user', 'assistant', 'system'];
   // 必须与其他常量一起放在顶部：normalizeModule() 在**文件开头加载 localStorage** 时就会用到它
@@ -297,6 +301,12 @@
    * ------------------------------------------------------------------ */
   var PROJECTS_KEY = 'fa_projects_v1';
   var PROJECT_META_KEY = 'research_workspace_meta_v1';
+  // 【本地修复 · 2026-09-24】当前项目的稳定 id。
+  // 原来「当前项目」只在 fa_state_v1 里，没有 id，因此无法在项目列表里标识自己；
+  // 于是「列表 = 非当前项目」，打开一个项目就从列表里移除它 —— 空项目（没有模块）
+  // 被打开时旧项目又不会被归档，用户看到的现象是「点过往的项目，那个项目就消失了」。
+  // 现在给当前项目一个固定 id，列表改为保存**全部**项目（含当前），条目永不移除。
+  var CURRENT_ID_KEY = 'fa_current_project_id_v1';
   var PROJECT_NAME_DEFAULT = '我的研究项目';
 
   function readJSON(key, fallback) {
@@ -337,55 +347,174 @@
     return writeJSON(PROJECT_META_KEY, { name: name, note: note });
   }
 
-  /** 历史项目列表（轻量视图，不含模块内容） */
-  function listProjects() {
+  /** 当前项目的 id：没有就生成一个并持久化（首次使用即完成迁移）。
+   *  【安全修复 · 2026-10-13】首次生成时同步把当前项目写进列表——原来列表为空，
+   *  listProjects() 返回 0 条、历史区整体隐藏，用户看不到当前项目条目也无法右键管理。 */
+  function currentProjectId() {
+    var id = readJSON(CURRENT_ID_KEY, null);
+    if (typeof id === 'string' && id) return id;
+    id = uid('prj_');
+    writeJSON(CURRENT_ID_KEY, id);
     var list = readJSON(PROJECTS_KEY, []);
-    if (!Array.isArray(list)) return [];
+    if (Array.isArray(list)) {
+      var exists = false;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && list[i].id === id) { exists = true; break; }
+      }
+      if (!exists) {
+        list.push({
+          id: id,
+          name: currentProjectName(),
+          savedAt: nowISO(),
+          modules: deepClone(state.modules),
+          activeModuleId: state.activeModuleId
+        });
+        writeJSON(PROJECTS_KEY, list);
+      }
+    }
+    return id;
+  }
+
+  /** 项目列表（轻量视图，不含模块内容）。包含当前项目，用 isCurrent 标识 */
+  function listProjects() {
+    var id = currentProjectId();
+    var list = readJSON(PROJECTS_KEY, []);
+    if (!Array.isArray(list)) list = [];
     var out = [];
     for (var i = 0; i < list.length; i++) {
       var p = list[i];
       if (!p || typeof p.id !== 'string') continue;
+      var isCurrent = (p.id === id);
       out.push({
         id: p.id,
-        name: (typeof p.name === 'string' && p.name) ? p.name : PROJECT_NAME_DEFAULT,
+        // 当前项目的名字以 meta 键为准（用户改名后立刻生效）
+        name: isCurrent
+          ? currentProjectName()
+          : ((typeof p.name === 'string' && p.name) ? p.name : PROJECT_NAME_DEFAULT),
         savedAt: (typeof p.savedAt === 'string') ? p.savedAt : '',
-        moduleCount: Array.isArray(p.modules) ? p.modules.length : 0
+        // 当前项目的模块数取内存里的实时值，避免列表条目滞后
+        moduleCount: isCurrent
+          ? state.modules.length
+          : (Array.isArray(p.modules) ? p.modules.length : 0),
+        isCurrent: isCurrent
       });
     }
     return out;
   }
 
-  /** 把当前工作区归档进项目历史；没有模块时不归档 -> { id, name } | null */
-  function archiveCurrentProject() {
-    if (!state.modules.length) return null;
+  /**
+   * 把当前工作区（名称 + 模块 + 选中项）写回它在项目列表里的那一条。
+   * 条目已存在则**原地更新**，不存在则补一条 —— 不再 push 新条目、也不再移除任何条目。
+   * -> { id, name } | null（写失败返回 null）
+   */
+  function saveCurrentProject() {
+    var id = currentProjectId();
     var list = readJSON(PROJECTS_KEY, []);
     if (!Array.isArray(list)) list = [];
-    var entry = {
-      id: uid('prj_'),
-      name: currentProjectName(),
-      savedAt: nowISO(),
-      modules: deepClone(state.modules),
-      activeModuleId: state.activeModuleId
-    };
-    list.push(entry);
+    var name = currentProjectName();
+    var modules = deepClone(state.modules);
+    var target = null;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].id === id) { target = list[i]; break; }
+    }
+    if (target) {
+      target.name = name;
+      target.savedAt = nowISO();
+      target.modules = modules;
+      target.activeModuleId = state.activeModuleId;
+    } else {
+      list.push({
+        id: id,
+        name: name,
+        savedAt: nowISO(),
+        modules: modules,
+        activeModuleId: state.activeModuleId
+      });
+    }
     if (!writeJSON(PROJECTS_KEY, list)) return null;
-    return { id: entry.id, name: entry.name };
+    return { id: id, name: name };
   }
 
-  /** 新建项目：先归档当前工作区，再清空模块，并写入新项目名（界面刷新后即为新项目） */
+  /** 新建项目：当前项目存回列表 → 追加一个空项目 → 切到新项目。列表条目只增不减 */
   function createProject(name) {
     var nm = (typeof name === 'string') ? name.trim() : '';
     if (!nm) return { ok: false, reason: '项目名不能为空' };
-    var archived = archiveCurrentProject();
+    var saved = saveCurrentProject();
+    var id = uid('prj_');
+    var list = readJSON(PROJECTS_KEY, []);
+    if (!Array.isArray(list)) list = [];
+    list.push({ id: id, name: nm, savedAt: nowISO(), modules: [], activeModuleId: null });
+    if (!writeJSON(PROJECTS_KEY, list)) {
+      return { ok: false, reason: '本地存储写入失败，未创建项目' };
+    }
+    writeJSON(CURRENT_ID_KEY, id);
     state.modules = [];
     state.activeModuleId = null;
     setProjectName(nm);
-    emit('project:create', { name: nm, archived: archived });
-    return { ok: true, name: nm, archived: archived };
+    emit('project:create', { name: nm, id: id, archived: saved });
+    return { ok: true, name: nm, id: id, archived: saved };
   }
 
-  /** 打开历史项目：当前工作区先归档，再把所选项目的模块恢复为当前工作区 */
+  /**
+   * 删除项目。
+   * 【本地修复 · 2026-09-24】删的是当前项目时：自动切到列表里剩下的第一个；
+   * 一个都不剩就新建一个空的默认项目（保证工作区始终有效，不出现"没有项目"的僵尸态）。
+   * -> { ok, deleted, switchedTo?, created? } | { ok:false, reason }
+   */
+  function deleteProject(id) {
+    if (typeof id !== 'string' || !id) return { ok: false, reason: '项目不存在' };
+    var list = readJSON(PROJECTS_KEY, []);
+    if (!Array.isArray(list)) return { ok: false, reason: '项目不存在' };
+    var idx = -1;
+    for (var i = 0; i < list.length; i++) if (list[i] && list[i].id === id) { idx = i; break; }
+    if (idx < 0) return { ok: false, reason: '项目不存在' };
+    var removed = list[idx];
+    list.splice(idx, 1);
+    if (!writeJSON(PROJECTS_KEY, list)) return { ok: false, reason: '本地存储写入失败' };
+
+    if (id !== currentProjectId()) {
+      emit('project:delete', { id: id, name: removed.name });
+      return { ok: true, deleted: removed.name };
+    }
+
+    if (list.length) {
+      var next = list[0];
+      var seen = {};
+      var modules = [];
+      var incoming = Array.isArray(next.modules) ? next.modules : [];
+      for (var k = 0; k < incoming.length; k++) {
+        var mod = normalizeModule(incoming[k], seen);
+        if (mod) { modules.push(mod); seen[mod.id] = true; }
+      }
+      writeJSON(CURRENT_ID_KEY, next.id);
+      state.modules = modules;
+      state.activeModuleId = modules.length ? pickModuleId({ modules: modules }, next.activeModuleId) : null;
+      setProjectName((typeof next.name === 'string' && next.name) ? next.name : PROJECT_NAME_DEFAULT);
+      emit('project:delete', { id: id, name: removed.name, switchedTo: next.id });
+      return { ok: true, deleted: removed.name, switchedTo: next.name };
+    }
+
+    var fresh = uid('prj_');
+    writeJSON(PROJECTS_KEY, [{ id: fresh, name: PROJECT_NAME_DEFAULT, savedAt: nowISO(), modules: [], activeModuleId: null }]);
+    writeJSON(CURRENT_ID_KEY, fresh);
+    state.modules = [];
+    state.activeModuleId = null;
+    setProjectName(PROJECT_NAME_DEFAULT);
+    emit('project:delete', { id: id, name: removed.name, switchedTo: fresh });
+    return { ok: true, deleted: removed.name, created: PROJECT_NAME_DEFAULT };
+  }
+
+  /**
+   * 打开项目：当前项目存回列表 → 载入所选项目。
+   * 【本地修复 · 2026-09-24】列表条目**一律保留**（原来会把被打开的项目从列表里删掉，
+   * 而旧项目在没有模块时又不会被写回，于是「点过往的项目，那个项目就消失」）。
+   * 已经打开的项目再次点击是安全的空操作。
+   */
   function openProject(id) {
+    if (typeof id !== 'string' || !id) return { ok: false, reason: '项目不存在' };
+    if (id === currentProjectId()) {
+      return { ok: true, name: currentProjectName(), moduleCount: state.modules.length, noop: true };
+    }
     var list = readJSON(PROJECTS_KEY, []);
     if (!Array.isArray(list)) return { ok: false, reason: '项目不存在' };
     var target = null;
@@ -394,15 +523,7 @@
     }
     if (!target) return { ok: false, reason: '项目不存在' };
 
-    archiveCurrentProject();                   // 当前内容先存起来，避免丢失
-    var fresh = readJSON(PROJECTS_KEY, []);
-    if (!Array.isArray(fresh)) fresh = [];
-    var remaining = [];
-    for (var j = 0; j < fresh.length; j++) {
-      if (fresh[j] && fresh[j].id === id) continue;   // 被打开的项目移出历史
-      remaining.push(fresh[j]);
-    }
-    writeJSON(PROJECTS_KEY, remaining);
+    saveCurrentProject();          // 当前项目原地存回（含 0 模块的空项目），不新增条目
 
     var seen = {};
     var modules = [];
@@ -411,6 +532,7 @@
       var mod = normalizeModule(incoming[k], seen);
       if (mod) { modules.push(mod); seen[mod.id] = true; }
     }
+    writeJSON(CURRENT_ID_KEY, id);
     state.modules = modules;
     state.activeModuleId = modules.length ? pickModuleId({ modules: modules }, target.activeModuleId) : null;
     setProjectName((typeof target.name === 'string' && target.name) ? target.name : PROJECT_NAME_DEFAULT);
@@ -502,6 +624,23 @@
     return MODULE_STATUSES.indexOf(value) >= 0 ? value : 'todo';
   }
 
+  /**
+   * 开始业务流程：**只建第 1 步**，后续步骤在每一步通过审核后由 approveModule 自动补齐。
+   * （原 initFlowModules 一次性建 9 个的行为保留，供需要一次铺满的场景使用。）
+   * -> { ok, id, name, created }
+   */
+  function startFlow() {
+    if (!FLOW_STEPS.length) return { ok: false, reason: '流程未定义' };
+    var existed = false;
+    for (var i = 0; i < state.modules.length; i++) {
+      if (state.modules[i].step === FLOW_STEPS[0].key) { existed = true; break; }
+    }
+    var first = ensureFlowModule(FLOW_STEPS[0]);
+    if (!findModule(state.activeModuleId)) state.activeModuleId = first.id;
+    emit('flow:start', { id: first.id, name: first.name, created: !existed });
+    return { ok: true, id: first.id, name: first.name, created: !existed };
+  }
+
   /** 按流程一次性创建缺失的 9 个模块（已存在同 key 的跳过），并选中第一个新建模块 */
   function initFlowModules() {
     var created = [];
@@ -557,13 +696,59 @@
     if (!mod) return { ok: false, reason: '模块不存在' };
     var idx = indexOfModule(id);
     var next = (idx >= 0 && idx + 1 < state.modules.length) ? state.modules[idx + 1] : null;
+    var created = null;
     mod.status = 'approved';
     mod.approvedAt = nowISO();
+    if (!next) {
+      // 【本地修复 · 2026-09-24】按步解锁：链上还没有下一个模块时，
+      // 若还有后续步骤就现场建一个（名字与说明取自 FLOW_STEPS），再跳过去。
+      created = buildNextFlowModule(mod);
+      next = created;
+    }
     if (next) state.activeModuleId = next.id;
     emit('module:status', {
-      id: id, status: 'approved', nextId: next ? next.id : null
+      id: id, status: 'approved', nextId: next ? next.id : null,
+      createdId: created ? created.id : null
     });
-    return { ok: true, nextId: next ? next.id : null, nextName: next ? next.name : null };
+    return {
+      ok: true,
+      nextId: next ? next.id : null,
+      nextName: next ? next.name : null,
+      created: created ? deepClone(created) : null
+    };
+  }
+
+  /** 该模块的 step 在 FLOW_STEPS 里的下标；不是流程模块返回 -1 */
+  function flowIndexOf(stepKey) {
+    for (var i = 0; i < FLOW_STEPS.length; i++) if (FLOW_STEPS[i].key === stepKey) return i;
+    return -1;
+  }
+
+  /** 把某个步骤建成模块并追加到链尾；已存在同 step 的则直接返回它 */
+  function ensureFlowModule(step) {
+    for (var i = 0; i < state.modules.length; i++) {
+      if (state.modules[i].step === step.key) return state.modules[i];
+    }
+    var last = state.modules.length ? state.modules[state.modules.length - 1] : null;
+    var mod = {
+      id: uid('mod_'),
+      name: step.name,
+      step: step.key,
+      spec: deepClone(step.spec),
+      status: 'todo',
+      dependsOn: last ? last.id : null,
+      createdAt: nowISO(),
+      messages: []
+    };
+    state.modules.push(mod);
+    return mod;
+  }
+
+  /** 审核通过后该出现的那一步：非流程模块或已是最后一步则返回 null */
+  function buildNextFlowModule(approved) {
+    var i = flowIndexOf(approved.step);
+    if (i < 0 || i + 1 >= FLOW_STEPS.length) return null;
+    return ensureFlowModule(FLOW_STEPS[i + 1]);
   }
 
   /** 人工审核打回（review -> doing），可附一句原因（写入系统消息） */
@@ -661,6 +846,7 @@
     var body = (text === null || typeof text === 'undefined') ? '' : String(text);
     body = body.trim();
     if (!body) return null;
+    if (body.length > MAX_MESSAGE_CHARS) return null; // 超长拒绝，UI 层负责提示
     var r = (typeof role === 'string' && ROLES.indexOf(role) >= 0) ? role : 'user';
     var msg = { id: uid('msg_'), role: r, text: body, at: nowISO() };
     mod.messages.push(msg);
@@ -729,6 +915,7 @@
     appendMessage: appendMessage,
     // —— 流程模块与人工审核（规格 + 状态机）
     initFlowModules: initFlowModules,
+    startFlow: startFlow,
     setModuleStatus: setModuleStatus,
     submitModule: submitModule,
     approveModule: approveModule,
@@ -762,6 +949,7 @@
       SIDEBAR_MIN: SIDEBAR_MIN,
       SIDEBAR_MAX: SIDEBAR_MAX,
       SIDEBAR_DEFAULT: SIDEBAR_DEFAULT,
+      MAX_MESSAGE_CHARS: MAX_MESSAGE_CHARS,
       ROLES: ROLES.slice(),
       MODULE_STATUSES: MODULE_STATUSES.slice()
     },
@@ -769,6 +957,11 @@
     FLOW_STEPS: deepClone(FLOW_STEPS),
     // 存储键常量（项目管理用）
     PROJECTS_KEY: PROJECTS_KEY,
-    PROJECT_META_KEY: PROJECT_META_KEY
+    PROJECT_META_KEY: PROJECT_META_KEY,
+    // 【本地修复 · 2026-09-24】当前项目 id / 把当前项目原地存回列表
+    CURRENT_ID_KEY: CURRENT_ID_KEY,
+    currentProjectId: currentProjectId,
+    saveCurrentProject: saveCurrentProject,
+    deleteProject: deleteProject
   };
 })(typeof window !== 'undefined' ? window : this);
