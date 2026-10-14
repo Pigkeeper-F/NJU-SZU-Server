@@ -30,7 +30,9 @@ class CodexBridge {
   async connect() {
     if (this.ready) return this.ready;
     this.ready = (async () => {
-      this.proc = spawn(process.env.CODEX_BIN || 'codex', ['app-server', '--listen', 'stdio://'], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const desktopCli = process.platform === 'darwin' ? '/Applications/ChatGPT.app/Contents/Resources/codex' : '';
+      const codexBin = process.env.CODEX_BIN || (desktopCli && fs.existsSync(desktopCli) ? desktopCli : 'codex');
+      this.proc = spawn(codexBin, ['app-server', '--listen', 'stdio://'], { stdio: ['pipe', 'pipe', 'pipe'] });
       this.proc.stderr.on('data', () => {}); // Never forward runtime diagnostics or auth data to Web.
       this.proc.stdin.on('error', () => {});
       const fail = () => {
