@@ -540,3 +540,73 @@
 
 /* 【W4 修复 · 2026-10-14】执行失败的醒目警示条 */
 .doc-exec-warning{border:1px solid #e5b4b4;background:#fdf3f3;color:#9a3535;border-radius:8px;padding:9px 11px;font-size:12.5px;line-height:1.7;margin:8px 0}
+
+/* ==================================================================
+   【X2 · 2026-10-14】迭代反馈 / AI 自动定位 / URL 下载 / 产物预览
+   ================================================================== */
+/* 迭代闭环：生成按钮下方的小字提示（已附带 stderr 反馈） */
+.doc-feedback-hint{margin-top:6px;font-size:11.5px;line-height:1.6;color:#2f7a46}
+
+/* AI 自动定位：按钮行 + 推断理由展示 */
+.doc-diag-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+.doc-diag-result{
+  margin:0 0 8px;
+  padding:8px 10px;
+  font-size:12px;
+  line-height:1.7;
+  color:#3c4a61;
+  background:#eef3fa;
+  border:1px solid #c6d5ea;
+  border-radius:8px;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
+
+/* URL 数据源：输入行 + 待下载清单（复用 doc-file-list / doc-file-item） */
+.doc-url-label{margin-top:10px;font-size:11.5px;color:var(--muted)}
+.doc-url-row{display:flex;gap:8px;margin-top:6px}
+.doc-url-input{
+  flex:1 1 auto;
+  min-width:0;
+  padding:5px 8px;
+  font:inherit;
+  font-size:12.5px;
+  color:var(--text);
+  background:#fff;
+  border:1px solid var(--border);
+  border-radius:7px;
+  outline:none;
+}
+.doc-url-input:focus{border-color:var(--accent-line)}
+.doc-url-input::placeholder{color:#a6afbc}
+.doc-url-add{
+  flex:0 0 auto;
+  padding:4px 12px;
+  font:inherit;
+  font-size:12.5px;
+  color:var(--text);
+  background:#fff;
+  border:1px solid var(--border);
+  border-radius:999px;
+}
+.doc-url-add:hover{border-color:var(--accent-line)}
+
+/* URL 下载结果清单 */
+.doc-downloaded-list{margin:6px 0 0;padding-left:20px}
+.doc-downloaded-item{font-size:12.5px;line-height:1.8;word-break:break-all}
+.doc-downloaded-ok{color:#2f7a46}
+.doc-downloaded-fail{color:var(--danger)}
+
+/* 产物预览：条目内切换按钮 + 展开后的限高滚动代码块 */
+.doc-preview-toggle{
+  margin-left:8px;
+  padding:1px 8px;
+  font:inherit;
+  font-size:11.5px;
+  color:var(--accent);
+  background:#fff;
+  border:1px solid var(--accent-line);
+  border-radius:999px;
+}
+.doc-preview-toggle:hover{background:var(--accent-soft)}
+.doc-artifact-preview{margin-top:6px;max-height:200px;overflow:auto}

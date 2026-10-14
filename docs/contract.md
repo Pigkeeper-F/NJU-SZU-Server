@@ -900,3 +900,94 @@ Store.LIMITS.RUN_STATUSES         // ['ran','confirmed']
 
 全通过仍输出 `ALL_EXEC_TESTS_PASS`（实测 31 通过 / 0 失败，1 项 SKIP 视环境 Key 而定）。
 
+
+## 20. 服务端扩展 v3（2026-10-14 · X1）
+
+第三批服务端扩展：compose(code) 迭代反馈闭环、compose(diagnose) AI 自动定位、exec URL 下载
+（含 SSRF 防护）、产物文本预览。实现见 `server.js`；纯函数 `isPrivateHost` / `buildComposePrompt` /
+`buildDiagnosePrompt` / `parseDiagnoseJson` 经 `module.exports` 导出供测试 require
+（`server.js` 已加 `require.main === module` 守卫：直接运行才监听端口，被 require 无副作用）。
+零依赖原则不变。
+
+### 20.1 compose(code) 迭代反馈（feedback）
+
+**入参**新增可选 `feedback = { stderr?: string, note?: string }`（仅 `mode:'code'` 生效）：
+
+- `stderr` 截**尾部 2000 字**、`note` 截前 1000 字，拼接进 code 提示词尾部：
+  `【上一轮执行失败信息（stderr）】…`、`【上一轮人工反馈】…`，并追加固定一句
+  「本次生成的代码必须避免上述问题。」；
+- `feedback` 缺省时提示词与旧行为**逐字一致**；
+- 另从 `messages` 原始数组扫描**最近 3 条** `role:'system'` 且以「文档打回：」或
+  「结果复核打回：」开头的消息（每条截 500 字），以 `【上轮反馈线索】` 段注入提示词——
+  **doc 与 code 模式均生效**（文档打回后重生成文档时也要看到打回理由）；
+- system 消息仅作为线索扫描，仍**不进**【对话记录】（`normalizeMessages` 防提权规则不变）。
+
+**出参**不变（`{ text }` / 400 / 503 / 502 / 500，语义同 §17.1）。
+
+### 20.2 compose(diagnose) AI 自动定位
+
+**入参** `{ mode:'diagnose', module?:{name,spec}, doc?:string|{content}, code?:string,
+exec?:{ok, stderr?, artifacts?}, issue?:string }`（除 `mode` 外全可选；`exec.stderr` 截尾部 2000 字）。
+提示词要求模型**只输出一个 JSON**：`{"level":"data|align|code","reason":"推断理由(≤150字)"}`。
+三级含义：`data`=数据本身问题 / `align`=对齐或标准文档问题 / `code`=生成的代码问题。
+
+**出参**：
+
+| 响应 | 条件 |
+|---|---|
+| `{level, reason}` | 服务端解析成功（容忍 ` ```json ` 围栏与前后杂质文本，取 `{…}` 片段 parse；`level` 必须 ∈ data/align/code 且 `reason` 为非空字符串） |
+| `{text}` | 解析失败 → 原样输出，前端降级为普通文本展示 |
+
+错误语义（400 / 503 / 502 / 500）与 doc/code 模式完全一致；上游超时同为 300s。
+
+### 20.3 exec URL 下载（urls）
+
+`/api/code/exec` 入参新增可选 `urls = [{ name?, url }]`（与 `files` 并存；非数组 → 400，
+单项结构非法丢弃）。每条 URL **独立处理，单条失败不影响其余**：
+
+1. 协议仅 `http` / `https`，否则该条失败（error 注明协议）；
+2. **SSRF 防护**：hostname 命中私网 → 该条失败（error 含「SSRF」）。判定抽为导出纯函数
+   `isPrivateHost(hostname)`，规则：`localhost`（含 `*.localhost`）、`*.local`、`0/8`、`10/8`、
+   `127/8`、`169.254/16`（链路本地）、`172.16/12`、`192.168/16`、`::1`、`::`、`::ffff:` 映射 IPv4；
+   非法点分（缺段 / 段>255）宁拒勿漏；
+   **测试例外**：环境变量 `YANXU_ALLOW_PRIVATE_HOST=1` 时放行私网（仅供测试下载本机静态文件，
+   生产环境勿设）；
+3. 单文件 ≤512KB（边收边限量，超限该条失败）；30s 超时；非 2xx 该条失败；
+4. `name`：优先用传入 `name`（与 files 同 sanitize 规则），否则取 URL path 的 basename
+   （同 sanitize；URL 解析后立即确定，失败条目也尽量携带）；
+5. 下载文件写入本次执行目录（与 files 同目录），脚本可直接读取。
+
+**出参**新增 `downloaded: [{ name, ok, size?, error? }]`（仅 urls 非空时出现；
+ok=true 带 `size`，ok=false 带 `error`）。
+
+> **残余风险（明示）**：`isPrivateHost` 只做 hostname 字面判断，不做 DNS 解析校验——
+> 公网域名解析到私网 IP（DNS rebinding）不在防护范围内；重定向（redirect: follow）后的
+> 目标地址也不再复检。强对抗场景应在外层加出口代理 / 防火墙策略。
+
+### 20.4 产物预览（preview）
+
+exec 返回前，对 `artifacts` 中扩展名 ∈ {`.csv`, `.txt`, `.json`, `.md`} 且 ≤200KB 的文件，
+读**前 50 行**、截 **10KB**（超出补「…」）填入 `preview` 字段；其余文件（二进制 / 超大 /
+读取失败）不带 `preview`。纯展示用途，不参与执行。
+
+### 20.5 自动化验收
+
+`node tools/test-server-exec.js` 新增 [16]–[22]：
+
+- **[16]** compose(code) feedback 注入：mock 上游（127.0.0.1:8198）抓取真实提示词，断言含
+  stderr 片段、「文档打回：」/「结果复核打回：」线索与固定收尾句；`buildComposePrompt`
+  纯函数直验；system 消息不进【对话记录】；
+- **[17]** feedback 缺省 / 无打回线索 → 提示词不含任何新增段（行为不变）；doc 模式有打回线索时也注入；
+- **[18]** `isPrivateHost` 纯函数：localhost/127.x/10.x/192.168.x/172.16-31.x/::1/0.0.0.0/
+  *.local/非法 IP → true；github.com/8.8.8.8/172.32.0.1 → false；
+- **[19]** diagnose：mock 返回合法 JSON → `{level, reason}`；非 JSON / 非法 level → `{text}`；
+  围栏容忍纯函数直验；
+- **[20]** urls：localhost / 10.x 默认拒绝（error 含 SSRF）、`ftp:` 该条失败、单条失败不影响
+  执行、urls 非数组 → 400；
+- **[21]** `YANXU_ALLOW_PRIVATE_HOST=1`（第二实例端口 8201）：下载 server 自身
+  `/package.json`（size 与源文件一致、真实写入执行目录、脚本可读）+ 404 条目失败其余继续 +
+  600KB 条目超 512KB 失败（mock `/big.txt`）+ 产物带 preview；
+- **[22]** artifacts preview：out.csv 多行内容正确、60 行截到 50 行、`.bin` 无 preview。
+
+全通过仍输出 `ALL_EXEC_TESTS_PASS`（实测 76 通过 / 0 失败，1 项 SKIP 视环境 Key 而定）。
+
