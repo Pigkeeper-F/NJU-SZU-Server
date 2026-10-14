@@ -7,13 +7,24 @@
   try { saved = JSON.parse(localStorage.getItem(key)) || {}; } catch (_) {}
   let account = null;
   let checking = false;
+  let loginBusy = false;
+  let loginTimer = null;
+  let loginNotice = '';
+  let preferences = {};
+  try { preferences = JSON.parse(localStorage.getItem('fa_codex_connection_v1')) || {}; } catch (_) {}
+  const backendPicker = document.getElementById('ai-backend');
+  const modelPicker = document.getElementById('codex-model');
+  const loginButton = document.getElementById('codex-login');
+  const refreshButton = document.getElementById('codex-refresh');
+  const connectionStatus = document.getElementById('codex-status');
+  const loginLink = document.getElementById('codex-login-link');
   const panel = document.createElement('section');
   panel.className = 'codex-panel';
   panel.hidden = true;
   document.getElementById('module-space').before(panel);
   function persist() { try { localStorage.setItem(key, JSON.stringify(saved)); } catch (_) {} }
   function task(id) {
-    if (!tasks[id]) tasks[id] = { files: [], busy: false, backend: saved[id]?.backend || 'codex', model: saved[id]?.model || '', execute: false, executeOnce: false, error: '', job: null, filesOpen: false, logOpen: false };
+    if (!tasks[id]) tasks[id] = { files: [], busy: false, backend: saved[id]?.backend || preferences.backend || 'codex', model: saved[id]?.model ?? preferences.model ?? '', execute: false, executeOnce: false, error: '', job: null, filesOpen: false, logOpen: false };
     return tasks[id];
   }
   function node(tag, text, cls) { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (cls) el.className = cls; return el; }
@@ -52,8 +63,54 @@
     checking = true; render();
     try { account = await request('/api/codex/status'); }
     catch (error) { account = { loggedIn: false, error: error.message }; }
-    checking = false; render();
+    checking = false;
+    if (account?.loggedIn) { loginNotice = ''; loginLink.hidden = true; if (loginTimer) clearInterval(loginTimer); loginTimer = null; }
+    render();
   }
+  function renderConnection() {
+    const state = Store.getState();
+    const mod = state.modules.find(item => item.id === state.activeModuleId);
+    const t = mod ? task(mod.id) : preferences;
+    backendPicker.value = t.backend || 'codex'; backendPicker.disabled = !!t.busy;
+    modelPicker.replaceChildren();
+    const initial = node('option', '账号默认 · ' + (account?.model || '登录后显示')); initial.value = ''; modelPicker.append(initial);
+    (account?.models || []).forEach(item => { const option = node('option', item.displayName || item.model); option.value = item.model; modelPicker.append(option); });
+    if (t.model && !(account?.models || []).some(item => item.model === t.model)) { const option = node('option', t.model + '（当前不可用）'); option.value = t.model; modelPicker.append(option); }
+    modelPicker.value = t.model || ''; modelPicker.disabled = !!t.busy || checking || !account?.loggedIn;
+    loginButton.textContent = account?.loggedIn ? '本机 Codex 已连接' : '登录本机 Codex'; loginButton.disabled = loginBusy || !!t.busy;
+    refreshButton.disabled = checking;
+    const connectionError = account?.error?.includes('workspace routing discovery timed out') ? 'Codex 工作区连接超时，请检查本机网络后重试。' : account?.error;
+    connectionStatus.textContent = checking ? '检查连接中…' : loginNotice || connectionError || (account?.loggedIn ? '本机 Codex 已登录' : '未连接，请先安装 Codex CLI 并点击登录');
+    document.querySelectorAll('[data-api-settings]').forEach(item => { item.hidden = backendPicker.value !== 'api'; });
+  }
+  function saveConnection() {
+    const id = Store.getState().activeModuleId;
+    preferences = { backend: backendPicker.value, model: modelPicker.value };
+    if (id) { Object.assign(task(id), preferences); saved[id] = { ...saved[id], ...preferences }; persist(); }
+    try { localStorage.setItem('fa_codex_connection_v1', JSON.stringify(preferences)); } catch (_) {}
+    render(); ModuleSpace.render();
+  }
+  backendPicker.onchange = saveConnection; modelPicker.onchange = saveConnection; refreshButton.onclick = check;
+  loginButton.onclick = async () => {
+    if (loginBusy) return;
+    loginBusy = true; renderConnection();
+    const popup = root.open('about:blank', '_blank');
+    if (popup) popup.opener = null;
+    try {
+      const data = await request('/api/codex/login', { method: 'POST' });
+      backendPicker.value = 'codex'; saveConnection();
+      if (data.loggedIn) { if (popup) popup.close(); await check(); return; }
+      const url = new URL(data.authUrl);
+      if (url.protocol !== 'https:' || !['auth.openai.com', 'chatgpt.com'].includes(url.hostname)) throw new Error('登录地址无法识别');
+      loginLink.href = url.href; loginLink.hidden = false;
+      if (popup) popup.location.href = url.href;
+      loginNotice = '请在官方页面完成登录；窗口被拦截时点击登录链接。';
+      if (loginTimer) clearInterval(loginTimer);
+      let attempts = 0;
+      loginTimer = setInterval(() => { if (++attempts > 120) { clearInterval(loginTimer); loginTimer = null; loginNotice = '等待已结束，请检查连接或重新登录。'; renderConnection(); return; } if (!checking) void check(); }, 3000);
+    } catch (error) { if (popup) popup.close(); loginNotice = '无法登录：' + error.message; }
+    finally { loginBusy = false; renderConnection(); }
+  };
   async function upload(id, files, group = 'input') {
     const t = task(id); if (t.busy) return;
     t.busy = true; t.error = ''; render();
@@ -180,6 +237,7 @@
     input.focus();
   }
   function render() {
+    renderConnection();
     const state = Store.getState();
     const mod = state.modules.find(m => m.id === state.activeModuleId);
     panel.hidden = !mod || !document.getElementById('records-view').hidden;
@@ -187,12 +245,6 @@
     const t = task(mod.id);
     panel.replaceChildren();
     const row = node('div', undefined, 'codex-toolbar');
-    const label = node('label', '模块助手 ');
-    const backend = node('select'); backend.setAttribute('aria-label', '模块助手');
-    [['codex', '本机 Codex（无需 API Key）'], ['api', 'API 对话']].forEach(([value, title]) => { const option = node('option', title); option.value = value; backend.append(option); });
-    backend.value = t.backend; backend.disabled = t.busy;
-    backend.onchange = () => { t.backend = backend.value; saved[mod.id] = { ...saved[mod.id], backend: t.backend }; persist(); render(); };
-    label.append(backend); row.append(label);
     if (t.backend === 'codex') {
       if (mod.type === 'calculation') {
         const branchLabel = node('label', '计算路径 ');
@@ -211,24 +263,11 @@
         mode.onchange = () => { t.execute = mode.value === 'execute'; };
         row.append(mode);
       }
-      const status = node('span', checking ? '检查登录中…' : account?.loggedIn ? 'Codex 已登录' : 'Codex 未连接', 'codex-status'); row.append(status);
-      const reconnect = node('button', '检查连接', 'quiet-button'); reconnect.type = 'button'; reconnect.disabled = checking; reconnect.onclick = check; row.append(reconnect);
-      const modelLabel = node('label', '模型 ');
-      const modelPicker = node('select'); modelPicker.setAttribute('aria-label', 'Codex 模型');
-      const defaultOption = node('option', '默认 · ' + (account?.model || '检查连接后显示')); defaultOption.value = ''; modelPicker.append(defaultOption);
-      (account?.models || []).forEach(item => { const option = node('option', item.displayName || item.model); option.value = item.model; modelPicker.append(option); });
-      if (t.model && !(account?.models || []).some(item => item.model === t.model)) {
-        const missing = node('option', t.model + '（当前不可用）'); missing.value = t.model; modelPicker.append(missing);
-      }
-      modelPicker.value = t.model;
-      modelPicker.disabled = t.busy || checking || !account?.loggedIn;
-      modelPicker.onchange = () => { t.model = modelPicker.value; saved[mod.id] = { ...saved[mod.id], model: t.model }; persist(); };
-      modelLabel.append(modelPicker); row.append(modelLabel);
     }
     panel.append(row);
     if (t.backend === 'api') { panel.append(node('p', 'API 模式提供文字指导；数据清洗的上传与执行需切换本机 Codex。')); return; }
-    if (account?.error) panel.append(node('p', account.error + '；可在终端运行 codex login 后检查连接。', 'codex-error'));
-    else if (account && !account.loggedIn) panel.append(node('p', '请在终端运行 codex login，用 ChatGPT 账号登录后检查连接。', 'codex-error'));
+    if (account?.error) panel.append(node('p', account.error + '；请打开左下角设置检查连接。', 'codex-error'));
+    else if (account && !account.loggedIn) panel.append(node('p', '请打开左下角设置，登录本机 Codex。', 'codex-error'));
     if (!['clean-data', 'calculation', 'result-audit'].includes(mod.type)) {
       panel.append(node('p', '本模块可用 Codex 对话梳理方案与规则；当前不执行下载、计算或文件处理。'));
       if (t.busy) panel.append(node('p', 'Codex 正在回复…', 'codex-status'));
@@ -291,7 +330,7 @@
     if (t.job?.events.length) { const log = node('details'); log.open = t.logOpen; log.ontoggle = () => { t.logOpen = log.open; }; log.append(node('summary', '执行进度')); log.append(node('pre', t.job.events.join('\n'))); panel.append(log); }
     if (t.error) panel.append(node('p', t.error, 'codex-error'));
   }
-  root.CodexUI = { render, reply, prepareConfirmedExecution, cancelPreparedExecution, useCodex: mod => !!mod && task(mod.id).backend === 'codex', busy: id => task(id).busy };
+  root.CodexUI = { render, reply, prepareConfirmedExecution, cancelPreparedExecution, useCodex: mod => !!mod && task(mod.id).backend === 'codex', getModel: mod => mod ? task(mod.id).model || null : null, busy: id => task(id).busy };
   function closeFiles() {
     const files = panel.querySelector('.codex-attachments[open]');
     if (!files) return;

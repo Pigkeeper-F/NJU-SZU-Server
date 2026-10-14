@@ -684,6 +684,12 @@
         }
       }
     }
+    if (root.CodexUI && root.CodexUI.useCodex(mod)) {
+      body.backend = 'codex';
+      body.codexModel = root.CodexUI.getModel(mod);
+      body.settings = null;
+      body.credential = null;
+    }
     return body;
   }
 

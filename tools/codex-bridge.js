@@ -77,6 +77,36 @@ class CodexBridge {
       }))
     };
   }
+  async login() {
+    await this.connect();
+    const info = await this.rpc('account/read', { refreshToken: false });
+    if (info.account) return { loggedIn: true };
+    if (this.loginAttempt) return this.loginAttempt;
+    if (!this.loginStarting) this.loginStarting = (async () => {
+      const result = await this.rpc('account/login/start', { type: 'chatgpt' });
+      const url = new URL(result.authUrl);
+      if (url.protocol !== 'https:' || !['auth.openai.com', 'chatgpt.com'].includes(url.hostname)) throw new Error('Codex 返回了无法识别的登录地址');
+      this.loginAttempt = { loggedIn: false, authUrl: result.authUrl };
+      return this.loginAttempt;
+    })().finally(() => { this.loginStarting = null; });
+    return this.loginStarting;
+  }
+  async compose(prompt, requestedModel) {
+    const session = this.createSession();
+    const start = await this.run(session.id, [{ role: 'user', content: prompt }], '根据用户给出的提示生成文本。只输出所要求的文档、代码或诊断；不调用工具、不执行代码、不读取其他文件。', false, requestedModel, 'discussion', null);
+    const deadline = Date.now() + 300000;
+    while (Date.now() < deadline) {
+      const job = this.snapshot(start.id);
+      if (job.status !== 'running') {
+        if (job.status !== 'completed') throw new Error(job.error || 'Codex 生成未完成');
+        if (!job.text.trim()) throw new Error('Codex 没有返回文本');
+        return job.text;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    await this.cancel(start.id).catch(() => {});
+    throw new Error('Codex 生成超时，请稍后重试');
+  }
   session(id) {
     if (!ID.test(id || '')) throw new Error('无效任务标识');
     const dir = path.join(this.root, id);
@@ -131,6 +161,7 @@ class CodexBridge {
     clearTimeout(job.timer);
   }
   notification({ method, params: p = {} }) {
+    if (method === 'account/login/completed' || method === 'account/updated') this.loginAttempt = null;
     const job = [...this.jobs.values()].find(j => j.threadId === p.threadId && j.status === 'running');
     if (!job) return;
     if (method === 'turn/started') job.turnId = p.turn.id;

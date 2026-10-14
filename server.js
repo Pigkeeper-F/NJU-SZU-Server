@@ -170,6 +170,7 @@ async function handleCodex(req, res, url) {
   try {
     const route = url.pathname;
     if (req.method === 'GET' && route === '/api/codex/status') return sendJson(res, 200, await codex.status());
+    if (req.method === 'POST' && route === '/api/codex/login') return sendJson(res, 200, await codex.login());
     if (req.method === 'POST' && route === '/api/codex/session') return sendJson(res, 201, codex.createSession());
     if (req.method === 'GET' && route === '/api/codex/files') return sendJson(res, 200, { files: codex.files(url.searchParams.get('session')) });
     if (req.method === 'POST' && route === '/api/codex/upload') {
@@ -690,7 +691,7 @@ async function handleCompose(req, res) {
     return;
   }
   const cfg = Object.assign(resolveModelConfig(payload.settings), normalizeCredential(payload.credential) || {});
-  if (!cfg.apiKey) {
+  if (!cfg.apiKey && payload.backend !== 'codex') {
     sendJson(res, 503, {
       error: '还没有配置模型。点左下角齿轮填写接口地址与 API Key，或把 .env.example 复制为 .env 配置服务端。'
     });
@@ -700,7 +701,9 @@ async function handleCompose(req, res) {
     const prompt = payload.mode === 'diagnose'
       ? buildDiagnosePrompt(payload)
       : buildComposePrompt(payload);
-    const text = await callModel(cfg, [{ role: 'user', content: prompt }], 300000);
+    const text = payload.backend === 'codex'
+      ? await codex.compose(prompt, typeof payload.codexModel === 'string' ? payload.codexModel : null)
+      : await callModel(cfg, [{ role: 'user', content: prompt }], 300000);
     if (payload.mode === 'diagnose') {
       // 【X1 · 2026-10-14】diagnose：解析成功返回 {level, reason}，失败返回 {text}（§20.2）。
       sendJson(res, 200, parseDiagnoseJson(text));

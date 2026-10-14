@@ -828,3 +828,10 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 }
 .doc-preview-toggle:hover{background:var(--accent-soft)}
 .doc-artifact-preview{margin-top:6px;max-height:200px;overflow:auto}
+.codex-connection { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:0 0 16px; border:1px solid #e4e9f0; border-radius:8px; padding:14px; background:#f8fafc; font-size:13px; }
+.codex-connection[hidden] { display:none!important; }
+.codex-connection p { width:100%; margin:0; }
+.codex-connection label { display:flex; align-items:center; gap:7px; }
+.codex-connection select { max-width:260px; padding:7px; border:1px solid #d5dce6; border-radius:6px; background:white; }
+.codex-connection button { padding:8px 12px; }
+.codex-connection a { color:#263e60; text-decoration:underline; }
