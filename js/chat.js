@@ -42,8 +42,9 @@
   // 【安全修复 · 2026-10-13】增量渲染追踪：消息是 append-only 的（Store 没有 edit/remove
   // 单条消息的 API），同模块且状态未变时只需向 .msg-list 追加新消息，避免每次状态变更
   // 全量重建整个消息列表（数百条消息时 O(n²) 卡顿）。任何不满足条件的场景落回全量。
-  var msgListState = { moduleId: null, count: -1, firstId: null, status: null, pending: false };
+  var msgListState = { moduleId: null, count: -1, firstId: null, status: null, pending: false, docSig: null };
   var MAX_INPUT_CHARS = (root.Store && root.Store.LIMITS && root.Store.LIMITS.MAX_MESSAGE_CHARS) || 20000; // 加载期与 Store 同步
+  var MAX_DOC_CHARS = (root.Store && root.Store.LIMITS && root.Store.LIMITS.MAX_DOC_CHARS) || 20000;      // 环节文档上限，与 Store 同步
 
   // -------------------------------------------------------------------- 工具
 
@@ -301,13 +302,55 @@
     } catch (error) { return null; }
   }
 
+  /** 模块 spec 归一化（与 composeBody 保持一致的四个字段） */
+  function specOf(mod) {
+    var spec = (mod && mod.spec) ? mod.spec : {};
+    return {
+      goal: spec.goal || '',
+      todo: Array.isArray(spec.todo) ? spec.todo : [],
+      output: spec.output || '',
+      acceptance: spec.acceptance || ''
+    };
+  }
+
+  /**
+   * 对话环节上下文（第二批）：本模块 {name, spec} + 沿 dependsOn 链向上回溯、收集所有上游模块中
+   * doc.status==='approved' 的 {name, doc: content 截 400 字}。无上游或没有 approved 文档则 upstream=[]。
+   * dependsOn 链理论无环，仍加 visited 保护避免脏数据成环时死循环。
+   */
+  function moduleContextFor(moduleId) {
+    var Store = getStore();
+    var state = Store ? Store.getState() : null;
+    var modules = (state && state.modules) ? state.modules : [];
+    var mod = findModule(modules, moduleId);
+    if (!mod) return { name: '', spec: specOf(null), upstream: [] };
+
+    var upstream = [];
+    var visited = {};
+    var cursor = mod.dependsOn;
+    while (cursor && !visited[cursor]) {
+      visited[cursor] = true;
+      var up = findModule(modules, cursor);
+      if (!up) break;
+      if (up.doc && up.doc.status === 'approved' && typeof up.doc.content === 'string') {
+        upstream.push({ name: up.name, doc: up.doc.content.slice(0, 400) });
+      }
+      cursor = up.dependsOn;
+    }
+    return { name: mod.name, spec: specOf(mod), upstream: upstream };
+  }
+
   function requestReply(moduleId) {
     pendingModules[moduleId] = true;
     render();
     return fetch('/api/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: messagesFor(moduleId), settings: readLlmSettings() })
+      body: JSON.stringify({
+        messages: messagesFor(moduleId),
+        settings: readLlmSettings(),
+        module: moduleContextFor(moduleId)
+      })
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
         if (!response.ok) throw new Error(data.error || 'AI 服务请求失败');
@@ -428,6 +471,693 @@
     return btn;
   }
 
+  // ------------------------------------ 环节文档卡（标准与验收的契约）· 生成/编辑/审核/执行
+  // v7 新增（契约 §16）：每个模块可挂一份「标准文档」，作为环节间契约，支持人工审核。
+  //   卡片全部由 createElement / textContent / appendChild 构造（零 innerHTML）；
+  //   瞬态 UI（生成中 / 代码确认 / 执行结果 / 打回反馈）用模块级 map 保存，跨 render() 复用；
+  //   编辑态用模块级变量 docEditingId 标记——编辑中该卡片不重建，避免 textarea 内容与焦点丢失。
+
+  var DOC_TITLE = '环节文档 · 标准与验收的契约';
+  var DOC_EMPTY_HINT = '尚未创建环节文档。可让 AI 依据本模块的目标 / 验收要点起草，或自己编写。';
+  var DOC_STATUS_META = {
+    none: { text: '无文档', cls: 'doc-badge-none' },
+    draft: { text: '草稿', cls: 'doc-badge-draft' },
+    approved: { text: '已审核', cls: 'doc-badge-approved' }
+  };
+
+  var docEditingId = null;   // 正在编辑的模块 id（编辑中该卡片不重建；保存/取消后清空）
+  var docDraftText = '';     // 编辑态草稿文本（切换模块时保留，避免误丢）
+  var docUi = {};            // moduleId -> 瞬态 UI 状态（生成/代码/执行/打回/提示）
+  // 【数据清洗闭环 · 2026-10-14】模块级瞬态，跨 render() 保留（编辑/上传/归因展开态不被重建吞掉）：
+  var docTemplate = {};      // moduleId -> 'standard'|'align'|'mining'（生成模板选择）
+  var docFiles = {};         // moduleId -> [{name,size,content}]（已读入的 UTF-8 文本数据文件）
+
+  var TEMPLATE_OPTIONS = [
+    { value: 'standard', label: '标准文档' },
+    { value: 'align', label: '对齐文档' },
+    { value: 'mining', label: '参数挖掘' }
+  ];
+  var TEMPLATE_DEFAULT = 'standard';
+  var MAX_FILES_TOTAL = 1024 * 1024;   // 数据文件总量上限 1MB（前端先拦，不发送）
+  var FILE_ACCEPT = '.csv,.txt,.json,.tsv,.md';
+  var RUN_CAUSES = [
+    { key: 'data', label: '数据问题' },
+    { key: 'code', label: '代码问题' },
+    { key: 'doc', label: '标准问题' }
+  ];
+
+  function uiOf(id) {
+    if (!docUi[id]) {
+      docUi[id] = {
+        gen: false, genErr: '',      // AI 生成标准文档
+        code: null, codeLoading: false, codeErr: '',   // 生成代码（待确认执行的代码）
+        exec: null, execLoading: false, execErr: '',   // 本机执行结果
+        reject: false, rejectNote: '',                 // 文档打回内联反馈
+        filesBusy: false, filesErr: '',                // 数据文件（读取中 / 卡片内错误与超限提示）
+        runReject: false, runRejectCause: '', runRejectNote: '', runRejectErr: '', // 结果确认门：三级归因
+        notice: ''                                     // 成功类提示
+      };
+    }
+    return docUi[id];
+  }
+
+  function templateOf(id) {
+    return docTemplate[id] || TEMPLATE_DEFAULT;
+  }
+
+  function filesOf(id) {
+    return docFiles[id] || (docFiles[id] = []);
+  }
+
+  function totalFileSize(id) {
+    var list = docFiles[id] || [];
+    var sum = 0;
+    for (var i = 0; i < list.length; i++) sum += (typeof list[i].size === 'number' ? list[i].size : 0);
+    return sum;
+  }
+
+  /** 字节数 -> 人类可读（B / KB / MB） */
+  function formatSize(bytes) {
+    if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '0 B';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  }
+
+  function docStatusOf(mod) {
+    var d = mod && mod.doc;
+    if (!d) return 'none';
+    return d.status === 'approved' ? 'approved' : 'draft';
+  }
+
+  /** 文档相关渲染签名：内容/状态/编辑态/瞬态 UI 任一变化都使增量快速路径失效（强制全量重建） */
+  function docSigOf(mod) {
+    if (!mod) return 'none';
+    var d = mod.doc;
+    var s = d ? (d.status + '|' + (d.updatedAt || '') + '|' + (d.approvedAt || '') + '|' + d.content.length) : 'none';
+    s += '#' + ((docEditingId === mod.id) ? 'E' : '-');
+    // 执行记录（结果确认门）：状态/时间/产物任一变化都要全量重建（否则快速路径吞掉徽标翻转）
+    var r = mod.run;
+    s += '#' + (r ? (r.status + '|' + (r.at || '') + '|' + ((r.artifacts && r.artifacts.length) || 0)) : 'none');
+    // 模板选择 + 数据文件清单（模块级瞬态，纳入签名以保证变更后重建）
+    s += '#' + templateOf(mod.id) + '#' + ((docFiles[mod.id] && docFiles[mod.id].length) || 0);
+    var ui = docUi[mod.id];
+    if (ui) {
+      s += '|' + (ui.gen ? 1 : 0) + (ui.codeLoading ? 1 : 0) + (ui.execLoading ? 1 : 0) +
+        ((ui.code === null || typeof ui.code === 'undefined') ? 0 : 1) + (ui.exec ? 1 : 0) + (ui.reject ? 1 : 0) +
+        '|' + (ui.notice || '') + '|' + (ui.genErr || '') + '|' + (ui.codeErr || '') + '|' + (ui.execErr || '') +
+        '|' + (ui.rejectNote || '') +
+        '|' + (ui.filesBusy ? 1 : 0) + '|' + (ui.filesErr || '') +
+        '|' + (ui.runReject ? 1 : 0) + '|' + (ui.runRejectCause || '') + '|' + (ui.runRejectNote || '') +
+        '|' + (ui.runRejectErr || '');
+    }
+    return s;
+  }
+
+  /** ISO -> YYYY-MM-DD HH:mm（本地时区）；非法/缺失返回空串 */
+  function formatDateTime(iso) {
+    var d = new Date(iso);
+    if (!d || isNaN(d.getTime())) return '';
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function errorText(prefix, err) {
+    return prefix + '：' + ((err && err.message) ? err.message : '未知错误');
+  }
+
+  /** 文档卡内按钮：沿用 status-btn 样式；disabled 时不可点（生成中 / 执行中） */
+  function docButton(text, kind, disabled, onClick) {
+    var btn = el('button', 'status-btn' + (kind === 'primary' ? ' status-btn-primary' : ''), text);
+    btn.type = 'button';
+    if (disabled) { btn.disabled = true; btn.setAttribute('aria-disabled', 'true'); }
+    btn.addEventListener('click', function () {
+      if (btn.disabled) return;
+      onClick();
+    });
+    return btn;
+  }
+
+  /** compose 请求体：mode + template? + 模块 {name, spec} + 消息 + settings（契约 §17 / 第二批冻结接口） */
+  function composeBody(mode, mod, template) {
+    var spec = (mod && mod.spec) ? mod.spec : {};
+    var body = {
+      mode: mode,
+      module: {
+        name: (mod && mod.name) ? mod.name : '',
+        spec: {
+          goal: spec.goal || '',
+          todo: Array.isArray(spec.todo) ? spec.todo : [],
+          output: spec.output || '',
+          acceptance: spec.acceptance || ''
+        }
+      },
+      messages: messagesFor(mod ? mod.id : null),
+      settings: readLlmSettings()
+    };
+    // 模板仅在生成标准文档时叠加（生成代码不传，服务端忽略未知字段亦安全）
+    if (template) body.template = template;
+    return body;
+  }
+
+  /** POST /api/ai/compose，返回 text；网络/404/非 ok/空响应都转成语义化 Error（调用方降级显示） */
+  function postCompose(mode, mod, template) {
+    return fetch('/api/ai/compose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(composeBody(mode, mod, template))
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error((data && data.error) || ('服务返回 HTTP ' + response.status));
+        if (!data || typeof data.text !== 'string' || !data.text.trim()) throw new Error('服务返回内容为空');
+        return data.text;
+      });
+    });
+  }
+
+  function enterDocEdit(mod) {
+    docEditingId = mod.id;
+    docDraftText = (mod.doc && typeof mod.doc.content === 'string') ? mod.doc.content : '';
+    uiOf(mod.id).notice = '';
+    render();
+    var ta = spaceEl ? spaceEl.querySelector('.doc-card .doc-editor') : null;
+    if (ta) { try { ta.focus(); } catch (e) { /* 聚焦失败不影响编辑 */ } }
+  }
+
+  /** AI 生成标准文档：按所选模板调 compose；按钮 disable + 文案「生成中…」；失败卡片内 textContent 显示错误 */
+  function generateDoc(mod) {
+    var ui = uiOf(mod.id);
+    if (ui.gen) return;
+    ui.gen = true; ui.genErr = ''; ui.notice = '';
+    render();
+    postCompose('doc', mod, templateOf(mod.id)).then(function (text) {
+      ui.gen = false;
+      var saved = getStore().saveDoc(mod.id, text);
+      if (!saved) throw new Error('生成内容为空或超过 ' + MAX_DOC_CHARS + ' 字，未写入');
+      ui.code = null; ui.exec = null; ui.codeErr = ''; ui.execErr = '';
+      ui.notice = '已生成标准文档（草稿），可直接审核或继续编辑。';
+    }).catch(function (err) {
+      ui.gen = false;
+      ui.genErr = errorText('AI 生成失败', err);
+    }).then(function () { render(); });
+  }
+
+  /** 生成代码：先 compose(code) 拿到代码，进入确认层（不自动执行） */
+  function composeCode(mod) {
+    var ui = uiOf(mod.id);
+    if (ui.codeLoading) return;
+    ui.codeLoading = true; ui.codeErr = ''; ui.code = null; ui.exec = null; ui.execErr = ''; ui.notice = '';
+    ui.genErr = '';
+    render();
+    postCompose('code', mod).then(function (text) {
+      ui.codeLoading = false;
+      ui.code = text;
+    }).catch(function (err) {
+      ui.codeLoading = false;
+      ui.codeErr = errorText('生成代码失败', err);
+    }).then(function () { render(); });
+  }
+
+  /**
+   * 确认执行：POST /api/code/exec（confirm:true, lang:'node'），把已选数据文件（files:[{name,content}]）
+   * 一并发送；执行返回结果后写回卡片，并调 Store.markRun 记录执行（进入结果确认门）。
+   * 任何网络/非 ok 失败都降级为卡片内 textContent 错误，不抛异常。
+   */
+  function execCode(mod) {
+    var ui = uiOf(mod.id);
+    if (ui.execLoading || ui.filesBusy) return;
+    if (typeof ui.code !== 'string' || !ui.code) return;
+    if (totalFileSize(mod.id) > MAX_FILES_TOTAL) {   // 双保险：超限绝不发送
+      ui.filesErr = '数据文件总量超过 1MB，已阻止执行，请移除部分文件。';
+      render();
+      return;
+    }
+    ui.execLoading = true; ui.execErr = ''; ui.exec = null;
+    ui.filesErr = ''; ui.genErr = ''; ui.codeErr = '';
+    render();
+    var list = docFiles[mod.id] || [];
+    var files = [];
+    for (var i = 0; i < list.length; i++) {
+      files.push({ name: list[i].name, content: list[i].content });
+    }
+    fetch('/api/code/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lang: 'node', code: ui.code, confirm: true, files: files })
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error((data && data.error) || ('服务返回 HTTP ' + response.status));
+        if (!data || typeof data !== 'object') throw new Error('服务返回无效响应');
+        return data;
+      });
+    }).then(function (data) {
+      ui.execLoading = false;
+      ui.exec = data;
+      // 执行真正发生（HTTP 200 拿到结果，无论脚本 ok 与否）→ 记录执行，进入结果确认门
+      var Store = getStore();
+      if (Store && Store.markRun) {
+        Store.markRun(mod.id, { dir: data.dir, artifacts: data.artifacts });
+      }
+      ui.runReject = false; ui.runRejectCause = ''; ui.runRejectNote = ''; ui.runRejectErr = '';
+      ui.notice = '';
+    }).catch(function (err) {
+      ui.execLoading = false;
+      ui.execErr = errorText('执行失败', err);
+    }).then(function () { render(); });
+  }
+
+  /* ---- 数据文件（数据清洗闭环）：UTF-8 文本读入，模块级变量持有，跨 render 保留 ---- */
+
+  /**
+   * 读取用户选择的数据文件为 UTF-8 文本，追加到 docFiles[mod.id]。
+   * 选择前先按声明 size 估算总量，>1MB 直接拦（卡片内提示，不读取、不发送）；读取失败降级提示。
+   */
+  function addFiles(mod, fileList) {
+    var ui = uiOf(mod.id);
+    var list = filesOf(mod.id);
+    var picked = [];
+    for (var i = 0; i < fileList.length; i++) picked.push(fileList[i]);
+    if (!picked.length) return;
+
+    // 预估总量（选择时 file.size 已知）→ 超 1MB 前端先拦
+    var projected = totalFileSize(mod.id);
+    for (var k = 0; k < picked.length; k++) projected += (typeof picked[k].size === 'number' ? picked[k].size : 0);
+    if (projected > MAX_FILES_TOTAL) {
+      ui.filesBusy = false;
+      ui.filesErr = '数据文件总量 ' + formatSize(projected) + ' 超过上限 1MB，已阻止（未读取、未发送）。请减少文件或拆分后再试。';
+      render();
+      return;
+    }
+
+    ui.filesBusy = true; ui.filesErr = '';
+    render();
+
+    var remaining = picked.length;
+    function done() {
+      remaining -= 1;
+      if (remaining > 0) return;
+      ui.filesBusy = false;
+      if (totalFileSize(mod.id) > MAX_FILES_TOTAL) {
+        ui.filesErr = '数据文件总量超过 1MB，已阻止执行，请移除部分文件。';
+      }
+      render();
+    }
+    for (var j = 0; j < picked.length; j++) {
+      (function (file) {
+        var reader = new FileReader();
+        reader.onload = function () {
+          list.push({ name: file.name, size: (typeof file.size === 'number' ? file.size : 0), content: String(reader.result || '') });
+          done();
+        };
+        reader.onerror = function () {
+          ui.filesErr = '读取文件失败：' + file.name;
+          done();
+        };
+        try {
+          reader.readAsText(file, 'utf-8');
+        } catch (e) {
+          ui.filesErr = '读取文件失败：' + file.name;
+          done();
+        }
+      })(picked[j]);
+    }
+  }
+
+  /** 生成区模板下拉：标准文档 / 对齐文档 / 参数挖掘，默认标准；切换写模块级变量（不触发重建） */
+  function buildTemplateRow(mod) {
+    var row = el('div', 'doc-template-row');
+    row.appendChild(el('label', 'doc-template-label', '生成模板'));
+    var sel = el('select', 'doc-template-select');
+    var cur = templateOf(mod.id);
+    for (var i = 0; i < TEMPLATE_OPTIONS.length; i++) {
+      var opt = el('option', 'doc-template-option', TEMPLATE_OPTIONS[i].label);
+      opt.value = TEMPLATE_OPTIONS[i].value;
+      if (TEMPLATE_OPTIONS[i].value === cur) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', function () {
+      docTemplate[mod.id] = sel.value;
+    });
+    row.appendChild(sel);
+    return row;
+  }
+
+  /** 执行确认层的「数据文件」区：多选读入 + 已选清单（name+size，可移除）+ 超限提示 */
+  function buildDocFilesArea(body, mod, ui) {
+    var area = el('div', 'doc-files-area');
+    area.appendChild(el('div', 'doc-exec-label', '数据文件（可选，UTF-8 文本，单文件与总量均受限）'));
+
+    var input = el('input', 'doc-file-input');
+    input.type = 'file';
+    input.multiple = true;
+    input.accept = FILE_ACCEPT;
+    input.addEventListener('change', function () {
+      addFiles(mod, input.files);
+    });
+    area.appendChild(input);
+
+    var list = docFiles[mod.id] || [];
+    if (list.length) {
+      var ul = el('ul', 'doc-file-list');
+      for (var i = 0; i < list.length; i++) {
+        (function (file) {
+          var li = el('li', 'doc-file-item');
+          li.appendChild(el('span', 'doc-file-name', file.name));
+          li.appendChild(el('span', 'doc-file-size', formatSize(file.size)));
+          var rm = el('button', 'doc-file-remove', '移除');
+          rm.type = 'button';
+          rm.addEventListener('click', function () {
+            var pos = list.indexOf(file);
+            if (pos >= 0) list.splice(pos, 1);
+            render();
+          });
+          li.appendChild(rm);
+          ul.appendChild(li);
+        })(list[i]);
+      }
+      area.appendChild(ul);
+      area.appendChild(el('div', 'doc-file-total',
+        '共 ' + list.length + ' 个文件 · ' + formatSize(totalFileSize(mod.id)) + ' / 上限 1MB'));
+    } else {
+      area.appendChild(el('div', 'doc-file-hint', '尚未选择数据文件'));
+    }
+
+    if (ui.filesBusy) area.appendChild(el('div', 'doc-file-hint', '正在读取文件…'));
+    if (ui.filesErr) area.appendChild(el('div', 'doc-error', ui.filesErr));
+    body.appendChild(area);
+  }
+
+  /* ---- 结果确认门（契约 §18）：执行记录 run 的确认 / 三级归因打回 ---- */
+
+  /** 三级归因 + 反馈框（点「有问题」后展开） */
+  function buildRunRejectBox(container, mod, ui) {
+    var box = el('div', 'doc-reject-box');
+    box.appendChild(el('div', 'doc-exec-label', '三级归因：问题出在哪一环？'));
+    var group = el('div', 'doc-cause-group');
+    for (var i = 0; i < RUN_CAUSES.length; i++) {
+      (function (c) {
+        var active = (ui.runRejectCause === c.key);
+        var btn = el('button', 'doc-cause-btn' + (active ? ' doc-cause-btn-active' : ''), c.label);
+        btn.type = 'button';
+        btn.setAttribute('data-cause', c.key);
+        btn.addEventListener('click', function () {
+          ui.runRejectCause = c.key; ui.runRejectErr = '';
+          render();
+        });
+        group.appendChild(btn);
+      })(RUN_CAUSES[i]);
+    }
+    box.appendChild(group);
+
+    var ta = el('textarea', 'doc-reject-input');
+    ta.maxLength = 2000;
+    ta.placeholder = '补充说明（可留空）：例如单位换算导致偏差';
+    ta.value = ui.runRejectNote || '';
+    ta.addEventListener('input', function () { ui.runRejectNote = ta.value; });
+    box.appendChild(ta);
+
+    if (ui.runRejectErr) box.appendChild(el('div', 'doc-error', ui.runRejectErr));
+
+    var acts = el('div', 'doc-actions');
+    acts.appendChild(docButton('确认打回', 'primary', false, function () {
+      if (!ui.runRejectCause) { ui.runRejectErr = '请先选择归因类型（数据 / 代码 / 标准）'; render(); return; }
+      var Store = getStore();
+      var ok = Store && Store.rejectRun ? Store.rejectRun(mod.id, ui.runRejectCause, ta.value) : false;
+      if (!ok) { ui.runRejectErr = '打回失败：当前没有可打回的执行记录'; render(); return; }
+      ui.runReject = false; ui.runRejectCause = ''; ui.runRejectNote = ''; ui.runRejectErr = '';
+      render();
+    }));
+    acts.appendChild(docButton('取消', '', false, function () {
+      ui.runReject = false; ui.runRejectCause = ''; ui.runRejectNote = ''; ui.runRejectErr = '';
+      render();
+    }));
+    box.appendChild(acts);
+    container.appendChild(box);
+  }
+
+  /** 结果确认门：run 存在时渲染护栏（ran→[确认结果]/[有问题]；confirmed→已确认徽标） */
+  function buildRunGate(body, mod, ui) {
+    var run = mod && mod.run;
+    if (!run) return;
+    var gate = el('div', 'doc-run-gate');
+    gate.setAttribute('data-run-status', run.status);
+
+    if (run.status === 'confirmed') {
+      gate.appendChild(el('div', 'doc-run-confirmed', '本环节产出已确认'));
+      var meta = [];
+      var at = formatDateTime(run.at);
+      if (at) meta.push('运行于 ' + at);
+      if (run.dir) meta.push('目录 ' + run.dir);
+      if (meta.length) gate.appendChild(el('div', 'doc-run-meta', meta.join(' · ')));
+      body.appendChild(gate);
+      return;
+    }
+
+    var execFailed = !!(ui.exec && ui.exec.ok === false);
+    gate.appendChild(el('div', 'doc-run-label', execFailed
+      ? '结果确认：最近一次执行未成功——建议走「有问题」归因修复；确有可用产出时也可强制确认。'
+      : '结果确认：核对产物后确认通过，或标记有问题并归因。'));
+    var acts = el('div', 'doc-actions');
+    function confirmAct() {
+      var Store = getStore();
+      if (Store && Store.confirmRun) Store.confirmRun(mod.id);
+      render();
+    }
+    function rejectAct() {
+      ui.runReject = true; ui.runRejectErr = '';
+      render();
+    }
+    if (execFailed) {
+      // 【W4 修复】失败态：主按钮为「有问题」，确认降级为次级按钮
+      acts.appendChild(docButton('有问题（推荐）', 'primary', false, rejectAct));
+      acts.appendChild(docButton('仍要确认结果', '', false, confirmAct));
+    } else {
+      acts.appendChild(docButton('确认结果', 'primary', false, confirmAct));
+      acts.appendChild(docButton('有问题', '', false, rejectAct));
+    }
+    gate.appendChild(acts);
+    if (ui.runReject) buildRunRejectBox(gate, mod, ui);
+    body.appendChild(gate);
+  }
+
+  /** 标题行：标题 + 状态徽标（data-doc-status + 语义类名）+ 执行状态徽标（data-run-status） */
+  function buildDocHead(mod, st) {
+    var head = el('div', 'doc-card-head');
+    head.appendChild(el('div', 'doc-card-title', DOC_TITLE));
+    var meta = DOC_STATUS_META[st] || DOC_STATUS_META.none;
+    var badge = el('span', 'doc-badge ' + meta.cls, meta.text);
+    badge.setAttribute('data-doc-status', st);
+    head.appendChild(badge);
+    // 执行状态徽标：run 存在时显示（ran→待确认 / confirmed→已确认）
+    if (mod.run) {
+      var runCls = (mod.run.status === 'confirmed') ? 'doc-badge-run-confirmed' : 'doc-badge-run-ran';
+      var runText = (mod.run.status === 'confirmed') ? '已确认' : '待确认';
+      var runBadge = el('span', 'doc-run-badge ' + runCls, runText);
+      runBadge.setAttribute('data-run-status', mod.run.status);
+      head.appendChild(runBadge);
+    }
+    return head;
+  }
+
+  function buildDocEmpty(body, mod, ui) {
+    body.appendChild(el('div', 'doc-empty-hint', DOC_EMPTY_HINT));
+    body.appendChild(buildTemplateRow(mod));
+    var actions = el('div', 'doc-actions');
+    actions.appendChild(docButton(ui.gen ? '生成中…（长任务可能需数分钟）' : 'AI 生成标准文档', 'primary', ui.gen, function () {
+      generateDoc(mod);
+    }));
+    actions.appendChild(docButton('手动编写', '', false, function () {
+      enterDocEdit(mod);
+    }));
+    body.appendChild(actions);
+    if (ui.genErr) body.appendChild(el('div', 'doc-error', ui.genErr));
+  }
+
+  function buildDocRejectBox(body, mod, ui) {
+    var box = el('div', 'doc-reject-box');
+    box.appendChild(el('div', 'doc-exec-label', '打回反馈（会写入系统消息，可留空）'));
+    var input = el('textarea', 'doc-reject-input');
+    input.maxLength = 2000;
+    input.placeholder = '例如：验收要点缺少异常场景，请补充后再提交';
+    input.value = ui.rejectNote || '';
+    input.addEventListener('input', function () { ui.rejectNote = input.value; });
+    box.appendChild(input);
+    var acts = el('div', 'doc-actions');
+    acts.appendChild(docButton('提交打回', 'primary', false, function () {
+      getStore().rejectDoc(mod.id, input.value);
+      ui.reject = false; ui.rejectNote = '';
+      render();
+    }));
+    acts.appendChild(docButton('取消', '', false, function () {
+      ui.reject = false; ui.rejectNote = '';
+      render();
+    }));
+    box.appendChild(acts);
+    body.appendChild(box);
+  }
+
+  function buildDocCodeLayer(body, mod, ui) {
+    var area = el('div', 'doc-exec-area');
+    area.appendChild(el('div', 'doc-exec-label', 'AI 生成的执行代码（确认后在本机受限执行）'));
+    var pre = el('pre', 'doc-code');
+    pre.textContent = ui.code;                 // 代码用 textContent 写入，绝不拼 HTML
+    area.appendChild(pre);
+    buildDocFilesArea(area, mod, ui);          // 数据文件区（可选）：确认执行时一并 POST
+    var acts = el('div', 'doc-actions');
+    acts.appendChild(docButton(ui.execLoading ? '执行中…' : '确认执行', 'primary', ui.execLoading || ui.filesBusy, function () {
+      execCode(mod);
+    }));
+    acts.appendChild(docButton('放弃', '', false, function () {
+      ui.code = null; ui.exec = null; ui.execErr = ''; ui.codeErr = '';
+      render();
+    }));
+    area.appendChild(acts);
+    body.appendChild(area);
+  }
+
+  function buildDocExecResult(body, mod, ui) {
+    var r = ui.exec;
+    var area = el('div', 'doc-exec-result');
+    var head = '执行结果：' + (r.ok ? '成功' : '失败');
+    if (typeof r.ms === 'number') head += ' · 耗时 ' + r.ms + ' ms';
+    area.appendChild(el('div', 'doc-exec-label', head));
+    // 【W4 修复 · 2026-10-14】执行失败醒目提示：引导先归因修复，避免对失败结果直接确认
+    if (!r.ok) {
+      area.appendChild(el('div', 'doc-exec-warning', '脚本未成功执行（详见下方 stderr）。建议先点「有问题」归因并修复后重新执行，不要直接确认结果。'));
+    }
+
+    if (typeof r.stdout === 'string' && r.stdout) {
+      area.appendChild(el('div', 'doc-exec-label', '标准输出 stdout'));
+      var out = el('pre', 'doc-code'); out.textContent = r.stdout; area.appendChild(out);
+    }
+    if (typeof r.stderr === 'string' && r.stderr) {
+      area.appendChild(el('div', 'doc-exec-label', '标准错误 stderr'));
+      var errOut = el('pre', 'doc-code'); errOut.textContent = r.stderr; area.appendChild(errOut);
+    }
+
+    var arts = Array.isArray(r.artifacts) ? r.artifacts : [];
+    if (arts.length) {
+      area.appendChild(el('div', 'doc-exec-label', '产物文件'));
+      var ul = el('ul', 'doc-artifact-list');
+      for (var i = 0; i < arts.length; i++) {
+        var a = arts[i] || {};
+        var name = (a.name === null || typeof a.name === 'undefined') ? '(未命名)' : String(a.name);
+        var size = (typeof a.size === 'number') ? a.size : null;
+        ul.appendChild(el('li', 'doc-artifact-item', size === null ? name : name + ' （' + size + ' 字节）'));
+      }
+      area.appendChild(ul);
+    } else {
+      area.appendChild(el('div', 'doc-exec-line', '无产物文件'));
+    }
+    if (typeof r.dir === 'string' && r.dir) {
+      area.appendChild(el('div', 'doc-exec-line', '输出目录：' + r.dir));
+    }
+    buildRunGate(area, mod, ui);      // 结果确认门：确认结果 / 有问题（三级归因）
+    body.appendChild(area);
+  }
+
+  function buildDocView(body, mod, ui, st) {
+    var d = mod.doc;
+    body.appendChild(el('div', 'doc-content', d.content));
+
+    var metaParts = [];
+    var up = formatDateTime(d.updatedAt);
+    if (up) metaParts.push('更新 ' + up);
+    if (st === 'approved') {
+      var ap = formatDateTime(d.approvedAt);
+      if (ap) metaParts.push('审核 ' + ap);
+    }
+    if (metaParts.length) body.appendChild(el('div', 'doc-meta', metaParts.join(' · ')));
+
+    if (ui.notice) body.appendChild(el('div', 'doc-notice', ui.notice));
+    if (ui.reject) buildDocRejectBox(body, mod, ui);
+
+    var actions = el('div', 'doc-actions');
+    actions.appendChild(docButton('编辑', '', false, function () { enterDocEdit(mod); }));
+    if (st === 'draft') {
+      actions.appendChild(docButton('审核通过', 'primary', false, function () {
+        getStore().approveDoc(mod.id);
+        render();
+      }));
+      actions.appendChild(docButton('打回', '', false, function () {
+        ui.reject = true; render();
+      }));
+      actions.appendChild(docButton(ui.gen ? '生成中…（长任务可能需数分钟）' : '重新生成', '', ui.gen, function () {
+        generateDoc(mod);
+      }));
+    } else if (st === 'approved') {
+      // run.status === 'confirmed'（本环节产出已确认）时不再提供重新执行入口，引导进入下一步 / 下一模块
+      if (mod.run && mod.run.status === 'confirmed') {
+        actions.appendChild(el('span', 'status-hint', '本环节产出已确认，请进入下一步或下一个模块'));
+      } else {
+        actions.appendChild(docButton(ui.codeLoading ? '生成代码中…（长任务可能需数分钟）' : '生成代码并执行', 'primary', ui.codeLoading, function () {
+          composeCode(mod);
+        }));
+      }
+    }
+    body.appendChild(actions);
+
+    if (st === 'draft') body.appendChild(buildTemplateRow(mod));
+    if (ui.genErr) body.appendChild(el('div', 'doc-error', ui.genErr));
+    if (ui.codeErr) body.appendChild(el('div', 'doc-error', ui.codeErr));
+    if (typeof ui.code === 'string' && ui.code) buildDocCodeLayer(body, mod, ui);
+    if (ui.exec) buildDocExecResult(body, mod, ui);
+    else if (mod.run) buildRunGate(body, mod, ui);   // 刷新后 ui.exec 丢失但 run 仍在：仍渲染确认门
+    if (ui.execErr) body.appendChild(el('div', 'doc-error', ui.execErr));
+  }
+
+  function buildDocEditor(body, mod) {
+    var ta = el('textarea', 'doc-editor');
+    ta.maxLength = MAX_DOC_CHARS;
+    ta.placeholder = '撰写本环节的标准与验收契约…（最长 ' + MAX_DOC_CHARS + ' 字）';
+    ta.value = docDraftText;
+    ta.addEventListener('input', function () { docDraftText = ta.value; });
+    body.appendChild(ta);
+
+    var ui = uiOf(mod.id);
+    var actions = el('div', 'doc-actions');
+    actions.appendChild(docButton('保存', 'primary', false, function () {
+      var text = ta.value;
+      if (!String(text).trim()) { ui.genErr = '保存失败：内容不能为空'; render(); return; }
+      if (String(text).length > MAX_DOC_CHARS) { ui.genErr = '保存失败：超过 ' + MAX_DOC_CHARS + ' 字'; render(); return; }
+      var saved = getStore().saveDoc(mod.id, text);
+      if (!saved) { ui.genErr = '保存失败：内容无效'; render(); return; }
+      ui.genErr = ''; ui.code = null; ui.exec = null; ui.codeErr = ''; ui.execErr = '';
+      ui.notice = '文档已保存为草稿。';
+      docEditingId = null; docDraftText = '';
+      render();
+    }));
+    actions.appendChild(docButton('取消', '', false, function () {
+      docEditingId = null; docDraftText = '';
+      render();
+    }));
+    body.appendChild(actions);
+    if (ui.genErr) body.appendChild(el('div', 'doc-error', ui.genErr));
+  }
+
+  /** 环节文档卡：标题行 + 状态徽标 + 依据状态渲染（无 / view / edit） */
+  function buildDocCard(mod) {
+    var st = docStatusOf(mod);
+    var ui = uiOf(mod.id);
+    var card = el('div', 'doc-card');
+    card.setAttribute('data-module-id', mod.id);
+    card.setAttribute('data-doc-status', st);
+    if (mod.run && mod.run.status) card.setAttribute('data-run-status', mod.run.status);
+    card.appendChild(buildDocHead(mod, st));
+
+    var body = el('div', 'doc-body');
+    card.appendChild(body);
+
+    if (docEditingId === mod.id) {
+      buildDocEditor(body, mod);
+    } else if (st === 'none') {
+      buildDocEmpty(body, mod, ui);
+    } else {
+      buildDocView(body, mod, ui, st);
+    }
+    return card;
+  }
+
   // ------------------------------------------------------------------ 渲染
 
   /**
@@ -451,7 +1181,19 @@
     }
     var messages = (active && active.messages) ? active.messages : [];
 
+    // ---- 编辑态守卫：正在编辑当前模块且编辑卡仍在 DOM 中 -> 不重建（保住草稿与焦点）----
+    if (docEditingId && active && docEditingId === active.id) {
+      var liveEditor = spaceEl.querySelector('.doc-card .doc-editor');
+      if (liveEditor) {
+        var pendingLive = !!pendingModules[active.id];
+        if (fallback) setComposerEnabled(false, PLACEHOLDER_NO_ACTIVE);
+        else setComposerEnabled(!pendingLive, pendingLive ? 'AI 正在回复…' : PLACEHOLDER_DEFAULT);
+        return;
+      }
+    }
+
     // ---- 增量快速路径：纯消息追加（含 AI pending 指示翻转），其余一律全量 ----
+    // 文档卡任一变化（内容/状态/编辑态/生成与执行瞬态）都会使 docSigOf 改变 -> 强制全量重建。
     var pendingNow = active ? !!pendingModules[active.id] : false;
     var canFast = !!active && !fallback &&
       msgListState.moduleId === active.id &&
@@ -459,7 +1201,8 @@
       messages.length >= msgListState.count &&
       (msgListState.count === 0 || messages[0].id === msgListState.firstId) &&
       (active.status || 'todo') === msgListState.status &&
-      pendingNow === msgListState.pending;
+      pendingNow === msgListState.pending &&
+      docSigOf(active) === msgListState.docSig;
     if (canFast) {
       try {
         var fastList = spaceEl.querySelector('.msg-list');
@@ -494,7 +1237,8 @@
     }
     msgListState.moduleId = null;
 
-    spaceEl.innerHTML = '';
+    // 零 innerHTML：清空自己的容器时逐个移除子节点
+    while (spaceEl.firstChild) spaceEl.removeChild(spaceEl.firstChild);
 
     if (!modules.length) {
       // 无模块：空状态 + 一键按流程图初始化 + 禁用输入
@@ -515,10 +1259,11 @@
         '依赖：' + depLabel(modules, active) + ' · 消息 ' + messages.length + ' 条'));
       spaceEl.appendChild(header);
 
-      // 先状态条（动作优先：提交审核 / 确定通过 一眼可见），再任务说明卡（"这个模块要做什么"）
+      // 顺序：状态条（动作优先）-> 任务说明卡 -> 环节文档卡 -> 消息列表
       spaceEl.appendChild(buildStatusBar(active, modules));
       var specCard = buildSpecCard(active);
       if (specCard) spaceEl.appendChild(specCard);
+      spaceEl.appendChild(buildDocCard(active));
 
       var list = el('div', 'msg-list');
       if (!messages.length) {
@@ -549,7 +1294,8 @@
       count: (active && !fallback) ? messages.length : -1,
       firstId: (active && messages.length) ? messages[0].id : null,
       status: (active && !fallback) ? (active.status || 'todo') : null,
-      pending: (active && !fallback) ? !!pendingModules[active.id] : false
+      pending: (active && !fallback) ? !!pendingModules[active.id] : false,
+      docSig: (active && !fallback) ? docSigOf(active) : null
     };
     if (messageless) spaceEl.scrollTop = 0;
     else spaceEl.scrollTop = spaceEl.scrollHeight;

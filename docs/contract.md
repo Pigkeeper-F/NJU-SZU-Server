@@ -507,3 +507,396 @@ Store.PROJECT_META_KEY       // 'research_workspace_meta_v1'
 ### 15.5 手工验收（已自动化实测）
 备份 toast / 导入恢复（模块、消息、项目名）/ 搜索过滤与空态 / Markdown 各语法渲染 + XSS 防护 /
 系统提示词保存与请求体透传 —— 全部通过（测试脚本 cdp-features.mjs，26 项）。
+
+
+## 16. 环节文档（2026-10-14）
+
+为每个流程模块增加一份「环节文档」：用户与 AI 协商出的**标准格式文档**，既是该环节的产出物，
+也是**环节间契约**（下游环节据此对接），可人工审核。设计原话：『执行之前得结构化成一个标准格式的文档』
+『每个环节都文档化了』。此章节为 T2（文档区 UI）/ T3（执行内核）的对接依据。
+
+### 16.1 数据结构（`module` 新增可选字段 `doc`）
+
+```js
+module.doc = null | {
+  content: "非空字符串",        // 已 trim；长度 ≤ MAX_DOC_CHARS（20000）
+  status: "draft" | "approved", // 审核状态；非法值一律按 "draft"
+  updatedAt: "2026-10-14T02:00:00.000Z", // 最后写入时间（ISO）
+  approvedAt: "2026-10-14T02:00:00.000Z" | null // 审核通过时间；draft 时恒为 null
+}
+```
+
+- 无文档时 `doc === null`（**不是** undefined）。手工新建的模块、`initFlowModules()` / `addModule()`
+  新建的模块 `doc` 初始即为 `null`。
+- **刷新必须保留**：`normalizeModule()` 已把 `doc` 纳入归一化（与 `step` / `spec` / `status` / `approvedAt`
+  同级）。空 content、超长 content、非法结构一律降级为 `null`；`draft` 时强制 `approvedAt = null`，
+  保证「落盘 → 读取」幂等。
+
+### 16.2 新增 API（照抄调用，全部同步）
+
+```js
+Store.saveDoc(moduleId, content)  // -> doc 深拷贝 | null
+                                  //    content 非字符串 / trim 后为空 / 长度 > 20000 -> null（状态不变）
+                                  //    首次创建 doc{status:'draft', approvedAt:null}
+                                  //    已存在则覆盖 content，并把 status 打回 'draft'、approvedAt=null
+                                  //    模块不存在 -> null
+Store.approveDoc(moduleId)        // -> true | false（无 doc 或模块不存在 -> false）
+                                  //    置 status='approved'、approvedAt=now、updatedAt=now
+Store.rejectDoc(moduleId, note?)  // -> true | false（无 doc 或模块不存在 -> false）
+                                  //    置 status='draft'、approvedAt=null
+                                  //    note 去首尾空白后非空时，向该模块消息流追加一条
+                                  //    system 消息：'文档打回：' + note
+Store.LIMITS.MAX_DOC_CHARS        // 20000
+Store.LIMITS.DOC_STATUSES         // ['draft','approved']
+```
+
+- 返回 `doc` 均为**深拷贝**（可随意修改/保存，不影响内部状态）。
+- 空内容、超长返回 `null` 属于**正常校验失败**（非异常），由 UI 层给出提示。
+
+### 16.3 新增事件
+
+| type | payload | 触发时机 |
+|---|---|---|
+| `doc:save` | `{ moduleId, doc, created }` | `saveDoc()` 成功且状态未变更后（`created` 区分首次建/改稿） |
+| `doc:approve` | `{ moduleId, doc }` | `approveDoc()` 成功后 |
+| `doc:reject` | `{ moduleId, note, doc }` | `rejectDoc()` 成功后（`note` 为 trim 后文本，可能为空串） |
+
+> 对应 `Store.EVENT.DOC_SAVE` / `DOC_APPROVE` / `DOC_REJECT` 常量。
+
+### 16.4 审核语义（状态机）
+
+```
+        saveDoc                approveDoc
+ (null) ---------> draft  ----------------> approved
+                     ^                         |
+                     |        rejectDoc(note)  |
+                     +------------------------ +
+```
+
+- 状态只有 **draft / approved** 两种（与模块 `status` 的四态状态机相互独立，互不联动）。
+- **改稿即打回**：任何一次 `saveDoc`（哪怕是已通过后再编辑）都会把状态重置为 `draft` 并清空 `approvedAt`，
+  需重新走审核 —— 保证「已通过的文档」永远是当前所见版本。
+- **打回附带说明**：`rejectDoc` 的 `note` 非空时写入该模块的消息流（`role:'system'`），
+  T2 的消息列表会渲染成系统气泡，形成可追溯的审核记录。
+
+### 16.5 上限与容错
+
+- **单份文档上限 20000 字**（`MAX_DOC_CHARS`，与单条消息 `MAX_MESSAGE_CHARS` 同量级）：
+  超长返回 `null`，由 UI 提示；避免超长文档撑爆 localStorage 配额（配额满会静默降级为纯内存，刷新即丢）。
+- 归一化对空 content / 超长 content / 非法 `doc` 结构一律回退为 `null`，**绝不抛异常**。
+
+### 16.6 手工/自动化验收
+
+1. `node --check js/store.js` 通过。
+2. `node tools/check-contract.js` 输出 `ALL_CHECKS_PASS`。
+3. 逻辑测试（内存 stub localStorage 加载 store.js）：空内容 `saveDoc` → `null`；保存成功 `status==='draft'`；
+   `approveDoc` 后 `approved`；再 `saveDoc` 回 `draft` 且 `approvedAt===null`；`rejectDoc` 带 note 后该模块
+   出现系统消息；非法 `moduleId` 全返回 `null`/`false`；>20000 字 → `null` —— 全部通过。
+
+
+## 17. 服务端扩展端点（2026-10-14）
+
+T3 新增两个端点，落地服务端能力节点：`/api/ai/compose`（环节文档 / 代码生成）与 `/api/code/exec`
+（受限执行）。实现见 `server.js` 的 `handleCompose` / `handleExec`，**都先经过已有的
+`checkRequestGuards`**（Host 本机校验 + Origin 同源校验 + 每分钟 30 次限流，见 §14），未通过返回
+403 / 429，语义与既有 `/api/ai/chat` 一致。模型配置解析已抽为公共函数 `resolveModelConfig`，
+`handleChat` 与 `handleCompose` 复用，优先级：请求体 `settings` > 服务端 `.env`。
+
+### 17.1 POST /api/ai/compose
+
+**入参**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `mode` | `'doc' \| 'code'` | 是 | `doc`=生成《环节标准文档》；`code`=生成单文件 node 脚本。其它值 → 400 |
+| `module` | object | 否 | `{ name, spec:{goal,todo[],output,acceptance}, doc? }`；`doc` 可为字符串或 §16 的 `{content}`。用于拼提示词 |
+| `messages` | array | 否 | `[{role:'user'\|'assistant', text}]`，即对话记录；沿用 `normalizeMessages` 归一化 |
+| `settings` | object | 否 | `{baseUrl, model, apiKey, protocol, systemPrompt}`，规则同 `handleChat` |
+
+**提示词模板**：内嵌于 `server.js` 常量 `COMPOSE_DOC_TEMPLATE` / `COMPOSE_CODE_TEMPLATE`。
+`doc` 模式要求模型输出四个固定二级小节（`## 环节目标` / `## 输入与数据说明` /
+`## 处理与验收标准` / `## 注意事项`）；`code` 模式约定脚本读工作目录 `input` 文件、结果写
+`output` 文件、零第三方依赖、无网络请求。
+
+**出参**
+
+| 状态 | 响应 | 语义 |
+|---|---|---|
+| 200 | `{ text: string }` | 模型输出（已 trim） |
+| 400 | `{ error }` | JSON 非法 / body 非对象 / `mode` 非法 / 上游 4xx |
+| 503 | `{ error }` | 无 API Key（未传且环境未配 `AI_API_KEY`） |
+| 502 | `{ error }` | 无法连接上游 / 上游 5xx / 空回复 |
+| 500 | `{ error:'服务端内部错误' }` | 兜底异常 |
+
+> 上游错误语义与 `/api/ai/chat` **完全一致**。
+> **超时**：compose 的上游调用超时为 **180s**（生成代码属长输出任务；对话端点 `/api/ai/chat` 保持 60s）——2026-10-14 E2E 实测修复。
+
+### 17.2 POST /api/code/exec
+
+**入参**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `lang` | `'node' \| 'python'` | 是 | 白名单外（如 `ruby`）→ 400 |
+| `code` | string | 是 | 非空脚本源码 |
+| `confirm` | `true` | 是 | **必须严格等于 `true`**，否则 400（防误触发） |
+
+**出参**（仅在执行真正发生后返回）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `ok` | boolean | 脚本退出码为 0 时为 `true` |
+| `stdout` / `stderr` | string | 各截断至 20KB，发生截断时末尾追加 `[已截断]` |
+| `artifacts` | `[{name,size}]` | 工作目录内除脚本文件外的产物文件 |
+| `dir` | string | 本次执行的临时目录（`os.tmpdir()/yanxu-exec-<随机>`） |
+| `ms` | number | 执行耗时（毫秒） |
+| `code` | number \| null | 退出码（超时或被信号终止时可能缺省） |
+| `error` | string | 仅失败时出现 |
+
+**错误 / 特殊语义**
+
+| 状态 | 场景 | 响应 |
+|---|---|---|
+| 400 | `confirm` 非 `true` | `{ error:'拒绝执行：必须显式传 confirm:true …' }` |
+| 400 | `lang` 非法 | `{ error:"lang 必须是 'node' 或 'python'。" }` |
+| 400 | `code` 为空 | `{ error:'code 必须是非空字符串。' }` |
+| 400 | python 解释器找不到 | `{ error:'本机未找到 python 解释器（已尝试 python / python3 / py）。' }` |
+| 200 | **执行超时（> 15s）** | `{ ok:false, error:'执行超时', … }`（**200 而非 5xx**：进程被正常收管，属业务结果） |
+| 200 | 脚本非零退出 | `{ ok:false, error:'执行失败（退出码 N）', … }` |
+
+> **注意**：超时与脚本报错都以 **HTTP 200 + `ok:false`** 返回，调用方应以 `ok` 判断成败，
+> 不要用 HTTP 状态码区分。
+
+### 17.3 安全边界（执行内核）
+
+本端点产品需求即「AI 生成的代码在本机跑」，因此防护是**多层叠加**而非拒绝执行：
+
+1. **本机 Origin 校验**（`checkRequestGuards`，已有）：第三方来源（如 `http://evil.example.com`）
+   一律 403，恶意网页无法借本机服务执行代码；
+2. **`confirm` 显式确认**：`body.confirm !== true` 直接 400，防误触发 / 防被顺手调度；
+3. **临时目录隔离**：每次执行在 `os.tmpdir()` 下新建 `yanxu-exec-<随机>` 目录并以其为 cwd，
+   不污染项目目录，脚本与产物均落在该目录；
+4. **语言白名单**：仅 `node` / `python`；python 解释器按 `python` → `python3` → `py` 探测
+   （探测结果以 Promise 缓存），探测不到直接 400；
+5. **15s 超时 SIGKILL**：防死循环 / 长任务占满本机；
+6. **输出截断 20KB**：stdout / stderr 各自截断并加 `[已截断]`，防超大输出打爆内存与响应体；
+7. **spawn argv 直传**：不拼 shell 字符串，杜绝命令注入。
+
+> **残余风险（明示）**：脚本以当前用户权限运行，仍可读写该用户可访问的文件、发起网络请求
+> （约定禁止但未强制沙箱）。若需强隔离，应在更外层引入容器 / 低权限账户。
+
+### 17.4 自动化验收
+
+`node tools/test-server-exec.js`（node 直跑，起 `server.js` 子进程 `PORT=8199`，零依赖）覆盖：
+exec 正常 / 产物 artifacts / 超时 kill / 输出截断 / confirm 缺失 400 / lang 非法 400 /
+第三方 Origin 403 / compose 无 key 503 / python 执行（解释器可用时），全通过输出
+`ALL_EXEC_TESTS_PASS`。实测本机 17 项通过 / 0 失败（含 python 路径）。
+
+
+## 18. 执行记录与结果确认（2026-10-14）
+
+为每个流程模块增加一份「执行记录」`run`：记录本次运行的结果（状态 / 时间 / 工作目录 / 产物），
+并引入**结果确认门**与**三级归因打回**。设计原话：『数据一旦出错后面全白干，结果必须人确认』。
+此章节为 W2（服务端 exec 落库）/ W3（前端结果确认 UI）的对接依据。
+
+### 18.1 数据结构（`module` 新增可选字段 `run`）
+
+```js
+module.run = null | {
+  status: "ran" | "confirmed",   // ran=已运行待人工确认；confirmed=人工已确认；非法值一律降级为 null
+  at: "2026-10-14T02:00:00.000Z",// 本次运行时间（ISO）
+  dir: "…/yanxu-exec-xxxx",      // 执行产物所在目录；缺省为空串
+  artifacts: [ { name: "out.csv", size: 1024 } ] // 产物清单；size 非有限数字按 0
+}
+```
+
+- 无记录时 `run === null`（**不是** undefined）。手工新建的模块、`initFlowModules()` / `addModule()`
+  新建的模块 `run` 初始即为 `null`。
+- **刷新必须保留**：`normalizeModule()` 已把 `run` 纳入归一化（与 `doc` / `step` / `spec` / `status`
+  同级）。缺 `status`、`status` 非法、结构非法一律降级为 `null`；`artifacts` 仅保留合法的
+  `{name,size}` 项，保证「落盘 → 读取」幂等。
+
+### 18.2 新增 API（照抄调用，全部同步）
+
+```js
+Store.markRun(moduleId, info)     // -> run 深拷贝 | null（模块不存在 -> null）
+                                  //    info = { dir?, artifacts? }（均可选）
+                                  //    置 status='ran'、at=now；dir 非字符串按 ''，artifacts 仅留合法 {name,size}
+                                  //    无论此前有无 run 都覆盖（再次执行即重新进入待确认）
+Store.confirmRun(moduleId)        // -> true | false（无 run 或 status!=='ran' 或模块不存在 -> false）
+                                  //    置 status='confirmed'
+Store.rejectRun(moduleId, cause, note?) // -> true | false
+                                  //    cause 仅接受 'data' | 'code' | 'doc'，否则 false；无 run 或模块不存在 -> false
+                                  //    成功：run 清空（=null），并向该模块消息流追加一条 system 消息
+                                  //         '结果复核打回（归因：数据/代码/标准）'
+                                  //         （note 去首尾空白后非空时追加 '：' + note）
+Store.LIMITS.RUN_STATUSES         // ['ran','confirmed']
+```
+
+- 返回 `run` 均为**深拷贝**（可随意修改/保存，不影响内部状态）。
+- 校验失败返回 `null` / `false` 属于**正常结果**（非异常），由 UI 层给出提示。
+
+### 18.3 新增事件
+
+| type | payload | 触发时机 |
+|---|---|---|
+| `run:mark` | `{ moduleId, run }` | `markRun()` 成功后 |
+| `run:confirm` | `{ moduleId, run }` | `confirmRun()` 成功后 |
+| `run:reject` | `{ moduleId, cause, note }` | `rejectRun()` 成功后（`note` 为 trim 后文本，可能为空串） |
+
+> 对应 `Store.EVENT.RUN_MARK` / `RUN_CONFIRM` / `RUN_REJECT` 常量。
+
+### 18.4 状态机与三级归因语义
+
+```
+        markRun                confirmRun
+ (null) ----------> ran  ----------------> confirmed
+                     |
+                     |  rejectRun(cause, note)
+                     +------------------------> (null)（打回，归因写入系统消息）
+```
+
+- **确认门**：`ran` 只表示「跑完了」，产物未经人工确认；只有 `confirmRun` 置 `confirmed` 才算通过。
+  「结果必须人确认」——避免错误结果流入下游环节（数据一旦出错后面全白干）。
+- **三级归因**（`cause`）决定问题回溯到哪一环，是「打回即定位责任环节」的关键：
+
+  | cause | 中文 | 语义 |
+  |---|---|---|
+  | `data` | 数据 | 输入数据有问题（缺失 / 异常 / 单位 / 去重不当） |
+  | `code` | 代码 | 处理脚本有问题（算法 / 参数 / 单位换算等实现偏差） |
+  | `doc`  | 标准 | 环节标准文档（§16 `doc`）描述不清 / 定义有误，需先改文档 |
+
+- **打回即清空**：`rejectRun` 成功后 `run` 置 `null`（回到未执行态），并写入一条系统消息，
+  W3 的消息列表会渲染成系统气泡，形成可追溯的复核记录。
+- 与模块 `status`（§12 四态）、`doc.status`（§16 draft/approved）**相互独立**，互不联动。
+
+### 18.5 手工/自动化验收
+
+1. `node --check js/store.js` 通过。
+2. `node tools/check-contract.js` 输出 `ALL_CHECKS_PASS`。
+3. 逻辑测试（内存 stub localStorage 加载 store.js）：
+   `markRun` 后 `run.status==='ran'`；`confirmRun` 后 `confirmed`；再次 `markRun` 覆盖回 `ran`；
+   `rejectRun('code','单位换算导致偏差')` 后 `run===null` 且该模块出现系统消息「归因：代码」；
+   非法 `cause`（如 `'other'`）→ `false`；无 `run` 时 `confirmRun` 与 `rejectRun` 都返回 `false`；
+   重新加载（模拟刷新）后 `run` 保留 —— 全部通过。
+
+
+## 19. 服务端扩展 v2（2026-10-14 · W2）
+
+在 §17 两个能力节点之上做四项扩展，落地「数据清洗闭环（数据进 / 结果审 / 归因）」的服务端一半。
+实现见 `server.js`，W3（前端）按本章冻结接口调用。
+
+### 19.0 全局：请求体上限
+
+`MAX_BODY_BYTES` 由 **64KB → 2MB**（**全端点统一**：`/api/ai/chat`、`/api/ai/compose`、`/api/code/exec`）。
+超限时 `readBody` 提前 reject，端点返回 `400 { error }`（文案为「请求必须是有效 JSON，且大小不超过 2MB。」）。
+抬高上限是为让 exec 能携带数据文件；真正的大小约束由 §19.2 的业务校验负责。
+
+### 19.1 `/api/ai/compose` 新增 `template`
+
+**入参**（在 §17.1 基础上新增一个可选字段）
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `template` | `'standard' \| 'align' \| 'mining'` | 否 | 缺省 `'standard'`；其它值 → `400 { error:"template 必须是 'standard'、'align' 或 'mining'。" }` |
+
+其余字段（`mode` / `module` / `messages` / `settings`）与出参语义**完全不变**（§17.1）。
+
+**模板常量（`server.js` 内嵌）与选择规则**
+
+| mode | template | 使用的提示词常量 | 期望产出 |
+|---|---|---|---|
+| `doc` | `standard` | `COMPOSE_DOC_TEMPLATE` | 通用《环节标准文档》（四小节，同 §17.1） |
+| `doc` | `align` | `COMPOSE_ALIGN_TEMPLATE` | 《数据对齐规则文档》：`## 对齐目标与范围` / `## 维度与口径映射` / `## 对不上时的系数拆分方案` / `## 校验与验收标准` |
+| `doc` | `mining` | `COMPOSE_MINING_TEMPLATE` | 《文献参数挖掘规则文档》：`## 挖掘目标与输入` / `## 参数表结构（字段定义）` / `## 提取规则与来源定位` / `## 质量控制与验收标准` |
+| `code` | `standard` | `COMPOSE_CODE_TEMPLATE` | 通用单文件脚本（读 input、写 output，同 §17.1） |
+| `code` | `align` | `COMPOSE_CODE_ALIGN_TEMPLATE` | 对齐脚本：读输入数据与对齐参考表 → 写 `aligned.csv` |
+| `code` | `mining` | `COMPOSE_CODE_MINING_TEMPLATE` | 挖掘脚本：遍历 `papers` 目录下论文文本 → 写 `params.csv`（首行表头） |
+
+- `align` 的核心是**对不上时如何拆分系数**（一对多 / 多对一的按比例拆分、系数估计与优先顺序、无法对齐的兜底）。
+- `mining` 的核心是**结构化参数表 + 提取规则**（字段定义表明确单位/类型/必填/缺失处理；来源定位到摘要/方法/结果/表格/图注；范围值与多值取值规则；不得臆造）。
+- 校验顺序：`mode` 校验 → `template` 校验 → 无 Key 503，因此 `template` 非法时**即使无 Key 也返回 400**。
+
+### 19.2 `/api/code/exec` 新增 `files`（数据文件）
+
+**入参**（在 §17.2 基础上新增一个可选字段）
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `files` | `[{ name: string, content: string }]` | 否 | 文本数据文件；执行前写入本次执行目录，脚本可用相对路径读取 |
+
+**文件名净化（安全边界，必须遵守）**
+
+对每个文件项：**只取 `path.basename(name)`**，再检查是否含 `..` / `/` / `\` 或为空名：
+
+- 取 basename 后仍非法的（或 `name` 非字符串、`content` 非字符串）→ **丢弃该项**（不报错、不中断请求）；
+- 结果保证只会落在执行目录内（例如 `../../etc/passwd` → `passwd`；`..\evil.txt` 在 Windows 上取 basename 得 `evil.txt`，在其它平台含 `\` 被丢弃）；
+- 因此**任何情况下都不会写到执行目录之外**。
+
+**大小限制**
+
+| 限制 | 阈值 | 超限结果 |
+|---|---|---|
+| 单个文件（UTF-8 字节数） | ≤ 512KB | `400 { error:'单个数据文件不能超过 512KB：<name>' }` |
+| `files` 总量（UTF-8 字节数） | ≤ 1MB | `400 { error:'数据文件总量不能超过 1MB。' }` |
+| `files` 非数组 | — | `400 { error:'files 必须是数组。' }` |
+
+> 大小校验按**字节数**（`Buffer.byteLength(content,'utf8')`）而非字符数。
+
+**出参**：在原字段（§17.2）之外新增 `fallback: boolean`（见 §19.3）；`artifacts` 逻辑不变
+（工作目录内除脚本文件外的文件，**上传的数据文件也会出现在其中**）。
+
+### 19.3 `/api/code/exec` 执行目录策略（用户可见）
+
+| 项 | 规则 |
+|---|---|
+| 根目录（base） | 优选环境变量 `YANXU_RUN_DIR`（非空时）；否则 `path.join(os.homedir(), 'yanxu-runs')` |
+| 子目录名 | `<Date.now()>-<随机 6 位 base36>`（如 `1739520000000-a1b2c3`） |
+| 创建失败回退 | base 递归创建或子目录创建失败时，回退 `os.tmpdir()` 下的 `mkdtemp('yanxu-exec-')` 目录 |
+| 返回标注 | 出参 `dir` 为本次执行目录（语义不变）；`fallback: true` 表示走了 `os.tmpdir()` 回退，`false` 表示正常用户可见目录 |
+
+- 目录策略只影响「产物落在哪」；`§17.3` 的其余安全边界（confirm / 语言白名单 / 15s 超时 / 20KB 截断 / argv 直传）全部不变。
+- 执行目录**执行后不自动删除**（便于用户在文件管理器里查看产物）。
+
+### 19.4 `/api/ai/chat` 新增 `module`（环节上下文注入）
+
+**入参**（新增一个可选字段）
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `module` | object | 否 | `{ name, spec:{goal,todo[],output,acceptance}, upstream:[{name, doc}] }`（各子字段均可选） |
+
+**注入规则**（`module` 为普通对象时生效；缺省/非对象时**完全沿用旧行为**）
+
+1. 最终 system 提示 = **环节上下文** + （如有）用户自定义 `settings.systemPrompt`，用 `\n\n` 连接；
+2. 环节上下文首行固定为：
+   `你正在支持科研流程环节「{name}」；本环节目标：{goal}；验收要点：{acceptance}。`
+   （`name` 缺失显示「（未命名）」，`goal` / `acceptance` 缺失显示「（未填写）」）；
+3. 若有 `upstream`，追加一节：
+   ```
+   【上游已确认产出摘要】
+   - {上游 name}：{doc 摘要}
+   - …
+   ```
+   其中 `doc` 支持字符串或 §16 的 `{ content }`；**每段截断至 400 字、全部合计截断至 1200 字**，超长处补 `…`；
+4. 用户自定义 `settings.systemPrompt`（若填了）拼接在上述内容**之后**。
+
+**协议兼容**：`chat-completions` 协议注入为 `messages[0] = {role:'system', content}`；
+`responses` 协议注入为请求体 `instructions`。两条路径均通过既有的 `cfg.sysPrompt` 合成机制生效，
+不新增分支。
+
+> 无 `module` 且无 `systemPrompt` 时，请求体**不含** system/instructions —— 与 W1 之前的行为逐字一致。
+
+### 19.5 自动化验收
+
+`node tools/test-server-exec.js`（起 `server.js` 子进程 `PORT=8199`，`YANXU_RUN_DIR=$TMP/yanxu-test-runs` 保证隔离）新增：
+
+- **[10]** 上传 `input.csv` → 脚本读取其内容写 `result.txt` → 产物内容正确；`dir` 位于 `YANXU_RUN_DIR` 下且 `fallback===false`；
+- **[11]** `files` 名为 `..\evil.txt` 与 `../../evil2.txt` → 状态 200（sanitize）或 400（丢弃），且执行目录**上一层/上两层**均无 `evil.txt` / `evil2.txt`；
+- **[12]** 单文件 600KB → 400；三文件合计 1.2MB → 400；
+- **[13]** `template='bogus'` → 400；`template='align'` 有 Key 时 200、无 Key 时 503（不算失败）；
+- **[14]** chat 带 `module` 且无 Key → 503 语义不变；
+- **[15]** chat 带 `module` + 假 Key（`baseUrl` 指向未监听端口）→ 502（证明环节上下文构建未崩溃）。
+
+全通过仍输出 `ALL_EXEC_TESTS_PASS`（实测 31 通过 / 0 失败，1 项 SKIP 视环境 Key 而定）。
+

@@ -15,9 +15,23 @@
  *   name: "模块1",
  *   dependsOn: null,         // 上游模块 id；链尾新增时 = 前一个模块 id；首模块为 null
  *   createdAt: "ISO 字符串",
- *   messages: [ message ]
+ *   messages: [ message ],
+ *   doc: null,               // 环节文档；无文档时为 null（见下方 doc 结构）
+ *   run: null                // 执行记录；未执行为 null（见下方 run 结构）
  * }
  * message = { id:"msg_xxx", role:"user"|"assistant"|"system", text:"非空字符串", at:"ISO 字符串" }
+ * doc = {                    // 环节文档（用户与 AI 协商的标准文档，可人工审核，见契约 §16）
+ *   content: "非空字符串",    // 已 trim；长度 ≤ MAX_DOC_CHARS
+ *   status: "draft"|"approved",
+ *   updatedAt: "ISO 字符串",
+ *   approvedAt: "ISO 字符串"|null
+ * }
+ * run = {                    // 执行记录（结果确认门，见契约 §18）
+ *   status: "ran"|"confirmed",        // ran=已运行待确认；confirmed=人工已确认
+ *   at: "ISO 字符串",                 // 本次运行时间
+ *   dir: "工作目录字符串",            // 执行产物所在目录（可为空串）
+ *   artifacts: [ { name:"文件名", size:数字 } ] // 产物清单
+ * }
  *
  * ============================== API ==============================
  * 以下方法全部同步：
@@ -28,12 +42,20 @@
  *   removeModule(id)                       -> { ok:true } | { ok:false, reason:"..." }
  *   renameModule(id, name)                 -> boolean
  *   appendMessage(moduleId, text, role)    -> message 深拷贝 | null
+ *   saveDoc(moduleId, content)             -> doc 深拷贝 | null（content 空/超长 → null；已存在则改稿回 draft）
+ *   approveDoc(moduleId)                   -> boolean（无 doc → false；置 approved + approvedAt）
+ *   rejectDoc(moduleId, note)              -> boolean（无 doc → false；置回 draft，note 非空时追加系统消息）
+ *   markRun(moduleId, info)                -> run 深拷贝 | null（无模块 → null；info={dir?,artifacts?}；置 ran）
+ *   confirmRun(moduleId)                   -> boolean（无 run 或 status!=='ran' → false；置 confirmed）
+ *   rejectRun(moduleId, cause, note)       -> boolean（cause 非 data|code|doc 或无 run → false；run 清空 + 系统消息）
  *   setSidebar({collapsed,width})          -> sidebar 深拷贝（width 夹取 180~520）
  *   selectTab(id)                          -> boolean
  *   resetAll()                             -> 重置为默认 state 深拷贝
  *
  * 变更事件 type 约定：
  *   module:add / module:select / module:remove / module:rename / message:append / sidebar:change / tab:select / state:reset
+ *   / doc:save / doc:approve / doc:reject
+ *   / run:mark / run:confirm / run:reject
  *
  * 持久化：localStorage 键 "fa_state_v1"；解析失败或结构非法 -> 回默认值且不抛异常；
  *         localStorage 不可用（隐私模式/配额满）时静默降级为纯内存，不影响内存状态。
@@ -50,11 +72,20 @@
   // 配额，persist() 静默失败降级为纯内存，刷新即丢且用户无感知。2 万字远超日常单条记录，
   // 又远离配额红线；超长时 appendMessage 返回 null，由 UI 层给出明确提示。
   var MAX_MESSAGE_CHARS = 20000;
+  // 【能力节点 · 2026-10-14】环节文档上限。与单条消息同量级（2 万字），超长返回 null 由 UI 提示，
+  // 避免超长文档撑爆 localStorage 配额（配额满会静默降级为纯内存，刷新即丢）。
+  var MAX_DOC_CHARS = 20000;
   var TABS_DEFAULT = [{ id: 'flow', name: '流程' }];
   var ROLES = ['user', 'assistant', 'system'];
   // 必须与其他常量一起放在顶部：normalizeModule() 在**文件开头加载 localStorage** 时就会用到它
   // （若把它声明在文件后段，var 提升会让加载期的值为 undefined → 归一化抛错 → 状态回退成空）。
   var MODULE_STATUSES = ['todo', 'doing', 'review', 'approved'];
+  var DOC_STATUSES = ['draft', 'approved'];
+  // 【能力节点 · 2026-10-14】执行记录状态（见契约 §18）：ran=已运行待人工确认；confirmed=已确认。
+  var RUN_STATUSES = ['ran', 'confirmed'];
+  // 结果复核打回的三级归因：数据 / 代码 / 标准（doc）。归因决定问题回溯到哪一环。
+  var RUN_CAUSES = ['data', 'code', 'doc'];
+  var RUN_CAUSE_LABELS = { data: '数据', code: '代码', doc: '标准' };
 
   // ---------------------------------------------------------------- 工具
 
@@ -146,10 +177,50 @@
         acceptance: (typeof raw.spec.acceptance === 'string') ? raw.spec.acceptance : ''
       };
     }
+    // 环节文档（v7 新增）：必须在归一化时保留，否则刷新页面后与 AI 协商好的文档会丢。
+    // 空/非法文档一律降级为 null（与 saveDoc 的入参校验同一套规则，保证落盘-读取幂等）。
+    var doc = null;
+    if (raw.doc && typeof raw.doc === 'object' && !Array.isArray(raw.doc)) {
+      var docContent = (typeof raw.doc.content === 'string') ? raw.doc.content : '';
+      if (docContent && docContent.trim() && docContent.length <= MAX_DOC_CHARS) {
+        var docOk = (raw.doc.status === 'approved');
+        doc = {
+          content: docContent,
+          status: docOk ? 'approved' : 'draft',
+          updatedAt: (typeof raw.doc.updatedAt === 'string' && raw.doc.updatedAt) ? raw.doc.updatedAt : nowISO(),
+          // approvedAt 只在 approved 时保留，draft 强制为 null（避免 draft 残留过期通过时间）
+          approvedAt: (docOk && typeof raw.doc.approvedAt === 'string' && raw.doc.approvedAt) ? raw.doc.approvedAt : null
+        };
+      }
+    }
+
+    // 执行记录（v8 新增）：必须在归一化时保留，否则刷新页面后"已运行/已确认"状态会丢。
+    // 脏数据（缺 status / status 非法）一律降级为 null；artifacts 仅保留合法的 {name,size} 项。
+    var run = null;
+    if (raw.run && typeof raw.run === 'object' && !Array.isArray(raw.run) &&
+        RUN_STATUSES.indexOf(raw.run.status) >= 0) {
+      var artifacts = [];
+      if (Array.isArray(raw.run.artifacts)) {
+        for (var r = 0; r < raw.run.artifacts.length; r++) {
+          var art = raw.run.artifacts[r];
+          if (!art || typeof art !== 'object' || typeof art.name !== 'string' || !art.name) continue;
+          artifacts.push({
+            name: art.name,
+            size: (typeof art.size === 'number' && isFinite(art.size)) ? art.size : 0
+          });
+        }
+      }
+      run = {
+        status: raw.run.status,
+        at: (typeof raw.run.at === 'string' && raw.run.at) ? raw.run.at : nowISO(),
+        dir: (typeof raw.run.dir === 'string') ? raw.run.dir : '',
+        artifacts: artifacts
+      };
+    }
 
     var out = {
       id: id, name: name, dependsOn: dependsOn, createdAt: createdAt,
-      messages: messages, status: normalizeStatus(raw.status)
+      messages: messages, status: normalizeStatus(raw.status), doc: doc, run: run
     };
     if (step) out.step = step;
     if (spec) out.spec = spec;
@@ -660,7 +731,9 @@
         status: 'todo',
         dependsOn: last ? last.id : null,
         createdAt: nowISO(),
-        messages: []
+        messages: [],
+        doc: null,
+        run: null
       };
       state.modules.push(mod);
       created.push(deepClone(mod));
@@ -782,7 +855,9 @@
       dependsOn: last ? last.id : null,
       status: 'todo',
       createdAt: nowISO(),
-      messages: []
+      messages: [],
+      doc: null,
+      run: null
     };
     list.push(mod);
     state.activeModuleId = mod.id;
@@ -854,6 +929,133 @@
     return deepClone(msg);
   }
 
+  /* ------------------------------------------------------------------
+   * 环节文档（v7 新增，见契约 §16）
+   *   每个模块可挂一份「用户与 AI 协商的标准文档」，作为环节间契约，支持人工审核：
+   *     draft（草稿） --approveDoc--> approved（已通过）
+   *     approved --rejectDoc(note)--> draft（打回，note 写入系统消息）
+   *     任何一次 saveDoc（改稿）都会把状态打回 draft 并清空 approvedAt。
+   *   全部同步；风格对齐 appendMessage（校验入参 → 先落盘 → 再 emit → 返回深拷贝）。
+   * ------------------------------------------------------------------ */
+
+  /**
+   * 保存/更新某模块的环节文档。返回 doc 的深拷贝；下列情况返回 null（不改变状态）：
+   *   - 模块不存在；content 非字符串；content.trim() 为空；content 长度 > MAX_DOC_CHARS。
+   * 首次创建 status='draft'；已存在则覆盖 content 并把 status 打回 'draft'、approvedAt=null。
+   */
+  function saveDoc(moduleId, content) {
+    var mod = findModule(moduleId);
+    if (!mod) return null;
+    if (typeof content !== 'string') return null;
+    var body = content.trim();
+    if (!body) return null;
+    if (body.length > MAX_DOC_CHARS) return null; // 超长拒绝，UI 层负责提示
+    var created = !(mod.doc && typeof mod.doc === 'object');
+    mod.doc = {
+      content: body,
+      status: 'draft',
+      updatedAt: nowISO(),
+      approvedAt: null
+    };
+    emit('doc:save', { moduleId: moduleId, doc: deepClone(mod.doc), created: created });
+    return deepClone(mod.doc);
+  }
+
+  /** 人工审核通过：无 doc 返回 false；否则置 approved + approvedAt=now，emit 'doc:approve' */
+  function approveDoc(moduleId) {
+    var mod = findModule(moduleId);
+    if (!mod || !mod.doc) return false;
+    mod.doc.status = 'approved';
+    mod.doc.approvedAt = nowISO();
+    mod.doc.updatedAt = nowISO();
+    emit('doc:approve', { moduleId: moduleId, doc: deepClone(mod.doc) });
+    return true;
+  }
+
+  /**
+   * 人工审核打回：无 doc 返回 false；否则置回 draft（approvedAt=null）。
+   * note 去首尾空白后非空时，向该模块消息流追加一条 system 消息「文档打回：<note>」。
+   */
+  function rejectDoc(moduleId, note) {
+    var mod = findModule(moduleId);
+    if (!mod || !mod.doc) return false;
+    var text = (typeof note === 'string') ? note.trim() : '';
+    mod.doc.status = 'draft';
+    mod.doc.approvedAt = null;
+    if (text) {
+      mod.messages.push({ id: uid('msg_'), role: 'system', text: '文档打回：' + text, at: nowISO() });
+    }
+    emit('doc:reject', { moduleId: moduleId, note: text, doc: deepClone(mod.doc) });
+    return true;
+  }
+
+  /* ------------------------------------------------------------------
+   * 执行记录与结果确认门（v8 新增，见契约 §18）
+   *   每个模块可挂一份「执行记录」，记录本次运行的结果（状态 / 时间 / 工作目录 / 产物）：
+   *     (null) --markRun--> ran --confirmRun--> confirmed
+   *                          `--rejectRun(cause,note)--> (null)（打回，归因写入系统消息）
+   *   设计原话：『数据一旦出错后面全白干，结果必须人确认』—— 因此 ran 只是"跑完了"，
+   *   必须经 confirmRun 人工确认才算通过；rejectRun 时连同三级归因（数据/代码/标准）打回。
+   *   全部同步；风格对齐 saveDoc（校验入参 → 先落盘 → 再 emit → 返回深拷贝）。
+   * ------------------------------------------------------------------ */
+
+  /**
+   * 记录一次执行结果。返回 run 的深拷贝；模块不存在 -> null。
+   * info = { dir?, artifacts? }（均可选）：dir 非字符串按 '' 处理；artifacts 仅保留 {name,size} 合法项。
+   * 无论此前是否有 run，本次都会用 status='ran'、at=now 覆盖（再次执行即重新进入待确认）。
+   */
+  function markRun(moduleId, info) {
+    var mod = findModule(moduleId);
+    if (!mod) return null;
+    var src = (info && typeof info === 'object' && !Array.isArray(info)) ? info : {};
+    var artifacts = [];
+    if (Array.isArray(src.artifacts)) {
+      for (var i = 0; i < src.artifacts.length; i++) {
+        var art = src.artifacts[i];
+        if (!art || typeof art !== 'object' || typeof art.name !== 'string' || !art.name) continue;
+        artifacts.push({
+          name: art.name,
+          size: (typeof art.size === 'number' && isFinite(art.size)) ? art.size : 0
+        });
+      }
+    }
+    mod.run = {
+      status: 'ran',
+      at: nowISO(),
+      dir: (typeof src.dir === 'string') ? src.dir : '',
+      artifacts: artifacts
+    };
+    emit('run:mark', { moduleId: moduleId, run: deepClone(mod.run) });
+    return deepClone(mod.run);
+  }
+
+  /** 人工确认执行结果：无 run 或 status!=='ran' 返回 false；否则置 confirmed，emit 'run:confirm' */
+  function confirmRun(moduleId) {
+    var mod = findModule(moduleId);
+    if (!mod || !mod.run || mod.run.status !== 'ran') return false;
+    mod.run.status = 'confirmed';
+    emit('run:confirm', { moduleId: moduleId, run: deepClone(mod.run) });
+    return true;
+  }
+
+  /**
+   * 结果复核打回：cause 必须是 'data' | 'code' | 'doc'（否则 false）；无 run 或模块不存在 -> false。
+   * 成功则把 run 清空（置 null），并向该模块消息流追加系统消息
+   * 「结果复核打回（归因：数据/代码/标准）」（note 去首尾空白后非空时追加 '：' + note）。
+   */
+  function rejectRun(moduleId, cause, note) {
+    if (RUN_CAUSES.indexOf(cause) < 0) return false;
+    var mod = findModule(moduleId);
+    if (!mod || !mod.run) return false;
+    var text = (typeof note === 'string') ? note.trim() : '';
+    var body = '结果复核打回（归因：' + RUN_CAUSE_LABELS[cause] + '）';
+    if (text) body += '：' + text;
+    mod.run = null;
+    mod.messages.push({ id: uid('msg_'), role: 'system', text: body, at: nowISO() });
+    emit('run:reject', { moduleId: moduleId, cause: cause, note: text });
+    return true;
+  }
+
   /**
    * 更新侧栏：patch.collapsed 布尔、patch.width 数字（可转数字的字符串也接受）夹取 180~520。
    * 仅在值真正变化时才 emit "sidebar:change"。返回新的 sidebar 深拷贝。
@@ -920,6 +1122,14 @@
     submitModule: submitModule,
     approveModule: approveModule,
     rejectModule: rejectModule,
+    // —— 环节文档（用户与 AI 协商的标准文档 + 人工审核）
+    saveDoc: saveDoc,
+    approveDoc: approveDoc,
+    rejectDoc: rejectDoc,
+    // —— 执行记录与结果确认门（跑完待确认 + 三级归因打回）
+    markRun: markRun,
+    confirmRun: confirmRun,
+    rejectRun: rejectRun,
     // —— 项目管理（本地多项目：归档 / 新建 / 打开）
     createProject: createProject,
     openProject: openProject,
@@ -942,7 +1152,13 @@
       MODULE_STATUS: 'module:status',
       FLOW_INIT: 'flow:init',
       PROJECT_CREATE: 'project:create',
-      PROJECT_OPEN: 'project:open'
+      PROJECT_OPEN: 'project:open',
+      DOC_SAVE: 'doc:save',
+      DOC_APPROVE: 'doc:approve',
+      DOC_REJECT: 'doc:reject',
+      RUN_MARK: 'run:mark',
+      RUN_CONFIRM: 'run:confirm',
+      RUN_REJECT: 'run:reject'
     },
     LIMITS: {
       STORAGE_KEY: STORAGE_KEY,
@@ -950,8 +1166,11 @@
       SIDEBAR_MAX: SIDEBAR_MAX,
       SIDEBAR_DEFAULT: SIDEBAR_DEFAULT,
       MAX_MESSAGE_CHARS: MAX_MESSAGE_CHARS,
+      MAX_DOC_CHARS: MAX_DOC_CHARS,
       ROLES: ROLES.slice(),
-      MODULE_STATUSES: MODULE_STATUSES.slice()
+      MODULE_STATUSES: MODULE_STATUSES.slice(),
+      DOC_STATUSES: DOC_STATUSES.slice(),
+      RUN_STATUSES: RUN_STATUSES.slice()
     },
     // 流程规格（只读快照）：9 步的 key / 名称 / 说明
     FLOW_STEPS: deepClone(FLOW_STEPS),

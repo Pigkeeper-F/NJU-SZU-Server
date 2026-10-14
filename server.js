@@ -7,9 +7,13 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
+const { spawn } = require('node:child_process');
 
 const ROOT = __dirname;
-const MAX_BODY_BYTES = 64 * 1024;
+// 【W2 · 2026-10-14】请求体上限 64KB → 2MB：exec 端点需要携带数据文件（文本），
+// 单文件 ≤512KB、files 总量 ≤1MB（业务校验见 §19），故整体上限统一抬高。
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGES = 30;
 const MAX_MESSAGE_CHARS = 4000;
 
@@ -85,18 +89,24 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
     let body = '';
+    let settled = false;
     req.setEncoding('utf8');
     req.on('data', (chunk) => {
+      if (settled) return; // 已超限：排干剩余数据，不再累积
       size += Buffer.byteLength(chunk);
       if (size > MAX_BODY_BYTES) {
+        // 【评审修复 · 2026-10-14】原来直接 req.destroy() 会让客户端收到 ECONNRESET
+        // 而非约定中的 400（响应发不出去）。改为：reject 让调用方回 400，同时
+        // req.resume() 把剩余请求体排干，保证 400 能送达客户端。
+        settled = true;
         reject(new Error('请求内容过大'));
-        req.destroy();
+        req.resume();
         return;
       }
       body += chunk;
     });
-    req.on('end', () => resolve(body));
-    req.on('error', reject);
+    req.on('end', () => { if (!settled) resolve(body); });
+    req.on('error', (error) => { if (!settled) reject(error); });
   });
 }
 
@@ -118,6 +128,81 @@ function errorText(payload) {
     : 'AI 服务暂时不可用';
 }
 
+// 【T3 重构 · 2026-10-14】把模型配置解析（Key / baseUrl / model / protocol / 系统提示词）从 handleChat
+// 里抽出来，供 handleChat 与 handleCompose 复用，保证两个端点的解析规则完全一致。
+// 优先级：前端 settings（左下角齿轮，随请求发来、只存浏览器本地） > 服务端 .env。
+function resolveModelConfig(rawSettings) {
+  const s = (rawSettings && typeof rawSettings === 'object') ? rawSettings : {};
+  const cliKey = (typeof s.apiKey === 'string') ? s.apiKey.trim() : '';
+  const cliBase = (typeof s.baseUrl === 'string') ? s.baseUrl.trim() : '';
+  const cliModel = (typeof s.model === 'string') ? s.model.trim() : '';
+  const cliProto = (s.protocol === 'responses' || s.protocol === 'chat-completions') ? s.protocol : '';
+  // 【体验升级 · 2026-10-13】系统提示词（可选）：前端「模型设置」填写，注入为 system 指令。
+  const sysPrompt = (typeof s.systemPrompt === 'string') ? s.systemPrompt.trim().slice(0, 2000) : '';
+  return {
+    apiKey: cliKey || process.env.AI_API_KEY || '',
+    baseUrl: (cliBase || process.env.AI_API_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
+    model: cliModel || process.env.AI_MODEL || 'gpt-5-mini',
+    protocol: cliProto || process.env.AI_API_PROTOCOL || 'responses',
+    sysPrompt: sysPrompt
+  };
+}
+
+// 上游调用错误：带上要回给浏览器的 HTTP 状态码，语义与 handleChat 原有分支一致
+// （上游 4xx → 400；网络失败 / 上游 5xx / 空回复 → 502）。
+class UpstreamError extends Error {
+  constructor(status, message) {
+    super(message || 'AI 服务暂时不可用');
+    this.name = 'UpstreamError';
+    this.status = status;
+  }
+}
+
+// 统一的模型调用：负责拼 URL / 请求体、发请求、解析文本。两个端点共用。
+// 【E2E 修复 · 2026-10-14】超时参数化：生成代码等长输出任务需要更长时间，
+// 原硬编码 60s 会在 compose(code) 真实调用时超时（实测 60.4s 失败）。
+// 对话 60s（handleChat），文档/代码生成 180s（compose）。
+async function callModel(cfg, messages, timeoutMs) {
+  let url;
+  let requestBody;
+  if (cfg.protocol === 'chat-completions') {
+    url = cfg.baseUrl + '/chat/completions';
+    requestBody = { model: cfg.model, messages: cfg.sysPrompt ? [{ role: 'system', content: cfg.sysPrompt }].concat(messages) : messages };
+  } else {
+    url = cfg.baseUrl + '/responses';
+    requestBody = {
+      model: cfg.model,
+      input: messages.map((message) => ({ role: message.role, content: message.content }))
+    };
+    if (cfg.sysPrompt) requestBody.instructions = cfg.sysPrompt;
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(timeoutMs || 60000)
+    });
+  } catch (error) {
+    throw new UpstreamError(502, '无法连接 AI 服务，请检查 AI_API_BASE_URL 与网络。');
+  }
+
+  let result;
+  try { result = await upstream.json(); } catch (error) { result = null; }
+  if (!upstream.ok) {
+    throw new UpstreamError(upstream.status >= 400 && upstream.status < 500 ? 400 : 502, errorText(result));
+  }
+  const text = cfg.protocol === 'chat-completions'
+    ? result && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content
+    : result && result.output_text;
+  if (typeof text !== 'string' || !text.trim()) {
+    throw new UpstreamError(502, 'AI 服务没有返回可显示的文本。');
+  }
+  return text.trim();
+}
+
 async function handleChat(req, res) {
   // 密钥可能来自前端的「模型设置」（左下角齿轮），所以这里不能提前拦；等 body 解析完再判断。
 
@@ -125,7 +210,7 @@ async function handleChat(req, res) {
   try {
     payload = JSON.parse(await readBody(req));
   } catch (error) {
-    sendJson(res, 400, { error: '请求必须是有效 JSON，且大小不超过 64KB。' });
+    sendJson(res, 400, { error: '请求必须是有效 JSON，且大小不超过 2MB。' });
     return;
   }
   // 【本地修复 · 2026-09-24】body 恰为字面量 null 时 JSON.parse 正常返回 null，
@@ -141,67 +226,528 @@ async function handleChat(req, res) {
     return;
   }
 
-  // 【本地修复 · 2026-09-24】允许前端（左下角齿轮）覆盖模型配置：
-  // 用户可以在本机填自己的接口地址 / 模型 / API Key（只存在浏览器 localStorage，随请求发来）。
-  // 前端没填的字段一律回落到服务端 .env，保持原有部署方式不变。
-  const s = (payload.settings && typeof payload.settings === 'object') ? payload.settings : {};
-  const cliKey = (typeof s.apiKey === 'string') ? s.apiKey.trim() : '';
-  const cliBase = (typeof s.baseUrl === 'string') ? s.baseUrl.trim() : '';
-  const cliModel = (typeof s.model === 'string') ? s.model.trim() : '';
-  const cliProto = (s.protocol === 'responses' || s.protocol === 'chat-completions') ? s.protocol : '';
-  // 【体验升级 · 2026-10-13】系统提示词（可选）：前端「模型设置」填写，注入为 system 指令。
-  const sysPrompt = (typeof s.systemPrompt === 'string') ? s.systemPrompt.trim().slice(0, 2000) : '';
-  const apiKey = cliKey || process.env.AI_API_KEY || '';
-  if (!apiKey) {
+  const cfg = resolveModelConfig(payload.settings);
+  if (!cfg.apiKey) {
     sendJson(res, 503, {
       error: '还没有配置模型。点左下角齿轮填写接口地址与 API Key，或把 .env.example 复制为 .env 配置服务端。'
     });
     return;
   }
-  const baseUrl = (cliBase || process.env.AI_API_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
-  const model = cliModel || process.env.AI_MODEL || 'gpt-5-mini';
-  const protocol = cliProto || process.env.AI_API_PROTOCOL || 'responses';
-  let url;
-  let requestBody;
-  if (protocol === 'chat-completions') {
-    url = baseUrl + '/chat/completions';
-    requestBody = { model, messages: sysPrompt ? [{ role: 'system', content: sysPrompt }].concat(messages) : messages };
-  } else {
-    url = baseUrl + '/responses';
-    requestBody = {
-      model,
-      input: messages.map((message) => ({ role: message.role, content: message.content }))
-    };
-    if (sysPrompt) requestBody.instructions = sysPrompt;
+  // 【W2 · 2026-10-14】环节上下文：module 存在时，把「环节 + 上游产出摘要」拼在最终
+  // system 提示最前，其后（如有）接用户自定义 systemPrompt。无 module 时 sysPrompt 不变。
+  const moduleContext = buildChatModuleContext(payload.module);
+  if (moduleContext) {
+    cfg.sysPrompt = moduleContext + (cfg.sysPrompt ? '\n\n' + cfg.sysPrompt : '');
   }
-
-  let upstream;
   try {
-    upstream = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
-      body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(60000)
-    });
+    const text = await callModel(cfg, messages);
+    sendJson(res, 200, { text });
   } catch (error) {
-    sendJson(res, 502, { error: '无法连接 AI 服务，请检查 AI_API_BASE_URL 与网络。' });
-    return;
+    sendJson(res, (error && error.status) || 500, { error: (error && error.message) || '服务端内部错误' });
+  }
+}
+
+// ============================================================================
+// 【T3 · 2026-10-14】能力节点①：环节文档 / 代码生成端点 POST /api/ai/compose
+// ----------------------------------------------------------------------------
+// 提示词模板内嵌在服务端常量里（零依赖、不进前端），让模型把「环节信息 + 对话记录」
+// 整理成《环节标准文档》或生成单文件 Node 脚本。模型配置解析复用 resolveModelConfig，
+// 上游错误语义与 handleChat 完全一致（4xx→400 / 网络/5xx/空回复→502 / 无 Key→503）。
+// ============================================================================
+const COMPOSE_MODES = new Set(['doc', 'code']);
+
+const COMPOSE_DOC_TEMPLATE = [
+  '你是资深流程架构师。请把下面给出的「环节信息」与「对话记录」整理成一份《环节标准文档》。',
+  '硬性要求：',
+  '1) 只输出 Markdown 正文，不要任何额外开场白 / 结束语，不要用代码围栏包裹整篇文档；',
+  '2) 必须且仅包含以下四个二级小节，标题一字不差、顺序固定：',
+  '   ## 环节目标',
+  '   ## 输入与数据说明',
+  '   ## 处理与验收标准',
+  '   ## 注意事项',
+  '3) 内容要具体、可执行，可直接作为该环节与上下游环节之间的交接契约；',
+  '4) 若对话记录信息不足，依据环节信息合理补全，不要留 TODO / 占位符 / 空小节。'
+].join('\n');
+
+const COMPOSE_CODE_TEMPLATE = [
+  '你是资深 Node.js 工程师。请根据下面的《环节文档》与环节信息，生成一个可直接运行的单文件 Node 脚本。',
+  '运行约定（必须遵守）：',
+  '1) 脚本零第三方依赖，只用 Node 内置模块；',
+  '2) 运行工作目录下会有一个输入文件（如 input.txt / input.json，按文档说明读取）；',
+  '3) 处理结果必须写入同目录下的输出文件（如 output.txt / output.json）；',
+  '4) 只输出脚本源码本身，用 ```js 代码围栏包裹，不要任何解释文字；',
+  '5) 脚本要健壮：输入缺失时打印清晰错误并以非零退出码结束；',
+  '6) 禁止网络请求，禁止读写工作目录以外的路径。'
+].join('\n');
+
+// ---- 【W2 · 2026-10-14】template 三选一 -------------------------------------
+// standard=通用（默认，即上方的 文档/代码 模板）；align=数据对齐；mining=文献参数挖掘。
+const COMPOSE_TEMPLATES = new Set(['standard', 'align', 'mining']);
+
+// align：数据 / 国家 / 品类对齐规则文档。核心难点是「对不上」时如何拆分系数。
+const COMPOSE_ALIGN_TEMPLATE = [
+  '你是资深科研数据治理专家。请把下面的「环节信息」与「对话记录」整理成一份《数据对齐规则文档》，',
+  '用于把多来源数据（不同口径的数据集、国家/地区、行业品类）对齐到统一维度。',
+  '硬性要求：',
+  '1) 只输出 Markdown 正文，不要额外开场白 / 结束语，不要用代码围栏包裹整篇文档；',
+  '2) 必须且仅包含以下四个二级小节，标题一字不差、顺序固定：',
+  '   ## 对齐目标与范围',
+  '   ## 维度与口径映射',
+  '   ## 对不上时的系数拆分方案',
+  '   ## 校验与验收标准',
+  '3) 「## 维度与口径映射」用表格给出：来源维度 → 目标维度 → 换算/映射规则 → 单位；',
+  '4) 「## 对不上时的系数拆分方案」必须写清楚：',
+  '   - 一对多 / 多对一时，如何用系数（比例/权重）把总量拆分或合并到目标维度；',
+  '   - 系数如何估计（历史占比 / 行业基准 / 等权均分 / 就近代理）及其优先顺序；',
+  '   - 无法对齐时的兜底（归入「其他」并保留原始值）与缺失值处理；',
+  '5) 规则要具体、可执行，能直接作为对齐脚本与上下游交接的契约；信息不足时合理补全，不留 TODO。'
+].join('\n');
+
+// mining：文献参数挖掘规则文档。输入论文文本 / 清单 → 输出结构化参数表与提取规则。
+const COMPOSE_MINING_TEMPLATE = [
+  '你是科研文献信息抽取专家。请把下面的「环节信息」与「对话记录」整理成一份《文献参数挖掘规则文档》，',
+  '用于从论文全文 / 文摘 / 文献清单中抽取结构化参数。',
+  '硬性要求：',
+  '1) 只输出 Markdown 正文，不要额外开场白 / 结束语，不要用代码围栏包裹整篇文档；',
+  '2) 必须且仅包含以下四个二级小节，标题一字不差、顺序固定：',
+  '   ## 挖掘目标与输入',
+  '   ## 参数表结构（字段定义）',
+  '   ## 提取规则与来源定位',
+  '   ## 质量控制与验收标准',
+  '3) 「## 参数表结构（字段定义）」用表格给出：字段名 → 含义 → 单位 → 类型 → 是否必填 → 缺失处理；',
+  '   并明确最终产物为结构化参数表文件（约定名 params.csv，首行为表头）；',
+  '4) 「## 提取规则与来源定位」说明每个字段从哪里取（摘要 / 方法 / 结果 / 表格 / 图注 / 参考文献），',
+  '   以及识别关键词、单位换算、范围值（如 a–b）与多值（如 x±y）的取值规则；',
+  '5) 无法从文中获得的字段记为空并标注原因，不得臆造；信息不足时合理补全，不留 TODO。'
+].join('\n');
+
+// code 模式下的对齐脚本提示词：读 input 与参考表 → 输出对齐后数据。
+const COMPOSE_CODE_ALIGN_TEMPLATE = [
+  '你是资深 Node.js 数据工程师。请根据下面的《数据对齐规则文档》与环节信息，生成一个可直接运行的单文件 Node 脚本。',
+  '运行约定（必须遵守）：',
+  '1) 脚本零第三方依赖，只用 Node 内置模块；',
+  '2) 工作目录下有输入数据文件（通常 input.csv）与对齐参考表（如 reference.csv / mapping.csv，按文档说明读取）；',
+  '3) 依据文档里的维度映射与「系数拆分方案」把输入对齐到目标维度，结果写入同目录 aligned.csv；',
+  '4) 无法对齐的行：按文档兜底规则处理（如归入「其他」并保留原始值），并在 stderr 打印告警条数；',
+  '5) 只输出脚本源码本身，用 ```js 代码围栏包裹，不要任何解释文字；',
+  '6) 输入缺失时打印清晰错误并以非零退出码结束；禁止网络请求，禁止读写工作目录以外的路径。'
+].join('\n');
+
+// code 模式下的挖掘脚本提示词：读目录下 papers 文本文件 → 输出 params.csv。
+const COMPOSE_CODE_MINING_TEMPLATE = [
+  '你是资深 Node.js 工程师。请根据下面的《文献参数挖掘规则文档》与环节信息，生成一个可直接运行的单文件 Node 脚本。',
+  '运行约定（必须遵守）：',
+  '1) 脚本零第三方依赖，只用 Node 内置模块；',
+  '2) 工作目录下有一个 papers 目录（或若干论文文本文件），脚本需遍历读取其中的论文文本；',
+  '3) 按文档的字段定义与提取规则解析文本，把结构化参数表写入同目录 params.csv（首行为表头）；',
+  '4) 取不到的字段留空并在 stderr 打印告警；不得臆造数据；',
+  '5) 只输出脚本源码本身，用 ```js 代码围栏包裹，不要任何解释文字；',
+  '6) 目录/文件缺失时打印清晰错误并以非零退出码结束；禁止网络请求，禁止读写工作目录以外的路径。'
+].join('\n');
+
+// 选模板：doc 模式与 code 模式各有一组「标准/对齐/挖掘」模板。
+function pickComposeTemplate(mode, template) {
+  const t = template || 'standard';
+  if (mode === 'code') {
+    if (t === 'align') return COMPOSE_CODE_ALIGN_TEMPLATE;
+    if (t === 'mining') return COMPOSE_CODE_MINING_TEMPLATE;
+    return COMPOSE_CODE_TEMPLATE;
+  }
+  if (t === 'align') return COMPOSE_ALIGN_TEMPLATE;
+  if (t === 'mining') return COMPOSE_MINING_TEMPLATE;
+  return COMPOSE_DOC_TEMPLATE;
+}
+
+function buildModuleBrief(module) {
+  const m = (module && typeof module === 'object') ? module : {};
+  const spec = (m.spec && typeof m.spec === 'object') ? m.spec : {};
+  const todo = Array.isArray(spec.todo)
+    ? spec.todo.filter((t) => typeof t === 'string' && t.trim())
+    : [];
+  return [
+    '【环节名称】' + (typeof m.name === 'string' && m.name.trim() ? m.name.trim() : '（未命名）'),
+    '【环节目标】' + (spec.goal || '（未填写）'),
+    '【待办清单】' + (todo.length ? '\n- ' + todo.join('\n- ') : '（未填写）'),
+    '【预期产出】' + (spec.output || '（未填写）'),
+    '【验收标准】' + (spec.acceptance || '（未填写）')
+  ].join('\n');
+}
+
+// module.doc 允许是字符串，或 §16 定义的 { content, ... } 对象；取不到则返回空串。
+function moduleDocText(module) {
+  const d = module && module.doc;
+  if (typeof d === 'string') return d.trim();
+  if (d && typeof d === 'object' && typeof d.content === 'string') return d.content.trim();
+  return '';
+}
+
+// ============================================================================
+// 【W2 · 2026-10-14】环节上下文注入（POST /api/ai/chat 的 body.module）
+// ----------------------------------------------------------------------------
+// 让对话从「通用助手」变成「该科研环节的领域专家」：把环节名称/目标/验收要点，
+// 以及上游环节「已确认产出」的摘要，注入到最终 system 提示的最前面。
+// 摘要规则：每段最多 400 字、合计最多 1200 字，超出以「…」结尾。
+// 仅在请求体带 module（普通对象）时生效，无 module 时完全沿用旧行为（返回空串）。
+// ============================================================================
+const MODULE_UPSTREAM_DOC_CHARS = 400;
+const MODULE_UPSTREAM_TOTAL_CHARS = 1200;
+
+function buildChatModuleContext(module) {
+  if (!module || typeof module !== 'object' || Array.isArray(module)) return '';
+  const name = (typeof module.name === 'string') ? module.name.trim() : '';
+  const spec = (module.spec && typeof module.spec === 'object' && !Array.isArray(module.spec)) ? module.spec : {};
+  const goal = (typeof spec.goal === 'string') ? spec.goal.trim() : '';
+  const acceptance = (typeof spec.acceptance === 'string') ? spec.acceptance.trim() : '';
+  const upstream = Array.isArray(module.upstream) ? module.upstream : [];
+
+  const head = '你正在支持科研流程环节「' + (name || '（未命名）') + '」；本环节目标：'
+    + (goal || '（未填写）') + '；验收要点：' + (acceptance || '（未填写）') + '。';
+
+  const docs = [];
+  let total = 0;
+  for (const item of upstream) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const doc = moduleDocText(item);
+    if (!doc) continue;
+    const srcName = (typeof item.name === 'string' && item.name.trim()) ? item.name.trim() : '上游环节';
+    let text = doc.length > MODULE_UPSTREAM_DOC_CHARS ? doc.slice(0, MODULE_UPSTREAM_DOC_CHARS) + '…' : doc;
+    if (total + text.length > MODULE_UPSTREAM_TOTAL_CHARS) {
+      const remain = MODULE_UPSTREAM_TOTAL_CHARS - total;
+      if (remain <= 0) break;
+      text = text.slice(0, remain) + '…';
+    }
+    total += text.length;
+    docs.push('- ' + srcName + '：' + text);
+    if (total >= MODULE_UPSTREAM_TOTAL_CHARS) break;
   }
 
-  let result;
-  try { result = await upstream.json(); } catch (error) { result = null; }
-  if (!upstream.ok) {
-    sendJson(res, upstream.status >= 400 && upstream.status < 500 ? 400 : 502, { error: errorText(result) });
+  if (!docs.length) return head;
+  return head + '\n【上游已确认产出摘要】\n' + docs.join('\n');
+}
+
+function buildComposeInput(payload) {
+  const brief = buildModuleBrief(payload.module);
+  const template = pickComposeTemplate(payload.mode, payload.template);
+  const convo = normalizeMessages(payload.messages);
+  const convoText = convo.length
+    ? convo.map((m) => (m.role === 'user' ? '用户：' : 'AI：') + m.content).join('\n\n')
+    : '（暂无对话记录）';
+
+  if (payload.mode === 'code') {
+    const docText = moduleDocText(payload.module);
+    return [
+      template,
+      '【环节信息】\n' + brief,
+      '【环节文档】\n' + (docText || '（尚未生成文档，请依据环节信息与对话记录自行推断）'),
+      '【对话记录】\n' + convoText
+    ].join('\n\n');
+  }
+  return [
+    template,
+    '【环节信息】\n' + brief,
+    '【对话记录】\n' + convoText
+  ].join('\n\n');
+}
+
+async function handleCompose(req, res) {
+  let payload;
+  try {
+    payload = JSON.parse(await readBody(req));
+  } catch (error) {
+    sendJson(res, 400, { error: '请求必须是有效 JSON，且大小不超过 2MB。' });
     return;
   }
-  const text = protocol === 'chat-completions'
-    ? result && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content
-    : result && result.output_text;
-  if (typeof text !== 'string' || !text.trim()) {
-    sendJson(res, 502, { error: 'AI 服务没有返回可显示的文本。' });
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    sendJson(res, 400, { error: '请求体必须是 JSON 对象。' });
     return;
   }
-  sendJson(res, 200, { text: text.trim() });
+  if (!COMPOSE_MODES.has(payload.mode)) {
+    sendJson(res, 400, { error: "mode 必须是 'doc' 或 'code'。" });
+    return;
+  }
+  // 【W2 · 2026-10-14】template 可选，缺省 'standard'；非法值 400。
+  if (payload.template !== undefined && !COMPOSE_TEMPLATES.has(payload.template)) {
+    sendJson(res, 400, { error: "template 必须是 'standard'、'align' 或 'mining'。" });
+    return;
+  }
+  const cfg = resolveModelConfig(payload.settings);
+  if (!cfg.apiKey) {
+    sendJson(res, 503, {
+      error: '还没有配置模型。点左下角齿轮填写接口地址与 API Key，或把 .env.example 复制为 .env 配置服务端。'
+    });
+    return;
+  }
+  try {
+    const text = await callModel(cfg, [{ role: 'user', content: buildComposeInput(payload) }], 300000);
+    sendJson(res, 200, { text });
+  } catch (error) {
+    sendJson(res, (error && error.status) || 500, { error: (error && error.message) || '服务端内部错误' });
+  }
+}
+
+// ============================================================================
+// 【T3 · 2026-10-14】能力节点②：受限执行端点 POST /api/code/exec
+// 【W2 · 2026-10-14】扩展：支持数据文件上传 + 用户可见执行目录
+// ----------------------------------------------------------------------------
+// 安全模型（产品需求即『AI 生成的代码在本机跑』，因此防护是多层叠加而非拒执行）：
+//   1) 本机 Origin 校验（checkRequestGuards，已有）：第三方网页一律 403，恶意站点无法借本机执行；
+//   2) confirm 显式确认：body.confirm !== true 一律 400，防误触发 / 防被顺手调度；
+//   3) 执行目录隔离：每次执行新建 <base>/<时间戳>-<随机> 目录并以其为 cwd；base 优选
+//      YANXU_RUN_DIR，否则 ~/yanxu-runs（用户可见），创建失败回退 os.tmpdir()（body.fallback 注明）；
+//   4) 数据文件净化：body.files 每项 name 只取 path.basename，过滤含 '..' / '/' / '\' 与空名的项
+//      （丢弃该文件），单文件 ≤512KB、总量 ≤1MB，超限 400 —— 防目录穿越 / 防超大 body；
+//   5) 语言白名单：仅 node / python，python 解释器探测失败直接 400；
+//   6) 执行超时：15s 未结束即 SIGKILL（防死循环 / 长任务占满本机）；
+//   7) 输出截断：stdout / stderr 各截断 20KB 并追加 '[已截断]'，防超大输出打爆内存与响应体。
+//   8) spawn 全程 argv 直传、不拼 shell 字符串，避免命令注入。
+// ============================================================================
+const EXEC_TIMEOUT_MS = 15000;
+const EXEC_OUTPUT_LIMIT = 20 * 1024; // 20KB
+const EXEC_SCRIPTS = { node: 'script.js', python: 'script.py' };
+const EXEC_FILE_MAX_BYTES = 512 * 1024; // 单个数据文件 ≤512KB
+const EXEC_FILES_TOTAL_BYTES = 1024 * 1024; // files 文本总量 ≤1MB
+const EXEC_RUN_DIR_ENV = 'YANXU_RUN_DIR'; // 首选执行根目录环境变量
+
+// 数据文件名净化：只取 path.basename，再去掉含 '..' / '/' / '\' 与空名的项（返回 null 表示丢弃）。
+// 说明：Windows 下 path.basename('..\\evil.txt')='evil.txt'（sanitize 生效）；
+//       其它平台该串含 '\' 会被直接判非法丢弃 —— 两种结果都不会写到目录之外。
+function sanitizeFileName(rawName) {
+  if (typeof rawName !== 'string') return null;
+  const trimmed = rawName.trim();
+  if (!trimmed) return null;
+  const base = path.basename(trimmed);
+  if (!base || base === '.' || base === '..') return null;
+  if (base.includes('..') || base.includes('/') || base.includes('\\')) return null;
+  return base;
+}
+
+// 解析 body.files：返回 { ok, files, error }。非法文件项「丢弃」（不报错），
+// 结构非法 / 超大才整体 400（见 §19）。
+function normalizeFiles(rawFiles) {
+  if (rawFiles === undefined || rawFiles === null) return { ok: true, files: [] };
+  if (!Array.isArray(rawFiles)) return { ok: false, error: 'files 必须是数组。' };
+  const files = [];
+  let total = 0;
+  for (const item of rawFiles) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue; // 丢弃结构非法项
+    const name = sanitizeFileName(item.name);
+    if (!name) continue; // 文件名非法 → 丢弃该文件
+    if (typeof item.content !== 'string') continue; // 非文本内容 → 丢弃
+    const bytes = Buffer.byteLength(item.content, 'utf8');
+    if (bytes > EXEC_FILE_MAX_BYTES) {
+      return { ok: false, error: '单个数据文件不能超过 512KB：' + name };
+    }
+    total += bytes;
+    if (total > EXEC_FILES_TOTAL_BYTES) {
+      return { ok: false, error: '数据文件总量不能超过 1MB。' };
+    }
+    files.push({ name, content: item.content });
+  }
+  return { ok: true, files };
+}
+
+// 创建本次执行目录：<base>/<时间戳>-<随机>，base 优选 YANXU_RUN_DIR → ~/yanxu-runs；
+// 两者都建不出来时回退 os.tmpdir()（mkdtemp），并以 fallback 标记回传。
+function createRunDir() {
+  const suffix = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  const envDir = (typeof process.env[EXEC_RUN_DIR_ENV] === 'string') ? process.env[EXEC_RUN_DIR_ENV].trim() : '';
+  const preferredBase = envDir || path.join(os.homedir(), 'yanxu-runs');
+  try {
+    fs.mkdirSync(preferredBase, { recursive: true });
+    const dir = path.join(preferredBase, suffix);
+    fs.mkdirSync(dir);
+    return { dir, fallback: false };
+  } catch (error) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yanxu-exec-'));
+    return { dir, fallback: true };
+  }
+}
+
+// python 解释器探测（异步 spawn，避免同步 spawn 在被托管/沙箱环境里的 EBUSY）：
+// 依次试 python / python3 / py，任一 `--version` 退出码为 0 即认为可用；结果缓存为 Promise。
+let pythonInterpreter = null; // null=未探测；Promise<命令名|null>
+function detectPython() {
+  if (!pythonInterpreter) {
+    pythonInterpreter = new Promise((resolve) => {
+      const candidates = ['python', 'python3', 'py'];
+      let index = 0;
+      const tryNext = () => {
+        if (index >= candidates.length) return resolve(null);
+        const cmd = candidates[index++];
+        let child;
+        try {
+          child = spawn(cmd, ['--version'], { windowsHide: true });
+        } catch (error) {
+          return tryNext();
+        }
+        let done = false;
+        const finish = (ok) => {
+          if (done) return;
+          done = true;
+          if (ok) resolve(cmd);
+          else tryNext();
+        };
+        const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (error) { /* 已退出 */ } finish(false); }, 5000);
+        child.on('error', () => { clearTimeout(timer); finish(false); });
+        child.on('close', (code) => { clearTimeout(timer); finish(code === 0); });
+      };
+      tryNext();
+    });
+  }
+  return pythonInterpreter;
+}
+
+// 边收边截断：超过 limit 后只保留前 limit 字节并停止累积，最终在末尾补 '[已截断]'。
+function makeCollector(limit) {
+  const chunks = [];
+  let size = 0;
+  let truncated = false;
+  return {
+    push(buf) {
+      if (truncated) return;
+      if (size + buf.length > limit) {
+        chunks.push(buf.subarray(0, Math.max(0, limit - size)));
+        size = limit;
+        truncated = true;
+      } else {
+        chunks.push(buf);
+        size += buf.length;
+      }
+    },
+    text() {
+      const body = Buffer.concat(chunks).toString('utf8');
+      return truncated ? body + '[已截断]' : body;
+    }
+  };
+}
+
+function listArtifacts(dir, scriptName) {
+  let names;
+  try { names = fs.readdirSync(dir); } catch (error) { return []; }
+  const out = [];
+  for (const name of names) {
+    if (name === scriptName) continue;
+    try {
+      const stat = fs.statSync(path.join(dir, name));
+      if (stat.isFile()) out.push({ name, size: stat.size });
+    } catch (error) { /* 忽略瞬时文件 */ }
+  }
+  return out;
+}
+
+function runScript(lang, code, command, files) {
+  return new Promise((resolve) => {
+    let created;
+    try {
+      created = createRunDir();
+    } catch (error) {
+      resolve({ ok: false, error: '无法创建执行目录：' + error.message, stdout: '', stderr: '', artifacts: [], dir: '', ms: 0, fallback: false });
+      return;
+    }
+    const dir = created.dir;
+    const fallback = created.fallback;
+    const scriptName = EXEC_SCRIPTS[lang];
+
+    const start = Date.now();
+
+    // 先落脚本，再落净化后的数据文件；任一步骤失败都如实回报（不回滚，目录留存便于排查）。
+    try {
+      fs.writeFileSync(path.join(dir, scriptName), code, 'utf8');
+      for (const file of (files || [])) {
+        fs.writeFileSync(path.join(dir, file.name), file.content, 'utf8');
+      }
+    } catch (error) {
+      resolve({ ok: false, error: '写入执行目录失败：' + error.message, stdout: '', stderr: '', artifacts: listArtifacts(dir, scriptName), dir, ms: Date.now() - start, fallback });
+      return;
+    }
+
+    let child;
+    try {
+      child = spawn(command, [scriptName], { cwd: dir, windowsHide: true });
+    } catch (error) {
+      resolve({ ok: false, error: '无法启动解释器：' + error.message, stdout: '', stderr: '', artifacts: listArtifacts(dir, scriptName), dir, ms: Date.now() - start, fallback });
+      return;
+    }
+
+    const out = makeCollector(EXEC_OUTPUT_LIMIT);
+    const err = makeCollector(EXEC_OUTPUT_LIMIT);
+    let timedOut = false;
+    let settled = false;
+    const finish = (value) => { if (settled) return; settled = true; clearTimeout(timer); resolve(value); };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch (error) { /* 进程可能已退出 */ }
+    }, EXEC_TIMEOUT_MS);
+
+    child.stdout.on('data', (buf) => out.push(buf));
+    child.stderr.on('data', (buf) => err.push(buf));
+    child.on('error', (error) => finish({
+      ok: false, error: '执行失败：' + error.message,
+      stdout: out.text(), stderr: err.text(), artifacts: listArtifacts(dir, scriptName), dir, ms: Date.now() - start, fallback
+    }));
+    child.on('close', (exitCode, signal) => {
+      const ms = Date.now() - start;
+      const artifacts = listArtifacts(dir, scriptName);
+      if (timedOut) {
+        finish({ ok: false, error: '执行超时', stdout: out.text(), stderr: err.text(), artifacts, dir, ms, signal: signal || 'SIGKILL', fallback });
+        return;
+      }
+      const ok = exitCode === 0;
+      const result = { ok, stdout: out.text(), stderr: err.text(), artifacts, dir, ms, code: exitCode, fallback };
+      if (!ok) result.error = '执行失败（退出码 ' + exitCode + '）';
+      finish(result);
+    });
+  });
+}
+
+async function handleExec(req, res) {
+  let payload;
+  try {
+    payload = JSON.parse(await readBody(req));
+  } catch (error) {
+    sendJson(res, 400, { error: '请求必须是有效 JSON，且大小不超过 2MB。' });
+    return;
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    sendJson(res, 400, { error: '请求体必须是 JSON 对象。' });
+    return;
+  }
+  if (payload.confirm !== true) {
+    sendJson(res, 400, { error: '拒绝执行：必须显式传 confirm:true 才允许在本机运行代码。' });
+    return;
+  }
+  const lang = payload.lang;
+  if (typeof lang !== 'string' || !Object.prototype.hasOwnProperty.call(EXEC_SCRIPTS, lang)) {
+    sendJson(res, 400, { error: "lang 必须是 'node' 或 'python'。" });
+    return;
+  }
+  if (typeof payload.code !== 'string' || !payload.code.trim()) {
+    sendJson(res, 400, { error: 'code 必须是非空字符串。' });
+    return;
+  }
+  // 【W2 · 2026-10-14】可选数据文件：净化文件名 + 大小校验（超限 400，非法项丢弃）。
+  const filesResult = normalizeFiles(payload.files);
+  if (!filesResult.ok) {
+    sendJson(res, 400, { error: filesResult.error });
+    return;
+  }
+  let command = process.execPath;
+  if (lang === 'python') {
+    command = await detectPython();
+    if (!command) {
+      sendJson(res, 400, { error: '本机未找到 python 解释器（已尝试 python / python3 / py）。' });
+      return;
+    }
+  }
+
+  try {
+    const result = await runScript(lang, payload.code, command, filesResult.files);
+    sendJson(res, 200, result);
+  } catch (error) {
+    console.error('[server] uncaught error in /api/code/exec:', error);
+    sendJson(res, 500, { error: '执行内核内部错误' });
+  }
 }
 
 // 请求路径解析：不用 new URL(req.url, base) —— 请求 "//" 会抛 ERR_INVALID_URL 直接把整个服务打崩；
@@ -244,17 +790,19 @@ function serveStatic(req, res) {
 http.createServer((req, res) => {
   // 【本地修复 · 2026-09-24】请求处理函数里抛异常会直接杀死进程（作者修过 new URL 那一例，
   // 同类路径还有别的）。这里统一兜住，任何异常都只回 500，不影响服务存活。
-  if (req.method === 'POST' && req.url === '/api/ai/chat') {
+  const guarded = (name, handler) => {
     if (!checkRequestGuards(req, res)) return;
-    handleChat(req, res).catch((error) => {
-      console.error('[server] uncaught error in /api/ai/chat:', error);
+    handler(req, res).catch((error) => {
+      console.error('[server] uncaught error in ' + name + ':', error);
       try {
         if (!res.headersSent) sendJson(res, 500, { error: '服务端内部错误' });
         else res.end();
       } catch (ignored) { /* 连接已断开，忽略 */ }
     });
-    return;
-  }
+  };
+  if (req.method === 'POST' && req.url === '/api/ai/chat') return guarded('/api/ai/chat', handleChat);
+  if (req.method === 'POST' && req.url === '/api/ai/compose') return guarded('/api/ai/compose', handleCompose);
+  if (req.method === 'POST' && req.url === '/api/code/exec') return guarded('/api/code/exec', handleExec);
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
   res.writeHead(405, { Allow: 'GET, HEAD, POST' }); res.end();
 }).listen(PORT, HOST, () => console.log('Flow Agent server started: http://localhost:' + PORT));
