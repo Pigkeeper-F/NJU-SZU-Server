@@ -1,0 +1,247 @@
+/* =========================================================
+ * Web 账号系统 — 全站统一样式（css/style.css）
+ * ---------------------------------------------------------
+ * 纯手写 CSS：无外部 CDN / 字体 / 图片 / 框架，file:// 直接打开可用。
+ * 类名清单与用法约定见 docs/contract.md。
+ * ========================================================= */
+
+:root {
+  --bg: #f3f6fb;
+  --card-bg: #ffffff;
+  --text: #1f2933;
+  --text-soft: #6b7280;
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --border: #e5e7eb;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 8px 24px rgba(31, 41, 51, 0.08);
+  --ok-bg: #ecfdf5;
+  --ok-border: #10b981;
+  --ok-text: #047857;
+  --err-bg: #fef2f2;
+  --err-border: #ef4444;
+  --err-text: #b91c1c;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* ---------- 页面与卡片 ---------- */
+
+.page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+/* 页面顶部对齐变体（带 .nav 的主页用） */
+.page-top { justify-content: flex-start; }
+
+.card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 32px 28px;
+}
+
+/* 宽卡片变体（主页内容区 / 联调展示用） */
+.card-wide { max-width: 720px; }
+
+.page-title {
+  margin: 0 0 20px;
+  font-size: 22px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--text);
+}
+
+/* ---------- 表单 ---------- */
+
+.form-row { margin-bottom: 16px; }
+
+.form-row label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 15px;
+  font-family: inherit;
+  color: var(--text);
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+/* ---------- 按钮 ---------- */
+
+.btn {
+  display: inline-block;
+  padding: 10px 18px;
+  font-size: 15px;
+  font-family: inherit;
+  font-weight: 500;
+  color: var(--text);
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: center;
+  text-decoration: none;
+  line-height: 1.4;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.btn:hover { background: #f9fafb; }
+.btn:active { transform: translateY(1px); }
+.btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.btn-primary {
+  color: #ffffff;
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.btn-primary:hover {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+
+.btn-block { display: block; width: 100%; }
+
+/* 按钮横排容器（如 index 的入口、注册页返回/提交并排） */
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.actions .btn { flex: 1; }
+
+/* ---------- 消息条 ---------- */
+/* 默认隐藏；显示时给元素加 .msg-show，配合 .msg-error / .msg-ok 着色。 */
+
+.msg {
+  display: none;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  word-break: break-all;
+}
+
+.msg-show { display: block; }
+
+.msg-error {
+  color: var(--err-text);
+  background: var(--err-bg);
+  border-color: var(--err-border);
+}
+
+.msg-ok {
+  color: var(--ok-text);
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+}
+
+/* ---------- 小字提示 ---------- */
+
+.hint {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+/* ---------- 主页：顶部导航与功能占位 ---------- */
+
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 14px 24px;
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 4px rgba(31, 41, 51, 0.05);
+}
+
+.nav-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.nav-user {
+  font-size: 14px;
+  color: var(--text-soft);
+}
+
+/* 功能占位栅格（auto-fit，窄屏自动单列） */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  width: 100%;
+  margin-top: 24px;
+}
+
+.feature-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  text-align: center;
+}
+
+.feature-card h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.feature-card p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+/* 两段式切换：第一段（测试码）通过后隐藏、显示第二段 */
+.stage-hidden { display: none !important; }

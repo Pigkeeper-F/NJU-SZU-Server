@@ -34,7 +34,7 @@
       </div>
       <div id="sidebar-tabs" class="sidebar-tabs" hidden></div>
       <div class="sidebar-footer"><div class="sidebar-tools"><div class="api-menu"><button id="add-api-button" class="quiet-button" type="button" aria-label="添加 API" title="添加 API" aria-haspopup="menu" aria-expanded="false"><span aria-hidden="true">＋</span><span class="api-button-label">添加 API</span></button><div id="api-provider-menu" class="api-provider-menu" role="menu" hidden><button type="button" role="menuitem" data-api-provider="deepseek">DeepSeek</button><button type="button" role="menuitem" data-api-provider="openai">OpenAI</button></div></div><button id="edit-dependencies-button" class="quiet-button" type="button" title="用系统文本编辑器打开项目依赖清单" aria-label="编辑依赖"><span aria-hidden="true">✎</span><span class="dependency-button-label">编辑依赖</span></button></div></div>
-      <div class="sidebar-bottom"><span class="save-dot"></span> 记录自动保存在此浏览器</div>
+      <div class="sidebar-bottom"><span class="profile-avatar">研</span><div>个人工作空间<small id="auth-user">已登录</small></div><button id="btn-logout" class="icon-btn" type="button" title="退出登录" aria-label="退出登录">⎋</button></div>
       <!-- 右侧拖拽手柄（cursor: col-resize） -->
       <div id="sidebar-resizer" class="sidebar-resizer" title="拖拽调整侧栏宽度"></div>
     </aside>
@@ -42,7 +42,7 @@
     <!-- ================================ 主区 ================================ -->
     <main id="main" class="main">
       <div class="workspace-body"><section class="work-area" aria-label="模块工作区">
-      <div class="task-bar"><label for="task-select">当前任务</label><select id="task-select" aria-label="切换任务"></select><button id="task-new" class="quiet-button" type="button">＋ 新建任务</button></div>
+      <div class="task-bar"><label for="task-select">当前任务</label><select id="task-select" aria-label="切换任务"></select><button id="task-new" class="quiet-button" type="button">＋ 新建任务</button><button id="backup-project" class="quiet-button" type="button" title="导出浏览器工作记录备份，不含 API Key">备份</button><button id="import-project" class="quiet-button" type="button" title="从 JSON 备份恢复浏览器工作记录">恢复</button></div>
       <div id="task-summary" class="task-rules-bar"><span>执行规则</span><span id="task-summary-status">尚未确认</span><button id="task-rules-open" class="quiet-button" type="button">查看 / 编辑规则</button></div>
       <div class="section-heading"><h2 id="section-name">模块工作区</h2><span id="active-module-meta"></span></div>
       <!-- 顶部模块选项卡条：T3: js/tabs.js 渲染 #module-tabs 内容 -->
@@ -60,7 +60,7 @@
         </div>
         <div class="composer-hint">Enter 发送 · Shift+Enter 换行 · 每个模块记忆独立</div>
       </div>
-      <section id="records-view" class="records-view" hidden><div id="records-list"></div></section>
+      <section id="records-view" class="records-view" hidden><div class="records-search-row"><input id="records-search" class="records-search" type="search" placeholder="搜索记录…" autocomplete="off"></div><div id="records-list"></div></section>
       </section></div>
     </main>
   </div>
@@ -68,8 +68,12 @@
   <dialog id="task-dialog"><form id="task-form"><div class="dialog-top"><span class="eyebrow">NEW TASK</span><button class="icon-btn" id="task-dialog-close" type="button" aria-label="关闭">×</button></div><h2>新建任务</h2><p>新任务有独立的模块对话与文件会话；当前练习保留，可随时切回。</p><label for="task-name">任务名称</label><input id="task-name" maxlength="80" required placeholder="例如：1992 年模型计算"><label for="task-start">从哪一步开始</label><select id="task-start"><option value="download">下载数据</option><option value="clean">数据清洗（已有原始文件）</option><option value="calculation">计算（已有代码和输入数据）</option></select><div class="dialog-actions"><button id="task-dialog-cancel" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">创建任务</button></div></form></dialog>
   <dialog id="rules-dialog"><div class="dialog-top"><span class="eyebrow">TASK RULES</span><button class="icon-btn" id="rules-dialog-close" type="button" aria-label="关闭">×</button></div><h2>执行规则</h2><p>这里只放你决定要执行的规则。可以自己填写，或让 AI 从对话中提取候选规则；AI 草稿须经你核对并确认。</p><div id="task-summary-confirmed" class="task-summary-confirmed" hidden></div><label for="task-summary-draft">规则草稿</label><textarea id="task-summary-draft" rows="12" placeholder="处理范围、输入文件、具体清洗/转换规则、异常处理、验收标准、输出文件……只写已经确定的内容。"></textarea><div class="task-summary-actions"><select id="task-summary-history" aria-label="查看规则历史版本"><option value="">历史版本</option></select><button id="task-summary-ai" class="quiet-button" type="button">AI 提取候选规则</button><button id="task-summary-save" class="primary-button" type="button">确认规则</button><button id="task-rules-execute" class="primary-button" type="button">按规则执行清洗</button></div><div id="task-summary-message" role="status"></div></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
+  <input id="import-file" type="file" accept=".json,application/json" hidden>
 
-  <!-- 脚本顺序不可调整：数据层 -> 三个 UI 模块 -> 装配 -->
+  <!-- 脚本顺序不可调整：账号 -> 守卫 -> 数据层 -> 三个 UI 模块 -> 装配 -->
+  <script src="js/auth-config.js"></script>
+  <script src="js/auth-storage.js"></script>
+  <script src="js/guard.js"></script>
   <script src="js/store.js"></script>
   <script src="js/sidebar.js"></script>
   <script src="js/tabs.js"></script>

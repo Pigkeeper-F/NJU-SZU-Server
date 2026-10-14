@@ -25,7 +25,8 @@ const problems = [];
 const passed = [];
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
 
-const JS_FILES = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js"];
+// 【集成 · 2026-10-13】js/auth-pages.js 纳入检查（其 DOM id / CSS 类引用落在账号页，见 htmlIds / css 的扩展源）
+const JS_FILES = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/workspace.js", "js/tasks.js", "js/auth-pages.js"];
 const UI_MODULES = [
   ["Sidebar", "js/sidebar.js"],
   ["ModuleTabs", "js/tabs.js"],
@@ -33,10 +34,15 @@ const UI_MODULES = [
   ["App", "js/app.js"]
 ];
 const STATIC_NODES = ["composer-input", "btn-send", "btn-add-module", "btn-sidebar-toggle", "sidebar-resizer"];
-const EXPECTED_SCRIPTS = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/workspace.js", "js/tasks.js"];
+// 【集成 · 2026-10-13】账号系统上工作台：index.html 在数据层之前先加载账号配置/存储与守卫
+const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.js", "js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/workspace.js", "js/tasks.js"];
+// 账号系统独立文件（登录/注册页自带脚本，不进工作台 index.html 的渲染链）
+const AUTH_FILES = ["js/auth-config.js", "js/auth-storage.js", "js/auth-pages.js", "js/guard.js", "login.html", "register.html", "css/auth.css"];
+// 契约 §2「两种运行模式」：前端只允许 js/chat.js 里对同源 /api/… 的 fetch；其余脚本零联网。
+const FETCH_ALLOWED = ["js/chat.js", "js/codex.js", "js/workspace.js", "js/tasks.js"];
 
 // ---------- 读取 ----------
-for (const f of JS_FILES.concat(["index.html", "css/style.css", "docs/contract.md"])) {
+for (const f of JS_FILES.concat(AUTH_FILES, ["index.html", "css/style.css", "docs/contract.md"])) {
   if (!fs.existsSync(path.join(ROOT, f))) {
     problems.push("缺少契约要求的文件: " + f);
   }
@@ -47,9 +53,16 @@ if (problems.length) {
 }
 
 const html = read("index.html");
-const css = read("css/style.css");
+// 【安全修复 · 2026-10-13】样式检查覆盖全部样式表：index.html 同时引入 style.css 与 workspace.css，
+// 只查 style.css 会把设置界面（settings-*）等 workspace.css 里的类误报为未定义。
+// 【集成 · 2026-10-13】再并入 css/auth.css（登录/注册页样式）。
+const css = read("css/style.css") + "\n" + read("css/workspace.css") + "\n" + read("css/auth.css");
 const storeSrc = read("js/store.js");
-const htmlIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+// 【集成 · 2026-10-13】DOM id 扫描源并入 login/register.html（js/auth-pages.js 的引用落点在账号页）
+let htmlIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+for (const ah of ["login.html", "register.html"]) {
+  for (const m of read(ah).matchAll(/\bid="([^"]+)"/g)) htmlIds.add(m[1]);
+}
 const cssClasses = new Set([...css.matchAll(/\.([A-Za-z][\w-]*)/g)].map((m) => m[1]));
 
 // ---------- 1. 脚本顺序 ----------
@@ -113,18 +126,45 @@ passed.push("全局对象导出齐备: " + UI_MODULES.map((p) => "window." + p[0
 // ---------- 6. 禁用能力（剥离注释后扫描） ----------
 for (const f of JS_FILES.concat(["index.html"])) {
   const raw = read(f);
-  const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/[^\n]*/g, "$1").replace(/<!--[\s\S]*?-->/g, "");
-  if (/\btype\s*=\s*["']module["']|crypto\.subtle/.test(src)) problems.push("[" + f + "] 出现禁用能力（ES module / crypto.subtle）");
-  if (/\bfetch\s*\(/.test(src) && f !== "js/chat.js") problems.push("[" + f + "] 出现非白名单 fetch（只允许 js/chat.js 调用同源 /api/ai/chat）");
-  if (/fetch\s*\(\s*["'](?!\/api\/ai\/chat["'])/.test(src)) problems.push("[" + f + "] fetch 目标不是同源 /api/ai/chat");
-  const urls = [...src.matchAll(/https?:\/\/[^"'`\s)]+/g)].map((m) => m[0]);
-  for (const url of urls) {
-    const allowedProviderUrl = f === "js/api-keys.js" && (
-      url === "https://api.deepseek.com/v1" ||
-      url === "https://api.openai.com/v1"
-    );
-    const allowedSvgNamespace = f === "index.html" && url === "http://www.w3.org/2000/svg";
-    if (!allowedProviderUrl && !allowedSvgNamespace) problems.push("[" + f + "] 出现非白名单外部 URL: " + url);
+  const src = raw
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|\s)\/\/[^\n]*/g, "$1")
+    .replace(/<!--[\s\S]*?-->/g, "");
+  const noData = src.replace(/data:[^"'\s)]+/g, "data-uri");   // 内联 data: 图标（含 SVG 命名空间）不算外部依赖
+  if (/\btype\s*=\s*["']module["']|crypto\.subtle/.test(noData)) {
+    problems.push("[" + f + "] 出现禁用能力（ES module / crypto.subtle）");
+  }
+  if (noData.indexOf("fetch(") !== -1 && FETCH_ALLOWED.indexOf(f) === -1) {
+    problems.push("[" + f + "] 出现 fetch()：按契约只有 " + FETCH_ALLOWED.join("、") + " 允许调用同源 AI 接口");
+  }
+  const xw = noData.match(/\b(XMLHttpRequest|WebSocket)\b/);
+  if (xw) problems.push("[" + f + "] 出现 " + xw[1] + "：前端只允许同源 fetch /api/ai/chat");
+  if (FETCH_ALLOWED.indexOf(f) !== -1) {
+    for (const m of noData.matchAll(/fetch\(\s*["']([^"']+)["']/g)) {
+      if (m[1].indexOf("/api/") !== 0) {
+        problems.push("[" + f + "] fetch 目标必须是同源 /api/… 路径，实际：" + m[1]);
+      }
+    }
+  }
+  // 外部 URL：HTML 只认资源引用上下文（src= / href= / url( / fetch 目标），避免 data: 内联图标里的
+  // XML 命名空间（http://www.w3.org/2000/svg）被误判；JS 只认非 data: 的字符串字面量。
+  let ext = null;
+  if (f.slice(-5) === ".html") {
+    ext = noData.match(/(?:src|href)\s*=\s*["']https?:\/\//) ||
+          noData.match(/url\(\s*["']?https?:\/\//) ||
+          noData.match(/fetch\(\s*["']https?:\/\//);
+  } else {
+    for (const m of noData.matchAll(/["'`]([^"'`\n]{0,200})["'`]/g)) {
+      if (m[1].indexOf("data:") === -1 && /https?:\/\//.test(m[1])) {
+        if (m[1].indexOf("例如") === 0) continue; // placeholder 示例文案（提示用户填什么格式），非真实请求
+        ext = m[1]; break;
+      }
+    }
+  }
+  if (ext) {
+    const providerPreset = f === "js/api-keys.js" &&
+      (String(ext).includes("https://api.deepseek.com/v1") || String(ext).includes("https://api.openai.com/v1"));
+    if (!providerPreset) problems.push("[" + f + "] 出现外部 URL（前端不得直连第三方服务）：" + String(ext).slice(0, 70));
   }
 }
 passed.push("禁用能力与外部 URL 扫描通过（已剥离注释）");

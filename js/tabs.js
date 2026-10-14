@@ -119,6 +119,16 @@
       mode.textContent = ({ direct: '运行现有代码', modify: '修改代码后计算', 'parameter-update': '参数更新', 'activity-data-update': '活动数据更新' })[mod.mode] || '选择计算方式';
       tab.appendChild(mode);
     }
+    // 状态徽标（流程模块的审核状态：待开始 / 进行中 / 待审核 / 已通过）
+    var statusMeta = { todo: '○', doing: '◐', review: '⏳', approved: '✓' };
+    var statusText = { todo: '待开始', doing: '进行中', review: '待审核', approved: '已通过' };
+    var st = statusMeta[mod.status] ? mod.status : 'todo';
+    var chip = doc.createElement('span');
+    chip.className = 'module-status';
+    chip.textContent = statusMeta[st];
+    chip.setAttribute('data-status', st);
+    chip.setAttribute('title', '状态：' + statusText[st]);
+    tab.appendChild(chip);
 
     // 依赖徽标：首模块「起点」，其余「← 上游模块名」
     var dep = doc.createElement('span');
@@ -337,6 +347,14 @@
     if (!tab) return;
     var id = tab.getAttribute('data-id');
     if (!id) return;
+
+    // 【安全修复 · 2026-10-13】优先走统一的命名 dialog（workspace.js 暴露），
+    // 交互风格与「新建模块 / 项目改名」一致；WorkspaceUI 未就绪时退回原生 prompt。
+    var ui = root.WorkspaceUI;
+    if (ui && typeof ui.openRenameDialog === 'function') {
+      ui.openRenameDialog(id, title.textContent || '');
+      return;
+    }
 
     var next = root.prompt ? root.prompt(RENAME_PROMPT, title.textContent || '') : null;
     if (next === null || typeof next === 'undefined') return; // 取消

@@ -1,58 +1,33 @@
 # 研序 · 研究工作台
 
-本目录是原 NJU-SZU 项目与 2026-10-12 研序交接版的合并工作区。交接功能、原有 SOC 流水线和流程图资料均保留；交接背景见 [开发交接说明](docs/开发交接.md)。
+本仓库合并了本地研序交接版与 GitHub `origin/main` 截至 2026-10-14 的改动。主界面仍按数据研究工作流组织：下载数据、数据清洗、计算、结果核查与定位、文献挖掘、人工审核、绘图；参数与活动数据更新是计算的可选分支。SOC 流水线位于 `SOC-database-pipeline-clean/`，目前是文献挖掘实例，尚未接入网页执行。
 
 ## 启动
 
-1. 安装 Node.js 18 或以上版本（本机验证环境为 Node.js 24）。项目只使用 Node 内置模块，无 npm 依赖，无需 npm install。
-2. macOS/Linux 在项目目录运行 `npm start`，访问 http://localhost:8123/；Windows 可双击 `start-workbench.cmd`，访问 http://localhost:18125/。
-3. 保持终端窗口运行；停止时按 Ctrl+C。服务只监听运行电脑的 127.0.0.1，不是远程共享网站。
+安装 Node.js 18+ 后，在本目录运行 `npm start`，访问 `http://localhost:8123/`。Windows 可双击 `start-workbench.cmd`（端口 18125）。项目使用 Node 内置模块，无需 `npm install`。不要直接双击 `index.html` 使用 AI、文件上传和执行功能；服务只监听本机。
 
-也可在项目目录的 PowerShell 运行：
+首次访问需要注册并登录：注册页的测试码定义在 `js/auth-config.js`。这是贡献版的**本地演示级账号门禁**，数据与登录状态仅存浏览器，不是服务器身份认证，也不应作为公网安全机制。
 
-```powershell
-$env:PORT = '18125'
-node server.js
-```
+## 合并后的能力
 
-`npm start` 默认端口为 8123；Windows 启动脚本固定使用 18125。请固定使用同一浏览器、同一地址，浏览器数据按地址隔离。不要双击 index.html 来使用 AI、上传和执行功能。
+- 左侧固定模块与独立研究任务；每个模块保留对话、确认规则和上传文件会话。
+- 默认进入「AI 对话」；左侧「添加 API」支持 DeepSeek/OpenAI，也可连接本机 Codex CLI。设置按钮可补充系统提示词。
+- 数据清洗、直接计算、修改计算与结果核查使用本机 Codex；生成环节文档、代码及受限执行是贡献版新增的能力，需要人工审核和确认。执行代码仍有本机风险，运行前必须检查生成内容。
+- 工作记录可搜索；浏览器记录可导出/恢复 JSON 备份。备份**不含 API Key、登录状态或服务端 `.workbench/` 上传与输出文件**；迁移整项研究时须另存这些文件。
+- 贡献版原有的浏览器多项目记录会在首次打开时一次性转为独立任务；原存储键仍保留。其“写作—投稿”旧流程只作为历史记录展示，不会替换当前固定数据模块。
+- 原项目的 SOC 文献数据库流水线、流程图和交接文档均保留。下载、文献等模块仍主要提供文字引导，不能仅凭模块名判断已具备自动执行能力。
 
-## AI 与计算环境
+## 配置与检查
 
-- 使用本机 Codex：需要安装 Codex CLI 并使用自己的账号登录，使 codex 命令可被服务器进程找到，然后在页面点击“检查连接”。项目不包含 CLI、账号、登录状态或 API Key。模型列表来自该账号，实际可用模型可能不同。
-- 使用 API 对话：在左下角“添加 API”配置自己的 DeepSeek 或 OpenAI 密钥。也可复制 .env.example 为 .env 配置服务器。API 模式目前提供文字对话；文件处理与执行走本机 Codex。
-- 运行 Python、R 等模型还需要相应运行时与模型依赖。项目根目录的 `requirements.txt` 是规划中的统一 Python 依赖清单，可在左下角“编辑依赖”中用系统文本编辑器打开；目前不会自动安装。将来虚拟环境使用 `.venv/`，`.env` 留给服务配置。可设置 WORKBENCH_PYTHON 指向 Python 可执行文件；Codex 可执行文件可由 CODEX_BIN 指定。
-- 本机 Codex 使用 app-server 协议，需在当前电脑验证 CLI 兼容性。
+本机 Codex 需要安装并登录 CLI。API Key 可在页面配置，或把 `.env.example` 复制为 `.env` 后填写服务端配置。Python 等计算依赖尚未自动安装；`requirements.txt` 是统一依赖清单，可用左侧「编辑依赖」打开。未来的虚拟环境目录是 `.venv/`，`.env` 用于服务配置。
 
-## 当前流程
-
-新建独立任务 → 数据清洗（讨论并确认规则后执行）→ 直接计算或修改计算 → 结果核查与定位 → 发现问题后返回计算讨论、修正、重跑、复验。
-
-直接计算上传现有代码和数据；修改计算先确认修改规则。核查模块支持“讨论核查原则”和“上传核查标准”，原则在大弹窗内编辑、确认并保留版本。下载数据、文献等模块目前主要提供流程讨论，不能据模块名称理解为全部自动执行能力已完成。
-
-## 项目内容
-
-- server.js、js/、css/、index.html：当前完整平台源码。
-- tools/：Codex 桥接与契约检查、计算和核查试跑脚本。
-- docs/：流程设计、各模块说明、开发交接与历史文档。
-- examples/1992-cleaning-trial/：80 行真实来源练习小样、规则说明、来源说明与取样脚本；非完整年度数据库。
-- examples/cleaning-demo-input.csv：清洗演示数据。
-- examples/历史试跑文件/：原本地工作目录中的小样输入、输出、代码和报告快照，供回看。不是浏览器任务备份，也不会自动显示在新任务中。
-- audit-principles-preview.png：界面预览。
-- SOC-database-pipeline-clean/：原项目保留的 SOC 文献数据库流水线实例，尚未接入网页命令执行。
-- docs/flowchart/：原项目流程图与历史版本。
-
-## 自检
-
-```powershell
+```bash
 npm run check
 node tools/check-contract.js
+node tools/test-merge-store.js
+node tools/test-server-exec.js
 ```
 
-tools/smoke-calculation.js、smoke-modify-calculation.js、smoke-audit.js 是需要已登录 Codex 和相应运行环境的集成试跑，会调用模型、创建测试会话。脚本中模型名是历史环境的值，接手者须改为自己账号的可用模型。修改与核查试跑需传入直接计算返回的 session ID。不要把历史验证结果视为新电脑上的验证。
+`tools/smoke-*.js` 会调用模型并消耗额度，需自行确认账号和运行环境后再执行。
 
-## 数据与边界
-
-任务列表、对话、确认规则保存在浏览器 localStorage；上传和输出保存在服务端 .workbench/。复制源码不会自动迁移浏览器对话、API Key 或账号登录状态；正式完整研究数据也不在示例中。新电脑启动时可新建任务并上传 examples 中的材料练习。
-
-早期 README 保留为 docs/README-历史版本.md，其中“纯静态”“无模型服务”等已过时。其它早期设计稿也可能描述规划而非已实现能力；以当前源码及 docs/开发交接.md 为准。
+更多说明见 `docs/user-guide.md`、`docs/workflow-drafts.md`、`docs/开发交接.md`。早期说明存于 `docs/README-历史版本.md`；其中的静态演示限制已过时。

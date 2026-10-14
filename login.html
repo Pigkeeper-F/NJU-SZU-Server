@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 - 研序 · 研究工作台</title>
+  <link rel="stylesheet" href="css/auth.css">
+</head>
+<body>
+  <main class="page">
+    <section class="card">
+      <h1 class="page-title">登录</h1>
+
+      <div id="login-msg" class="msg" role="alert"></div>
+
+      <div class="form-row">
+        <label for="login-user">账号</label>
+        <input class="input" type="text" id="login-user" placeholder="请输入账号"
+               autocomplete="username" maxlength="32">
+      </div>
+      <div class="form-row">
+        <label for="login-pass">密码</label>
+        <input class="input" type="password" id="login-pass" placeholder="请输入密码"
+               autocomplete="current-password">
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary btn-block" type="button" id="btn-login">登录</button>
+      </div>
+
+      <p class="hint">还没有账号？<a href="register.html">去注册</a></p>
+    </section>
+  </main>
+
+  <script src="js/auth-config.js"></script>
+  <script src="js/auth-storage.js"></script>
+  <script src="js/auth-pages.js"></script>
+</body>
+</html>

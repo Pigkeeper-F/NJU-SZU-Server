@@ -42,10 +42,41 @@
 
   function initialize() {
     try { index = JSON.parse(read(INDEX_KEY)); } catch (e) { index = null; }
-    if (!index || !Array.isArray(index.tasks) || !index.tasks.length || !index.tasks.some(function (task) { return task.id === index.activeTaskId; })) {
+    var fresh = !index || !Array.isArray(index.tasks) || !index.tasks.length || !index.tasks.some(function (task) { return task.id === index.activeTaskId; });
+    if (fresh) {
       var first = { id: id(), name: '原有练习', createdAt: new Date().toISOString(), rulesByModule: {} };
       index = { activeTaskId: first.id, tasks: [first] };
       saveIndex();
+    }
+    // 贡献版使用 fa_projects_v1 存多项目；一次性映射为本工作台的独立任务，保留原键作备份。
+    if (!read('research_legacy_projects_imported_v1')) {
+      var legacyProjects;
+      try { legacyProjects = JSON.parse(read('fa_projects_v1')); } catch (e) { legacyProjects = null; }
+      if (Array.isArray(legacyProjects) && legacyProjects.length) {
+        var currentProjectId = read('fa_current_project_id_v1');
+        if (fresh) {
+          try {
+            var meta = JSON.parse(read('research_workspace_meta_v1'));
+            if (meta && typeof meta.name === 'string' && meta.name.trim()) index.tasks[0].name = meta.name.trim().slice(0, 80);
+          } catch (e) { /* 沿用原有练习名称 */ }
+        }
+        legacyProjects.forEach(function (project) {
+          if (!project || typeof project.id !== 'string' || project.id === currentProjectId || !Array.isArray(project.modules)) return;
+          var taskId = id();
+          var task = {
+            id: taskId,
+            name: ((typeof project.name === 'string' && project.name.trim()) ? project.name.trim() : '旧项目').slice(0, 80),
+            createdAt: project.savedAt || new Date().toISOString(),
+            rulesByModule: {}
+          };
+          var snapshot = root.Store.getState();
+          snapshot.modules = project.modules;
+          snapshot.activeModuleId = project.activeModuleId || null;
+          if (write(STATE_PREFIX + taskId, JSON.stringify(snapshot))) index.tasks.push(task);
+        });
+        saveIndex();
+        write('research_legacy_projects_imported_v1', '1');
+      }
     }
     // fa_state_v1 始终是当前任务的最新镜像。首次升级时原有记录直接归入“原有练习”。
     saveState();
