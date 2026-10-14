@@ -1,0 +1,12 @@
+1992 年清洗流程试跑资料
+
+规则说明：1992_原始数据到模型输入_完整清洗说明.txt
+  是原 Markdown 文档的纯文本副本，内容未改动，仅为适配平台目前接受的 .txt 上传格式。
+
+练习数据：FBSH_1992_Afghanistan_练习样本.csv
+  来源：D:\claudecode\model1992\data_download\FoodBalanceSheetsHistoric_E_All_Data_(Normalized).zip
+  内部文件：FoodBalanceSheetsHistoric_E_All_Data_(Normalized).csv
+  筛选：Year=1992；Area Code (M49)=004；Element Code 属于 5511、5611、5911、5074、5142、5521；取匹配的前 80 行。
+  这是一份不完整的练习样本，只用于验证读取、字段检查和规则理解，不能生成正式 1992 模型输入。
+
+原始 ZIP 和正式模型输入没有被改动。

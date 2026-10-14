@@ -559,6 +559,72 @@ body.sidebar-collapsed .sidebar-hint { display: none; }
 
 /* ---- 分区 A：侧栏（sidebar.js）与输入区（chat.js composer） —— 负责人：A ---- */
 
+.api-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.api-provider-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 148px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.api-provider-menu button {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.api-provider-menu button:hover,
+.api-provider-menu button:focus-visible {
+  background: var(--panel-2);
+}
+
+.api-key-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.api-key-row input {
+  min-width: 0;
+}
+
+.calculation-mode-chooser { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 8px; color: var(--muted); font-size: 12px; }
+.calculation-mode-option { border: 1px solid var(--border); border-radius: 6px; background: var(--panel); padding: 6px 10px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.calculation-mode-option:hover { background: var(--panel-2); border-color: var(--accent-line); }
+.fixed-module-next { align-self: center; color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+#api-dialog input {
+  width: 100%;
+}
+
+@media (max-width: 640px) {
+  .api-provider-menu {
+    left: 0;
+    right: auto;
+  }
+
+  .api-key-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ---- 分区 B：模块条（tabs.js）与消息区（chat.js msg-list） —— 负责人：B ---- */
 
 /* ---- 分区 共用：跨模块公共样式 / 主题变量调整 —— 双方确认后由提交者追加 ---- */

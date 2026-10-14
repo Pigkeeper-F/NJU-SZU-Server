@@ -1,0 +1,59 @@
+﻿Country_M49,FBSH_Item_Code,Item,Element_Code,Element,Year,Status
+004,2511,Wheat and products,5911,Export Quantity,1992,not_in_sample
+004,2511,Wheat and products,5521,Feed,1992,not_in_sample
+004,2513,Barley and products,5911,Export Quantity,1992,not_in_sample
+004,2514,Maize and products,5074,Stock Variation,1992,not_in_sample
+004,2517,Millet and products,5611,Import Quantity,1992,not_in_sample
+004,2517,Millet and products,5911,Export Quantity,1992,not_in_sample
+004,2517,Millet and products,5074,Stock Variation,1992,not_in_sample
+004,2517,Millet and products,5521,Feed,1992,not_in_sample
+004,2520,"Cereals, Other",5511,Production,1992,not_in_sample
+004,2520,"Cereals, Other",5911,Export Quantity,1992,not_in_sample
+004,2520,"Cereals, Other",5074,Stock Variation,1992,not_in_sample
+004,2520,"Cereals, Other",5521,Feed,1992,not_in_sample
+004,2531,Potatoes and products,5074,Stock Variation,1992,not_in_sample
+004,2531,Potatoes and products,5521,Feed,1992,not_in_sample
+004,2536,Sugar cane,5611,Import Quantity,1992,not_in_sample
+004,2536,Sugar cane,5911,Export Quantity,1992,not_in_sample
+004,2536,Sugar cane,5074,Stock Variation,1992,not_in_sample
+004,2536,Sugar cane,5142,Food,1992,not_in_sample
+004,2537,Sugar beet,5611,Import Quantity,1992,not_in_sample
+004,2537,Sugar beet,5911,Export Quantity,1992,not_in_sample
+004,2537,Sugar beet,5074,Stock Variation,1992,not_in_sample
+004,2537,Sugar beet,5142,Food,1992,not_in_sample
+004,2542,Sugar (Raw Equivalent),5911,Export Quantity,1992,not_in_sample
+004,2542,Sugar (Raw Equivalent),5521,Feed,1992,not_in_sample
+004,2543,"Sweeteners, Other",5511,Production,1992,not_in_sample
+004,2543,"Sweeteners, Other",5911,Export Quantity,1992,not_in_sample
+004,2543,"Sweeteners, Other",5074,Stock Variation,1992,not_in_sample
+004,2543,"Sweeteners, Other",5521,Feed,1992,not_in_sample
+004,2549,"Pulses, Other and products",5074,Stock Variation,1992,not_in_sample
+004,2551,Nuts and products,5611,Import Quantity,1992,not_in_sample
+004,2551,Nuts and products,5074,Stock Variation,1992,not_in_sample
+004,2551,Nuts and products,5521,Feed,1992,not_in_sample
+004,2557,Sunflower seed,5611,Import Quantity,1992,not_in_sample
+004,2557,Sunflower seed,5911,Export Quantity,1992,not_in_sample
+004,2557,Sunflower seed,5074,Stock Variation,1992,not_in_sample
+004,2557,Sunflower seed,5142,Food,1992,not_in_sample
+004,2557,Sunflower seed,5521,Feed,1992,not_in_sample
+004,2559,Cottonseed,5611,Import Quantity,1992,not_in_sample
+004,2559,Cottonseed,5074,Stock Variation,1992,not_in_sample
+004,2559,Cottonseed,5142,Food,1992,not_in_sample
+004,2559,Cottonseed,5521,Feed,1992,not_in_sample
+004,2745,Honey,5074,Stock Variation,1992,not_in_sample
+004,2745,Honey,5521,Feed,1992,not_in_sample
+004,2805,Rice (Milled Equivalent),5911,Export Quantity,1992,not_in_sample
+004,2805,Rice (Milled Equivalent),5074,Stock Variation,1992,not_in_sample
+004,2805,Rice (Milled Equivalent),5521,Feed,1992,not_in_sample
+004,2907,Starchy Roots,5074,Stock Variation,1992,not_in_sample
+004,2907,Starchy Roots,5521,Feed,1992,not_in_sample
+004,2908,Sugar Crops,5611,Import Quantity,1992,not_in_sample
+004,2908,Sugar Crops,5911,Export Quantity,1992,not_in_sample
+004,2908,Sugar Crops,5074,Stock Variation,1992,not_in_sample
+004,2908,Sugar Crops,5142,Food,1992,not_in_sample
+004,2909,Sugar & Sweeteners,5521,Feed,1992,not_in_sample
+004,2911,Pulses,5074,Stock Variation,1992,not_in_sample
+004,2912,Treenuts,5611,Import Quantity,1992,not_in_sample
+004,2912,Treenuts,5074,Stock Variation,1992,not_in_sample
+004,2912,Treenuts,5521,Feed,1992,not_in_sample
+004,2913,Oilcrops,5521,Feed,1992,not_in_sample

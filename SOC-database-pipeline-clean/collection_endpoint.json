@@ -1,0 +1,35 @@
+{
+  "mode": "spatial_model_readiness",
+  "model_dataset": "C:/Users/31307/Desktop/SOC model/outputs/soc_space_model_input_final/final_spatial_model_input.csv",
+  "requirements": {
+    "valid_unique_points": {
+      "min": 500
+    },
+    "valid_surface_points_0_30": {
+      "min": 500
+    },
+    "min_agro_region_unique_points": {
+      "min": 60
+    },
+    "invalid_coordinate_rows": {
+      "max": 0
+    },
+    "max_rows_per_point_share": {
+      "max": 0.05
+    }
+  },
+  "monitor_only": {
+    "valid_deep_points_30_60": {
+      "recommended_min": 150
+    },
+    "valid_deep_points_60_100": {
+      "recommended_min": 80
+    },
+    "invalid_coordinate_rate": {
+      "recommended_max": 0
+    },
+    "unique_references": {
+      "recommended_min": 400
+    }
+  }
+}

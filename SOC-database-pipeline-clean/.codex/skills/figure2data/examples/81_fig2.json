@@ -1,0 +1,12 @@
+{
+  "pdf_path": "D:/CodexCat/04_project/07_figure2data/81.pdf",
+  "page_idx": 4,
+  "fig_output": "fig2_native.png",
+  "subplots": {
+    "A_line": {"crop": [60,    80, 1500, 1200], "type": "line"},
+    "A_bar":  {"crop": [1400,  80, 3100, 1200], "type": "bar"},
+    "B_line": {"crop": [60,  1400, 1500, 2550], "type": "line"},
+    "B_bar":  {"crop": [1400, 1400, 3100, 2550], "type": "bar"}
+  },
+  "_note": "高碳土壤(A) + 极高碳土壤(B) 稻田 CH4 排放通量(line) 和累计排放量(bar)"
+}

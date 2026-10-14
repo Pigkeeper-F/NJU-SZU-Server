@@ -1,0 +1,6 @@
+规则版本：v1
+修改：double_value = int(value) * 3（原为 * 2）
+保留其余逻辑和输出字段：item, double_value
+输入：smoke_input.csv
+运行状态：成功
+检查结果：a=6，b=9；通过

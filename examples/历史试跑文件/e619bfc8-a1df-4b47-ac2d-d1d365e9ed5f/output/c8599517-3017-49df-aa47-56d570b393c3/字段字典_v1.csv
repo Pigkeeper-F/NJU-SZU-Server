@@ -1,0 +1,20 @@
+﻿field,logical_type,unit,description,empty_meaning
+Area Code,text,,原始地区代码,本次无空值
+Area Code (M49),text,,原始 M49，保留前导撇号和零,本次无空值
+Area,text,,原始地区名称,本次无空值
+Item Code,text,,原始商品代码，保持原字符串,本次无空值
+Item Code (FBS),text,,原始 FBS 商品代码，保留撇号,本次无空值
+Item,text,,原始商品名称,本次无空值
+Element Code,text,,原始要素代码,本次无空值
+Element,text,,原始要素名称,本次无空值
+Year Code,text,year,原始年份代码,本次无空值
+Year,text,year,原始年份,本次无空值
+Unit,text,,原值单位，本样本全部为 1000 t,本次无空值
+Value,decimal string,1000 t,原始值字符串，保留六位小数与符号,空白不等于零；本样本无空白
+Flag,text,,原始质量标记，含义不作推断,本次无空值
+Country_M49,text(3),,标准化三位 M49，004；导入时指定文本类型,本次无空值
+FBSH_Item_Code,integer,,Item Code 解析为整数的连接键,本次无空值
+Value_t,decimal,t,Value × 1000，十进制精确换算，库存不变号,空白不等于零；本样本无空白
+Value_status,enum,,blank=空白；reported_zero=明确报零；reported_nonzero=非零报告值,本次无空值
+Source_file,text,,实际上传的练习 CSV 文件名,本次无空值
+Source_row,integer,,练习 CSV 行号，表头为第 1 行，数据为第 2–81 行；不是原始 ZIP 行号,本次无空值

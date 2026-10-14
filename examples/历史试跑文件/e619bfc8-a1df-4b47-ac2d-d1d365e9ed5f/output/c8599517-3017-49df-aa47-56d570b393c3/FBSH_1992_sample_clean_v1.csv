@@ -1,0 +1,81 @@
+﻿Area Code,Area Code (M49),Area,Item Code,Item Code (FBS),Item,Element Code,Element,Year Code,Year,Unit,Value,Flag,Country_M49,FBSH_Item_Code,Value_t,Value_status,Source_file,Source_row
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5511,Production,1992,1992,1000 t,2370.000000,E,004,2905,2370000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,2
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5611,Import Quantity,1992,1992,1000 t,154.000000,E,004,2905,154000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,3
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5074,Stock Variation,1992,1992,1000 t,180.000000,E,004,2905,180000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,4
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5911,Export Quantity,1992,1992,1000 t,0.000000,E,004,2905,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,5
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5521,Feed,1992,1992,1000 t,130.000000,E,004,2905,130000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,6
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5142,Food,1992,1992,1000 t,2140.000000,E,004,2905,2140000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,7
+2,'004,Afghanistan,2511,'S2511,Wheat and products,5511,Production,1992,1992,1000 t,1650.000000,I,004,2511,1650000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,8
+2,'004,Afghanistan,2511,'S2511,Wheat and products,5611,Import Quantity,1992,1992,1000 t,78.000000,I,004,2511,78000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,9
+2,'004,Afghanistan,2511,'S2511,Wheat and products,5074,Stock Variation,1992,1992,1000 t,180.000000,I,004,2511,180000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,10
+2,'004,Afghanistan,2511,'S2511,Wheat and products,5142,Food,1992,1992,1000 t,1582.000000,I,004,2511,1582000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,11
+2,'004,Afghanistan,2805,'S2805,Rice (Milled Equivalent),5511,Production,1992,1992,1000 t,200.000000,I,004,2805,200000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,12
+2,'004,Afghanistan,2805,'S2805,Rice (Milled Equivalent),5611,Import Quantity,1992,1992,1000 t,76.000000,I,004,2805,76000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,13
+2,'004,Afghanistan,2805,'S2805,Rice (Milled Equivalent),5142,Food,1992,1992,1000 t,249.000000,I,004,2805,249000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,14
+2,'004,Afghanistan,2513,'S2513,Barley and products,5511,Production,1992,1992,1000 t,200.000000,I,004,2513,200000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,15
+2,'004,Afghanistan,2513,'S2513,Barley and products,5611,Import Quantity,1992,1992,1000 t,0.000000,I,004,2513,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,16
+2,'004,Afghanistan,2513,'S2513,Barley and products,5074,Stock Variation,1992,1992,1000 t,0.000000,I,004,2513,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,17
+2,'004,Afghanistan,2513,'S2513,Barley and products,5521,Feed,1992,1992,1000 t,40.000000,I,004,2513,40000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,18
+2,'004,Afghanistan,2513,'S2513,Barley and products,5142,Food,1992,1992,1000 t,120.000000,I,004,2513,120000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,19
+2,'004,Afghanistan,2514,'S2514,Maize and products,5511,Production,1992,1992,1000 t,300.000000,I,004,2514,300000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,20
+2,'004,Afghanistan,2514,'S2514,Maize and products,5611,Import Quantity,1992,1992,1000 t,0.000000,I,004,2514,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,21
+2,'004,Afghanistan,2514,'S2514,Maize and products,5911,Export Quantity,1992,1992,1000 t,0.000000,I,004,2514,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,22
+2,'004,Afghanistan,2514,'S2514,Maize and products,5521,Feed,1992,1992,1000 t,90.000000,I,004,2514,90000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,23
+2,'004,Afghanistan,2514,'S2514,Maize and products,5142,Food,1992,1992,1000 t,170.000000,I,004,2514,170000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,24
+2,'004,Afghanistan,2517,'S2517,Millet and products,5511,Production,1992,1992,1000 t,20.000000,I,004,2517,20000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,25
+2,'004,Afghanistan,2517,'S2517,Millet and products,5142,Food,1992,1992,1000 t,18.000000,I,004,2517,18000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,26
+2,'004,Afghanistan,2520,'S2520,"Cereals, Other",5611,Import Quantity,1992,1992,1000 t,0.000000,I,004,2520,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,27
+2,'004,Afghanistan,2520,'S2520,"Cereals, Other",5142,Food,1992,1992,1000 t,0.000000,I,004,2520,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,28
+2,'004,Afghanistan,2907,'S2907,Starchy Roots,5511,Production,1992,1992,1000 t,225.000000,E,004,2907,225000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,29
+2,'004,Afghanistan,2907,'S2907,Starchy Roots,5611,Import Quantity,1992,1992,1000 t,5.000000,E,004,2907,5000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,30
+2,'004,Afghanistan,2907,'S2907,Starchy Roots,5911,Export Quantity,1992,1992,1000 t,0.000000,E,004,2907,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,31
+2,'004,Afghanistan,2907,'S2907,Starchy Roots,5142,Food,1992,1992,1000 t,210.000000,E,004,2907,210000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,32
+2,'004,Afghanistan,2531,'S2531,Potatoes and products,5511,Production,1992,1992,1000 t,225.000000,I,004,2531,225000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,33
+2,'004,Afghanistan,2531,'S2531,Potatoes and products,5611,Import Quantity,1992,1992,1000 t,5.000000,I,004,2531,5000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,34
+2,'004,Afghanistan,2531,'S2531,Potatoes and products,5911,Export Quantity,1992,1992,1000 t,0.000000,I,004,2531,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,35
+2,'004,Afghanistan,2531,'S2531,Potatoes and products,5142,Food,1992,1992,1000 t,210.000000,I,004,2531,210000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,36
+2,'004,Afghanistan,2908,'S2908,Sugar Crops,5511,Production,1992,1992,1000 t,39.000000,E,004,2908,39000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,37
+2,'004,Afghanistan,2908,'S2908,Sugar Crops,5521,Feed,1992,1992,1000 t,29.000000,E,004,2908,29000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,38
+2,'004,Afghanistan,2536,'S2536,Sugar cane,5511,Production,1992,1992,1000 t,38.000000,I,004,2536,38000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,39
+2,'004,Afghanistan,2536,'S2536,Sugar cane,5521,Feed,1992,1992,1000 t,29.000000,I,004,2536,29000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,40
+2,'004,Afghanistan,2537,'S2537,Sugar beet,5511,Production,1992,1992,1000 t,1.000000,I,004,2537,1000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,41
+2,'004,Afghanistan,2537,'S2537,Sugar beet,5521,Feed,1992,1992,1000 t,0.000000,I,004,2537,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,42
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5511,Production,1992,1992,1000 t,5.000000,E,004,2909,5000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,43
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5611,Import Quantity,1992,1992,1000 t,60.000000,E,004,2909,60000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,44
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5074,Stock Variation,1992,1992,1000 t,-11.000000,E,004,2909,-11000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,45
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5911,Export Quantity,1992,1992,1000 t,0.000000,E,004,2909,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,46
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5142,Food,1992,1992,1000 t,54.000000,E,004,2909,54000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,47
+2,'004,Afghanistan,2542,'S2542,Sugar (Raw Equivalent),5511,Production,1992,1992,1000 t,1.000000,I,004,2542,1000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,48
+2,'004,Afghanistan,2542,'S2542,Sugar (Raw Equivalent),5611,Import Quantity,1992,1992,1000 t,60.000000,I,004,2542,60000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,49
+2,'004,Afghanistan,2542,'S2542,Sugar (Raw Equivalent),5074,Stock Variation,1992,1992,1000 t,-11.000000,I,004,2542,-11000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,50
+2,'004,Afghanistan,2542,'S2542,Sugar (Raw Equivalent),5142,Food,1992,1992,1000 t,50.000000,I,004,2542,50000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,51
+2,'004,Afghanistan,2543,'S2543,"Sweeteners, Other",5611,Import Quantity,1992,1992,1000 t,0.000000,I,004,2543,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,52
+2,'004,Afghanistan,2543,'S2543,"Sweeteners, Other",5142,Food,1992,1992,1000 t,0.000000,I,004,2543,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,53
+2,'004,Afghanistan,2745,'S2745,Honey,5511,Production,1992,1992,1000 t,4.000000,I,004,2745,4000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,54
+2,'004,Afghanistan,2745,'S2745,Honey,5611,Import Quantity,1992,1992,1000 t,0.000000,I,004,2745,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,55
+2,'004,Afghanistan,2745,'S2745,Honey,5911,Export Quantity,1992,1992,1000 t,0.000000,I,004,2745,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,56
+2,'004,Afghanistan,2745,'S2745,Honey,5142,Food,1992,1992,1000 t,4.000000,I,004,2745,4000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,57
+2,'004,Afghanistan,2911,'S2911,Pulses,5511,Production,1992,1992,1000 t,35.000000,E,004,2911,35000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,58
+2,'004,Afghanistan,2911,'S2911,Pulses,5611,Import Quantity,1992,1992,1000 t,0.000000,E,004,2911,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,59
+2,'004,Afghanistan,2911,'S2911,Pulses,5911,Export Quantity,1992,1992,1000 t,1.000000,E,004,2911,1000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,60
+2,'004,Afghanistan,2911,'S2911,Pulses,5521,Feed,1992,1992,1000 t,2.000000,E,004,2911,2000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,61
+2,'004,Afghanistan,2911,'S2911,Pulses,5142,Food,1992,1992,1000 t,29.000000,E,004,2911,29000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,62
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5511,Production,1992,1992,1000 t,35.000000,I,004,2549,35000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,63
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5611,Import Quantity,1992,1992,1000 t,0.000000,I,004,2549,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,64
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5911,Export Quantity,1992,1992,1000 t,1.000000,I,004,2549,1000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,65
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5521,Feed,1992,1992,1000 t,2.000000,I,004,2549,2000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,66
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5142,Food,1992,1992,1000 t,29.000000,I,004,2549,29000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,67
+2,'004,Afghanistan,2912,'S2912,Treenuts,5511,Production,1992,1992,1000 t,18.000000,E,004,2912,18000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,68
+2,'004,Afghanistan,2912,'S2912,Treenuts,5911,Export Quantity,1992,1992,1000 t,1.000000,E,004,2912,1000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,69
+2,'004,Afghanistan,2912,'S2912,Treenuts,5142,Food,1992,1992,1000 t,17.000000,E,004,2912,17000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,70
+2,'004,Afghanistan,2551,'S2551,Nuts and products,5511,Production,1992,1992,1000 t,18.000000,I,004,2551,18000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,71
+2,'004,Afghanistan,2551,'S2551,Nuts and products,5911,Export Quantity,1992,1992,1000 t,1.000000,I,004,2551,1000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,72
+2,'004,Afghanistan,2551,'S2551,Nuts and products,5142,Food,1992,1992,1000 t,17.000000,I,004,2551,17000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,73
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5511,Production,1992,1992,1000 t,103.000000,E,004,2913,103000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,74
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5611,Import Quantity,1992,1992,1000 t,0.000000,E,004,2913,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,75
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5074,Stock Variation,1992,1992,1000 t,0.000000,E,004,2913,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,76
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5911,Export Quantity,1992,1992,1000 t,1.000000,E,004,2913,1000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,77
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5142,Food,1992,1992,1000 t,14.000000,E,004,2913,14000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,78
+2,'004,Afghanistan,2557,'S2557,Sunflower seed,5511,Production,1992,1992,1000 t,16.000000,I,004,2557,16000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,79
+2,'004,Afghanistan,2559,'S2559,Cottonseed,5511,Production,1992,1992,1000 t,44.000000,I,004,2559,44000.000000,reported_nonzero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,80
+2,'004,Afghanistan,2559,'S2559,Cottonseed,5911,Export Quantity,1992,1992,1000 t,0.000000,I,004,2559,0.000000,reported_zero,e92e9b61-FBSH_1992_Afghanistan_练习样本.csv,81

@@ -134,18 +134,37 @@
     var state = Store ? Store.getState() : null;
     var mod = state ? findModule(state.modules || [], moduleId) : null;
     if (!mod) return [];
-    return (mod.messages || []).map(function (message) {
+    var recent = (mod.messages || []).filter(function (message) {
+      return message.role === 'user' || message.role === 'assistant';
+    }).slice(-25).map(function (message) {
       return { role: message.role, text: message.text };
     });
+    var rules = root.TaskManager && root.TaskManager.confirmedRules();
+    if (!rules) return recent;
+    var chunks = [];
+    for (var offset = 0; offset < rules.length; offset += 3400) {
+      chunks.push({ role: 'user', text: '以下是研究者确认的执行规则（第 ' + (chunks.length + 1) + ' 段），仅按规则处理；规则未覆盖的判断先询问：\n' + rules.slice(offset, offset + 3400) });
+    }
+    return chunks.concat(recent);
   }
 
   function requestReply(moduleId) {
+    var module = findModule(getStore().getState().modules, moduleId);
+    var credential = root.ApiKeys && typeof root.ApiKeys.getActiveCredential === 'function'
+      ? root.ApiKeys.getActiveCredential()
+      : null;
     pendingModules[moduleId] = true;
     render();
+    if (root.CodexUI && root.CodexUI.useCodex(module)) {
+      return root.CodexUI.reply(module, messagesFor(moduleId)).catch(function (error) {
+        getStore().appendMessage(moduleId, 'Codex 请求失败：' + error.message, 'system');
+      }).finally(function () { delete pendingModules[moduleId]; render(); });
+    }
     return fetch('/api/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: messagesFor(moduleId) })
+      body: JSON.stringify({ messages: messagesFor(moduleId), credential: credential,
+        module: { type: module.type, mode: module.mode || null } })
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
         if (!response.ok) throw new Error(data.error || 'AI 服务请求失败');
@@ -205,7 +224,7 @@
       var list = el('div', 'msg-list');
       if (!messages.length) {
         list.appendChild(emptyState(active.name,
-          '这是「' + active.name + '」的独立空间，在下方输入内容开始'));
+          '输入研究目标或已有材料。切换到 AI 对话后，助手会依据本模块工作流协助你补齐输入、推进执行并检查交付。'));
       } else {
         for (var i = 0; i < messages.length; i++) list.appendChild(buildMessage(messages[i]));
       }
@@ -219,7 +238,8 @@
       if (fallback) {
         setComposerEnabled(false, PLACEHOLDER_NO_ACTIVE);
       } else {
-        setComposerEnabled(!pendingModules[active.id], pendingModules[active.id] ? 'AI 正在回复…' : PLACEHOLDER_DEFAULT);
+        var busy = pendingModules[active.id] || (root.CodexUI && root.CodexUI.busy(active.id));
+        setComposerEnabled(!busy, busy ? 'AI 正在回复…' : PLACEHOLDER_DEFAULT);
       }
     }
 
@@ -235,12 +255,28 @@
     if (!inputEl) return;
     var id = activeModuleId();
     if (!id) return;                                    // 无选中模块 / 模块不存在 -> 忽略
+    if (pendingModules[id] || (root.CodexUI && root.CodexUI.busy(id))) return;
     var msg = getStore().appendMessage(id, inputEl.value, 'user');
     if (!msg) return;                                   // 空文本被 Store 拒绝 -> 保留原输入
     inputEl.value = '';
     autoGrow(inputEl);
     render();                                           // 自渲染兜底（app.js 订阅后也会再渲染一次）
     requestReply(id);
+  }
+
+  function sendText(text) {
+    if (!inputEl) inputEl = document.getElementById('composer-input');
+    if (!inputEl || !text || !activeModuleId() || isBusy()) return false;
+    inputEl.value = text;
+    send();
+    return true;
+  }
+
+  function isBusy() {
+    var state = getStore().getState();
+    return (state.modules || []).some(function (mod) {
+      return !!(pendingModules[mod.id] || (root.CodexUI && root.CodexUI.busy(mod.id)));
+    });
   }
 
   // -------------------------------------------------------------- 加载期绑定
@@ -266,5 +302,5 @@
     });
   }
 
-  root.ModuleSpace = { render: render };
+  root.ModuleSpace = { render: render, sendText: sendText, isBusy: isBusy };
 })(typeof window !== 'undefined' ? window : this);

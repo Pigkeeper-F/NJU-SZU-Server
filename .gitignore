@@ -8,6 +8,8 @@ js/*.local.js
 
 # ---- 依赖目录 ----
 node_modules/
+.venv/
+.workbench/
 
 # ---- 编辑器 / 系统杂项 ----
 .idea/

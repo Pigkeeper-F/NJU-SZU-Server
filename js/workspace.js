@@ -2,46 +2,15 @@
 (function () {
   'use strict';
   const $ = id => document.getElementById(id);
-  const key = 'research_workspace_meta_v1';
-  let meta = { name: '我的研究项目', note: '' };
-  try {
-    const saved = JSON.parse(localStorage.getItem(key));
-    if (saved && typeof saved.name === 'string' && typeof saved.note === 'string') meta = saved;
-  } catch (_) { /* Keep the in-memory workspace available. */ }
   let currentView = 'workspace';
-  let dialogMode = 'module';
-  let toastTimer;
   const node = (tag, className, text) => {
     const el = document.createElement(tag);
     el.className = className || '';
     if (text !== undefined) el.textContent = text;
     return el;
   };
-  function saveMeta() {
-    try { localStorage.setItem(key, JSON.stringify(meta)); return true; }
-    catch (_) { return false; }
-  }
-  function toast(text) {
-    $('toast').textContent = text;
-    $('toast').hidden = false;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { $('toast').hidden = true; }, 2800);
-  }
   function formatDate(value) {
     return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-  }
-  function openDialog(mode) {
-    dialogMode = mode;
-    const rename = mode === 'project';
-    $('dialog-title').textContent = rename ? '修改项目名称' : '新建研究模块';
-    $('dialog-eyebrow').textContent = rename ? 'PROJECT SETTINGS' : 'NEW MODULE';
-    $('name-label').textContent = rename ? '项目名称' : '模块名称';
-    $('dialog-description').textContent = rename ? '用一个清晰的名字，让研究更容易找到。' : '给这段工作起个名字，之后可以随时调整。';
-    $('name-input').value = rename ? meta.name : '';
-    $('name-input').setCustomValidity('');
-    $('name-input').placeholder = rename ? '输入项目名称' : '例如：文献阅读、数据整理、研究讨论';
-    $('name-dialog').showModal();
-    $('name-input').focus();
   }
   function switchView(view) {
     currentView = view;
@@ -49,23 +18,55 @@
   }
   function welcome() {
     const panel = node('div', 'welcome');
-    panel.append(node('div', 'welcome-symbol', '▤'), node('h2', '', '从一个研究模块开始'), node('p', '', '为手头的研究留一个专注的空间。整理想法、展开讨论，也记录每一步进展。'));
+    panel.append(node('div', 'eyebrow', '研序 · 研究工作台'), node('h2', '', '开始你的研究'), node('p', '', '从下载数据开始，逐步完成清洗、计算与分析。每个模块都有独立的对话与工作记录。'));
     const button = node('button', 'primary-button', '＋ 创建第一个模块');
     button.type = 'button';
-    button.addEventListener('click', () => openDialog('module'));
+    button.addEventListener('click', () => Store.addModule('下载数据'));
     panel.append(button);
-    const features = node('div', 'welcome-features');
-    [['◫', '独立讨论空间'], ['▤', '记录自动保留'], ['↗', '随时导出']].forEach(([icon, label]) => {
-      const item = node('span', '', label);
-      item.prepend(node('b', '', icon));
-      features.append(item);
+    return panel;
+  }
+  function literatureWorkflow() {
+    const panel = node('details', 'literature-workflow');
+    panel.append(node('summary', '', '工作流说明 · 文献 meta 与参数挖掘'));
+    panel.setAttribute('aria-labelledby', 'literature-workflow-title');
+    const head = node('div', 'literature-workflow-head');
+    head.append(node('div', 'eyebrow', 'WORKFLOW'), node('h2', '', '从研究主题到文献 meta 与参数'), node('p', '', '通用工作流定义。每个主题单独配置检索范围、纳入规则和字段；SOC 只是一个实例，不是全局规则。'));
+    panel.append(head);
+    const stages = [
+      ['定义', '输入一个研究主题，形成可追溯、可复核的结构化文献及研究参数数据。'],
+      ['输入', '必填：主题。可选：研究目的、地域/时间范围、目标数量、纳入/排除标准、字段模板、已有文献或数据。缺省项先提出建议，确认后执行。'],
+      ['执行', '扩展检索词并检索来源；合并去重；按规则标注纳入/排除/待复核；获取全文（HTML 优先、PDF 备选）；提取文献 meta 与主题参数；统一单位和分类，同时保留原始值及证据。'],
+      ['交付', '结构化 CSV/XLSX（可附逐篇 JSON）、检索与筛选日志、规则版本、纳入/排除数量、来源证据，以及待人工复核清单。'],
+      ['检查', '检查必填字段、重复记录、单位与范围、来源可追溯性、提取值是否有原文证据；抽样复核准确性并报告检索覆盖与缺失。'],
+      ['异常', '全文不可得、字段缺失/冲突、图表无法可靠读取、候选不足或规则有歧义时，明确标记原因并转人工审核；不得猜测或补造数据。']
+    ];
+    const grid = node('div', 'literature-workflow-grid');
+    stages.forEach(([title, description], index) => {
+      const item = node('article', 'literature-workflow-stage');
+      item.append(node('span', 'literature-workflow-number', String(index + 1).padStart(2, '0')), node('h3', '', title), node('p', '', description));
+      grid.append(item);
     });
-    panel.append(features);
+    panel.append(grid);
+    const example = node('details', 'literature-workflow-example');
+    const summary = node('summary', '', 'SOC 示例配置（仅作为主题实例）');
+    const exampleText = node('p', '', '主题可限定为中国地区、可定位样点的原始田间研究和明确报告的土壤有机碳（SOC）数据；按地点、年份、处理、作物与施肥等字段提取并保留原文证据。综述、无法定位或不符合地域范围的记录按该实例规则排除或复核。切换主题时，应替换这些筛选条件与字段，不沿用 SOC 专属规则。');
+    example.append(summary, exampleText);
+    panel.append(example);
     return panel;
   }
   function decorateSpace() {
     const state = Store.getState();
     const notes = $('conversation-mode').value === 'notes';
+    const moduleSpace = $('module-space');
+    const existingWorkflow = moduleSpace.querySelector('.literature-workflow');
+    if (existingWorkflow) existingWorkflow.remove();
+    const activeModule = state.modules.find(mod => mod.id === state.activeModuleId);
+    if (activeModule && activeModule.type === 'literature-mining') {
+      const workflow = literatureWorkflow();
+      const messages = moduleSpace.querySelector('.msg-list');
+      if (messages) moduleSpace.insertBefore(workflow, messages);
+      else moduleSpace.append(workflow);
+    }
     if (!state.modules.length) $('module-space').replaceChildren(welcome());
     if (notes && state.activeModuleId) {
       $('composer-input').disabled = false;
@@ -73,8 +74,10 @@
       $('btn-send').disabled = false;
     }
     $('btn-send').textContent = notes ? '记录 ↑' : '发送 ↑';
-    $('mode-description').textContent = notes ? '记录想法，随时继续' : '使用已配置的 AI 服务';
-    document.querySelector('.composer-hint').textContent = notes ? 'Enter 保存记录 · Shift + Enter 换行 · 仅保存在当前浏览器' : 'Enter 发送 · Shift + Enter 换行 · 需要配置 AI 服务';
+    const codex = activeModule && window.CodexUI && window.CodexUI.useCodex(activeModule);
+    $('mode-description').textContent = notes ? '仅保存，不发送给 AI' : codex ? '本机 Codex · 无需 API Key' : '使用已配置的 API';
+    document.querySelector('.composer-hint').textContent = 'Enter ' + (notes ? '保存' : '发送') + ' · Shift + Enter 换行';
+    if (window.CodexUI) window.CodexUI.render();
   }
   const originalRender = ModuleSpace.render;
   ModuleSpace.render = function () { originalRender(); decorateSpace(); };
@@ -107,13 +110,11 @@
   function render() {
     const state = Store.getState();
     const messages = state.modules.flatMap(mod => mod.messages.map(message => ({ ...message, moduleName: mod.name })));
-    ['project-title', 'detail-project-name', 'sidebar-project-name'].forEach(id => { $(id).textContent = meta.name; });
-    $('stat-modules').textContent = state.modules.length;
-    $('stat-messages').textContent = messages.length;
     $('records-count').textContent = messages.length;
-    $('module-count').textContent = currentView === 'workspace' ? state.modules.length + ' 个模块' : messages.length + ' 条记录';
-    $('section-name').textContent = currentView === 'workspace' ? '模块工作区' : '全部工作记录';
-    $('view-breadcrumb').textContent = currentView === 'workspace' ? '研究空间' : '工作记录';
+    const active = state.modules.find(mod => mod.id === state.activeModuleId);
+    $('module-count').textContent = state.modules.length + ' 个模块';
+    $('section-name').textContent = currentView === 'workspace' ? active?.name || '开始研究' : '工作记录';
+    $('active-module-meta').textContent = currentView === 'workspace' ? active ? active.messages.length + ' 条消息' : '' : messages.length + ' 条记录';
     document.querySelectorAll('[data-view]').forEach(el => {
       el.classList.toggle('is-active', el.dataset.view === currentView);
       if (el.dataset.view === currentView) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
@@ -123,35 +124,49 @@
     $('module-space').hidden = currentView !== 'workspace';
     $('composer').hidden = currentView !== 'workspace';
     $('records-view').hidden = currentView !== 'records';
-    const activity = $('recent-activity');
-    activity.replaceChildren();
-    if (!messages.length) activity.append(node('p', 'activity-empty', '还没有新的记录。\n从一个想法开始，慢慢积累。'));
-    messages.sort((a, b) => b.at.localeCompare(a.at)).slice(0, 3).forEach(message => {
-      const item = node('div', 'activity-item');
-      item.append(node('p', '', message.text), node('small', '', message.moduleName + ' · ' + formatDate(message.at)));
-      activity.append(item);
-    });
     document.querySelectorAll('.module-tab, .sidebar-tab').forEach(el => { el.tabIndex = 0; });
     if (currentView === 'records') renderRecords(state);
     decorateSpace();
   }
-  document.querySelectorAll('[data-new-module]').forEach(button => button.addEventListener('click', () => openDialog('module')));
+  document.querySelectorAll('[data-new-module]').forEach(button => button.addEventListener('click', () => {
+    const modules = Store.getState().modules;
+    let next = null;
+    for (const item of [
+      { type: 'download-data', name: '下载数据' },
+      { type: 'clean-data', name: '数据清洗' },
+      { type: 'calculation', name: '计算' },
+      { type: 'parameter-update', name: '参数更新', conditional: true },
+      { type: 'activity-data-update', name: '活动数据更新', conditional: true },
+      { type: 'result-audit', name: '结果核查与定位' },
+      { type: 'literature-mining', name: '文献挖掘' },
+      { type: 'manual-review', name: '人工审核' },
+      { type: 'plotting', name: '绘图' }
+    ]) {
+      if (!item.conditional && !modules.some(mod => mod.type === item.type)) { next = item; break; }
+    }
+    const calc = modules.find(mod => mod.type === 'calculation');
+    const calculationSubmodule = calc && ['parameter-update', 'activity-data-update'].includes(calc.mode) && !modules.some(mod => mod.type === calc.mode)
+      ? ({ 'parameter-update': '参数更新', 'activity-data-update': '活动数据更新' }[calc.mode])
+      : null;
+    if (calculationSubmodule || next) { Store.addModule(calculationSubmodule || next.name); currentView = 'workspace'; }
+  }));
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
-  $('project-shortcut').addEventListener('click', () => switchView('workspace'));
-  $('rename-project').addEventListener('click', () => openDialog('project'));
-  ['close-dialog', 'cancel-dialog'].forEach(id => $(id).addEventListener('click', () => $('name-dialog').close()));
-  $('name-form').addEventListener('submit', event => {
-    event.preventDefault();
-    const name = $('name-input').value.trim();
-    if (!name) { $('name-input').setCustomValidity('请输入名称'); $('name-input').reportValidity(); return; }
-    if (dialogMode === 'project') { meta.name = name; toast(saveMeta() ? '项目名称已更新' : '名称已更新，当前浏览器无法持久保存'); }
-    else { Store.addModule(name); currentView = 'workspace'; }
-    $('name-dialog').close();
-    render();
+  $('edit-dependencies-button').addEventListener('click', async () => {
+    const button = $('edit-dependencies-button');
+    button.disabled = true;
+    try {
+      const response = await fetch('/api/dependencies/open', { method: 'POST', headers: { 'X-Workbench': '1' } });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || '无法打开依赖清单');
+    } catch (error) {
+      const toast = $('toast');
+      toast.textContent = error.message;
+      toast.hidden = false;
+      setTimeout(() => { toast.hidden = true; }, 4000);
+    } finally {
+      button.disabled = false;
+    }
   });
-  $('name-input').addEventListener('input', () => $('name-input').setCustomValidity(''));
-  $('project-note').value = meta.note;
-  $('project-note').addEventListener('input', () => { meta.note = $('project-note').value; $('note-status').textContent = saveMeta() ? '已保存' : '仅本次会话'; });
   $('conversation-mode').addEventListener('change', () => ModuleSpace.render());
   function saveNote(event) {
     if ($('conversation-mode').value !== 'notes') return;
@@ -171,32 +186,10 @@
   $('module-tabs').addEventListener('keydown', event => {
     if (event.target.classList.contains('module-tab') && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); Store.selectModule(event.target.dataset.id); }
   });
-  $('toggle-details').addEventListener('click', () => {
-    const narrow = matchMedia('(max-width: 980px)').matches;
-    if (narrow) {
-      document.querySelector('.workspace-body').classList.toggle('details-open');
-      $('project-details').hidden = false;
-      $('toggle-details').setAttribute('aria-expanded', document.querySelector('.workspace-body').classList.contains('details-open'));
-    } else {
-      $('project-details').hidden = !$('project-details').hidden;
-      $('toggle-details').setAttribute('aria-expanded', !$('project-details').hidden);
-    }
-  });
-  $('export-project').addEventListener('click', () => {
-    const state = Store.getState();
-    const lines = ['# ' + meta.name, '', '导出时间：' + new Date().toLocaleString('zh-CN'), '', '## 项目备忘', '', meta.note || '暂无备忘', ''];
-    state.modules.forEach(mod => {
-      lines.push('## ' + mod.name, '');
-      mod.messages.forEach(message => { lines.push('### ' + ({ user: '我的记录', assistant: 'AI 回复', system: '系统提示' }[message.role]) + ' · ' + formatDate(message.at), '', message.text, ''); });
-      if (!mod.messages.length) lines.push('暂无记录', '');
-    });
-    const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' }));
-    const link = node('a'); link.href = url; link.download = meta.name.replace(/[\\/:*?"<>|]/g, '_') + '.md'; document.body.append(link); link.click(); link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    toast('项目记录已导出');
+  $('module-tabs').addEventListener('click', event => {
+    if (matchMedia('(max-width: 640px)').matches && event.target.closest('.module-tab') && !event.target.closest('button')) Store.setSidebar({ collapsed: true });
   });
   if (matchMedia('(max-width: 640px)').matches) Store.setSidebar({ collapsed: true });
-  if (matchMedia('(max-width: 980px)').matches) $('toggle-details').setAttribute('aria-expanded', 'false');
   Store.subscribe(render);
   render();
 })();

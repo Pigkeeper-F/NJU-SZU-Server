@@ -1,0 +1,81 @@
+﻿Area Code,Area Code (M49),Area,Item Code,Item Code (FBS),Item,Element Code,Element,Year Code,Year,Unit,Value,Flag
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5511,Production,1992,1992,1000 t,2370.000000,E
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5611,Import Quantity,1992,1992,1000 t,154.000000,E
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5074,Stock Variation,1992,1992,1000 t,180.000000,E
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5911,Export Quantity,1992,1992,1000 t,0.000000,E
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5521,Feed,1992,1992,1000 t,130.000000,E
+2,'004,Afghanistan,2905,'S2905,Cereals - Excluding Beer,5142,Food,1992,1992,1000 t,2140.000000,E
+2,'004,Afghanistan,2511,'S2511,Wheat and products,5511,Production,1992,1992,1000 t,1650.000000,I
+2,'004,Afghanistan,2511,'S2511,Wheat and products,5611,Import Quantity,1992,1992,1000 t,78.000000,I
+2,'004,Afghanistan,2511,'S2511,Wheat and products,5074,Stock Variation,1992,1992,1000 t,180.000000,I
+2,'004,Afghanistan,2511,'S2511,Wheat and products,5142,Food,1992,1992,1000 t,1582.000000,I
+2,'004,Afghanistan,2805,'S2805,Rice (Milled Equivalent),5511,Production,1992,1992,1000 t,200.000000,I
+2,'004,Afghanistan,2805,'S2805,Rice (Milled Equivalent),5611,Import Quantity,1992,1992,1000 t,76.000000,I
+2,'004,Afghanistan,2805,'S2805,Rice (Milled Equivalent),5142,Food,1992,1992,1000 t,249.000000,I
+2,'004,Afghanistan,2513,'S2513,Barley and products,5511,Production,1992,1992,1000 t,200.000000,I
+2,'004,Afghanistan,2513,'S2513,Barley and products,5611,Import Quantity,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2513,'S2513,Barley and products,5074,Stock Variation,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2513,'S2513,Barley and products,5521,Feed,1992,1992,1000 t,40.000000,I
+2,'004,Afghanistan,2513,'S2513,Barley and products,5142,Food,1992,1992,1000 t,120.000000,I
+2,'004,Afghanistan,2514,'S2514,Maize and products,5511,Production,1992,1992,1000 t,300.000000,I
+2,'004,Afghanistan,2514,'S2514,Maize and products,5611,Import Quantity,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2514,'S2514,Maize and products,5911,Export Quantity,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2514,'S2514,Maize and products,5521,Feed,1992,1992,1000 t,90.000000,I
+2,'004,Afghanistan,2514,'S2514,Maize and products,5142,Food,1992,1992,1000 t,170.000000,I
+2,'004,Afghanistan,2517,'S2517,Millet and products,5511,Production,1992,1992,1000 t,20.000000,I
+2,'004,Afghanistan,2517,'S2517,Millet and products,5142,Food,1992,1992,1000 t,18.000000,I
+2,'004,Afghanistan,2520,'S2520,"Cereals, Other",5611,Import Quantity,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2520,'S2520,"Cereals, Other",5142,Food,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2907,'S2907,Starchy Roots,5511,Production,1992,1992,1000 t,225.000000,E
+2,'004,Afghanistan,2907,'S2907,Starchy Roots,5611,Import Quantity,1992,1992,1000 t,5.000000,E
+2,'004,Afghanistan,2907,'S2907,Starchy Roots,5911,Export Quantity,1992,1992,1000 t,0.000000,E
+2,'004,Afghanistan,2907,'S2907,Starchy Roots,5142,Food,1992,1992,1000 t,210.000000,E
+2,'004,Afghanistan,2531,'S2531,Potatoes and products,5511,Production,1992,1992,1000 t,225.000000,I
+2,'004,Afghanistan,2531,'S2531,Potatoes and products,5611,Import Quantity,1992,1992,1000 t,5.000000,I
+2,'004,Afghanistan,2531,'S2531,Potatoes and products,5911,Export Quantity,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2531,'S2531,Potatoes and products,5142,Food,1992,1992,1000 t,210.000000,I
+2,'004,Afghanistan,2908,'S2908,Sugar Crops,5511,Production,1992,1992,1000 t,39.000000,E
+2,'004,Afghanistan,2908,'S2908,Sugar Crops,5521,Feed,1992,1992,1000 t,29.000000,E
+2,'004,Afghanistan,2536,'S2536,Sugar cane,5511,Production,1992,1992,1000 t,38.000000,I
+2,'004,Afghanistan,2536,'S2536,Sugar cane,5521,Feed,1992,1992,1000 t,29.000000,I
+2,'004,Afghanistan,2537,'S2537,Sugar beet,5511,Production,1992,1992,1000 t,1.000000,I
+2,'004,Afghanistan,2537,'S2537,Sugar beet,5521,Feed,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5511,Production,1992,1992,1000 t,5.000000,E
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5611,Import Quantity,1992,1992,1000 t,60.000000,E
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5074,Stock Variation,1992,1992,1000 t,-11.000000,E
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5911,Export Quantity,1992,1992,1000 t,0.000000,E
+2,'004,Afghanistan,2909,'S2909,Sugar & Sweeteners,5142,Food,1992,1992,1000 t,54.000000,E
+2,'004,Afghanistan,2542,'S2542,Sugar (Raw Equivalent),5511,Production,1992,1992,1000 t,1.000000,I
+2,'004,Afghanistan,2542,'S2542,Sugar (Raw Equivalent),5611,Import Quantity,1992,1992,1000 t,60.000000,I
+2,'004,Afghanistan,2542,'S2542,Sugar (Raw Equivalent),5074,Stock Variation,1992,1992,1000 t,-11.000000,I
+2,'004,Afghanistan,2542,'S2542,Sugar (Raw Equivalent),5142,Food,1992,1992,1000 t,50.000000,I
+2,'004,Afghanistan,2543,'S2543,"Sweeteners, Other",5611,Import Quantity,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2543,'S2543,"Sweeteners, Other",5142,Food,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2745,'S2745,Honey,5511,Production,1992,1992,1000 t,4.000000,I
+2,'004,Afghanistan,2745,'S2745,Honey,5611,Import Quantity,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2745,'S2745,Honey,5911,Export Quantity,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2745,'S2745,Honey,5142,Food,1992,1992,1000 t,4.000000,I
+2,'004,Afghanistan,2911,'S2911,Pulses,5511,Production,1992,1992,1000 t,35.000000,E
+2,'004,Afghanistan,2911,'S2911,Pulses,5611,Import Quantity,1992,1992,1000 t,0.000000,E
+2,'004,Afghanistan,2911,'S2911,Pulses,5911,Export Quantity,1992,1992,1000 t,1.000000,E
+2,'004,Afghanistan,2911,'S2911,Pulses,5521,Feed,1992,1992,1000 t,2.000000,E
+2,'004,Afghanistan,2911,'S2911,Pulses,5142,Food,1992,1992,1000 t,29.000000,E
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5511,Production,1992,1992,1000 t,35.000000,I
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5611,Import Quantity,1992,1992,1000 t,0.000000,I
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5911,Export Quantity,1992,1992,1000 t,1.000000,I
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5521,Feed,1992,1992,1000 t,2.000000,I
+2,'004,Afghanistan,2549,'S2549,"Pulses, Other and products",5142,Food,1992,1992,1000 t,29.000000,I
+2,'004,Afghanistan,2912,'S2912,Treenuts,5511,Production,1992,1992,1000 t,18.000000,E
+2,'004,Afghanistan,2912,'S2912,Treenuts,5911,Export Quantity,1992,1992,1000 t,1.000000,E
+2,'004,Afghanistan,2912,'S2912,Treenuts,5142,Food,1992,1992,1000 t,17.000000,E
+2,'004,Afghanistan,2551,'S2551,Nuts and products,5511,Production,1992,1992,1000 t,18.000000,I
+2,'004,Afghanistan,2551,'S2551,Nuts and products,5911,Export Quantity,1992,1992,1000 t,1.000000,I
+2,'004,Afghanistan,2551,'S2551,Nuts and products,5142,Food,1992,1992,1000 t,17.000000,I
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5511,Production,1992,1992,1000 t,103.000000,E
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5611,Import Quantity,1992,1992,1000 t,0.000000,E
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5074,Stock Variation,1992,1992,1000 t,0.000000,E
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5911,Export Quantity,1992,1992,1000 t,1.000000,E
+2,'004,Afghanistan,2913,'S2913,Oilcrops,5142,Food,1992,1992,1000 t,14.000000,E
+2,'004,Afghanistan,2557,'S2557,Sunflower seed,5511,Production,1992,1992,1000 t,16.000000,I
+2,'004,Afghanistan,2559,'S2559,Cottonseed,5511,Production,1992,1992,1000 t,44.000000,I
+2,'004,Afghanistan,2559,'S2559,Cottonseed,5911,Export Quantity,1992,1992,1000 t,0.000000,I

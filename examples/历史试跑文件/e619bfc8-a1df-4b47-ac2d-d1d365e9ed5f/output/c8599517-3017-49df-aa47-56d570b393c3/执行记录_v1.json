@@ -1,0 +1,104 @@
+{
+  "rule_version": "FBSH_sample_step1_v1",
+  "executed_at": "2026-09-29T13:26:54.332488+00:00",
+  "scope": "Only uploaded 80-row sample; no SUA estimation",
+  "source_sha256": {
+    "31736142-1992_原始数据到模型输入_完整清洗说明.txt": "93715c26cd6497bc72cd5ec6a3a1b91f236c746f7549f2324a0e0a4c6beeb3bc",
+    "3fecadf4-SOURCE.txt": "2200c9f318f995df0ad93a17c59a4d750008ea660a71d0114dd502ca39318551",
+    "e92e9b61-FBSH_1992_Afghanistan_练习样本.csv": "0247cc2079a04125980ccf9510a4e3d56960734633012ef6181dddd65965f2c0"
+  },
+  "input_rows": 80,
+  "output_rows": 80,
+  "original_columns": 13,
+  "added_columns": [
+    "Country_M49",
+    "FBSH_Item_Code",
+    "Value_t",
+    "Value_status",
+    "Source_file",
+    "Source_row"
+  ],
+  "deleted": 0,
+  "merged": 0,
+  "imputed": 0,
+  "replaced_original_cells": 0,
+  "isolated": 0,
+  "blank_counts": {
+    "Area Code": 0,
+    "Area Code (M49)": 0,
+    "Area": 0,
+    "Item Code": 0,
+    "Item Code (FBS)": 0,
+    "Item": 0,
+    "Element Code": 0,
+    "Element": 0,
+    "Year Code": 0,
+    "Year": 0,
+    "Unit": 0,
+    "Value": 0,
+    "Flag": 0
+  },
+  "zero_source_rows": [
+    "5",
+    "16",
+    "17",
+    "21",
+    "22",
+    "27",
+    "28",
+    "31",
+    "35",
+    "42",
+    "46",
+    "52",
+    "53",
+    "55",
+    "56",
+    "59",
+    "64",
+    "75",
+    "76",
+    "81"
+  ],
+  "negative_source_rows": [
+    "45",
+    "50"
+  ],
+  "absent_sample_combinations": 58,
+  "checks": {
+    "row_count_80": true,
+    "all_original_cells_unchanged": true,
+    "M49_text_004": true,
+    "numeric_item_key": true,
+    "all_tonne_conversions_exact": true,
+    "unique_business_key": true,
+    "source_rows_preserved": true,
+    "inputs_hashes_unchanged": true
+  },
+  "changes": [
+    {
+      "step": "scope_check",
+      "input_rows": 80,
+      "output_rows": 80,
+      "removed": 0
+    },
+    {
+      "step": "add_M49_and_item_key",
+      "rows": 80
+    },
+    {
+      "step": "add_tonnes_status_and_provenance",
+      "rows": 80
+    },
+    {
+      "step": "read_back_validation",
+      "checked_rows": 80,
+      "passed": true
+    }
+  ],
+  "output_sha256": {
+    "FBSH_1992_sample_clean_v1.csv": "a550e5b173a7f65f245408b70336811cfbe8c303b1cac365924d39c57645703d",
+    "未出现组合_v1.csv": "da3bc1a8305193d7bd1e07c5015455f3107ca8610745f54cfae817c195475f98",
+    "字段字典_v1.csv": "527c6c502dd353793862adff41cbf5823222ae360df9f8ea640d51d4747466ba"
+  }
+}

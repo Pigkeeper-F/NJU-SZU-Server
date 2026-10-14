@@ -1,0 +1,292 @@
+[
+  {
+    "col": 1,
+    "group": null,
+    "field": "No."
+  },
+  {
+    "col": 2,
+    "group": null,
+    "field": "Reference"
+  },
+  {
+    "col": 3,
+    "group": null,
+    "field": "处理名称"
+  },
+  {
+    "col": 4,
+    "group": null,
+    "field": "采样年份"
+  },
+  {
+    "col": 5,
+    "group": "点位信息",
+    "field": "Region"
+  },
+  {
+    "col": 6,
+    "group": "点位信息",
+    "field": "经度"
+  },
+  {
+    "col": 7,
+    "group": "点位信息",
+    "field": "纬度"
+  },
+  {
+    "col": 8,
+    "group": "气候信息",
+    "field": "年均温/℃"
+  },
+  {
+    "col": 9,
+    "group": "气候信息",
+    "field": "年均降水/mm"
+  },
+  {
+    "col": 10,
+    "group": "土壤信息",
+    "field": "PH"
+  },
+  {
+    "col": 11,
+    "group": "土壤信息",
+    "field": "容重（g/cm3）"
+  },
+  {
+    "col": 12,
+    "group": "土壤信息",
+    "field": "Sand (%)"
+  },
+  {
+    "col": 13,
+    "group": "土壤信息",
+    "field": "Silt (%)"
+  },
+  {
+    "col": 14,
+    "group": "土壤信息",
+    "field": "Clay (%)"
+  },
+  {
+    "col": 15,
+    "group": "土壤信息",
+    "field": "STN (g/kg)"
+  },
+  {
+    "col": 16,
+    "group": "土壤信息",
+    "field": "SOC (g/kg)"
+  },
+  {
+    "col": 17,
+    "group": "作物信息",
+    "field": "Crop type"
+  },
+  {
+    "col": 18,
+    "group": "作物信息",
+    "field": "轮作体系"
+  },
+  {
+    "col": 19,
+    "group": "作物信息",
+    "field": "间作体系"
+  },
+  {
+    "col": 20,
+    "group": "施肥信息",
+    "field": "总施肥量（kg N/ha）"
+  },
+  {
+    "col": 21,
+    "group": "施肥信息",
+    "field": "化肥类型"
+  },
+  {
+    "col": 22,
+    "group": "施肥信息",
+    "field": "化肥用量（kg N/ha）"
+  },
+  {
+    "col": 23,
+    "group": "施肥信息",
+    "field": "有机肥用量（kg N/ha）"
+  },
+  {
+    "col": 24,
+    "group": "有机肥信息",
+    "field": "大类"
+  },
+  {
+    "col": 25,
+    "group": "有机肥信息",
+    "field": "详细类型"
+  },
+  {
+    "col": 26,
+    "group": "有机肥信息",
+    "field": "C含量(g/kg)"
+  },
+  {
+    "col": 27,
+    "group": "有机肥信息",
+    "field": "N含量(g/kg)"
+  },
+  {
+    "col": 28,
+    "group": "有机肥信息",
+    "field": "C/N"
+  },
+  {
+    "col": 29,
+    "group": "有机肥信息",
+    "field": "PH"
+  },
+  {
+    "col": 30,
+    "group": "有机肥信息",
+    "field": "有机肥施用量（t/ha）"
+  },
+  {
+    "col": 31,
+    "group": "灌溉管理",
+    "field": "灌溉方式"
+  },
+  {
+    "col": 32,
+    "group": "灌溉管理",
+    "field": "灌溉量(m3/ha)"
+  },
+  {
+    "col": 33,
+    "group": "耕作管理",
+    "field": "耕作方式"
+  },
+  {
+    "col": 34,
+    "group": "耕作管理",
+    "field": "秸秆还田"
+  },
+  {
+    "col": 35,
+    "group": "耕作管理",
+    "field": "秸秆还田方式"
+  },
+  {
+    "col": 36,
+    "group": "耕作管理",
+    "field": "还田比例（%）"
+  },
+  {
+    "col": 37,
+    "group": "土壤调理剂",
+    "field": "调理剂类型"
+  },
+  {
+    "col": 38,
+    "group": "土壤调理剂",
+    "field": "施用量（t/ha）"
+  },
+  {
+    "col": 39,
+    "group": "覆盖作物",
+    "field": "作物类型"
+  },
+  {
+    "col": 40,
+    "group": "活性氮损失（kg N/ha）",
+    "field": "NH3"
+  },
+  {
+    "col": 41,
+    "group": "活性氮损失（kg N/ha）",
+    "field": "N2O"
+  },
+  {
+    "col": 42,
+    "group": "活性氮损失（kg N/ha）",
+    "field": "N leaching"
+  },
+  {
+    "col": 43,
+    "group": "活性氮损失（kg N/ha）",
+    "field": "N runoff"
+  },
+  {
+    "col": 44,
+    "group": "碳排放",
+    "field": "CH4（kg/ha）"
+  },
+  {
+    "col": 45,
+    "group": "SOC",
+    "field": "SOC     0-30cm"
+  },
+  {
+    "col": 46,
+    "group": "SOC",
+    "field": "POC     0-30cm"
+  },
+  {
+    "col": 47,
+    "group": "SOC",
+    "field": "MAOC     0-30cm"
+  },
+  {
+    "col": 48,
+    "group": "SOC",
+    "field": "SOC     30-60cm"
+  },
+  {
+    "col": 49,
+    "group": "SOC",
+    "field": "POC     30-60cm"
+  },
+  {
+    "col": 50,
+    "group": "SOC",
+    "field": "MAOC     30-60cm"
+  },
+  {
+    "col": 51,
+    "group": "SOC",
+    "field": "SOC     60-100cm"
+  },
+  {
+    "col": 52,
+    "group": "SOC",
+    "field": "POC     60-100cm"
+  },
+  {
+    "col": 53,
+    "group": "SOC",
+    "field": "MAOC     60-100cm"
+  },
+  {
+    "col": 54,
+    "group": "SOC",
+    "field": "SOC原始单位"
+  },
+  {
+    "col": 55,
+    "group": "SOC",
+    "field": "土层（cm）"
+  },
+  {
+    "col": 56,
+    "group": null,
+    "field": "土壤容重（g/cm3）"
+  },
+  {
+    "col": 57,
+    "group": "Yield",
+    "field": "t/ha"
+  },
+  {
+    "col": 58,
+    "group": null,
+    "field": "备注"
+  }
+]

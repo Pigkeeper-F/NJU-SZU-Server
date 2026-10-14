@@ -46,6 +46,22 @@
   var SIDEBAR_MIN = 180;
   var SIDEBAR_MAX = 520;
   var SIDEBAR_DEFAULT = 240;
+  var FIXED_MODULES = [
+    { id: 'download-data', name: '下载数据', mode: null },
+    { id: 'clean-data', name: '数据清洗', mode: null },
+    { id: 'calculation', name: '计算', mode: null },
+    { id: 'parameter-update', name: '参数更新', mode: null, conditional: true },
+    { id: 'activity-data-update', name: '活动数据更新', mode: null, conditional: true },
+    { id: 'result-audit', name: '结果核查与定位', mode: null },
+    { id: 'literature-mining', name: '文献挖掘', mode: null },
+    { id: 'manual-review', name: '人工审核', mode: null },
+    { id: 'plotting', name: '绘图', mode: null }
+  ];
+  var REQUIRED_MODULES = FIXED_MODULES.filter(function (item) { return !item.conditional; });
+  var CALCULATION_SUBMODULES = [
+    { id: 'parameter-update', name: '参数更新' },
+    { id: 'activity-data-update', name: '活动数据更新' }
+  ];
   var TABS_DEFAULT = [{ id: 'flow', name: '流程' }];
   var ROLES = ['user', 'assistant', 'system'];
 
@@ -120,7 +136,9 @@
         });
       }
     }
-    return { id: id, name: name, dependsOn: dependsOn, createdAt: createdAt, messages: messages };
+    var type = typeof raw.type === 'string' ? raw.type : '';
+    var mode = typeof raw.mode === 'string' ? raw.mode : null;
+    return { id: id, name: name, type: type, mode: mode, dependsOn: dependsOn, createdAt: createdAt, messages: messages };
   }
 
   /** 把任意 JS 值规整成合法 state；非法输入返回 null（调用方回默认值） */
@@ -153,6 +171,20 @@
       for (var j = 0; j < raw.modules.length; j++) {
         var mod = normalizeModule(raw.modules[j], seen);
         if (mod) {
+          // 旧版模块没有 type；按固定流程顺序补齐类型，非流程外模块不再恢复。
+          if (!mod.type) {
+            var legacyFixed = REQUIRED_MODULES[modules.length];
+            if (legacyFixed) { mod.type = legacyFixed.id; mod.name = legacyFixed.name; }
+          }
+          if (!FIXED_MODULES.some(function (item) { return item.id === mod.type; })) continue;
+          var fixed = FIXED_MODULES.filter(function (item) { return item.id === mod.type; })[0];
+          if (fixed.conditional && !modules.some(function (item) { return item.type === 'calculation'; })) continue;
+          mod.name = fixed.id === 'calculation' && mod.mode === 'direct' ? '直接计算'
+            : fixed.id === 'calculation' && mod.mode === 'modify' ? '修改计算' : fixed.name;
+          if (fixed.id !== 'calculation') mod.mode = null;
+          var existingCalculation = modules.filter(function (item) { return item.type === 'calculation'; })[0];
+          if (!fixed.conditional && existingCalculation && !existingCalculation.mode) continue;
+          if (!fixed.conditional && existingCalculation && CALCULATION_SUBMODULES.some(function (item) { return item.id === existingCalculation.mode; }) && !modules.some(function (item) { return item.type === existingCalculation.mode; })) continue;
           modules.push(mod);
           seen[mod.id] = true;
         }
@@ -260,6 +292,29 @@
   /** 追加模块到链尾：dependsOn = 当前最后一个模块 id（保证强依赖 A→B→C）；同时选中新模块 */
   function addModule(name) {
     var list = state.modules;
+    var nextFixed = null;
+    var calc = list.filter(function (item) { return item.type === 'calculation'; })[0];
+    if (calc && CALCULATION_SUBMODULES.some(function (item) { return item.id === calc.mode; })) {
+      var calculationChild = CALCULATION_SUBMODULES.filter(function (item) { return item.id === calc.mode; })[0];
+      if (!list.some(function (item) { return item.type === calc.mode; })) nextFixed = calculationChild;
+    } else {
+      for (var fi = 0; fi < FIXED_MODULES.length; fi++) {
+        if (!FIXED_MODULES[fi].conditional && !list.some(function (item) { return item.type === FIXED_MODULES[fi].id; })) {
+          nextFixed = FIXED_MODULES[fi];
+          break;
+        }
+      }
+    }
+    if (nextFixed) {
+      var calculation = calc;
+      var calcIndex = list.findIndex(function (item) { return item.type === 'calculation'; });
+      if (calculation && !calculation.mode) return null;
+      if (calculation && CALCULATION_SUBMODULES.some(function (item) { return item.id === calculation.mode; }) && list.some(function (item) { return item.type === calculation.mode; }) && calcIndex === list.length - 1) return null;
+      if (typeof name === 'string' && name.trim() && name.trim() !== nextFixed.name) return null;
+      name = nextFixed.name;
+    } else {
+      return null; // 流程模块固定，不创建列表以外的额外模块
+    }
     var nm = (typeof name === 'string') ? name.trim() : '';
     if (!nm) {
       var n = list.length + 1;
@@ -272,6 +327,8 @@
     var mod = {
       id: uid('mod_'),
       name: nm,
+      type: nextFixed.id,
+      mode: nextFixed.mode,
       dependsOn: last ? last.id : null,
       createdAt: nowISO(),
       messages: []
@@ -284,6 +341,28 @@
       activeModuleId: mod.id
     });
     return deepClone(mod);
+  }
+
+  /** 计算模块的固定子方式：直接计算 / 参数更新 / 活动数据更新 */
+  function setModuleMode(id, mode) {
+    var mod = findModule(id);
+    if (!mod || mod.type !== 'calculation') return false;
+    if (['direct', 'modify', 'parameter-update', 'activity-data-update'].indexOf(mode) < 0) return false;
+    if (mod.mode === mode) return true;
+    var isCurrentMainPath = ['direct', 'modify'].indexOf(mod.mode) >= 0;
+    var isNextMainPath = ['direct', 'modify'].indexOf(mode) >= 0;
+    if (!(isCurrentMainPath && isNextMainPath)) {
+      var calcIndex = state.modules.indexOf(mod);
+      while (state.modules.length > calcIndex + 1) {
+        var removed = state.modules.pop();
+        emit('module:remove', { id: removed.id, module: deepClone(removed), activeModuleId: state.activeModuleId });
+      }
+      state.activeModuleId = id;
+    }
+    mod.mode = mode;
+    mod.name = mode === 'direct' ? '直接计算' : mode === 'modify' ? '修改计算' : '计算';
+    emit('module:mode', { id: id, mode: mode });
+    return true;
   }
 
   /** 选中模块；id 非法返回 false；已选中同一模块返回 true 且不触发 emit */
@@ -394,6 +473,15 @@
     return deepClone(state);
   }
 
+  /** 切换独立任务时恢复其模块、消息与当前选中位置。 */
+  function restoreState(raw) {
+    var restored = sanitize(raw);
+    if (!restored) return false;
+    state = restored;
+    emit('state:reset', { state: deepClone(state) });
+    return true;
+  }
+
   root.Store = {
     // —— 状态读写
     getState: getState,
@@ -403,11 +491,13 @@
     selectModule: selectModule,
     removeModule: removeModule,
     renameModule: renameModule,
+    setModuleMode: setModuleMode,
     appendMessage: appendMessage,
     // —— 侧栏 / 选项卡
     setSidebar: setSidebar,
     selectTab: selectTab,
     resetAll: resetAll,
+    restoreState: restoreState,
     // —— 常量（可选使用，避免各处硬编码字符串）
     EVENT: {
       MODULE_ADD: 'module:add',

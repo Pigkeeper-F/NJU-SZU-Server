@@ -37,7 +37,18 @@
 ;(function (root, doc) {
   'use strict';
 
-  var EMPTY_HINT_TEXT = '点击 ＋ 添加第一个模块';
+  var FIXED_MODULES = [
+    { id: 'download-data', name: '下载数据' },
+    { id: 'clean-data', name: '数据清洗' },
+    { id: 'calculation', name: '计算' },
+    { id: 'parameter-update', name: '参数更新', conditional: true },
+    { id: 'activity-data-update', name: '活动数据更新', conditional: true },
+    { id: 'result-audit', name: '结果核查与定位' },
+    { id: 'literature-mining', name: '文献挖掘' },
+    { id: 'manual-review', name: '人工审核' },
+    { id: 'plotting', name: '绘图' }
+  ];
+  var EMPTY_HINT_TEXT = '从“下载数据”开始，按流程逐步添加模块';
   var DEP_FIRST_TEXT = '起点';          // 首模块（dependsOn === null）
   var DEP_ARROW = '← ';                 // 其余模块：← 上游模块名
   var DEP_UNKNOWN_TEXT = '未知上游';     // 仅容错：dependsOn 指向已不存在的模块
@@ -52,6 +63,9 @@
   var tabsEl = doc.getElementById('module-tabs');
   var chainEl = doc.getElementById('module-chain');
   var addBtn = doc.getElementById('btn-add-module');
+  var addMenuEl = doc.getElementById('fixed-module-menu');
+  var nextModule = null;
+  var pendingCalculationModule = null;
 
   var lastLockedTipAt = 0; // 最近一次「锁定删除键」提示时间戳（仅用于去抖重复提示）
 
@@ -99,6 +113,13 @@
     title.setAttribute('title', mod.name);
     tab.appendChild(title);
 
+    if (mod.type === 'calculation') {
+      var mode = doc.createElement('span');
+      mode.className = 'module-dep';
+      mode.textContent = ({ direct: '运行现有代码', modify: '修改代码后计算', 'parameter-update': '参数更新', 'activity-data-update': '活动数据更新' })[mod.mode] || '选择计算方式';
+      tab.appendChild(mode);
+    }
+
     // 依赖徽标：首模块「起点」，其余「← 上游模块名」
     var dep = doc.createElement('span');
     dep.className = 'module-dep';
@@ -118,10 +139,10 @@
     del.className = 'module-tab-del';
     del.textContent = DEL_GLYPH;
     del.setAttribute('data-act', 'del');
-    if (hasDownstream(modules, mod.id)) {
+    if (hasDownstream(modules, mod.id) || (mod.type === 'calculation' && !mod.mode)) {
       del.disabled = true;
       del.setAttribute('aria-disabled', 'true');
-      del.setAttribute('title', LOCKED_TITLE);
+      del.setAttribute('title', hasDownstream(modules, mod.id) ? LOCKED_TITLE : '先选择计算方式');
     } else {
       del.setAttribute('title', DEL_TITLE);
     }
@@ -140,6 +161,10 @@
     var state = S.getState() || {};
     var modules = state.modules || [];
     var activeId = state.activeModuleId;
+    var moduleTypes = modules.map(function (item) { return item.type; });
+    var calculation = modules.filter(function (item) { return item.type === 'calculation'; })[0];
+    var legacyChild = calculation && ['parameter-update', 'activity-data-update'].indexOf(calculation.mode) >= 0;
+    var workflowLocked = !!calculation && (!calculation.mode || legacyChild && modules[modules.length - 1].type === 'calculation');
 
     tabsEl.innerHTML = '';
 
@@ -155,6 +180,59 @@
       return;
     }
 
+    var calc = modules.filter(function (item) { return item.type === 'calculation'; })[0];
+    var chooser = null;
+    if (calc && calc.id === activeId && !calc.mode) {
+      var chooser = doc.createElement('div');
+      chooser.className = 'calculation-mode-chooser';
+      var title = doc.createElement('span');
+      title.textContent = '选择计算方式：';
+      chooser.appendChild(title);
+      var choices = [
+        ['direct', '直接计算 · 上传代码与输入数据'],
+        ['modify', '修改计算 · 讨论并确认修改规则']
+      ];
+      if (calc.mode) {
+        chooser.appendChild((function () {
+          var text = doc.createElement('span');
+          text.textContent = '当前方式：' + (calc.mode === 'direct' ? '直接计算' : calc.mode === 'parameter-update' ? '参数更新' : '活动数据更新');
+          return text;
+        })());
+        choices = [];
+      }
+      choices.forEach(function (choice) {
+        var button = doc.createElement('button');
+        button.type = 'button';
+        button.className = 'calculation-mode-option';
+        button.setAttribute('data-mode', choice[0]);
+        button.textContent = choice[1];
+        chooser.appendChild(button);
+      });
+    }
+
+    if (addMenuEl) {
+      nextModule = null;
+      pendingCalculationModule = null;
+      for (var fi = 0; fi < FIXED_MODULES.length; fi++) {
+        if (!FIXED_MODULES[fi].conditional && moduleTypes.indexOf(FIXED_MODULES[fi].id) < 0) { nextModule = FIXED_MODULES[fi]; break; }
+      }
+      if (calculation && ['parameter-update', 'activity-data-update'].indexOf(calculation.mode) >= 0 && moduleTypes.indexOf(calculation.mode) < 0) {
+        pendingCalculationModule = calculation.mode === 'parameter-update'
+          ? { id: 'parameter-update', name: '参数更新' }
+          : { id: 'activity-data-update', name: '活动数据更新' };
+      }
+      addMenuEl.textContent = pendingCalculationModule ? '下一步：' + pendingCalculationModule.name : nextModule ? '下一步：' + nextModule.name : '流程已完成';
+      addMenuEl.hidden = !nextModule && !pendingCalculationModule;
+    }
+    if (addBtn) {
+      var calculationSubmoduleNeeded = calculation && ['parameter-update', 'activity-data-update'].indexOf(calculation.mode) >= 0 && !modules.some(function (item) { return item.type === calculation.mode; });
+      addBtn.disabled = workflowLocked || (!nextModule && !calculationSubmoduleNeeded);
+      if (workflowLocked) addBtn.title = '先选择计算方式';
+      else if (calculationSubmoduleNeeded) addBtn.title = '添加：' + (calculation.mode === 'parameter-update' ? '参数更新' : '活动数据更新');
+      else if (!nextModule) addBtn.title = '固定流程已全部添加';
+      else addBtn.title = '添加下一步：' + nextModule.name;
+    }
+
     var activeEl = null;
     var names = [];
     for (var i = 0; i < modules.length; i++) {
@@ -163,6 +241,7 @@
       names.push(modules[i].name);
       if (modules[i].id === activeId) activeEl = el;
     }
+    if (chooser) tabsEl.appendChild(chooser);
 
     // 依赖链概览：模块1 → 模块2 → 模块3（无模块时上面已置空，CSS :empty 自动隐藏）
     if (chainEl) {
@@ -221,6 +300,13 @@
     var S = getStore();
     if (!S) return;
 
+    var modeButton = closestWithin(e.target, '.calculation-mode-option', tabsEl);
+    if (modeButton) {
+      var calculation = S.getState().modules.filter(function (item) { return item.type === 'calculation'; })[0];
+      if (calculation) S.setModuleMode(calculation.id, modeButton.getAttribute('data-mode'));
+      return;
+    }
+
     var tab = closestWithin(e.target, '.module-tab', tabsEl);
     if (!tab) return; // 点在空状态提示或空白处
     var id = tab.getAttribute('data-id');
@@ -261,7 +347,12 @@
   function onAddClick() {
     var S = getStore();
     if (!S) return;
-    S.addModule(); // 追加链尾，dependsOn = 当前最后模块 ⇒ 保证 A→B→C
+    if (pendingCalculationModule) {
+      S.addModule(pendingCalculationModule.name);
+      return;
+    }
+    if (!nextModule) return;
+    S.addModule(nextModule.name);
   }
 
   // 加载期只绑一次（委托：卡片重建无需重绑；#btn-add-module 是静态节点，只绑事件不重建）

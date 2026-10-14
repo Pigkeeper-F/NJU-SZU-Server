@@ -1,0 +1,8 @@
+{
+  "y_axis_side": "right",
+  "tick_values": [0, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800],
+  "bar_order": ["CK", "N0", "RFF", "HACF", "PACF"],
+  "y_unit": "kg·hm-2",
+  "digit_w": [8, 30], "digit_h": [20, 50], "digit_area": [100, 600],
+  "label_width": 90
+}

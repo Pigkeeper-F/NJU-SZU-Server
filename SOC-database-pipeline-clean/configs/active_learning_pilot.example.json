@@ -1,0 +1,46 @@
+{
+  "version": "pilot_v0.1",
+  "batch_size": 20,
+  "exploration_fraction": 0.3,
+  "seed": 42,
+  "strata_fields": [
+    "source_type",
+    "language",
+    "access_type",
+    "trial_type"
+  ],
+  "weights": {
+    "uncertainty": 0.35,
+    "boundary_risk": 0.35,
+    "format_risk": 0.15,
+    "impact": 0.15
+  },
+  "keyword_signals": {
+    "uncertainty": [
+      "unclear",
+      "ambiguous",
+      "insufficient information",
+      "needs review"
+    ],
+    "boundary_risk": [
+      "long-term",
+      "three-year",
+      "pot experiment",
+      "greenhouse",
+      "multiple layers",
+      "supplementary"
+    ],
+    "format_risk": [
+      "figure",
+      "scanned",
+      "ocr",
+      "pdf"
+    ],
+    "impact": [
+      "multi-site",
+      "multi-year",
+      "long-term platform",
+      "national experiment"
+    ]
+  }
+}

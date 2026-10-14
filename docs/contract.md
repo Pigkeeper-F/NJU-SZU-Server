@@ -17,7 +17,9 @@ flow-agent-web/
 │   ├── sidebar.js      # T2 交付：window.Sidebar
 │   ├── tabs.js         # T3 交付：window.ModuleTabs
 │   ├── chat.js         # T4 交付：window.ModuleSpace
-│   └── app.js          # T5 交付：window.App（装配 + 订阅）
+│   ├── app.js          # T5 交付：window.App（装配 + 订阅）
+│   ├── api-keys.js     # API 配置入口：供应商菜单 + 本地密钥保存
+│   └── workspace.js    # 首页体验层：研究空间 / 记录 / 项目详情
 └── docs/
     └── contract.md     # 本文件
 ```
@@ -30,7 +32,8 @@ flow-agent-web/
    `crypto.subtle`、外部 CDN、外部字体与图片。全部用传统 `<script src>` 普通脚本。
 2. **两种运行模式**：双击 `index.html` 可使用本地 UI 与 localStorage；要启用 AI 回复则运行
    `npm start` 并从 `http://localhost:8123/` 打开。前端只允许以 `fetch` 调用同源
-   `POST /api/ai/chat`，不得直接访问第三方模型服务或携带 API Key。
+   `POST /api/ai/chat`，不得直接访问第三方模型服务。页面可把用户在「添加 API」弹窗中输入的
+   API Key 保存到当前浏览器 localStorage，并只随同源本地代理请求发送。
 3. **全局对象约定**：每个 UI 模块挂载一个全局对象，只暴露 `render()`（**名字以各任务说明为准，务必一致**）：
    - `window.Sidebar     = { render: function () {} }`  ← T2（js/sidebar.js）
    - `window.ModuleTabs  = { render: function () {} }`  ← T3（js/tabs.js）
@@ -78,8 +81,8 @@ message = {
 }
 ```
 
-**依赖链语义**：`addModule()` 永远追加到数组末尾，并把 `dependsOn` 设为当前最后一个模块的 id，
-因此天然形成强依赖链 `模块1 → 模块2 → 模块3`（首模块 `dependsOn === null`）。
+**依赖链语义**：模块只能按「下载数据 → 数据清洗 → 计算 → 文献挖掘 → 人工审核 → 绘图」固定顺序追加，
+计算方式可选「直接计算」「参数更新」「活动数据更新」；后两者在计算后插入对应子模块。模块名不可任意设置。
 校验层保证 `dependsOn` 只能指向数组中**更靠前**的模块 id ⇒ 不可能出现环。
 
 **删除规则**：若存在任何模块的 `dependsOn === 目标 id`，删除被拒。配合链式结构，即"只有链尾可删"。
@@ -196,7 +199,8 @@ Store.LIMITS = {
 })();
 ```
 
-- 顺序固定为 `store.js → sidebar.js → tabs.js → chat.js → app.js`（`index.html` 已写好，勿改）。
+- 顺序固定为 `store.js → sidebar.js → tabs.js → chat.js → app.js → api-keys.js → codex.js → workspace.js`。
+- 当前呈现层采用对话优先布局：`#module-tabs` 与新增按钮位于左侧栏，添加 API 位于侧栏底部（折叠时仍可用）；主区仅保留当前模块标题、Codex 文件面板、对话和输入区。项目顶部栏、项目名称编辑、导出记录、项目备忘面板与模块标题上方的“研究空间”小字已移除；原浏览器保存的数据不删除。历史 T1–T5 骨架描述中的“顶部模块条”以此为准；受保护静态节点与状态 API 保持兼容。
 - 模块脚本之间**不得**在加载期互相调用；所有跨模块调用只能发生在 `render()` / 事件回调里。
 - 若某模块脚本缺失（例如 T2 未完成），app.js 需对 `window.Sidebar` 等做存在性判断以免整页报错。
 - **T5 实装补充（js/app.js，均不影响上表语义）**：① 每个 `render()` 单独 `try/catch`，单个模块抛错
@@ -344,8 +348,7 @@ body > .app-shell
    取 `value` → `Store.appendMessage(activeModuleId, text, 'user')`；返回非 null 时清空输入框、
    重新自适应高度。空文本或没有选中模块时直接忽略。
 3. 自适应高度：输入时 `el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 180) + 'px'`。
-4. 可选：发送后追加一条本地占位助手回复（`setTimeout` + `Store.appendMessage(id, '（本地演示回复）', 'assistant')`），
-   **不得**发起任何网络请求。
+4. AI 对话模式可通过同源 `POST /api/ai/chat` 请求本地代理；不得直接请求第三方模型服务。
 
 ### T5 `js/app.js`（`window.App`）
 见 §7；另需在 `Store` 不存在时给出明确报错提示，并在控制台暴露 `window.Store` 便于调试。

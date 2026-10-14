@@ -1,0 +1,5 @@
+状态：通过
+脚本退出码：0
+输出行数：2
+核对结果：a=4，b=6
+执行方式：原样运行 smoke_model.py；输入 smoke_input.csv
