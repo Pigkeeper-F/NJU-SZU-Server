@@ -1131,6 +1131,20 @@ const STATIC_EXT = new Set([
   '.gif', '.webp', '.ico', '.txt', '.woff', '.woff2', '.ttf'
 ]);
 
+// 【修复 · 2026-10-14】统一域名：浏览器把 localhost 与 127.0.0.1 视为两个独立 origin，
+// localStorage 里的账号/记录互不可见（用户从不同地址进来会「注册后登录不上」）。
+// 页面类 GET/HEAD 请求若来自 127.0.0.1，统一 302 到 localhost，保证所有人都落在同一 origin。
+// API 的 POST 不重定向（页面固定在 localhost 后，API 自然同源）。
+function redirectLoopback(req, res) {
+  if ((req.method === 'GET' || req.method === 'HEAD') &&
+      String(req.headers.host || '').toLowerCase().indexOf('127.0.0.1:') === 0) {
+    res.writeHead(302, { Location: 'http://localhost:' + PORT + safePathname(req.url) });
+    res.end();
+    return true;
+  }
+  return false;
+}
+
 function serveStatic(req, res) {
   const pathname = safePathname(req.url);
   const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
@@ -1178,7 +1192,8 @@ if (require.main === module) {
     if (req.method === 'POST' && req.url === '/api/ai/chat') return guarded('/api/ai/chat', handleChat);
     if (req.method === 'POST' && req.url === '/api/ai/compose') return guarded('/api/ai/compose', handleCompose);
     if (req.method === 'POST' && req.url === '/api/code/exec') return guarded('/api/code/exec', handleExec);
-    if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
+    if (redirectLoopback(req, res)) return;
+  if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
     res.writeHead(405, { Allow: 'GET, HEAD, POST' }); res.end();
   }).listen(PORT, HOST, () => console.log('Flow Agent server started: http://localhost:' + PORT));
   function shutdown() { codex.close(); server.close(); }

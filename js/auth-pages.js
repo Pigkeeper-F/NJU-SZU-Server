@@ -93,9 +93,10 @@
       });
       if (!ok) { showMsg(msg, "注册失败，请稍后重试", "error"); return; }
 
-      showMsg(msg, "注册成功！即将跳转到登录页…", "ok");
+      showMsg(msg, "注册成功！正在进入工作台…", "ok");
       step2.disabled = true;
-      setTimeout(function () { location.href = "login.html"; }, 1200);
+      Session.set(username); // 【修复 · 2026-10-14】注册后自动登录，免去再输一次账号密码
+      setTimeout(function () { location.href = "index.html"; }, 1200);
     }
 
     step1.addEventListener("click", verifyCode);
@@ -143,6 +144,18 @@
     onEnter(passInput, login);
   }
 
+  /* ---------------- 测试直达（免登录）——开发/演示便利入口 ---------------- */
+
+  function initTestEntry() {
+    var btn = document.getElementById("btn-test-entry");
+    if (!btn) { return; } // 当前页面没有测试直达按钮
+    btn.addEventListener("click", function () {
+      Session.set("tester"); // 写入测试会话，工作台守卫（guard.js）即放行
+      location.href = "index.html";
+    });
+  }
+
   initRegisterPage();
   initLoginPage();
+  initTestEntry();
 })();

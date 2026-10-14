@@ -245,3 +245,7 @@ body {
 
 /* 两段式切换：第一段（测试码）通过后隐藏、显示第二段 */
 .stage-hidden { display: none !important; }
+
+/* 测试直达按钮（免登录便利入口，正式交付时可移除） */
+.btn-quiet-entry{background:#fff;border-style:dashed;color:#8b95a5}
+.btn-quiet-entry:hover{background:#f5f7fa;color:#5b6a80}
