@@ -387,9 +387,13 @@
     var modelPane = doc.createElement('div');
     modelPane.className = 'settings-pane is-active';
     modelPane.setAttribute('data-settings-pane', 'model');
+    var codexConnection = doc.getElementById('codex-connection');
+    if (codexConnection) { modelPane.appendChild(codexConnection); codexConnection.hidden = false; }
 
     var body = doc.createElement('div');
     body.className = 'settings-body';
+    body.setAttribute('data-api-settings', '');
+    body.hidden = !!codexConnection && codexConnection.querySelector('select').value !== 'api';
     body.appendChild(settingsField('接口地址（Base URL）', 'llm-base-url',
       '例如 https://api.commandcode.ai/provider/v1'));
     body.appendChild(settingsField('模型名', 'llm-model', '例如 deepseek/deepseek-v4-flash'));
@@ -441,6 +445,8 @@
 
     var actions = doc.createElement('div');
     actions.className = 'settings-actions';
+    actions.setAttribute('data-api-settings', '');
+    actions.hidden = !!codexConnection && codexConnection.querySelector('select').value !== 'api';
     var save = doc.createElement('button');
     save.type = 'submit';
     save.className = 'primary-button';
@@ -584,7 +590,7 @@
     activateSettingsTab('model');          // 每次打开回到「模型」页
     if (typeof elSettingsDialog.showModal === 'function') elSettingsDialog.showModal();
     else elSettingsDialog.setAttribute('open', '');
-    if (doc.getElementById('llm-base-url')) doc.getElementById('llm-base-url').focus();
+    if (doc.getElementById('ai-backend')) doc.getElementById('ai-backend').focus();
   }
 
   /**

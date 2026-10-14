@@ -69,6 +69,15 @@
   <dialog id="rules-dialog"><div class="dialog-top"><span class="eyebrow">TASK RULES</span><button class="icon-btn" id="rules-dialog-close" type="button" aria-label="关闭">×</button></div><h2>执行规则</h2><p>这里只放你决定要执行的规则。可以自己填写，或让 AI 从对话中提取候选规则；AI 草稿须经你核对并确认。</p><div id="task-summary-confirmed" class="task-summary-confirmed" hidden></div><label for="task-summary-draft">规则草稿</label><textarea id="task-summary-draft" rows="12" placeholder="处理范围、输入文件、具体清洗/转换规则、异常处理、验收标准、输出文件……只写已经确定的内容。"></textarea><div class="task-summary-actions"><select id="task-summary-history" aria-label="查看规则历史版本"><option value="">历史版本</option></select><button id="task-summary-ai" class="quiet-button" type="button">AI 提取候选规则</button><button id="task-summary-save" class="primary-button" type="button">确认规则</button><button id="task-rules-execute" class="primary-button" type="button">按规则执行清洗</button></div><div id="task-summary-message" role="status"></div></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
   <input id="import-file" type="file" accept=".json,application/json" hidden>
+  <section id="codex-connection" class="codex-connection" aria-label="AI 连接" hidden>
+    <p>当前模块的助手与模型；未选模块时设置新模块默认值。</p>
+    <label>对话助手 <select id="ai-backend"><option value="codex">本机 Codex（无需 API Key）</option><option value="api">API 对话</option></select></label>
+    <button id="codex-login" class="primary-button" type="button">登录本机 Codex</button>
+    <button id="codex-refresh" class="quiet-button" type="button">检查连接</button>
+    <span id="codex-status" role="status">尚未检查连接</span>
+    <label>Codex 模型 <select id="codex-model" disabled><option value="">账号默认模型</option></select></label>
+    <a id="codex-login-link" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页面</a>
+  </section>
 
   <!-- 脚本顺序不可调整：账号 -> 守卫 -> 数据层 -> 三个 UI 模块 -> 装配 -->
   <script src="js/auth-config.js"></script>

@@ -993,3 +993,10 @@ exec 返回前，对 `artifacts` 中扩展名 ∈ {`.csv`, `.txt`, `.json`, `.md
 - **[22]** artifacts preview：out.csv 多行内容正确、60 行截到 50 行、`.bin` 无 preview。
 
 全通过仍输出 `ALL_EXEC_TESTS_PASS`（实测 76 通过 / 0 失败，1 项 SKIP 视环境 Key 而定）。
+# 2026-10-14 补充：设置中的本机 Codex 登录
+
+`POST /api/codex/login` 启动 app-server 官方 ChatGPT 浏览器登录；已有登录状态时返回 `{loggedIn:true}`，未登录时返回 `{loggedIn:false,authUrl}`，完成或失败通知后释放待登录状态。沿用本机 Host、Origin 与工作台请求头保护。凭据由 Codex 保存，浏览器只接收官方登录 URL 与连接状态。
+
+连接控件 `codex-connection` 默认隐藏，首次打开“设置 → 模型”时由 sidebar.js 移入模型设置页。登录、检查连接、后端与模型选项由 CodexUI 管理；后端/模型仍按模块保存，未选择模块时更新新模块的默认值（`fa_codex_connection_v1`）。主模块面板保留文件与执行按钮，不显示登录和模型配置。
+
+`POST /api/ai/compose` 可选 `backend:'codex'` 与 `codexModel`，只读生成文档/代码或诊断文本，继续使用现有模板、反馈和返回结构。生成的代码仍经过原人工确认与执行接口；没有自动执行。`CodexUI.getModel(mod)` 返回当前模块的模型。
