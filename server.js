@@ -358,7 +358,8 @@ async function handleChat(req, res) {
 // 整理成《环节标准文档》或生成单文件 Node 脚本。模型配置解析复用 resolveModelConfig，
 // 上游错误语义与 handleChat 完全一致（4xx→400 / 网络/5xx/空回复→502 / 无 Key→503）。
 // ============================================================================
-const COMPOSE_MODES = new Set(['doc', 'code']);
+// 【X1 · 2026-10-14】新增 diagnose：AI 自动定位问题层级（data/align/code），契约见 §20.2。
+const COMPOSE_MODES = new Set(['doc', 'code', 'diagnose']);
 
 const COMPOSE_DOC_TEMPLATE = [
   '你是资深流程架构师。请把下面给出的「环节信息」与「对话记录」整理成一份《环节标准文档》。',
@@ -449,6 +450,17 @@ const COMPOSE_CODE_MINING_TEMPLATE = [
   '6) 目录/文件缺失时打印清晰错误并以非零退出码结束；禁止网络请求，禁止读写工作目录以外的路径。'
 ].join('\n');
 
+// 【X1 · 2026-10-14】diagnose 提示词：要求模型只输出一个 JSON（解析规则见 parseDiagnoseJson）。
+const COMPOSE_DIAGNOSE_TEMPLATE = [
+  '你是流程执行问题的定位专家。请综合下面的环节信息、文档、代码、上次执行结果与问题描述，判断问题出在哪一层。',
+  '三层的含义：',
+  '- "data"：数据本身问题（输入数据缺失、格式错误、内容异常）；',
+  '- "align"：对齐或标准文档问题（文档规则缺陷、口径不一致、验收标准矛盾）；',
+  '- "code"：生成的代码问题（脚本 bug、逻辑错误、未按文档实现）。',
+  '硬性要求：只输出一个 JSON 对象，不要任何解释文字、不要代码围栏，格式为：',
+  '{"level":"data|align|code","reason":"推断理由(≤150字)"}'
+].join('\n');
+
 // 选模板：doc 模式与 code 模式各有一组「标准/对齐/挖掘」模板。
 function pickComposeTemplate(mode, template) {
   const t = template || 'standard';
@@ -529,7 +541,50 @@ function buildChatModuleContext(module) {
   return head + '\n【上游已确认产出摘要】\n' + docs.join('\n');
 }
 
-function buildComposeInput(payload) {
+// ============================================================================
+// 【X1 · 2026-10-14】compose 提示词拼装（抽为纯函数 buildComposePrompt 供测试断言）
+// ----------------------------------------------------------------------------
+// 迭代反馈注入（仅 code 模式的 feedback；打回线索 doc/code 均生效）：
+//   1) body.feedback = { stderr?, note? }：stderr 截尾部 2000 字、note 截前 1000 字，
+//      拼接在提示词尾部，并追加「本次生成的代码必须避免上述问题」；
+//   2) 从 messages 原始数组扫描最近 3 条 role='system' 且以「文档打回：」/「结果复核打回：」
+//      开头的消息（每条截 500 字），以【上轮反馈线索】段注入——文档打回后重生成文档
+//      也要看到打回理由，故 doc 模式同样生效；
+//   3) feedback 缺省且无打回线索时，提示词与旧行为逐字一致；
+//   4) system 消息只作为线索扫描，仍不进【对话记录】（normalizeMessages 规则不变，防提权）。
+// ============================================================================
+const FEEDBACK_STDERR_CHARS = 2000;
+const FEEDBACK_NOTE_CHARS = 1000;
+const REJECT_CLUE_PREFIXES = ['文档打回：', '结果复核打回：'];
+const REJECT_CLUE_MAX = 3;
+const REJECT_CLUE_CHARS = 500;
+
+function collectRejectionClues(rawMessages) {
+  if (!Array.isArray(rawMessages)) return [];
+  const clues = [];
+  for (const item of rawMessages) {
+    if (!item || typeof item !== 'object' || item.role !== 'system' || typeof item.text !== 'string') continue;
+    if (!REJECT_CLUE_PREFIXES.some((prefix) => item.text.startsWith(prefix))) continue;
+    clues.push(item.text.trim().slice(0, REJECT_CLUE_CHARS));
+  }
+  return clues.slice(-REJECT_CLUE_MAX); // 最近 3 条
+}
+
+function buildComposeFeedback(feedback) {
+  if (!feedback || typeof feedback !== 'object' || Array.isArray(feedback)) return '';
+  const parts = [];
+  if (typeof feedback.stderr === 'string' && feedback.stderr.trim()) {
+    parts.push('【上一轮执行失败信息（stderr）】\n' + feedback.stderr.trim().slice(-FEEDBACK_STDERR_CHARS));
+  }
+  if (typeof feedback.note === 'string' && feedback.note.trim()) {
+    parts.push('【上一轮人工反馈】\n' + feedback.note.trim().slice(0, FEEDBACK_NOTE_CHARS));
+  }
+  if (!parts.length) return '';
+  parts.push('本次生成的代码必须避免上述问题。');
+  return parts.join('\n');
+}
+
+function buildComposePrompt(payload) {
   const brief = buildModuleBrief(payload.module);
   const template = pickComposeTemplate(payload.mode, payload.template);
   const convo = normalizeMessages(payload.messages);
@@ -537,20 +592,80 @@ function buildComposeInput(payload) {
     ? convo.map((m) => (m.role === 'user' ? '用户：' : 'AI：') + m.content).join('\n\n')
     : '（暂无对话记录）';
 
+  const blocks = [template, '【环节信息】\n' + brief];
   if (payload.mode === 'code') {
     const docText = moduleDocText(payload.module);
-    return [
-      template,
-      '【环节信息】\n' + brief,
-      '【环节文档】\n' + (docText || '（尚未生成文档，请依据环节信息与对话记录自行推断）'),
-      '【对话记录】\n' + convoText
-    ].join('\n\n');
+    blocks.push('【环节文档】\n' + (docText || '（尚未生成文档，请依据环节信息与对话记录自行推断）'));
   }
-  return [
-    template,
-    '【环节信息】\n' + brief,
-    '【对话记录】\n' + convoText
-  ].join('\n\n');
+  blocks.push('【对话记录】\n' + convoText);
+
+  const clues = collectRejectionClues(payload.messages);
+  if (clues.length) {
+    blocks.push('【上轮反馈线索】\n' + clues.map((c) => '- ' + c).join('\n'));
+  }
+  if (payload.mode === 'code') {
+    const fb = buildComposeFeedback(payload.feedback);
+    if (fb) blocks.push(fb);
+  }
+  return blocks.join('\n\n');
+}
+
+// 【X1 · 2026-10-14】diagnose 提示词拼装（纯函数，供测试断言）。除 mode 外字段均可选。
+function diagnoseDocText(raw) {
+  if (typeof raw === 'string') return raw.trim();
+  if (raw && typeof raw === 'object' && typeof raw.content === 'string') return raw.content.trim();
+  return '';
+}
+
+function buildDiagnosePrompt(payload) {
+  const parts = [COMPOSE_DIAGNOSE_TEMPLATE];
+  if (payload.module && typeof payload.module === 'object' && !Array.isArray(payload.module)) {
+    parts.push('【环节信息】\n' + buildModuleBrief(payload.module));
+  }
+  const docText = diagnoseDocText(payload.doc);
+  if (docText) parts.push('【环节文档】\n' + docText);
+  if (typeof payload.code === 'string' && payload.code.trim()) {
+    parts.push('【环节代码】\n' + payload.code.trim());
+  }
+  const exec = payload.exec;
+  if (exec && typeof exec === 'object' && !Array.isArray(exec)) {
+    const lines = ['【上次执行结果】', '成功与否：' + (exec.ok === true ? '成功' : '失败')];
+    if (typeof exec.stderr === 'string' && exec.stderr.trim()) {
+      lines.push('stderr（截尾部 ' + FEEDBACK_STDERR_CHARS + ' 字）：\n' + exec.stderr.trim().slice(-FEEDBACK_STDERR_CHARS));
+    }
+    if (Array.isArray(exec.artifacts)) {
+      const names = exec.artifacts
+        .map((a) => (a && typeof a.name === 'string') ? a.name : '')
+        .filter(Boolean);
+      lines.push('产物文件：' + (names.length ? names.join('、') : '（无）'));
+    }
+    parts.push(lines.join('\n'));
+  }
+  if (typeof payload.issue === 'string' && payload.issue.trim()) {
+    parts.push('【问题描述】\n' + payload.issue.trim());
+  }
+  return parts.join('\n\n');
+}
+
+// diagnose 输出解析：容忍 ```json 围栏与前后杂质文本（取 {…} 片段 parse）；
+// level ∈ data|align|code 且 reason 为非空字符串才算成功，否则返回 {text} 原样（前端降级展示）。
+function parseDiagnoseJson(text) {
+  let t = String(text || '').trim();
+  const fence = t.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i);
+  if (fence) t = fence[1].trim();
+  const start = t.indexOf('{');
+  const end = t.lastIndexOf('}');
+  if (start !== -1 && end > start) {
+    try {
+      const obj = JSON.parse(t.slice(start, end + 1));
+      if (obj && !Array.isArray(obj)
+        && ['data', 'align', 'code'].includes(obj.level)
+        && typeof obj.reason === 'string' && obj.reason.trim()) {
+        return { level: obj.level, reason: obj.reason };
+      }
+    } catch (error) { /* 解析失败 → 落到 text 返回 */ }
+  }
+  return { text: String(text || '') };
 }
 
 async function handleCompose(req, res) {
@@ -566,7 +681,7 @@ async function handleCompose(req, res) {
     return;
   }
   if (!COMPOSE_MODES.has(payload.mode)) {
-    sendJson(res, 400, { error: "mode 必须是 'doc' 或 'code'。" });
+    sendJson(res, 400, { error: "mode 必须是 'doc'、'code' 或 'diagnose'。" });
     return;
   }
   // 【W2 · 2026-10-14】template 可选，缺省 'standard'；非法值 400。
@@ -582,8 +697,16 @@ async function handleCompose(req, res) {
     return;
   }
   try {
-    const text = await callModel(cfg, [{ role: 'user', content: buildComposeInput(payload) }], 300000);
-    sendJson(res, 200, { text });
+    const prompt = payload.mode === 'diagnose'
+      ? buildDiagnosePrompt(payload)
+      : buildComposePrompt(payload);
+    const text = await callModel(cfg, [{ role: 'user', content: prompt }], 300000);
+    if (payload.mode === 'diagnose') {
+      // 【X1 · 2026-10-14】diagnose：解析成功返回 {level, reason}，失败返回 {text}（§20.2）。
+      sendJson(res, 200, parseDiagnoseJson(text));
+    } else {
+      sendJson(res, 200, { text });
+    }
   } catch (error) {
     sendJson(res, (error && error.status) || 500, { error: (error && error.message) || '服务端内部错误' });
   }
@@ -648,6 +771,103 @@ function normalizeFiles(rawFiles) {
     files.push({ name, content: item.content });
   }
   return { ok: true, files };
+}
+
+// ============================================================================
+// 【X1 · 2026-10-14】exec URL 下载（body.urls，契约见 §20.3）
+// ----------------------------------------------------------------------------
+// 每条 URL 独立处理，单条失败不影响其余（结果记入响应的 downloaded 数组）：
+//   1) 协议仅 http/https；2) SSRF 防护：hostname 命中私网一律拒绝（isPrivateHost）；
+//   3) 单文件 ≤512KB（边收边限量）；4) 30s 超时；5) name 取传入 name 或 URL path 的
+//   basename（与 files 同 sanitize 规则），下载文件写入执行目录供脚本读取。
+// 测试例外：环境变量 YANXU_ALLOW_PRIVATE_HOST=1 时放行私网（仅供测试下载本机静态文件）。
+// ============================================================================
+const URL_DOWNLOAD_TIMEOUT_MS = 30000;
+const URL_DOWNLOAD_MAX_BYTES = 512 * 1024;
+const ALLOW_PRIVATE_HOST = process.env.YANXU_ALLOW_PRIVATE_HOST === '1';
+
+// SSRF 防护纯函数：hostname 是否命中私网 / 本机保留地址（命中 → 拒绝下载）。
+// 规则：localhost（含 *.localhost）、*.local、0/8、10/8、127/8、169.254/16（链路本地）、
+// 172.16/12、192.168/16、::1、::、::ffff: 映射的 IPv4；非法点分（缺段 / 段>255）宁拒勿漏。
+// 其余域名（如 github.com）不在 DNS 解析层校验（残余风险见 §20.3）。
+function isPrivateHost(hostname) {
+  const raw = String(hostname || '').trim().toLowerCase();
+  if (!raw) return true;
+  if (raw === 'localhost' || raw.endsWith('.localhost') || raw.endsWith('.local')) return true;
+  const host = raw.replace(/^\[|\]$/g, ''); // [::1] 形式去括号
+  if (host === '::1' || host === '0:0:0:0:0:0:0:1' || host === '::') return true;
+  if (host.startsWith('::ffff:')) return isPrivateHost(host.slice(7));
+  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const segs = m.slice(1).map(Number);
+    if (segs.some((n) => n > 255)) return true;
+    const [a, b] = segs;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return false;
+  }
+  return false;
+}
+
+// 解析 body.urls：非数组整体 400；单项结构非法（非对象 / url 缺失）丢弃。
+function normalizeUrls(rawUrls) {
+  if (rawUrls === undefined || rawUrls === null) return { ok: true, urls: [] };
+  if (!Array.isArray(rawUrls)) return { ok: false, error: 'urls 必须是数组。' };
+  const urls = [];
+  for (const item of rawUrls) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    if (typeof item.url !== 'string' || !item.url.trim()) continue;
+    urls.push({ url: item.url.trim(), name: (typeof item.name === 'string') ? item.name : '' });
+  }
+  return { ok: true, urls };
+}
+
+// 单个 URL 下载：成功 {name, ok:true, size, data(Buffer)}；失败 {name, ok:false, error}。
+// name 在 URL 解析后立即确定（传入 name 优先，否则取 URL path 的 basename，同 sanitize 规则），
+// 保证失败条目也尽量携带 name。
+async function downloadUrlToFile(item, allowPrivate) {
+  const fail = (name, error) => ({ name: name || '', ok: false, error });
+  let parsed;
+  try { parsed = new URL(item.url); } catch (error) { return fail(item.name, 'URL 无法解析'); }
+  const name = sanitizeFileName(item.name)
+    || sanitizeFileName(decodeURIComponent(path.basename(parsed.pathname)))
+    || '';
+  const failHere = (error) => fail(name || item.name, error);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return failHere('仅支持 http/https 协议：' + parsed.protocol.replace(/:$/, ''));
+  }
+  if (!allowPrivate && isPrivateHost(parsed.hostname)) {
+    return failHere('拒绝下载私网/本机地址（SSRF 防护）：' + parsed.hostname);
+  }
+  if (!name) return failHere('无法从 URL 确定文件名');
+  let res;
+  try {
+    res = await fetch(parsed.href, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(URL_DOWNLOAD_TIMEOUT_MS)
+    });
+  } catch (error) {
+    return failHere((error && error.name === 'TimeoutError') ? '下载超时（30s）' : '下载失败：网络错误');
+  }
+  if (!res.ok) return failHere('下载失败：HTTP ' + res.status);
+  if (!res.body) return failHere('下载失败：空响应体');
+  const chunks = [];
+  let total = 0;
+  try {
+    for await (const chunk of res.body) {
+      total += chunk.byteLength;
+      if (total > URL_DOWNLOAD_MAX_BYTES) {
+        try { await res.body.cancel(); } catch (ignored) { /* 已超限，忽略 */ }
+        return failHere('文件超过 512KB 上限');
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+  } catch (error) {
+    return failHere('下载失败：读取响应中断');
+  }
+  return { name, ok: true, size: total, data: Buffer.concat(chunks) };
 }
 
 // 创建本次执行目录：<base>/<时间戳>-<随机>，base 优选 YANXU_RUN_DIR → ~/yanxu-runs；
@@ -739,6 +959,28 @@ function listArtifacts(dir, scriptName) {
   return out;
 }
 
+// 【X1 · 2026-10-14】产物预览（契约见 §20.4）：文本类产物（.csv/.txt/.json/.md）且 ≤200KB 时，
+// 读前 50 行、截 10KB（超出补「…」）填入 preview 字段；其余文件 / 读取失败不带 preview。
+const PREVIEW_EXTS = new Set(['.csv', '.txt', '.json', '.md']);
+const PREVIEW_MAX_FILE_BYTES = 200 * 1024;
+const PREVIEW_MAX_LINES = 50;
+const PREVIEW_MAX_CHARS = 10 * 1024;
+
+function addArtifactsPreview(dir, artifacts) {
+  if (!dir || !Array.isArray(artifacts)) return;
+  for (const artifact of artifacts) {
+    try {
+      if (!artifact || typeof artifact.name !== 'string') continue;
+      if (!PREVIEW_EXTS.has(path.extname(artifact.name).toLowerCase())) continue;
+      if (artifact.size > PREVIEW_MAX_FILE_BYTES) continue;
+      const content = fs.readFileSync(path.join(dir, artifact.name), 'utf8');
+      let preview = content.split(/\r?\n/).slice(0, PREVIEW_MAX_LINES).join('\n');
+      if (preview.length > PREVIEW_MAX_CHARS) preview = preview.slice(0, PREVIEW_MAX_CHARS) + '…';
+      artifact.preview = preview;
+    } catch (error) { /* 读不到就不带 preview */ }
+  }
+}
+
 function runScript(lang, code, command, files) {
   return new Promise((resolve) => {
     let created;
@@ -758,7 +1000,8 @@ function runScript(lang, code, command, files) {
     try {
       fs.writeFileSync(path.join(dir, scriptName), code, 'utf8');
       for (const file of (files || [])) {
-        fs.writeFileSync(path.join(dir, file.name), file.content, 'utf8');
+        // 【X1 · 2026-10-14】file.data（Buffer，URL 下载产物）优先；否则 file.content（文本）。
+        fs.writeFileSync(path.join(dir, file.name), file.data !== undefined ? file.data : file.content, 'utf8');
       }
     } catch (error) {
       resolve({ ok: false, error: '写入执行目录失败：' + error.message, stdout: '', stderr: '', artifacts: listArtifacts(dir, scriptName), dir, ms: Date.now() - start, fallback });
@@ -836,6 +1079,21 @@ async function handleExec(req, res) {
     sendJson(res, 400, { error: filesResult.error });
     return;
   }
+  // 【X1 · 2026-10-14】可选 URL 下载：结构非法 → 400；单条失败不影响其余（§20.3）。
+  const urlsResult = normalizeUrls(payload.urls);
+  if (!urlsResult.ok) {
+    sendJson(res, 400, { error: urlsResult.error });
+    return;
+  }
+  const downloaded = [];
+  const downloadedFiles = [];
+  for (const item of urlsResult.urls) {
+    const one = await downloadUrlToFile(item, ALLOW_PRIVATE_HOST);
+    downloaded.push(one.ok
+      ? { name: one.name, ok: true, size: one.size }
+      : { name: one.name, ok: false, error: one.error });
+    if (one.ok) downloadedFiles.push({ name: one.name, data: one.data });
+  }
   let command = process.execPath;
   if (lang === 'python') {
     command = await detectPython();
@@ -846,7 +1104,9 @@ async function handleExec(req, res) {
   }
 
   try {
-    const result = await runScript(lang, payload.code, command, filesResult.files);
+    const result = await runScript(lang, payload.code, command, filesResult.files.concat(downloadedFiles));
+    addArtifactsPreview(result.dir, result.artifacts);
+    if (downloaded.length) result.downloaded = downloaded;
     sendJson(res, 200, result);
   } catch (error) {
     console.error('[server] uncaught error in /api/code/exec:', error);
@@ -867,7 +1127,7 @@ function safePathname(rawUrl) {
 // 原实现是「只要落在 ROOT 之内就发」，于是 GET /.env 会把 AI_API_KEY 明文返回给任何访问者
 // （而服务默认绑 0.0.0.0，同网段任何人都能取到）。现在叠加两道：拒绝点开头路径段 + 扩展名白名单。
 const STATIC_EXT = new Set([
-  '.html', '.htm', '.js', '.css', '.map', '.json', '.svg', '.png', '.jpg', '.jpeg',
+  '.html', '.htm', '.js', '.css', '.map', '.json', '.svg', '.png', '.jpg', '.jpeg', '.md',
   '.gif', '.webp', '.ico', '.txt', '.woff', '.woff2', '.ttf'
 ]);
 
@@ -894,30 +1154,39 @@ function serveStatic(req, res) {
   });
 }
 
-const server = http.createServer((req, res) => {
-  if (String(req.url || '').startsWith('/api/') && !checkRequestGuards(req, res)) return;
-  if ((String(req.url || '').startsWith('/api/codex/') || req.url === '/api/dependencies/open') &&
-    req.method === 'POST' && req.headers['x-workbench'] !== '1') {
-    return sendJson(res, 403, { error: '请从工作台发起请求' });
-  }
-  const guarded = (name, handler) => {
-    Promise.resolve().then(() => handler(req, res)).catch((error) => {
-      console.error('[server] uncaught error in ' + name + ':', error);
-      try {
-        if (!res.headersSent) sendJson(res, 500, { error: '服务端内部错误' });
-        else res.end();
-      } catch (ignored) { /* 连接已断开，忽略 */ }
-    });
-  };
-  if (String(req.url || '').startsWith('/api/codex/')) return guarded('/api/codex', (request, response) =>
-    handleCodex(request, response, new URL(request.url, 'http://localhost')));
-  if (req.method === 'POST' && req.url === '/api/dependencies/open') return guarded('/api/dependencies/open', (_, response) => openDependencies(response));
-  if (req.method === 'POST' && req.url === '/api/ai/chat') return guarded('/api/ai/chat', handleChat);
-  if (req.method === 'POST' && req.url === '/api/ai/compose') return guarded('/api/ai/compose', handleCompose);
-  if (req.method === 'POST' && req.url === '/api/code/exec') return guarded('/api/code/exec', handleExec);
-  if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
-  res.writeHead(405, { Allow: 'GET, HEAD, POST' }); res.end();
-}).listen(PORT, HOST, () => console.log('Flow Agent server started: http://localhost:' + PORT));
-function shutdown() { codex.close(); server.close(); }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+// 【X1 · 2026-10-14】require.main 守卫：直接运行时才监听端口；被测试 require 时
+// 仅复用下方导出的纯函数，不占端口、不加载监听副作用。
+if (require.main === module) {
+  const server = http.createServer((req, res) => {
+    if (String(req.url || '').startsWith('/api/') && !checkRequestGuards(req, res)) return;
+    if ((String(req.url || '').startsWith('/api/codex/') || req.url === '/api/dependencies/open') &&
+      req.method === 'POST' && req.headers['x-workbench'] !== '1') {
+      return sendJson(res, 403, { error: '请从工作台发起请求' });
+    }
+    const guarded = (name, handler) => {
+      Promise.resolve().then(() => handler(req, res)).catch((error) => {
+        console.error('[server] uncaught error in ' + name + ':', error);
+        try {
+          if (!res.headersSent) sendJson(res, 500, { error: '服务端内部错误' });
+          else res.end();
+        } catch (ignored) { /* 连接已断开，忽略 */ }
+      });
+    };
+    if (String(req.url || '').startsWith('/api/codex/')) return guarded('/api/codex', (request, response) =>
+      handleCodex(request, response, new URL(request.url, 'http://localhost')));
+    if (req.method === 'POST' && req.url === '/api/dependencies/open') return guarded('/api/dependencies/open', (_, response) => openDependencies(response));
+    if (req.method === 'POST' && req.url === '/api/ai/chat') return guarded('/api/ai/chat', handleChat);
+    if (req.method === 'POST' && req.url === '/api/ai/compose') return guarded('/api/ai/compose', handleCompose);
+    if (req.method === 'POST' && req.url === '/api/code/exec') return guarded('/api/code/exec', handleExec);
+    if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
+    res.writeHead(405, { Allow: 'GET, HEAD, POST' }); res.end();
+  }).listen(PORT, HOST, () => console.log('Flow Agent server started: http://localhost:' + PORT));
+  function shutdown() { codex.close(); server.close(); }
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+// 【X1 · 2026-10-14】测试导出（零依赖纯函数）：供 tools/test-server-exec.js require 断言。
+// isPrivateHost：SSRF 私网判定；buildComposePrompt / buildDiagnosePrompt：提示词拼装；
+// parseDiagnoseJson：diagnose 输出解析。
+module.exports = { isPrivateHost, buildComposePrompt, buildDiagnosePrompt, parseDiagnoseJson };

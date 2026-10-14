@@ -759,3 +759,72 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 .records-search-row{margin:0 0 16px}
 .records-search{box-sizing:border-box;width:100%;max-width:560px;padding:9px 12px;border:1px solid var(--border);border-radius:8px}
 @media(max-width:640px){.sidebar{width:52px!important}.sidebar:not(.sidebar-collapsed){width:min(260px,calc(100vw - 52px))!important}.main{margin-left:52px}.sidebar.sidebar-collapsed+.main{margin-left:0}.task-bar{padding:8px 12px;flex-wrap:wrap}.task-bar select{min-width:140px;flex:1}.task-rules-bar{margin:8px 12px 0}.section-heading{padding:12px 16px}.module-space{padding:18px 16px}.composer{padding:10px 12px 12px}}
+/* ==================================================================
+   【X2 · 2026-10-14】迭代反馈 / AI 自动定位 / URL 下载 / 产物预览
+   ================================================================== */
+/* 迭代闭环：生成按钮下方的小字提示（已附带 stderr 反馈） */
+.doc-feedback-hint{margin-top:6px;font-size:11.5px;line-height:1.6;color:#2f7a46}
+
+/* AI 自动定位：按钮行 + 推断理由展示 */
+.doc-diag-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+.doc-diag-result{
+  margin:0 0 8px;
+  padding:8px 10px;
+  font-size:12px;
+  line-height:1.7;
+  color:#3c4a61;
+  background:#eef3fa;
+  border:1px solid #c6d5ea;
+  border-radius:8px;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
+
+/* URL 数据源：输入行 + 待下载清单（复用 doc-file-list / doc-file-item） */
+.doc-url-label{margin-top:10px;font-size:11.5px;color:var(--muted)}
+.doc-url-row{display:flex;gap:8px;margin-top:6px}
+.doc-url-input{
+  flex:1 1 auto;
+  min-width:0;
+  padding:5px 8px;
+  font:inherit;
+  font-size:12.5px;
+  color:var(--text);
+  background:#fff;
+  border:1px solid var(--border);
+  border-radius:7px;
+  outline:none;
+}
+.doc-url-input:focus{border-color:var(--accent-line)}
+.doc-url-input::placeholder{color:#a6afbc}
+.doc-url-add{
+  flex:0 0 auto;
+  padding:4px 12px;
+  font:inherit;
+  font-size:12.5px;
+  color:var(--text);
+  background:#fff;
+  border:1px solid var(--border);
+  border-radius:999px;
+}
+.doc-url-add:hover{border-color:var(--accent-line)}
+
+/* URL 下载结果清单 */
+.doc-downloaded-list{margin:6px 0 0;padding-left:20px}
+.doc-downloaded-item{font-size:12.5px;line-height:1.8;word-break:break-all}
+.doc-downloaded-ok{color:#2f7a46}
+.doc-downloaded-fail{color:var(--danger)}
+
+/* 产物预览：条目内切换按钮 + 展开后的限高滚动代码块 */
+.doc-preview-toggle{
+  margin-left:8px;
+  padding:1px 8px;
+  font:inherit;
+  font-size:11.5px;
+  color:var(--accent);
+  background:#fff;
+  border:1px solid var(--accent-line);
+  border-radius:999px;
+}
+.doc-preview-toggle:hover{background:var(--accent-soft)}
+.doc-artifact-preview{margin-top:6px;max-height:200px;overflow:auto}

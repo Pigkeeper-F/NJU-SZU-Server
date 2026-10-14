@@ -510,6 +510,9 @@
   // 【数据清洗闭环 · 2026-10-14】模块级瞬态，跨 render() 保留（编辑/上传/归因展开态不被重建吞掉）：
   var docTemplate = {};      // moduleId -> 'standard'|'align'|'mining'（生成模板选择）
   var docFiles = {};         // moduleId -> [{name,size,content}]（已读入的 UTF-8 文本数据文件）
+  // 【X2 · 2026-10-14】迭代反馈 / AI 自动定位 / URL 下载 / 产物预览（模块级瞬态，跨 render 保留）：
+  var urlList = {};          // moduleId -> [{url}]（待下载 URL 清单，确认执行时随 body.urls 发送）
+  var previewOpen = {};      // moduleId -> { '<artifact下标>': true }（产物预览展开态）
 
   var TEMPLATE_OPTIONS = [
     { value: 'standard', label: '标准文档' },
@@ -525,6 +528,26 @@
     { key: 'doc', label: '标准问题' }
   ];
 
+  // 【X2 · 2026-10-14】AI 自动定位：diagnose 返回 level(data|align|code) → 预选对应归因按钮
+  // （服务端 "align"（对齐/标准文档问题）映射为本卡片的「标准问题」）。预选只是初始选中态，
+  // 用户点击归因按钮仍会覆盖（确认打回以最终选中为准）。
+  var DIAG_LEVEL_META = {
+    data: { cause: 'data', label: '数据问题' },
+    align: { cause: 'doc', label: '对齐（标准）问题' },
+    code: { cause: 'code', label: '代码问题' }
+  };
+
+  /** 从 diagnose 输出中解析 {level, reason}：容忍 ```json 围栏与前后杂质（取 {…} 片段），失败返回 null */
+  function parseDiagJson(text) {
+    var m = String(text).match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    try {
+      var o = JSON.parse(m[0]);
+      if (o && DIAG_LEVEL_META[o.level] && typeof o.reason === 'string') return o;
+    } catch (e) { /* 非 JSON：走降级展示 */ }
+    return null;
+  }
+
   function uiOf(id) {
     if (!docUi[id]) {
       docUi[id] = {
@@ -534,6 +557,8 @@
         reject: false, rejectNote: '',                 // 文档打回内联反馈
         filesBusy: false, filesErr: '',                // 数据文件（读取中 / 卡片内错误与超限提示）
         runReject: false, runRejectCause: '', runRejectNote: '', runRejectErr: '', // 结果确认门：三级归因
+        diagLoading: false, diagText: '', diagErr: '',   // 【X2】AI 自动定位（compose diagnose）
+        urlErr: '',                                      // 【X2】URL 添加校验错误
         notice: ''                                     // 成功类提示
       };
     }
@@ -546,6 +571,11 @@
 
   function filesOf(id) {
     return docFiles[id] || (docFiles[id] = []);
+  }
+
+  /** 【X2】待下载 URL 清单（模块级，跨 render 保留） */
+  function urlsOf(id) {
+    return urlList[id] || (urlList[id] = []);
   }
 
   function totalFileSize(id) {
@@ -580,6 +610,12 @@
     s += '#' + (r ? (r.status + '|' + (r.at || '') + '|' + ((r.artifacts && r.artifacts.length) || 0)) : 'none');
     // 模板选择 + 数据文件清单（模块级瞬态，纳入签名以保证变更后重建）
     s += '#' + templateOf(mod.id) + '#' + ((docFiles[mod.id] && docFiles[mod.id].length) || 0);
+    // 【X2】URL 清单 + 产物预览展开数（模块级瞬态，变更后需全量重建）
+    s += '#' + ((urlList[mod.id] && urlList[mod.id].length) || 0);
+    var pvOpen = previewOpen[mod.id];
+    var pvCount = 0;
+    for (var pk in pvOpen) { if (Object.prototype.hasOwnProperty.call(pvOpen, pk)) pvCount += 1; }
+    s += '#' + pvCount;
     var ui = docUi[mod.id];
     if (ui) {
       s += '|' + (ui.gen ? 1 : 0) + (ui.codeLoading ? 1 : 0) + (ui.execLoading ? 1 : 0) +
@@ -588,7 +624,8 @@
         '|' + (ui.rejectNote || '') +
         '|' + (ui.filesBusy ? 1 : 0) + '|' + (ui.filesErr || '') +
         '|' + (ui.runReject ? 1 : 0) + '|' + (ui.runRejectCause || '') + '|' + (ui.runRejectNote || '') +
-        '|' + (ui.runRejectErr || '');
+        '|' + (ui.runRejectErr || '') +
+        '|' + (ui.diagLoading ? 1 : 0) + '|' + (ui.diagText || '') + '|' + (ui.diagErr || '') + '|' + (ui.urlErr || '');
     }
     return s;
   }
@@ -617,8 +654,10 @@
     return btn;
   }
 
-  /** compose 请求体：mode + template? + 模块 {name, spec} + 消息 + settings（契约 §17 / 第二批冻结接口） */
-  function composeBody(mode, mod, template) {
+  /** compose 请求体：mode + template? + 模块 {name, spec} + 消息 + settings（契约 §17 / 第二批冻结接口）。
+   *  【X2】extra（可选）：附加字段（code 模式的 feedback；diagnose 模式的 doc/code/exec/issue），
+   *  值为 undefined 的字段不写入（不会出现在序列化结果里）。 */
+  function composeBody(mode, mod, template, extra) {
     var spec = (mod && mod.spec) ? mod.spec : {};
     var body = {
       mode: mode,
@@ -638,15 +677,22 @@
     };
     // 模板仅在生成标准文档时叠加（生成代码不传，服务端忽略未知字段亦安全）
     if (template) body.template = template;
+    if (extra) {
+      for (var key in extra) {
+        if (Object.prototype.hasOwnProperty.call(extra, key) && typeof extra[key] !== 'undefined') {
+          body[key] = extra[key];
+        }
+      }
+    }
     return body;
   }
 
   /** POST /api/ai/compose，返回 text；网络/404/非 ok/空响应都转成语义化 Error（调用方降级显示） */
-  function postCompose(mode, mod, template) {
+  function postCompose(mode, mod, template, extra) {
     return fetch('/api/ai/compose', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(composeBody(mode, mod, template))
+      body: JSON.stringify(composeBody(mode, mod, template, extra))
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
         if (!response.ok) throw new Error((data && data.error) || ('服务返回 HTTP ' + response.status));
@@ -683,14 +729,20 @@
     }).then(function () { render(); });
   }
 
-  /** 生成代码：先 compose(code) 拿到代码，进入确认层（不自动执行） */
+  /** 生成代码：先 compose(code) 拿到代码，进入确认层（不自动执行）。
+   *  【X2 · 2026-10-14】迭代闭环：上次执行失败（ui.exec.ok === false）时，把 stderr 尾部 2000 字
+   *  作为 feedback 随请求发送，服务端注入提示词让 AI 针对性修复；无失败记录则请求体与旧行为一致。 */
   function composeCode(mod) {
     var ui = uiOf(mod.id);
     if (ui.codeLoading) return;
+    var feedback;   // 必须在清空 ui.exec 之前提取
+    if (ui.exec && ui.exec.ok === false && typeof ui.exec.stderr === 'string' && ui.exec.stderr) {
+      feedback = { stderr: ui.exec.stderr.slice(-2000) };
+    }
     ui.codeLoading = true; ui.codeErr = ''; ui.code = null; ui.exec = null; ui.execErr = ''; ui.notice = '';
     ui.genErr = '';
     render();
-    postCompose('code', mod).then(function (text) {
+    postCompose('code', mod, null, feedback ? { feedback: feedback } : null).then(function (text) {
       ui.codeLoading = false;
       ui.code = text;
     }).catch(function (err) {
@@ -721,10 +773,18 @@
     for (var i = 0; i < list.length; i++) {
       files.push({ name: list[i].name, content: list[i].content });
     }
+    // 【X2】URL 数据源：与 files 并存，随 body.urls 发送（服务端逐条下载，结果在响应 downloaded）
+    var urlPayload = [];
+    var urlItems = urlList[mod.id] || [];
+    for (var u = 0; u < urlItems.length; u++) {
+      urlPayload.push({ url: urlItems[u].url });
+    }
+    var execPayload = { lang: 'node', code: ui.code, confirm: true, files: files };
+    if (urlPayload.length) execPayload.urls = urlPayload;
     fetch('/api/code/exec', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lang: 'node', code: ui.code, confirm: true, files: files })
+      body: JSON.stringify(execPayload)
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
         if (!response.ok) throw new Error((data && data.error) || ('服务返回 HTTP ' + response.status));
@@ -734,6 +794,7 @@
     }).then(function (data) {
       ui.execLoading = false;
       ui.exec = data;
+      previewOpen[mod.id] = {};   // 新一轮执行的产物与旧展开下标不对应，重置预览展开态
       // 执行真正发生（HTTP 200 拿到结果，无论脚本 ok 与否）→ 记录执行，进入结果确认门
       var Store = getStore();
       if (Store && Store.markRun) {
@@ -865,15 +926,118 @@
 
     if (ui.filesBusy) area.appendChild(el('div', 'doc-file-hint', '正在读取文件…'));
     if (ui.filesErr) area.appendChild(el('div', 'doc-error', ui.filesErr));
+
+    // 【X2 · 2026-10-14】URL 数据源：输入 URL 加入待下载清单（模块级 urlList），确认执行时随 urls 发送
+    area.appendChild(el('div', 'doc-url-label', 'URL 数据源（可选，执行时下载到执行目录供脚本读取）'));
+    var urlRow = el('div', 'doc-url-row');
+    var urlInput = el('input', 'doc-url-input');
+    urlInput.type = 'text';
+    urlInput.placeholder = '请输入数据文件的 URL（http 或 https）';
+    urlInput.setAttribute('aria-label', '数据文件 URL');
+    urlRow.appendChild(urlInput);
+    var urlAdd = el('button', 'doc-url-add', '添加');
+    urlAdd.type = 'button';
+    urlAdd.addEventListener('click', function () {
+      var v = String(urlInput.value || '').trim();
+      if (!v) { ui.urlErr = '请先填写 URL 再添加'; render(); return; }
+      urlsOf(mod.id).push({ url: v });
+      ui.urlErr = '';
+      render();
+    });
+    urlRow.appendChild(urlAdd);
+    area.appendChild(urlRow);
+
+    var urls = urlList[mod.id] || [];
+    if (urls.length) {
+      var urlUl = el('ul', 'doc-file-list');
+      for (var u = 0; u < urls.length; u++) {
+        (function (item) {
+          var li = el('li', 'doc-file-item');
+          li.appendChild(el('span', 'doc-file-name', item.url));
+          var rm = el('button', 'doc-file-remove', '移除');
+          rm.type = 'button';
+          rm.addEventListener('click', function () {
+            var pos = urls.indexOf(item);
+            if (pos >= 0) urls.splice(pos, 1);
+            render();
+          });
+          li.appendChild(rm);
+          urlUl.appendChild(li);
+        })(urls[u]);
+      }
+      area.appendChild(urlUl);
+    }
+    if (ui.urlErr) area.appendChild(el('div', 'doc-error', ui.urlErr));
     body.appendChild(area);
   }
 
   /* ---- 结果确认门（契约 §18）：执行记录 run 的确认 / 三级归因打回 ---- */
 
-  /** 三级归因 + 反馈框（点「有问题」后展开） */
+  /**
+   * 【X2 · 2026-10-14】AI 自动定位：compose(mode='diagnose')，携带文档/代码/上次执行结果/问题描述。
+   * 成功解析 {level, reason} → 预选对应归因（高亮）+ 显示推断理由；降级 {text} → 原文展示；
+   * 失败 → 卡片内 textContent 错误。预选可被用户改选覆盖（确认打回以最终选中的归因为准）。
+   */
+  function diagnoseRun(mod, ui) {
+    if (ui.diagLoading) return;
+    ui.diagLoading = true; ui.diagText = ''; ui.diagErr = '';
+    render();
+    var execPayload = null;
+    if (ui.exec) {
+      execPayload = {
+        ok: !!ui.exec.ok,
+        stderr: (typeof ui.exec.stderr === 'string') ? ui.exec.stderr.slice(-2000) : '',
+        artifacts: Array.isArray(ui.exec.artifacts) ? ui.exec.artifacts : []
+      };
+    }
+    var extra = {
+      doc: (mod.doc && typeof mod.doc.content === 'string') ? mod.doc.content : undefined,
+      code: (typeof ui.code === 'string') ? ui.code : '',
+      exec: execPayload,
+      issue: ui.runRejectNote || ''
+    };
+    // diagnose 的成功响应是 {level, reason}（降级 {text}），与 postCompose 期望的 {text} 契约不同，单独处理
+    fetch('/api/ai/compose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(composeBody('diagnose', mod, null, extra))
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error((data && data.error) || ('服务返回 HTTP ' + response.status));
+        return data;
+      });
+    }).then(function (data) {
+      ui.diagLoading = false;
+      var parsed = (data && typeof data.text === 'string') ? parseDiagJson(data.text) : null;
+      if (!parsed && data && DIAG_LEVEL_META[data.level]) {
+        parsed = { level: data.level, reason: (typeof data.reason === 'string') ? data.reason : '' };
+      }
+      if (parsed) {
+        var meta = DIAG_LEVEL_META[parsed.level];
+        ui.runRejectCause = meta.cause; ui.runRejectErr = '';   // 预选对应归因（用户仍可改选）
+        ui.diagText = 'AI 推断：' + meta.label + (parsed.reason ? '——' + parsed.reason : '');
+      } else if (data && typeof data.text === 'string' && data.text.trim()) {
+        ui.diagText = data.text;                                // 解析失败：原样降级展示
+      } else {
+        ui.diagErr = 'AI 自动定位失败：返回内容无法识别';
+      }
+    }).catch(function (err) {
+      ui.diagLoading = false;
+      ui.diagErr = errorText('AI 自动定位失败', err);
+    }).then(function () { render(); });
+  }
+
+  /** 三级归因 + 反馈框（点「有问题」后展开）。【X2】顶部加 [AI 自动定位]：预选归因 + 推断理由。 */
   function buildRunRejectBox(container, mod, ui) {
     var box = el('div', 'doc-reject-box');
     box.appendChild(el('div', 'doc-exec-label', '三级归因：问题出在哪一环？'));
+    var diagRow = el('div', 'doc-diag-row');
+    diagRow.appendChild(docButton(ui.diagLoading ? '定位中…' : 'AI 自动定位', '', ui.diagLoading, function () {
+      diagnoseRun(mod, ui);
+    }));
+    box.appendChild(diagRow);
+    if (ui.diagText) box.appendChild(el('div', 'doc-diag-result', ui.diagText));
+    if (ui.diagErr) box.appendChild(el('div', 'doc-error', ui.diagErr));
     var group = el('div', 'doc-cause-group');
     for (var i = 0; i < RUN_CAUSES.length; i++) {
       (function (c) {
@@ -1056,15 +1220,51 @@
       var errOut = el('pre', 'doc-code'); errOut.textContent = r.stderr; area.appendChild(errOut);
     }
 
+    // 【X2】URL 下载结果：data.downloaded 每条列出（name/ok/error），成功绿 / 失败红
+    var dl = Array.isArray(r.downloaded) ? r.downloaded : [];
+    if (dl.length) {
+      area.appendChild(el('div', 'doc-exec-label', 'URL 下载结果'));
+      var dul = el('ul', 'doc-downloaded-list');
+      for (var di = 0; di < dl.length; di++) {
+        var dItem = dl[di] || {};
+        var dName = (dItem.name === null || typeof dItem.name === 'undefined' || dItem.name === '') ? '(未命名)' : String(dItem.name);
+        var dText = dItem.ok
+          ? dName + ' 下载成功' + (typeof dItem.size === 'number' ? '（' + dItem.size + ' 字节）' : '')
+          : dName + ' 下载失败' + (dItem.error ? '：' + dItem.error : '');
+        dul.appendChild(el('li', 'doc-downloaded-item' + (dItem.ok ? ' doc-downloaded-ok' : ' doc-downloaded-fail'), dText));
+      }
+      area.appendChild(dul);
+    }
+
     var arts = Array.isArray(r.artifacts) ? r.artifacts : [];
     if (arts.length) {
       area.appendChild(el('div', 'doc-exec-label', '产物文件'));
       var ul = el('ul', 'doc-artifact-list');
       for (var i = 0; i < arts.length; i++) {
-        var a = arts[i] || {};
-        var name = (a.name === null || typeof a.name === 'undefined') ? '(未命名)' : String(a.name);
-        var size = (typeof a.size === 'number') ? a.size : null;
-        ul.appendChild(el('li', 'doc-artifact-item', size === null ? name : name + ' （' + size + ' 字节）'));
+        (function (a, idx) {
+          var name = (a.name === null || typeof a.name === 'undefined') ? '(未命名)' : String(a.name);
+          var size = (typeof a.size === 'number') ? a.size : null;
+          var li = el('li', 'doc-artifact-item');
+          li.appendChild(el('span', 'doc-artifact-name', size === null ? name : name + ' （' + size + ' 字节）'));
+          // 【X2】产物预览：服务端带回 preview（文本前 50 行）的条目提供展开/收起（模块级展开态）
+          var openMap = previewOpen[mod.id] || (previewOpen[mod.id] = {});
+          if (typeof a.preview === 'string' && a.preview) {
+            var tg = el('button', 'doc-preview-toggle', openMap[idx] ? '收起预览' : '预览');
+            tg.type = 'button';
+            tg.setAttribute('aria-expanded', openMap[idx] ? 'true' : 'false');
+            tg.addEventListener('click', function () {
+              if (openMap[idx]) delete openMap[idx]; else openMap[idx] = true;
+              render();
+            });
+            li.appendChild(tg);
+            if (openMap[idx]) {
+              var pv = el('pre', 'doc-code doc-artifact-preview');
+              pv.textContent = a.preview;   // textContent 写入，不拼 HTML
+              li.appendChild(pv);
+            }
+          }
+          ul.appendChild(li);
+        })(arts[i], i);
       }
       area.appendChild(ul);
     } else {
@@ -1119,6 +1319,12 @@
       }
     }
     body.appendChild(actions);
+
+    // 【X2】迭代闭环提示：上次执行失败 → 本次「生成代码并执行」已附带 stderr 反馈（仅在按钮可见时显示）
+    if (st === 'approved' && !(mod.run && mod.run.status === 'confirmed') &&
+        ui.exec && ui.exec.ok === false) {
+      body.appendChild(el('div', 'doc-feedback-hint', '已附带上次失败信息，AI 将针对性修复'));
+    }
 
     if (st === 'draft') body.appendChild(buildTemplateRow(mod));
     if (ui.genErr) body.appendChild(el('div', 'doc-error', ui.genErr));
