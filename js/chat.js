@@ -294,21 +294,12 @@
     return chunks.concat(recent);
   }
 
-  /** 读取本机保存的模型设置（左下角齿轮）；没有配置返回 null */
+  /** 读取本机保存的模型设置（左下角齿轮，模型分组 v2）；没有有效配置返回 null */
   function readLlmSettings() {
-    try {
-      var raw = root.localStorage ? root.localStorage.getItem('fa_llm_settings_v1') : null;
-      var s = raw ? JSON.parse(raw) : null;
-      if (!s || typeof s !== 'object') return null;
-      var out = {};
-      if (typeof s.baseUrl === 'string' && s.baseUrl.trim()) out.baseUrl = s.baseUrl.trim();
-      if (typeof s.model === 'string' && s.model.trim()) out.model = s.model.trim();
-      if (typeof s.apiKey === 'string' && s.apiKey.trim()) out.apiKey = s.apiKey.trim();
-      if (s.protocol === 'responses' || s.protocol === 'chat-completions') out.protocol = s.protocol;
-      // 【体验升级 · 2026-10-13】系统提示词（可选）：由服务端注入为 system 指令
-      if (typeof s.systemPrompt === 'string' && s.systemPrompt.trim()) out.systemPrompt = s.systemPrompt.trim().slice(0, 2000);
-      return Object.keys(out).length ? out : null;
-    } catch (error) { return null; }
+    // 【模型分组 · 2026-10-15】解析逻辑收敛到 Store.llmSettings（v1 旧形状由 normalize 自动迁移）
+    var api = root.Store && root.Store.llmSettings;
+    if (!api) return null;
+    try { return api.resolve(api.read()); } catch (error) { return null; }
   }
 
   /** 模块 spec 归一化（与 composeBody 保持一致的四个字段） */

@@ -39,7 +39,8 @@ const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.j
 // 账号系统独立文件（登录/注册页自带脚本，不进工作台 index.html 的渲染链）
 const AUTH_FILES = ["js/auth-config.js", "js/auth-storage.js", "js/auth-pages.js", "js/guard.js", "login.html", "register.html", "css/auth.css"];
 // 契约 §2「两种运行模式」：前端只允许 js/chat.js 里对同源 /api/… 的 fetch；其余脚本零联网。
-const FETCH_ALLOWED = ["js/chat.js", "js/codex.js", "js/workspace.js", "js/tasks.js"];
+// 【模型分组 · 2026-10-15】js/sidebar.js 获准发起同源 POST /api/ai/test（设置页「测试连通」，契约 §15.7）。
+const FETCH_ALLOWED = ["js/chat.js", "js/codex.js", "js/workspace.js", "js/tasks.js", "js/sidebar.js"];
 
 // ---------- 读取 ----------
 for (const f of JS_FILES.concat(AUTH_FILES, ["index.html", "css/style.css", "docs/contract.md"])) {

@@ -1,16 +1,33 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from literature_search import normalize_candidates, safe_csv_cell, write_results, run
+from literature_search import (  # noqa: E402
+    main, normalize_candidates, normalize_doi, parse_byline, resolve_batch_index,
+    run, safe_csv_cell, validate_config, write_results,
+)
+
+CONFIG = {"topic": "中国水产养殖", "query": "China aquaculture climate change", "sources": ["google-scholar"],
+          "publicationYearFrom": 2015, "publicationYearTo": 2023, "limit": 10}
+
+
+def read_report(output: Path) -> dict:
+    return json.loads((output / "candidates.json").read_text(encoding="utf-8"))
+
+
+def read_csv_rows(output: Path) -> list[dict]:
+    with (output / "candidates.csv").open(encoding="utf-8-sig", newline="") as stream:
+        return list(csv.DictReader(stream))
 
 
 class LiteratureSearchTest(unittest.TestCase):
@@ -39,7 +56,7 @@ class LiteratureSearchTest(unittest.TestCase):
                 "results": [{"title": "示例论文", "byline": "作者", "snippet": "检索片段"}],
             })
             self.assertEqual(result["count"], 1)
-            report = json.loads((output / "candidates.json").read_text(encoding="utf-8"))
+            report = read_report(output)
             self.assertEqual(report["scope"], "first_page_candidates_only")
             self.assertEqual(report["records"][0]["screening_status"], "pending_review")
             with (output / "candidates.csv").open(encoding="utf-8-sig", newline="") as stream:
@@ -56,8 +73,120 @@ class LiteratureSearchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"browser": browser, "google_scholar_search": scholar}):
             self.assertEqual(run(config, Path(temp)), 0)
             self.assertEqual(received, [(config["query"], False, 10, 2015, 2023)])
-            report = json.loads((Path(temp) / "candidates.json").read_text(encoding="utf-8"))
+            report = read_report(Path(temp))
             self.assertEqual(report["run_config"]["publicationYearFrom"], 2015)
+
+    def test_byline_parsing_is_conservative(self) -> None:
+        self.assertEqual(parse_byline("J Smith, A Lee - Nature, 2019 - nature.com"),
+                         {"authors": "J Smith, A Lee", "venue": "Nature", "year": 2019})
+        self.assertEqual(parse_byline("张三, 李四 - 生态学报, 2020 - cnki"),
+                         {"authors": "张三, 李四", "venue": "生态学报", "year": 2020})
+        self.assertEqual(parse_byline("J Smith"), {"authors": "J Smith", "venue": "", "year": None})
+        self.assertEqual(parse_byline(""), {"authors": "", "venue": "", "year": None})
+        self.assertEqual(parse_byline("J Smith - 2019"), {"authors": "J Smith", "venue": "", "year": 2019})
+        self.assertIsNone(parse_byline("J Smith - Nature - nature.com")["year"])
+
+    def test_doi_normalization(self) -> None:
+        self.assertEqual(normalize_doi("  10.1016/J.Geoderma.2019.01 "), "10.1016/j.geoderma.2019.01")
+        self.assertEqual(normalize_doi("https://doi.org/10.1000/XYZ"), "10.1000/xyz")
+        self.assertEqual(normalize_doi(None), "")
+        self.assertEqual(normalize_doi(""), "")
+
+    def test_first_batch_keeps_gsc_ids_and_new_fields_are_nullable(self) -> None:
+        records = normalize_candidates([{"title": "One paper"}], "q", "2026-10-15T00:00:00+00:00")
+        record = records[0]
+        self.assertEqual(record["candidate_id"], "GSC-001")
+        self.assertEqual(record["doi"], "")
+        self.assertIsNone(record["year"])
+        self.assertEqual(record["source_key"], "google-scholar")
+        self.assertEqual(record["batch_index"], 1)
+
+    def test_second_batch_uses_prefixed_ids_and_merges_cumulative_view(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            write_results(output, "q1", {"url": "https://scholar.google.com/1", "results": [{"title": "Alpha"}]}, CONFIG, batch_index=1)
+            write_results(output, "q2", {"url": "https://scholar.google.com/2", "results": [{"title": "Beta"}, {"title": "Gamma"}]}, CONFIG, batch_index=2)
+            report = read_report(output)
+            self.assertEqual(report["version"], 2)
+            self.assertEqual(report["count"], 3)
+            self.assertEqual([batch["batch_index"] for batch in report["batches"]], [1, 2])
+            self.assertEqual(report["search_url"], "https://scholar.google.com/2", "头部键取最新批次")
+            identifiers = [record["candidate_id"] for record in report["records"]]
+            self.assertEqual(identifiers, ["GSC-001", "GSC-B2-001", "GSC-B2-002"])
+            rows = read_csv_rows(output)
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(rows[1]["candidate_id"], "GSC-B2-001")
+            self.assertEqual(rows[1]["batch_index"], "2")
+            self.assertEqual(list(rows[0].keys()), [
+                "candidate_id", "source", "query", "retrieved_at", "title", "byline", "snippet",
+                "result_url", "fulltext_links", "screening_status", "evidence_level",
+                "doi", "year", "authors", "venue", "source_key", "batch_index",
+            ])
+
+    def test_same_batch_rerun_replaces_that_batch_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            write_results(output, "q1", {"results": [{"title": "Alpha"}, {"title": "Beta"}]}, CONFIG, batch_index=1)
+            write_results(output, "q2", {"results": [{"title": "Gamma"}]}, CONFIG, batch_index=2)
+            write_results(output, "q1-retry", {"results": [{"title": "Alpha v2"}]}, CONFIG, batch_index=1)
+            report = read_report(output)
+            titles = [record["title"] for record in report["records"]]
+            self.assertEqual(titles, ["Alpha v2", "Gamma"])
+            self.assertEqual(len(report["batches"]), 2)
+
+    def test_v1_report_is_migrated_when_merged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            legacy = {"source": "Google Scholar", "query": "old", "count": 1,
+                      "records": [{"candidate_id": "GSC-001", "title": "Legacy", "screening_status": "pending_review"}]}
+            (output / "candidates.json").write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+            self.assertEqual(resolve_batch_index(output, CONFIG), 2, "v1 单批旧文件视为已有第 1 批")
+            write_results(output, "new", {"results": [{"title": "Fresh"}]}, CONFIG, batch_index=2)
+            report = read_report(output)
+            self.assertEqual(report["version"], 2)
+            legacy_record = next(record for record in report["records"] if record["title"] == "Legacy")
+            self.assertEqual(legacy_record["source_key"], "google-scholar")
+            self.assertEqual(legacy_record["batch_index"], 1)
+            self.assertEqual([record["title"] for record in report["records"]], ["Legacy", "Fresh"])
+            self.assertEqual(report["records"][1]["candidate_id"], "GSC-B2-001")
+
+    def test_resolve_batch_index_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            self.assertEqual(resolve_batch_index(output, CONFIG), 1)
+            write_results(output, "q1", {"results": [{"title": "Alpha"}]}, CONFIG, batch_index=1)
+            self.assertEqual(resolve_batch_index(output, CONFIG), 2)
+            self.assertEqual(resolve_batch_index(output, CONFIG, resume=True), 1)
+            self.assertEqual(resolve_batch_index(output, CONFIG, requested=7), 7)
+
+    def test_batch_limit_is_enforced_before_browser_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            write_results(output, "q1", {"results": [{"title": "Alpha"}]}, CONFIG, batch_index=1)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = run(CONFIG, output)  # 缺省 = 新批次 2 > maxBatches=1
+            self.assertEqual(code, 1)
+            events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+            self.assertIn("批数上限", events[-1]["message"])
+            with redirect_stdout(io.StringIO()):
+                code = run(CONFIG, output, batch_index=0)
+            self.assertEqual(code, 1)
+
+    def test_validate_config_rejects_unconnected_sources_with_frozen_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch("sys.argv", ["literature_search.py", "--config", str(Path(temp) / "c.json"), "--output-dir", str(Path(temp) / "out")]):
+            config_path = Path(temp) / "c.json"
+            config_path.write_text(json.dumps({**CONFIG, "sources": ["google-scholar", "cnki"]}), encoding="utf-8")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main()
+            self.assertEqual(code, 1)
+            events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+            self.assertIn("尚未接通以下检索来源：cnki；请明确改为仅检索 Google Scholar，或等待相应连接器。", events[-1]["message"])
+
+    def test_validate_config_keeps_stage1_generic_message(self) -> None:
+        with self.assertRaisesRegex(ValueError, "运行配置缺少检索式或包含未接通来源"):
+            validate_config({**CONFIG, "sources": ["arxiv"]})
 
 
 if __name__ == "__main__":

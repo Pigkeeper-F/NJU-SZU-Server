@@ -11,11 +11,11 @@
 ## 合并后的能力
 
 - 左侧固定模块与独立研究任务；每个模块保留对话、确认规则和上传文件会话。
-- 默认进入「AI 对话」；左侧「添加 API」支持 DeepSeek/OpenAI，也可连接本机 Codex CLI。设置按钮可补充系统提示词。
+- 默认进入「AI 对话」；左侧「添加 API」支持 DeepSeek/OpenAI，也可连接本机 Codex CLI。设置按钮支持**多组模型配置**（一个接口地址 + 一个 Key 为一组，组内维护模型列表，模型名左侧 ▼ 可展开切换、保存时当前模型自动入列；旧版单套配置首次读取自动迁移）与**测试连通**（用表单当前值实调一次本机代理，直接验证地址/Key/模型是否可用），并可补充系统提示词。
 - 数据清洗、直接计算、修改计算与结果核查使用本机 Codex；生成环节文档、代码及受限执行是贡献版新增的能力，需要人工审核和确认。执行代码仍有本机风险，运行前必须检查生成内容。
 - 工作记录可搜索；浏览器记录可导出/恢复 JSON 备份。备份**不含 API Key、登录状态或服务端 `.workbench/` 上传与输出文件**；迁移整项研究时须另存这些文件。
 - 贡献版原有的浏览器多项目记录会在首次打开时一次性转为独立任务；原存储键仍保留。其“写作—投稿”旧流程只作为历史记录展示，不会替换当前固定数据模块。
-- 原项目的 SOC 文献数据库流水线、流程图和交接文档均保留。文献挖掘可从模块对话提取候选运行配置，核对后交由 SOC 的 Google Scholar 脚本按检索式与发表年份发现首批候选（最多 10 条，导出运行配置及 JSON/CSV）；其他来源、全文和参数提取仍未接通。下载数据等模块仍主要提供文字引导。
+- 原项目的 SOC 文献数据库流水线、流程图和交接文档均保留。文献挖掘已升级为六阶段流水线：从模块对话提取候选运行配置，核对后执行首批 Google Scholar 候选检索（最多 10 条），并可逐阶段续跑跨来源去重、全文获取、参数提取（提取前需研究者确认字段含义与单位）、校验与文献表/参数明细表导出（CSV+Excel）；其他检索来源仍会明确拒绝而不能静默忽略。下载数据等模块仍主要提供文字引导。
 
 ## 文献挖掘：使用流程与需求
 
@@ -25,20 +25,22 @@
 
 1. 启动本地服务并进入「文献挖掘」模块。用 AI 对话说明主题；来源、**论文发表年份**、地域、语言、研究类型、纳排规则、目标参数字段等已有决定可在同一轮说明。首批检索的最小输入是主题，其他未确认项保持不限；实验/观测年份不等同于论文发表年份。
 2. 点击「从对话整理规则」。本机 Codex 从本模块对话和**已批准**的模块文档生成候选配置；仅讨论过、尚未确认的内容不能自动生效。Codex 不可用时可点「手动填写」。
-3. 在「核对本次运行配置」中一次检查并修改主题、实际检索式、来源、发表年份、研究类型、纳排规则和目标字段。点击「确认配置并检索」才启动脚本；每次任务冻结一份 `run_config.json`，后续结果可追溯到所用规则。
-4. 首次运行会创建项目 `.venv/` 并安装 Playwright/Chromium。若 Google Scholar 要求人机验证，在打开的浏览器完成后点「验证后重新检索」；不自动绕过验证码。完成后下载 `run_config.json`、`candidates.json` 和 `candidates.csv`。
+3. 在「核对本次运行配置」中一次检查并修改主题、实际检索式、来源、发表年份、研究类型、纳排规则和目标字段。点击「确认配置并检索」才启动脚本；每次任务冻结一份 `run_config.json`，后续结果可追溯到所用规则。默认只跑首批候选检索，任务完成后页面提供「继续下一阶段」按需推进。
+4. 续跑时按阶段执行：**跨来源去重**（DOI 精确/标题归一化自动合并明确重复，疑似重复保留待复核）→ **全文获取**（HTML 正文优先、PDF 备选；遇到人机验证必须先人工完成再按页面提示继续，不自动绕过；付费墙或无法合法获取的标为“待补充”，不绕过访问控制）→ **参数提取**（先由研究者确认主题参数字段的含义与单位，这是硬关口；确认后由本机 Codex 按已确认字段逐篇提取，每个值都带出处）→ **校验**（阻断行不进主表并列入错误报告；缺 DOI、单位不明、疑似重复等进待审清单）→ **导出**（文献表与参数明细表各出 CSV+Excel；同一任务重导出先归档旧版本，不覆盖）。
+5. 首次运行会创建项目 `.venv/` 并安装 Playwright/Chromium 与 `openpyxl`、`pypdf`；依赖清单变化会自动重装。若 Google Scholar 要求人机验证，在打开的浏览器完成后点「验证后重新检索」；不自动绕过验证码。任务文件与全量事件流水保存在 `.workbench/literature/<任务 ID>/`（含 `events.jsonl`），页面下载区只提供已登记的交付物。
 
 当前执行边界和验收要求：
 
-- 只接通 **Google Scholar**；如果配置包含知网、万方、Web of Science、Scopus 或 PubMed，启动会明确拒绝，绝不悄悄只查 Scholar。首批最多 10 条；Python 实际使用 `query`、`publicationYearFrom`、`publicationYearTo` 和 `limit`。地域与研究类型只有写入检索式才会影响这一阶段的搜索；语言、纳排规则和目标字段先随配置保存，供后续阶段使用。
-- 候选清单保留标题、结果链接、全文链接（如有）、页面片段、来源、检索时间与待复核状态；按标题做本批去重。片段不是已核实的摘要或全文，候选不是已纳入文献。结果必须记录检索 URL 与实际应用的筛选条件；失败或验证码要给出真实状态。
-- 本阶段**不**批量下载论文、自动完成纳排、读取全文、提取参数或生成最终 Excel。SOC 原项目有可选 PDF 下载、逐篇提取、校验和合并脚本/技能，但还没有通用的一键总控。下一阶段需求是接通已选来源、跨来源 DOI/标题去重、全文获取与可追溯参数提取，再按本次确认的字段定义校验并导出文献表和参数明细表；无合法全文时标为待补充，不绕过访问限制。
+- 只接通 **Google Scholar**；如果配置包含知网、万方、Web of Science、Scopus 或 PubMed，启动会明确拒绝，绝不悄悄只查 Scholar。首批最多 10 条；Python 实际使用 `query`、`publicationYearFrom`、`publicationYearTo` 和 `limit`。地域与研究类型只有写入检索式才会影响检索阶段的搜索；语言、纳排规则和目标字段随配置保存，供后续阶段使用。
+- 候选清单保留标题、结果链接、全文链接（如有）、页面片段、来源、检索时间与待复核状态；批内按标题去重，跨批/跨来源重复由去重阶段归并。片段不是已核实的摘要或全文，候选不是已纳入文献。结果必须记录检索 URL 与实际应用的筛选条件；失败或验证码要给出真实状态。
+- 自动化只做“明确重复/无法获取”的判断：去重仅自动排除明确重复；全文获取不重试无法合法获取项；不自动判“不相关”。参数字段以研究者确认记录为准（`confirmations.json`），不把 AI 建议当已确认规则。提取行必须带出处，阻断/待审核行按规则分流，被排除文献仍保留筛选记录。
+- 本阶段仍**不**做：其他检索来源接入、用户上传清单/PDF 的自动导入、图表像素读数（人工转录可补录）、代理自动发现。无合法全文的文献标为待补充。
 
 详细的字段、异常和交付规则见 `docs/literature-mining-alignment.md`；SOC 原始规则见 `SOC-database-pipeline-clean/AGENTS.md`，仅在选择 SOC 示例时适用。
 
 ## 配置与检查
 
-本机 Codex 需已登录；macOS 上优先使用 ChatGPT 桌面应用内置的 Codex CLI，也可通过 `CODEX_BIN` 指定其他 CLI。API Key 可在页面配置，或把 `.env.example` 复制为 `.env` 后填写服务端配置。文献挖掘首次检索会自动创建 `.venv/`，安装 `requirements-literature.txt` 与 Chromium；需要 Python 3.10+，网络代理沿用 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量。其他计算依赖尚未自动安装；`requirements.txt` 是统一依赖规划清单，可用左侧「编辑依赖」打开。`.env` 用于服务配置，不是虚拟环境。
+本机 Codex 需已登录；macOS 上优先使用 ChatGPT 桌面应用内置的 Codex CLI，也可通过 `CODEX_BIN` 指定其他 CLI。API Key 可在页面配置，或把 `.env.example` 复制为 `.env` 后填写服务端配置。文献挖掘首次检索会自动创建 `.venv/`，安装 `requirements-literature.txt`（Playwright、openpyxl、pypdf）与 Chromium；依赖清单内容变化时按 `.literature-ready` 校验值自动重装。需要 Python 3.10+，网络代理沿用 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量。其他计算依赖尚未自动安装；`requirements.txt` 是统一依赖规划清单，可用左侧「编辑依赖」打开。`.env` 用于服务配置，不是虚拟环境。
 
 ```bash
 npm run check
@@ -46,9 +48,16 @@ node tools/check-contract.js
 node tools/test-merge-store.js
 node tools/test-server-exec.js
 node tools/test-literature-guidance.js
+node tools/test-literature-sources.js
 node tools/test-literature-connector.js
 node tools/test-literature-http.js
+node tools/test-literature-http-stage2.js
+node tools/test-literature-extract.js
+node tools/test-literature-ui-stage2.js
+node tools/test-llm-settings.js
 python3 -m unittest tools/test_literature_search.py
+python3 -m unittest tools/test_literature_pipeline.py
+python3 -m unittest tools/test_literature_dedupe.py tools/test_literature_fulltext.py tools/test_literature_extract.py tools/test_literature_validate.py tools/test_literature_export.py
 # 首次文献检索安装 Chromium 后可选：.venv/bin/python tools/test_literature_ui.py
 ```
 

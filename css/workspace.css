@@ -847,3 +847,78 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 @media(max-width:680px){.literature-config-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .literature-downloads{display:flex;gap:12px;margin:7px 0}
 .literature-downloads a{color:var(--accent);text-decoration:underline;font-size:12px}
+
+/* ===== 设置页 · 模型分组（2026-10-15 追加；契约 §15.6） ===== */
+.settings-group-row{display:flex;gap:8px;align-items:center}
+.settings-group-row>select{
+  flex:1 1 auto;min-width:0;padding:8px 10px;
+  font:inherit;font-size:13px;color:var(--text);
+  background:#fbfcfe;border:1px solid var(--border);border-radius:8px;
+}
+.settings-group-row>select:focus{outline:none;border-color:var(--accent-line);background:#ffffff}
+.settings-group-row>button{flex:none;white-space:nowrap}
+.model-picker{position:relative;display:flex;align-items:stretch}
+.model-caret-btn{
+  flex:none;width:34px;display:inline-flex;align-items:center;justify-content:center;
+  padding:0;font-size:11px;color:var(--muted);cursor:pointer;
+  background:#f1f5fa;border:1px solid var(--border);border-right:none;border-radius:8px 0 0 8px;
+}
+.model-caret-btn:hover{background:#e9eff7;color:var(--text)}
+.model-picker>input{
+  flex:1 1 auto;min-width:0;padding:8px 10px;
+  font:inherit;font-size:13px;color:var(--text);
+  background:#fbfcfe;border:1px solid var(--border);border-radius:0 8px 8px 0;
+}
+.model-picker>input:focus{outline:none;border-color:var(--accent-line);background:#ffffff}
+.model-menu{
+  display:none;position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:30;
+  max-height:184px;overflow:auto;padding:4px;
+  background:#ffffff;border:1px solid var(--border);border-radius:10px;
+  box-shadow:0 14px 34px rgba(25,35,52,.16);
+}
+.model-menu.is-open{display:block}
+.model-menu-item{
+  display:block;width:100%;padding:7px 9px;text-align:left;
+  font:inherit;font-size:13px;color:var(--text);word-break:break-all;cursor:pointer;
+  background:none;border:none;border-radius:7px;
+}
+.model-menu-item:hover{background:#f1f5fa}
+.model-menu-item.is-active{color:var(--accent);font-weight:500}
+.model-menu-empty{padding:8px 9px;font-size:12px;line-height:1.6;color:var(--muted)}
+
+/* ===== 文献挖掘 · 第二阶段（2026-10-15 追加；契约 §21 / 设计 §9.7：阶段条 · 字段确认表 · 分组下载 · 历史任务） ===== */
+.literature-toolbar>label{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#64755c}
+.literature-toolbar>label>select{padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:#fff;font:inherit;font-size:12px;color:#40503b}
+.literature-stages{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0}
+.literature-stage{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border:1px solid var(--border);border-radius:999px;background:#fff;font-size:11px;color:#64755c}
+.literature-stage-state{color:#9ba695}
+.literature-stage.is-running{border-color:var(--accent-line);color:var(--accent)}
+.literature-stage.is-running .literature-stage-state{color:var(--accent)}
+.literature-stage.is-done{background:#f1f7ee;border-color:#cfe0c4;color:#4c6b3c}
+.literature-stage.is-failed{border-color:#e3b7b7;color:#a25353}
+.literature-stage.is-skipped{opacity:.65}
+.literature-stage-meta{width:100%;font-size:11px;color:#9ba695}
+.literature-confirm{margin:8px 0;padding:9px 10px;border:1px dashed var(--accent-line);border-radius:8px;background:#fff}
+.literature-confirm-fields{display:grid;gap:6px}
+.literature-confirm-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) 88px 56px;gap:6px;align-items:end}
+.literature-confirm-row>label{display:grid;gap:3px;font-size:11px;color:#64755c}
+.literature-confirm-row input[type=text],.literature-confirm-row select{box-sizing:border-box;width:100%;min-width:0;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:#fff;font:inherit;font-size:12px;color:#40503b}
+.literature-confirm-row input[type=checkbox]{width:auto;justify-self:start;margin:0 0 7px}
+.literature-confirm-actions{margin-top:8px}
+.literature-deliverables{display:grid;gap:6px;margin:7px 0}
+.literature-deliverable-group{display:grid;gap:4px}
+.literature-deliverable-title{font-size:11px;color:#9ba695}
+.literature-deliverable-list{display:flex;flex-wrap:wrap;gap:6px 14px}
+.literature-deliverable-list a{color:var(--accent);text-decoration:underline;font-size:12px}
+.literature-deliverable-more{width:100%}
+.literature-deliverable-more>summary{cursor:pointer;font-size:11px;color:#64755c}
+.literature-history{margin-top:8px;border-top:1px solid var(--border);padding-top:6px}
+.literature-history>summary{cursor:pointer;font-size:12px;color:#64755c}
+.literature-history-head{display:flex;justify-content:flex-end;margin:6px 0}
+.literature-history-list{display:grid;gap:4px}
+.literature-history-row{display:grid;grid-template-columns:74px 118px minmax(0,1fr) auto;gap:8px;align-items:center;font-size:11.5px;color:#64755c}
+.literature-history-row.is-current{color:#40503b;font-weight:500}
+.literature-history-id{font-family:var(--mono);color:#9ba695}
+.literature-history-status{white-space:nowrap}
+.literature-history-message{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:680px){.literature-confirm-row{grid-template-columns:repeat(2,minmax(0,1fr))}.literature-history-row{grid-template-columns:64px minmax(0,1fr) auto}.literature-history-message{display:none}}

@@ -513,6 +513,55 @@ Store.PROJECT_META_KEY       // 'research_workspace_meta_v1'
 备份 toast / 导入恢复（模块、消息、项目名）/ 搜索过滤与空态 / Markdown 各语法渲染 + XSS 防护 /
 系统提示词保存与请求体透传 —— 全部通过（测试脚本 cdp-features.mjs，26 项）。
 
+### 15.6 设置页 · 模型分组（2026-10-15）
+
+「模型」设置从单套配置升级为**多分组**：一个 Base URL + 一个 API Key 构成一个分组，分组内维护多个模型名
+（模型行左侧 ▼ 展开本组模型列表）。存储键不变，结构升级为 v2；旧 v1 形状读取时自动迁移为一个「默认分组」。
+
+```js
+// localStorage 键 fa_llm_settings_v1（v2）
+{
+  version: 2,
+  activeGroupId: "g-…",
+  groups: [{
+    id: "g-…", name: "分组 1",
+    baseUrl: "https://…", apiKey: "sk-…",
+    protocol: "chat-completions" | "responses",
+    model: "deepseek/deepseek-v4-flash",   // 当前选中模型
+    models: ["…"],                          // 本分组模型列表（保存时当前模型自动并入）
+    systemPrompt: ""                        // 上限 2000 字
+  }]
+}
+```
+
+- 公共读写/解析函数在 `Store.llmSettings`（js/store.js）：`read()`（读 + 规范化）、`write(norm)`、
+  `normalize(raw)`（含 v1→v2 迁移与脏数据容错）、`resolve(raw)`（→ 请求体 settings，全空返回 null）、
+  `clear()`、`activeGroup(norm)` / `addGroup(norm, name)` / `removeGroup(norm, groupId)` /
+  `updateGroup(norm, groupId, fields)`。
+- 请求体透传语义不变：js/chat.js `readLlmSettings()` 改为经 `Store.llmSettings.resolve` 解析当前激活分组；
+  服务端注入逻辑（chat-completions → system 消息 / responses → instructions）不变。
+- 新增 DOM（设置弹窗内动态创建，id 引用用单引号，不进 index.html）：`#llm-group-select`（分组下拉）、
+  `#llm-group-add`（＋新建分组）、`#llm-group-remove`（删除当前分组）、`#llm-model-toggle`（▼ 模型列表按钮）、
+  `#llm-model-menu`（列表弹层）；`#llm-model`、`#llm-base-url`、`#llm-api-key`、`#llm-protocol`、
+  `#llm-system-prompt` 沿用原 id。新增样式类（css/workspace.css 末尾追加分区）：`.settings-group-row`、
+  `.model-picker`、`.model-caret-btn`、`.model-menu`、`.model-menu-item`、`.model-menu-empty`（展开态用 `.is-open`）。
+- 行为：点「保存」写当前分组字段（当前模型自动并入 `models`）；切换/新建/删除分组前先静默落盘当前表单；
+  只剩 1 个分组时拒绝删除（用「清除」恢复默认，回到服务端 .env）；模型列表为空时弹层显示提示文案。
+- 测试：tools/test-llm-settings.js（node，vm 加载 store.js + localStorage stub）：v1 迁移 / 分组增删改查 /
+  模型自动并入 / 脏数据容错 / clear 后 resolve 为 null。
+
+### 15.7 设置页 · 测试连通（2026-10-15）
+
+- 「模型」页操作区新增「测试连通」按钮 `#llm-test-btn`（quiet-button，动态创建 id 单引号引用）。
+- 点击后用**表单当前值**（未保存也生效；留空字段省略 → 回落服务端 .env）请求同源
+  `POST /api/ai/test`，由服务端以最小消息（「连通性测试：请只回复 pong」，20s 超时）实调上游；
+  结果写入 `#llm-settings-status`：✓ 显示延迟与模型名（有回复时附回复摘录）；✗ 显示失败原因。
+- 服务端契约（server.js `handleAiTest`）：配置解析与 `/api/ai/chat` 完全一致（resolveModelConfig +
+  credential 回落）；无 Key → 503；上游 4xx → 400；网络失败 / 上游 5xx / 空回复 → 502；
+  成功 → 200 `{ ok, latencyMs, model, protocol, reply }`。
+- 联网口径：js/sidebar.js 因此获准发起该**同源**接口的 fetch（check-contract.js `FETCH_ALLOWED`
+  扩展一项）；其余联网规则不变（前端零第三方直连）。
+
 
 ## 16. 环节文档（2026-10-14）
 
@@ -993,3 +1042,104 @@ exec 返回前，对 `artifacts` 中扩展名 ∈ {`.csv`, `.txt`, `.json`, `.md
 - **[22]** artifacts preview：out.csv 多行内容正确、60 行截到 50 行、`.bin` 无 preview。
 
 全通过仍输出 `ALL_EXEC_TESTS_PASS`（实测 76 通过 / 0 失败，1 项 SKIP 视环境 Key 而定）。
+
+## 21. 文献挖掘·第二阶段（2026-10-15 · D1c 冻结，W1a/W1b 接线依据）
+
+第二批文献挖掘扩展：把「首批候选检索」连接器升级为六阶段流水线（`discover` 候选检索 → `dedupe` 跨来源归并 → `fulltext` 全文获取 → `extract` 可追溯提取 → `validate` 校验 → `export` 文献表/参数明细表），并在全文提取前增设「研究者确认字段含义与单位」硬关口。完整设计（阶段脚本 CLI、中间 JSON、任务目录树、SOC 复用映射、校验规则、任务切分）见 `docs/literature-mining-stage2-design.md`；本章只冻结**网页接口层**契约。§1–§20 全部保持不变，本章为纯增量。
+
+### 21.1 阶段与状态机
+
+- `job.status` 仍为 5 值：`running / needs_attention / completed / failed / cancelled`，**不新增取值**。
+- `job.stage` 词汇表扩展：新增 `dedupe / fulltext / extraction / validation / export / awaiting_confirmation`；原值（`queued/environment/browser/search/save/verification/failed/completed/cancelled/interrupted`）全部保留。
+- 人工关口：字段确认复用 `status=needs_attention`，用 `stage="awaiting_confirmation"` 与验证码关口 `stage="verification"` 区分；前端按 stage 渲染不同操作（验证按钮 / 字段确认表单）。
+- 新人工关口的产品口径不变：验证码仍交人工、不自动绕过；字段确认仍以研究者确认为准，不把 AI 建议当已确认科学规则。
+
+### 21.2 API 契约
+
+#### 21.2.1 POST /api/literature/search（扩展）
+
+- 入参：`{ config, resumeCurrent?, until? }`。
+- `until` 可选，取值 ∈ `discover|dedupe|fulltext|extract|validate|export`；**缺省 `discover`**，与第一阶段行为逐字一致；非法值在创建任务前 400『阶段边界必须是 discover–export 的有效阶段名』。
+- 其余校验、并发守卫、错误文案全部不变（不回归清单见设计文档 §10）。
+
+#### 21.2.2 POST /api/literature/advance（新增）
+
+- 入参：`{ id, until?, confirmations? }`：
+  - `id`：36 位任务 id；
+  - `until`：可选，缺省 `export`（跑到流水线末尾或下一个硬关口）；
+  - `confirmations`：可选，`{ fields: [ …fieldDefinitions 结构… ] }`，仅在 `stage="awaiting_confirmation"` 时提交；服务端追加写入 `<job>/confirmations.json` 后从 `extract` 续跑。
+- 允许状态：`completed`（`resumeStage` 非空）、`needs_attention`、`failed`（含 interrupted；从 `resumeStage` 重试当前阶段）。
+- 出参：200 = 公开 job 快照（同 GET /job 结构）；400 错误文案：
+  - 无效 id『无效检索任务标识』；不存在『检索任务不存在』；
+  - `cancelled` 或 `resumeStage` 为空：『任务已停止，不能继续；请发起新检索』/『该任务已完成全部阶段』；
+  - 非法 `until`：『阶段边界必须是 discover–export 的有效阶段名』；`confirmations` 结构非法：『字段确认内容无效』；
+  - 并发冲突沿用『已有文献检索正在运行，请等待或停止后重试』；
+  - 请求体上限 64KB，超限 400（同现有 readBody 语义）。
+- 守卫：属 `POST /api/literature/*`，自动适用 `X-Workbench: 1`（403『请从工作台发起请求』）。
+- 验证码关口的 advance 等价于 resumeCurrent（脚本带 `--scrape-current`）；上述两条恢复路径并存，`resumeCurrent` 行为不变。
+- 旧第一阶段任务（`job.json` 无 `stages`/`resumeStage` 字段）：按设计 §4.4 产物判定表重建——其 `candidates.json` 无 `batches[]` 时 discover 视为 pending，advance 会从 discover 重跑该任务（跨批可能产生的重复由 dedupe 兜底，设计 §12 D7；如需平滑复用旧结果属后续增强）。
+
+#### 21.2.3 GET /api/literature/jobs（新增）
+
+- `?limit=` 取 1–50，默认 20；返回 `{ jobs: [公开快照…] }`，按 `job.json` mtime 倒序；损坏任务跳过。
+- 用途：刷新/换页后找回历史任务（第一阶段仅 localStorage 记住最后一个 job）。
+
+#### 21.2.4 GET /api/literature/job（扩展）
+
+公开快照新增可选字段（均可缺省、向后兼容）：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `stages` | `{stage: "pending"\|"running"\|"done"\|"failed"\|"skipped"}` | 各阶段状态表 |
+| `resumeStage` | string\|null | 下一待执行阶段；running 或全流程完成时为 null |
+| `until` | string | 本次运行的阶段边界 |
+| `counters` | object | 各阶段主计数（candidates/uniqueGroups/fulltextFetched/extractedPapers/parameterRows） |
+
+`count` 语义与 `events`（截尾 30 条）不变；interrupted 恢复语义不变（`status=failed` + `stage=interrupted` + 原文案），新增 `stages/resumeStage` 使 interrupted 任务可经 advance 续跑。
+
+#### 21.2.5 GET /api/literature/download（扩展）
+
+- 路由与响应头不变（`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`filename*=UTF-8''`）；`name` 校验由固定白名单改为**该任务已登记交付物成员校验**（`job.files`），并保留：36 位 id 正则、反软链 `lstat`、仅允许任务目录内相对路径。
+- Content-Type 映射扩展：`.csv → text/csv; charset=utf-8`、`.json → application/json; charset=utf-8`、`.xlsx → application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`、`.md → text/markdown; charset=utf-8`，其余 → `application/octet-stream`。
+- 交付物命名（登记用相对 POSIX 路径）：`run_config.json`、`candidates.json|csv`、`dedupe/dedupe.json|csv`、`fulltext/status.json`、`fulltext/files/<paper_id>.pdf|txt`、`extraction/inputs/<paper_id>.json`、`extraction/<paper_id>.json`、`extraction/check_report.json`、`validation/validation.json|md`、`export/literature.csv|xlsx`、`export/parameters.csv|xlsx`、`export/export_report.md`。
+- 登记规则：`result.files` 先过静态模式表再登记；`fulltext/files/*` 因 result 事件只带 `status.json`，由连接器按 `fulltext/status.json` 各 item 的 `path` 补登记（W1a 实现）。
+
+#### 21.2.6 既有路由不变承诺
+
+`POST /prepare`（指令文本与 202/400 语义）、`POST /search`（缺 `until` 时行为）、`GET /job`（旧字段与旧值）、`GET /download`（安全头）、`POST /cancel`（discover 阶段文案『检索已停止；持久浏览器保持打开』）全部保持第一阶段语义；`cancel` 在非 discover 阶段新增文案『任务已停止；已完成的阶段产物保留』。
+
+### 21.3 数据与文件契约（摘要，全文见设计文档 §3/§4）
+
+- `run_config.json`：现有 12 字段保留 + 可选 v2 字段（`batch / fieldDefinitions / templates / fulltext / extraction / limits`）；仍以 `flag:'wx'`+`mode:0o444` 冻结写入、永不回写。
+- `confirmations.json`（新增）：`{records:[{at, by:"researcher", kind:"fieldDefinitions", fields:[…], note}]}`，append-only；为全文提取的有效字段定义来源。
+- 任务目录：`.workbench/literature/<jobid>/` 新增 `confirmations.json`、`events.jsonl`、`dedupe/`、`fulltext/`、`extraction/`、`validation/`、`export/`（完整目录树见设计文档 §4.1）。
+- `events.jsonl`（新增）：`{"at","type","stage","message","extra"?}` 一行一事件、追加写；唯一写入者 = 任务驱动方（连接器 / pipeline.py）；`job.json` 的 `events` 仍是 UI 展示缓存（截尾 30）。
+- 阶段脚本 NDJSON 事件协议不变（`stage/attention/error/result`，字段与退出码见设计文档 §2.2/§2.3）；`attention.stage ∈ {verification, awaiting_confirmation}` → 驱动方置 `needs_attention` 并记录 `resumeStage`。
+
+### 21.4 安全与守卫（不变项重述）
+
+- 新 POST 路由（advance）自动继承 `X-Workbench: 1` 与 Host/Origin 校验；GET 路由不新增守卫（同现状 job/download）。
+- `.workbench` 不经静态服务暴露；文件访问只经 download 的登记校验。
+- 不绕过访问控制：验证码人工处理、付费墙全文标 `unavailable`，均按已确认规则（`docs/literature-mining-alignment.md`）。
+
+### 21.5 自动化验收（W1a/W1b 实现后补齐，格式同 §17.4/§20.5）
+
+`node tools/test-literature-connector.js`（W1a，已实测通过，输出 `LITERATURE_CONNECTOR_TESTS_PASS`）：
+S0 原 mock 单阶段回归（start 缺省 `until=discover` 行为与文件登记逐字不变）；S1 桩阶段脚本工作区
+`advance→…→download` 冒烟（失败重试、awaiting_confirmation 关口、confirmations 追加、stages/resumeStage/
+counters、交付物登记与下载、events.jsonl）；S2 剥离父进程 UTF-8 变量后 spawn 中文事件无 U+FFFD；
+S3 interrupted（服务重启遗留 running）按产物重建并可 advance 续跑；S4 cancel 双文案；S5 advance/snapshot
+守卫边界；S6 `.literature-ready` marker v2（requirements sha256 变更感知、旧纯文本 marker 过期）；
+S7 jobs 列表（mtime 倒序、limit 收敛、损坏记录跳过）。
+
+`node tools/test-literature-http.js`（W1a，已实测通过，输出 `LITERATURE_HTTP_TESTS_PASS`）：
+原 5 条零回归断言 + search 非法 `until` 400 + advance 路由（403；400 无效 id/不存在/已完成全部阶段）+
+jobs 列表 + download 登记校验与新 MIME（csv/xlsx/md 实测 Content-Type 与 no-store/nosniff 安全头；
+未登记名、穿越名 400）。
+
+`python tools/test_literature_ui.py` / `node tools/test-literature-ui-stage2.js`（W1b）：
+awaiting_confirmation 表单与继续流程（保留既有文案断言）。
+
+全套 node/python 回归（check-contract、test-merge-store、test-server-exec、test-literature-sources、
+test-literature-guidance、test-literature-extract、`python -m unittest discover -s tools -p "test_literature_*.py"`）
+实测全通过，0 失败。

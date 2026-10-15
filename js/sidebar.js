@@ -281,24 +281,22 @@
 
   // -------------------------------------------- 模型设置（左下角齿轮）
 
-  var SETTINGS_KEY = 'fa_llm_settings_v1';
   var elSettingsBtn = null;
   var elSettingsDialog = null;
+  var elModelMenu = null;       // ▼ 模型列表弹层（构建时缓存）
+  var elModelPicker = null;     // 模型选择器容器（用于判断"点击落在外部"）
+  var settingsNorm = null;      // 当前表单对应的规范化设置（v2；各处理器共用）
 
+  /** 读取本机保存的模型设置（v2 规范化；无配置返回空分组结构） */
   function readLlmSettings() {
-    try {
-      var raw = root.localStorage ? root.localStorage.getItem(SETTINGS_KEY) : null;
-      var obj = raw ? JSON.parse(raw) : null;
-      return (obj && typeof obj === 'object') ? obj : {};
-    } catch (error) { return {}; }
+    var api = root.Store && root.Store.llmSettings;
+    return api ? api.read() : { version: 2, activeGroupId: '', groups: [] };
   }
 
-  function saveLlmSettings(obj) {
-    try {
-      if (!root.localStorage || typeof root.localStorage.setItem !== 'function') return false;
-      root.localStorage.setItem(SETTINGS_KEY, JSON.stringify(obj));
-      return true;
-    } catch (error) { return false; }
+  /** 写回模型设置（规范化由 Store.llmSettings.write 内做） */
+  function saveLlmSettings(norm) {
+    var api = root.Store && root.Store.llmSettings;
+    return api ? api.write(norm) : false;
   }
 
   function settingsField(labelText, id, placeholder, type) {
@@ -390,9 +388,72 @@
 
     var body = doc.createElement('div');
     body.className = 'settings-body';
+
+    // 【模型分组 · 2026-10-15】一个地址 + 一个 Key = 一个分组；切换/新建/删除都在这一行
+    var groupWrap = doc.createElement('label');
+    groupWrap.className = 'settings-field';
+    var groupCap = doc.createElement('span');
+    groupCap.textContent = '分组（一个地址 + 一个 Key 为一组）';
+    var groupRow = doc.createElement('div');
+    groupRow.className = 'settings-group-row';
+    var groupSel = doc.createElement('select');
+    groupSel.id = 'llm-group-select';
+    groupSel.setAttribute('aria-label', '模型分组');
+    groupSel.addEventListener('change', function () { switchSettingsGroup(groupSel.value); });
+    var groupAdd = doc.createElement('button');
+    groupAdd.type = 'button';
+    groupAdd.id = 'llm-group-add';
+    groupAdd.className = 'quiet-button';
+    groupAdd.textContent = '＋ 新建分组';
+    groupAdd.addEventListener('click', addSettingsGroup);
+    var groupDel = doc.createElement('button');
+    groupDel.type = 'button';
+    groupDel.id = 'llm-group-remove';
+    groupDel.className = 'quiet-button';
+    groupDel.textContent = '删除当前分组';
+    groupDel.addEventListener('click', removeSettingsGroup);
+    groupRow.appendChild(groupSel);
+    groupRow.appendChild(groupAdd);
+    groupRow.appendChild(groupDel);
+    groupWrap.appendChild(groupCap);
+    groupWrap.appendChild(groupRow);
+    body.appendChild(groupWrap);
+
     body.appendChild(settingsField('接口地址（Base URL）', 'llm-base-url',
       '例如 https://api.commandcode.ai/provider/v1'));
-    body.appendChild(settingsField('模型名', 'llm-model', '例如 deepseek/deepseek-v4-flash'));
+
+    // 【模型分组 · 2026-10-15】模型名左侧 ▼ 展开本组模型列表（点选即填入；保存时自动并入列表）
+    var modelWrap = doc.createElement('label');
+    modelWrap.className = 'settings-field';
+    var modelCap = doc.createElement('span');
+    modelCap.textContent = '模型名（左侧 ▼ 显示本组模型列表）';
+    var picker = doc.createElement('div');
+    picker.className = 'model-picker';
+    var modelToggle = doc.createElement('button');
+    modelToggle.type = 'button';
+    modelToggle.id = 'llm-model-toggle';
+    modelToggle.className = 'model-caret-btn';
+    modelToggle.textContent = '▼';
+    modelToggle.title = '模型列表';
+    modelToggle.setAttribute('aria-label', '模型列表');
+    modelToggle.addEventListener('click', toggleModelMenu);
+    var modelInput = doc.createElement('input');
+    modelInput.type = 'text';
+    modelInput.id = 'llm-model';
+    modelInput.placeholder = '例如 deepseek/deepseek-v4-flash';
+    modelInput.autocomplete = 'off';
+    modelInput.spellcheck = false;
+    var modelMenu = doc.createElement('div');
+    modelMenu.className = 'model-menu';
+    modelMenu.id = 'llm-model-menu';
+    picker.appendChild(modelToggle);
+    picker.appendChild(modelInput);
+    picker.appendChild(modelMenu);
+    modelWrap.appendChild(modelCap);
+    modelWrap.appendChild(picker);
+    body.appendChild(modelWrap);
+    elModelPicker = picker;
+    elModelMenu = modelMenu;
 
     var proto = doc.createElement('label');
     proto.className = 'settings-field';
@@ -441,6 +502,13 @@
 
     var actions = doc.createElement('div');
     actions.className = 'settings-actions';
+    // 【模型分组 · 2026-10-15】测试连通：用表单当前值（未保存也生效；留空回落 .env）走同源 /api/ai/test
+    var testBtn = doc.createElement('button');
+    testBtn.type = 'button';
+    testBtn.id = 'llm-test-btn';
+    testBtn.className = 'quiet-button';
+    testBtn.textContent = '测试连通';
+    testBtn.addEventListener('click', testSettingsConnection);
     var save = doc.createElement('button');
     save.type = 'submit';
     save.className = 'primary-button';
@@ -450,15 +518,17 @@
     clear.className = 'quiet-button';
     clear.textContent = '清除';
     clear.addEventListener('click', function () {
-      saveLlmSettings({});
+      if (root.Store && root.Store.llmSettings) root.Store.llmSettings.clear();
       fillSettingsForm();
-      setSettingsStatus('已清除本机保存的模型设置，将使用服务端 .env 的配置。', true);
+      closeModelMenu();
+      setSettingsStatus('已清除本机保存的模型设置（全部分组），将使用服务端 .env 的配置。', true);
     });
     var cancel = doc.createElement('button');
     cancel.type = 'button';
     cancel.className = 'quiet-button';
     cancel.textContent = '取消';
     cancel.addEventListener('click', function () { dlg.close(); });
+    actions.appendChild(testBtn);
     actions.appendChild(save);
     actions.appendChild(clear);
     actions.appendChild(cancel);
@@ -478,14 +548,7 @@
     form.appendChild(layout);
     form.addEventListener('submit', function (event) {
       event.preventDefault();
-      var keep = {
-        baseUrl: doc.getElementById('llm-base-url').value.trim(),
-        model: doc.getElementById('llm-model').value.trim(),
-        protocol: doc.getElementById('llm-protocol').value,
-        apiKey: doc.getElementById('llm-api-key').value.trim(),
-        systemPrompt: doc.getElementById('llm-system-prompt') ? doc.getElementById('llm-system-prompt').value.trim() : ''
-      };
-      var ok = saveLlmSettings(keep);
+      var ok = persistSettingsForm();
       setSettingsStatus(ok ? '已保存。下一次发送就会使用这套配置。'
                            : '保存失败：浏览器本地存储不可用。', ok);
     });
@@ -564,13 +627,197 @@
   }
 
   function fillSettingsForm() {
-    var s = readLlmSettings();
-    if (doc.getElementById('llm-base-url')) doc.getElementById('llm-base-url').value = s.baseUrl || '';
-    if (doc.getElementById('llm-model')) doc.getElementById('llm-model').value = s.model || '';
-    if (doc.getElementById('llm-api-key')) doc.getElementById('llm-api-key').value = s.apiKey || '';
-    if (doc.getElementById('llm-protocol')) doc.getElementById('llm-protocol').value = s.protocol || 'chat-completions';
-    if (doc.getElementById('llm-system-prompt')) doc.getElementById('llm-system-prompt').value = s.systemPrompt || '';
+    settingsNorm = settingsNormForForm();
+    renderSettingsGroupSelect();
+    fillSettingsFields();
+    renderModelMenu();
   }
+
+  /** 取规范化设置；无分组时创建一个内存草稿分组（不落盘，点「保存」才写入） */
+  function settingsNormForForm() {
+    var norm = readLlmSettings();
+    var api = root.Store && root.Store.llmSettings;
+    if (api) {
+      if (!norm.groups.length) api.addGroup(norm, '分组 1');
+      if (!api.activeGroup(norm)) norm.activeGroupId = norm.groups[0].id;
+    }
+    return norm;
+  }
+
+  function activeSettingsGroup() {
+    var api = root.Store && root.Store.llmSettings;
+    return (api && settingsNorm) ? api.activeGroup(settingsNorm) : null;
+  }
+
+  function setFieldValue(id, value) {
+    var el = doc.getElementById(id);
+    if (el) el.value = value || '';
+  }
+
+  function fieldValue(id) {
+    var el = doc.getElementById(id);
+    return el ? String(el.value || '').trim() : '';
+  }
+
+  /** 分组下拉：选项 = 各分组名（缺名按序号），选中 = 激活分组 */
+  function renderSettingsGroupSelect() {
+    var sel = doc.getElementById('llm-group-select');
+    if (!sel || !settingsNorm) return;
+    while (sel.firstChild) sel.removeChild(sel.firstChild);
+    settingsNorm.groups.forEach(function (group, index) {
+      var opt = doc.createElement('option');
+      opt.value = group.id;
+      opt.textContent = group.name || ('分组 ' + (index + 1));
+      sel.appendChild(opt);
+    });
+    sel.value = settingsNorm.activeGroupId;
+  }
+
+  function fillSettingsFields() {
+    var group = activeSettingsGroup() || {};
+    setFieldValue('llm-base-url', group.baseUrl);
+    setFieldValue('llm-model', group.model);
+    setFieldValue('llm-api-key', group.apiKey);
+    setFieldValue('llm-protocol', group.protocol || 'chat-completions');
+    setFieldValue('llm-system-prompt', group.systemPrompt);
+  }
+
+  /** 把当前表单落盘到激活分组（model 由 Store 自动并入 models 列表） */
+  function persistSettingsForm() {
+    var api = root.Store && root.Store.llmSettings;
+    if (!api || !settingsNorm) return false;
+    var updated = api.updateGroup(settingsNorm, settingsNorm.activeGroupId, {
+      baseUrl: fieldValue('llm-base-url'),
+      model: fieldValue('llm-model'),
+      protocol: fieldValue('llm-protocol'),
+      apiKey: fieldValue('llm-api-key'),
+      systemPrompt: fieldValue('llm-system-prompt')
+    });
+    if (!updated) return false;
+    var ok = saveLlmSettings(settingsNorm);
+    renderModelMenu();
+    return ok;
+  }
+
+  /** 「测试连通」：用表单当前值（未保存也生效；留空字段省略 → 回落服务端 .env）探测模型端点 */
+  function testSettingsConnection() {
+    var btn = doc.getElementById('llm-test-btn');
+    var settings = {};
+    var baseUrl = fieldValue('llm-base-url');
+    var model = fieldValue('llm-model');
+    var apiKey = fieldValue('llm-api-key');
+    var protocol = fieldValue('llm-protocol');
+    if (baseUrl) settings.baseUrl = baseUrl;
+    if (model) settings.model = model;
+    if (apiKey) settings.apiKey = apiKey;
+    if (protocol) settings.protocol = protocol;
+    var started = Date.now();
+    if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
+    setSettingsStatus('正在测试连通…（留空字段将回落服务端 .env）', undefined);
+    fetch('/api/ai/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: settings })
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+        return data;
+      });
+    }).then(function (data) {
+      var line = '✓ 连通成功（' + (Date.now() - started) + ' ms' + (data.model ? '，模型 ' + data.model : '') + '）';
+      if (data.reply) line += '：' + data.reply;
+      setSettingsStatus(line + '。点「保存」后即用于对话。', true);
+    }).catch(function (error) {
+      setSettingsStatus('✗ 连接失败：' + (error && error.message ? error.message : '未知错误'), false);
+    }).then(function () {
+      if (btn) { btn.disabled = false; btn.textContent = '测试连通'; }
+    });
+  }
+
+  /** 切换分组：先把当前表单静默落盘，再切到目标分组 */
+  function switchSettingsGroup(groupId) {
+    if (!settingsNorm || !groupId) return;
+    persistSettingsForm();
+    settingsNorm.activeGroupId = groupId;
+    saveLlmSettings(settingsNorm);
+    fillSettingsForm();
+  }
+
+  /** ＋ 新建分组：先落盘当前表单，再追加空分组并聚焦到地址输入 */
+  function addSettingsGroup() {
+    var api = root.Store && root.Store.llmSettings;
+    if (!api || !settingsNorm) return;
+    persistSettingsForm();
+    api.addGroup(settingsNorm, '');
+    saveLlmSettings(settingsNorm);
+    fillSettingsForm();
+    setSettingsStatus('已新建分组，填写地址与 Key 后点「保存」。', true);
+    var input = doc.getElementById('llm-base-url');
+    if (input && typeof input.focus === 'function') input.focus();
+  }
+
+  /** 删除当前分组（只剩 1 个时拒绝；先落盘再删，需确认） */
+  function removeSettingsGroup() {
+    var api = root.Store && root.Store.llmSettings;
+    if (!api || !settingsNorm) return;
+    if (settingsNorm.groups.length <= 1) {
+      setSettingsStatus('只剩一个分组时不能删除；可用「清除」恢复默认配置。', false);
+      return;
+    }
+    persistSettingsForm();
+    var group = api.activeGroup(settingsNorm);
+    if (root.confirm && !root.confirm('删除分组「' + ((group && group.name) || '') + '」（其地址与 Key 一并删除）？')) return;
+    if (!api.removeGroup(settingsNorm, settingsNorm.activeGroupId)) return;
+    saveLlmSettings(settingsNorm);
+    fillSettingsForm();
+    setSettingsStatus('已删除分组。', true);
+  }
+
+  /** 渲染 ▼ 弹层内容：当前分组的模型列表（空列表给提示；点选填入模型名） */
+  function renderModelMenu() {
+    if (!elModelMenu) return;
+    while (elModelMenu.firstChild) elModelMenu.removeChild(elModelMenu.firstChild);
+    var group = activeSettingsGroup();
+    var models = (group && group.models) ? group.models : [];
+    var current = (group && group.model) || '';
+    if (!models.length) {
+      var empty = doc.createElement('div');
+      empty.className = 'model-menu-empty';
+      empty.textContent = '暂无已保存模型：直接输入模型名后点「保存」，即会加入本组列表。';
+      elModelMenu.appendChild(empty);
+      return;
+    }
+    models.forEach(function (model) {
+      var item = doc.createElement('button');
+      item.type = 'button';
+      item.className = 'model-menu-item' + (model === current ? ' is-active' : '');
+      item.textContent = model + (model === current ? '（当前）' : '');
+      item.addEventListener('click', function () {
+        setFieldValue('llm-model', model);
+        closeModelMenu();
+      });
+      elModelMenu.appendChild(item);
+    });
+  }
+
+  function toggleModelMenu() {
+    if (!elModelMenu) return;
+    if (elModelMenu.classList.contains('is-open')) { closeModelMenu(); return; }
+    renderModelMenu();
+    elModelMenu.classList.add('is-open');
+  }
+
+  function closeModelMenu() {
+    if (elModelMenu) elModelMenu.classList.remove('is-open');
+  }
+
+  // 点击选择器外部 / 按 Esc 收起模型列表（加载期只绑一次）
+  doc.addEventListener('click', function (event) {
+    if (elModelMenu && elModelPicker && !elModelPicker.contains(event.target)) closeModelMenu();
+  });
+  doc.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') closeModelMenu();
+  });
 
   function openSettingsDialog() {
     if (!elSettingsDialog) {
@@ -580,6 +827,7 @@
       });
     }
     fillSettingsForm();
+    closeModelMenu();
     setSettingsStatus('', undefined);
     activateSettingsTab('model');          // 每次打开回到「模型」页
     if (typeof elSettingsDialog.showModal === 'function') elSettingsDialog.showModal();

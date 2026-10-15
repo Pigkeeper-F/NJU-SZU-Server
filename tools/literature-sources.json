@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "key": "google-scholar",
+      "label": "Google Scholar",
+      "state": "executable",
+      "adapter": { "kind": "soc-script", "script": "SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/scripts/google_scholar_search.py" },
+      "notes": "首批连接器（2026-10-15）"
+    },
+    { "key": "cnki", "label": "知网", "state": "registered", "adapter": null, "notes": "SOC cnki_search.py 存在但未接入网页线" },
+    { "key": "wanfang", "label": "万方", "state": "registered", "adapter": null, "notes": "" },
+    { "key": "web-of-science", "label": "Web of Science", "state": "registered", "adapter": null, "notes": "" },
+    { "key": "scopus", "label": "Scopus", "state": "registered", "adapter": null, "notes": "" },
+    { "key": "pubmed", "label": "PubMed", "state": "registered", "adapter": null, "notes": "" }
+  ]
+}

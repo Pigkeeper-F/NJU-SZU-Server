@@ -14,7 +14,13 @@ const { LiteratureConnector } = require('./tools/literature-connector');
 
 const ROOT = __dirname;
 const codex = new CodexBridge(ROOT);
-const literature = new LiteratureConnector(ROOT);
+// 【stage2 · 2026-10-15】extract 阶段 = Python 半（bundle/校验）+ Node 半（CodexBridge 逐篇提取，§1.4）。
+// 适配器按设计 §9.6 注入；测试可沿用 options.prepare/search 的 mock 先例。
+const literature = new LiteratureConnector(ROOT, {
+  extract: (job, python, onEvent) => require('./tools/literature-extract').runExtractStage({
+    bridge: codex, jobDir: job.dir, config: job.config, python, onEvent
+  })
+});
 // 【W2 · 2026-10-14】请求体上限 64KB → 2MB：exec 端点需要携带数据文件（文本），
 // 单文件 ≤512KB、files 总量 ≤1MB（业务校验见 §19），故整体上限统一抬高。
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -230,7 +236,16 @@ async function handleLiterature(req, res, url) {
     }
     if (req.method === 'POST' && route === '/api/literature/search') {
       const data = JSON.parse(await readBody(req, 16 * 1024));
-      return sendJson(res, 202, literature.start(data.config, data.resumeCurrent === true));
+      return sendJson(res, 202, literature.start(data.config, data.resumeCurrent === true, data.until));
+    }
+    // 【stage2】POST /advance：从 resumeStage 续跑（缺省 until=export），支持字段确认关口（§21.2.2）。
+    if (req.method === 'POST' && route === '/api/literature/advance') {
+      const data = JSON.parse(await readBody(req, 64 * 1024));
+      return sendJson(res, 200, literature.advance(data.id, { until: data.until, confirmations: data.confirmations }));
+    }
+    // 【stage2】GET /jobs：历史任务找回（?limit= 1–50，默认 20；§21.2.3）。
+    if (req.method === 'GET' && route === '/api/literature/jobs') {
+      return sendJson(res, 200, { jobs: literature.list(url.searchParams.get('limit')) });
     }
     if (req.method === 'GET' && route === '/api/literature/job') {
       return sendJson(res, 200, literature.snapshot(url.searchParams.get('id')));
@@ -241,7 +256,14 @@ async function handleLiterature(req, res, url) {
     if (req.method === 'GET' && route === '/api/literature/download') {
       const name = url.searchParams.get('name') || '';
       const file = literature.download(url.searchParams.get('id'), name);
-      res.writeHead(200, { 'Content-Type': name.endsWith('.csv') ? 'text/csv; charset=utf-8' : 'application/json; charset=utf-8',
+      // 【stage2】MIME 映射扩展（§21.2.5）；其余扩展名沿用 application/octet-stream。
+      const LITERATURE_MIME = {
+        '.csv': 'text/csv; charset=utf-8',
+        '.json': 'application/json; charset=utf-8',
+        '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '.md': 'text/markdown; charset=utf-8'
+      };
+      res.writeHead(200, { 'Content-Type': LITERATURE_MIME[path.extname(name).toLowerCase()] || 'application/octet-stream',
         'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(name),
         'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
@@ -401,6 +423,47 @@ async function handleChat(req, res) {
     sendJson(res, 200, { text });
   } catch (error) {
     sendJson(res, (error && error.status) || 500, { error: (error && error.message) || '服务端内部错误' });
+  }
+}
+
+// ============================================================================
+// 【模型分组 · 2026-10-15】设置页「测试连通」：POST /api/ai/test
+// ----------------------------------------------------------------------------
+// 用给定的模型配置（缺省字段回落 .env / credential）发一条最小上游请求，验证
+// baseUrl / Key / 模型 / 协议是否可用。错误语义与 handleChat 一致：
+// 无 Key → 503；上游 4xx → 400；网络失败 / 上游 5xx / 空回复 → 502。
+// 成功 → 200 { ok, latencyMs, model, protocol, reply }。
+// ============================================================================
+async function handleAiTest(req, res) {
+  let payload;
+  try {
+    payload = JSON.parse(await readBody(req));
+  } catch (error) {
+    sendJson(res, 400, { error: '请求必须是有效 JSON，且大小不超过 2MB。' });
+    return;
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    sendJson(res, 400, { error: '请求体必须是 JSON 对象。' });
+    return;
+  }
+  const cfg = Object.assign(resolveModelConfig(payload.settings), normalizeCredential(payload.credential) || {});
+  if (!cfg.apiKey) {
+    sendJson(res, 503, { error: '尚未配置 API Key：请填写设置中的模型配置，或使用服务端 .env。' });
+    return;
+  }
+  const messages = normalizeMessages([{ role: 'user', text: '连通性测试：请只回复 pong' }]);
+  const started = Date.now();
+  try {
+    const text = await callModel(cfg, messages, 20000);
+    sendJson(res, 200, {
+      ok: true,
+      latencyMs: Date.now() - started,
+      model: cfg.model || '',
+      protocol: cfg.protocol || '',
+      reply: String(text || '').trim().slice(0, 80)
+    });
+  } catch (error) {
+    sendJson(res, (error && error.status) || 502, { error: (error && error.message) || '上游调用失败' });
   }
 }
 
@@ -1245,6 +1308,7 @@ if (require.main === module) {
       handleLiterature(request, response, new URL(request.url, 'http://localhost')));
     if (req.method === 'POST' && req.url === '/api/dependencies/open') return guarded('/api/dependencies/open', (_, response) => openDependencies(response));
     if (req.method === 'POST' && req.url === '/api/ai/chat') return guarded('/api/ai/chat', handleChat);
+    if (req.method === 'POST' && req.url === '/api/ai/test') return guarded('/api/ai/test', handleAiTest);
     if (req.method === 'POST' && req.url === '/api/ai/compose') return guarded('/api/ai/compose', handleCompose);
     if (req.method === 'POST' && req.url === '/api/code/exec') return guarded('/api/code/exec', handleExec);
     if (redirectLoopback(req, res)) return;
