@@ -10,6 +10,8 @@
   let loginBusy = false;
   let loginTimer = null;
   let loginNotice = '';
+  let downloadModuleId = null;
+  let downloadBasis = null;
   let preferences = {};
   try { preferences = JSON.parse(localStorage.getItem('fa_codex_connection_v1')) || {}; } catch (_) {}
   const backendPicker = document.getElementById('ai-backend');
@@ -118,7 +120,12 @@
       const sid = await session(id);
       for (const file of files) {
         if (file.size > 20 * 1024 * 1024) throw new Error(file.name + ' 超过 20MB');
+        const previousNames = new Set(t.files.map(item => item.name));
         t.files = (await request('/api/codex/upload?session=' + sid + '&group=' + group + '&name=' + encodeURIComponent(file.name), { method: 'POST', body: file })).files;
+        if (group === 'input' && saved[id]?.inputBatch) {
+          saved[id].inputBatch.names.push(...t.files.filter(item => item.group === 'input' && !previousNames.has(item.name)).map(item => item.name));
+          persist();
+        }
       }
     } catch (error) { t.error = error.message; }
     finally { t.busy = false; t.filesOpen = false; render(); ModuleSpace.render(); }
@@ -171,6 +178,8 @@
     t.busy = true; t.error = ''; t.job = null; render();
     try {
       const sid = await session(module.id);
+      const batch = saved[module.id]?.inputBatch;
+      if (module.type === 'clean-data' && batch) messages = [{ role: 'user', text: '当前下载交接批次（来源信息，不替代本模块的清洗规则）：\n仅处理以下当前输入文件，其他 input 文件为历史保留，不自动合并：\n' + batch.names.join('\n') + '\n获取依据：' + batch.label + '\n' + batch.text.slice(0, 1500) }, ...messages];
       const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, mode: module.mode }, messages, execute: executeRequested, model: t.model || null }) });
       saved[module.id].jobId = job.id; persist();
       await watch(module.id, job.id);
@@ -203,6 +212,90 @@
       if (!ModuleSpace.sendText('请直接运行本模块已上传的现有计算代码，读取已上传输入数据得到输出。不要修改代码或计算方法；若入口、依赖或运行方式不明确，先询问我。保存运行日志、输出文件和基本检查报告。')) throw new Error('当前模块无法发送执行请求');
       t.error = '';
     } catch (error) { cancelPreparedExecution(mod.id); t.error = error.message; render(); }
+  }
+  function basisForDownload(mod, sourceType) {
+    if (!sourceType && mod.doc?.status === 'approved') return { text: mod.doc.content, label: '已审核下载方案', sourceType: 'doc' };
+    if (sourceType !== 'doc') {
+      const rules = root.TaskManager?.rulesForModule(mod.id);
+      if (rules?.text) return { text: rules.text, label: '已确认下载规则 v' + rules.version, sourceType: 'rules' };
+    }
+    if (mod.doc?.status === 'approved') return { text: mod.doc.content, label: '已审核下载方案', sourceType: 'doc' };
+    return null;
+  }
+  function openDownload(mod, basis) {
+    const t = task(mod.id);
+    if (t.busy) return false;
+    basis = basis || basisForDownload(mod);
+    if (!basis?.text) { t.error = '请先确认上方下载规则，或审核下载方案，再开始下载。'; render(); return false; }
+    downloadModuleId = mod.id; downloadBasis = basis;
+    document.getElementById('download-basis').textContent = basis.label + '\n' + basis.text;
+    const previous = saved[mod.id]?.download?.sources;
+    const urls = basis.text.match(/https?:\/\/[^\s<>"\]\)]+/g) || [];
+    document.getElementById('download-sources').value = previous ? previous.map(source => source.url + (source.name ? ' | ' + source.name : '')).join('\n') : urls.slice(0, 5).join('\n');
+    document.getElementById('download-status').textContent = '请核对地址与文件名。下载得到原始文件后，仍需确认它符合规则。';
+    document.getElementById('download-start').disabled = false;
+    document.getElementById('download-dialog').showModal();
+    return true;
+  }
+  document.getElementById('download-close').onclick = () => document.getElementById('download-dialog').close();
+  document.getElementById('download-start').onclick = async () => {
+    if (!downloadModuleId || !downloadBasis) return;
+    const id = downloadModuleId, basis = downloadBasis, t = task(id);
+    if (t.busy) return;
+    const status = document.getElementById('download-status');
+    const lines = document.getElementById('download-sources').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (!lines.length || lines.length > 5) { status.textContent = '请填写 1 到 5 个文件地址。'; return; }
+    const sources = lines.map(line => { const parts = line.split('|'); return { url: parts[0].trim(), name: parts.slice(1).join('|').trim() }; });
+    t.busy = true; t.error = ''; t.job = null; document.getElementById('download-start').disabled = true; render();
+    const run = { ...basis, sources, files: [], failures: [], confirmed: false };
+    try {
+      const sid = await session(id);
+      Store.rejectRun(id, 'data', '开始重新下载；本次结果须重新检查并确认。');
+      Store.setModuleStatus(id, 'doing');
+      saved[id].download = run; persist();
+      for (let i = 0; i < sources.length; i++) {
+        status.textContent = '正在下载 ' + (i + 1) + ' / ' + sources.length + '：' + (sources[i].name || sources[i].url);
+        try {
+          const result = await request('/api/codex/fetch-source', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, rules: basis.text, source: sources[i], confirm: true }) });
+          run.files.push(result.download); t.files = result.files;
+        } catch (error) { run.failures.push({ source: sources[i], error: error.message }); }
+        persist(); render();
+      }
+      t.files = (await request('/api/codex/files?session=' + sid)).files;
+      const count = run.files.length;
+      status.textContent = '完成：成功 ' + count + ' 个，失败 ' + run.failures.length + ' 个。' + (count ? '请查看文件，再确认交给清洗。' : '请检查下载地址或网络后重试。');
+      Store.appendMessage(id, basis.label + '：下载成功 ' + count + ' 个，失败 ' + run.failures.length + ' 个。原始文件和下载记录在“文件与结果”中；年份、范围和版本仍待核查。' + run.failures.map(item => '\n失败：' + item.source.url + '；' + item.error).join(''), 'system');
+      if (count) Store.markRun(id, { dir: '.workbench/' + sid + '/input', artifacts: run.files.map(file => ({ name: file.storedName, size: file.size })) });
+      t.filesOpen = true;
+    } catch (error) { status.textContent = error.message; t.error = error.message; }
+    finally { t.busy = false; document.getElementById('download-start').disabled = false; render(); ModuleSpace.render(); }
+  };
+  async function handoffDownload(mod) {
+    const t = task(mod.id), run = saved[mod.id]?.download;
+    if (t.busy || !run?.files.length) return;
+    if (run.failures.length) { t.error = '仍有下载失败，请补齐清单后再交给清洗。成功文件已保留。'; render(); return; }
+    const basis = basisForDownload(mod, run.sourceType);
+    if (!basis || basis.text !== run.text) { t.error = '下载规则已变化，请先按当前规则重新核查或下载文件。'; render(); return; }
+    if (run.confirmed) {
+      const clean = Store.getState().modules.find(item => item.type === 'clean-data');
+      if (clean) { Store.selectModule(clean.id); return; }
+    }
+    t.busy = true; t.error = ''; render();
+    try {
+      let clean = Store.getState().modules.find(item => item.type === 'clean-data');
+      if (!clean) { Store.addModule('数据清洗'); clean = Store.getState().modules.find(item => item.type === 'clean-data'); }
+      if (!clean) throw new Error('无法建立清洗模块');
+      const target = await session(clean.id);
+      const result = await request('/api/codex/import-input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: target, sourceSessionId: saved[mod.id].sessionId, names: run.files.map(file => file.storedName), confirm: true }) });
+      task(clean.id).files = result.files; task(clean.id).filesOpen = true;
+      saved[clean.id].inputBatch = { names: result.names, label: run.label, text: run.text };
+      run.confirmed = true; persist(); Store.confirmRun(mod.id);
+      Store.appendMessage(mod.id, '已人工确认 ' + run.files.length + ' 个下载文件并交给数据清洗。' + (run.failures.length ? '本次仍有 ' + run.failures.length + ' 个下载失败，须另行补充。' : ''), 'system');
+      Store.appendMessage(clean.id, '已接收下载模块确认的 ' + run.files.length + ' 个原始文件，依据“' + run.label + '”。\n来源与获取要求（用于交接，清洗规则另行确认）：\n' + run.text + '\n交接文件：\n' + run.files.map(file => file.name + '；来源：' + file.finalUrl + '；SHA-256：' + file.sha256).join('\n') + '\n请先查看输入并讨论清洗规则，再执行清洗。', 'system');
+      Store.approveModule(mod.id);
+      Store.selectModule(clean.id);
+    } catch (error) { t.error = error.message; }
+    finally { t.busy = false; render(); ModuleSpace.render(); }
   }
   async function runAudit(mod) {
     const t = task(mod.id);
@@ -265,10 +358,10 @@
       }
     }
     panel.append(row);
-    if (t.backend === 'api') { panel.append(node('p', 'API 模式提供文字指导；数据清洗的上传与执行需切换本机 Codex。')); return; }
-    if (account?.error) panel.append(node('p', account.error + '；请打开左下角设置检查连接。', 'codex-error'));
-    else if (account && !account.loggedIn) panel.append(node('p', '请打开左下角设置，登录本机 Codex。', 'codex-error'));
-    if (!['clean-data', 'calculation', 'result-audit'].includes(mod.type)) {
+    if (t.backend === 'api' && mod.type !== 'download-data') { panel.append(node('p', 'API 模式提供文字指导；数据清洗的上传与执行需切换本机 Codex。')); return; }
+    if (mod.type !== 'download-data' && account?.error) panel.append(node('p', account.error + '；请打开左下角设置检查连接。', 'codex-error'));
+    else if (mod.type !== 'download-data' && account && !account.loggedIn) panel.append(node('p', '请打开左下角设置，登录本机 Codex。', 'codex-error'));
+    if (!['download-data', 'clean-data', 'calculation', 'result-audit'].includes(mod.type)) {
       panel.append(node('p', '本模块可用 Codex 对话梳理方案与规则；当前不执行下载、计算或文件处理。'));
       if (t.busy) panel.append(node('p', 'Codex 正在回复…', 'codex-status'));
       if (t.error) panel.append(node('p', t.error, 'codex-error'));
@@ -284,9 +377,9 @@
     toggle.append(node('span', '文件与结果 · ' + t.files.length));
     const chevron = node('span', undefined, 'codex-chevron'); chevron.setAttribute('aria-hidden', 'true'); toggle.append(chevron);
     files.append(toggle);
-    files.ontoggle = () => { t.filesOpen = files.open; toggle.setAttribute('aria-expanded', String(files.open)); };
+    files.ontoggle = () => { if (!files.isConnected) return; t.filesOpen = files.open; toggle.setAttribute('aria-expanded', String(files.open)); };
     const fileRow = node('div', undefined, 'codex-toolbar');
-    if (mod.type !== 'result-audit') {
+    if (mod.type !== 'result-audit' && mod.type !== 'download-data') {
       const input = node('input'); input.type = 'file'; input.multiple = true;
       input.accept = mod.type === 'calculation' ? '.py,.r,.R,.jl,.m,.ipynb,.csv,.tsv,.xlsx,.xls,.json,.txt' : '.csv,.tsv,.xlsx,.xls,.json,.txt';
       input.disabled = t.busy;
@@ -294,6 +387,12 @@
       input.onchange = () => upload(mod.id, Array.from(input.files)); fileRow.append(input);
     }
     const refreshButton = node('button', '刷新文件', 'quiet-button'); refreshButton.type = 'button'; refreshButton.disabled = t.busy; refreshButton.onclick = () => refresh(mod.id); fileRow.append(refreshButton);
+    if (mod.type === 'download-data') {
+      const start = node('button', '已有文件链接：直接下载', 'quiet-button'); start.type = 'button'; start.disabled = t.busy || !!root.LiteratureUI?.isBusy(); start.onclick = () => openDownload(mod); fileRow.append(start);
+      const handoff = node('button', saved[mod.id]?.download?.confirmed ? '查看已交接的清洗模块' : '确认文件并进入清洗', 'quiet-button'); handoff.type = 'button'; handoff.disabled = t.busy || !saved[mod.id]?.download?.files.length || !!saved[mod.id]?.download?.failures.length; handoff.onclick = () => handoffDownload(mod); fileRow.append(handoff);
+      const run = saved[mod.id]?.download;
+      fileRow.append(node('span', run ? '下载成功 ' + run.files.length + ' 个，失败 ' + run.failures.length + ' 个；' + (run.confirmed ? '已确认交给清洗' : '待人工核查') : '先确认规则，下载后检查文件，再交给清洗。', 'codex-status'));
+    }
     if (mod.type === 'calculation' && mod.mode === 'direct') {
       const start = node('button', '运行现有代码', 'primary-button'); start.type = 'button'; start.disabled = t.busy; start.onclick = () => runDirect(mod); fileRow.append(start);
     }
@@ -313,15 +412,19 @@
       stop.onclick = async () => { try { await request('/api/codex/cancel?id=' + t.job.id, { method: 'POST' }); } catch (error) { t.error = error.message; render(); } };
       row.append(stop);
     }
-    panel.append(fileRow);
+    if (mod.type === 'download-data' && root.LiteratureUI) {
+      const auxiliary = node('details'); auxiliary.append(node('summary', '已有文件链接或查看旧下载')); auxiliary.append(fileRow); panel.append(auxiliary);
+    } else panel.append(fileRow);
     if (mod.type === 'result-audit') panel.append(node('p', '先讨论并在上方确认核查原则，或直接上传已有标准；再核查结果、讨论定位。每个标准文件上限 20MB。', 'codex-status'));
+    if (mod.type === 'clean-data' && saved[mod.id]?.inputBatch) panel.append(node('p', '当前交接输入 ' + saved[mod.id].inputBatch.names.length + ' 个；历史原始文件保留，不自动合并到本次清洗。', 'codex-status'));
     const list = node('div', undefined, 'codex-files');
     list.id = 'codex-file-list';
-    list.append(node('p', mod.type === 'result-audit' ? '与计算模块共享输入及各次输出；点击文件名下载。' : '上传文件与本次结果；点击文件名下载。每个上传文件上限 20MB。'));
-    if (!t.files.length) list.append(node('p', mod.type === 'result-audit' ? '还没有计算文件，请先在计算模块运行。' : '还没有文件，请先选择原始数据。'));
+    list.append(node('p', mod.type === 'result-audit' ? '与计算模块共享输入及各次输出；点击文件名下载。' : mod.type === 'download-data' ? '下载的原始文件与下载记录；点击文件名保存到本机。' : '上传文件与本次结果；点击文件名下载。每个上传文件上限 20MB。'));
+    if (!t.files.length) list.append(node('p', mod.type === 'result-audit' ? '还没有计算文件，请先在计算模块运行。' : mod.type === 'download-data' ? '尚未下载文件，请确认规则后开始下载。' : '还没有文件，请先选择原始数据。'));
     t.files.forEach(file => {
       const displayName = file.name.split('/').pop().replace(/^[0-9a-f]{8}-/, '');
-      const link = node('a', (file.group === 'input' ? '原始 · ' : file.group === 'reference' ? '核查标准 · ' : '结果 · ') + displayName + ' · ' + Math.ceil(file.size / 1024) + 'KB');
+      const batch = mod.type === 'clean-data' && saved[mod.id]?.inputBatch;
+      const link = node('a', (file.group === 'input' ? batch ? batch.names.includes(file.name) ? '当前原始 · ' : '历史原始 · ' : '原始 · ' : file.group === 'reference' ? '核查标准 · ' : '结果 · ') + displayName + ' · ' + Math.ceil(file.size / 1024) + 'KB');
       link.title = file.name;
       link.href = '/api/codex/download?session=' + saved[mod.id]?.sessionId + '&group=' + file.group + '&name=' + encodeURIComponent(file.name); list.append(link);
     });
@@ -330,7 +433,10 @@
     if (t.job?.events.length) { const log = node('details'); log.open = t.logOpen; log.ontoggle = () => { t.logOpen = log.open; }; log.append(node('summary', '执行进度')); log.append(node('pre', t.job.events.join('\n'))); panel.append(log); }
     if (t.error) panel.append(node('p', t.error, 'codex-error'));
   }
-  root.CodexUI = { render, reply, prepareConfirmedExecution, cancelPreparedExecution, useCodex: mod => !!mod && task(mod.id).backend === 'codex', getModel: mod => mod ? task(mod.id).model || null : null, busy: id => task(id).busy };
+  root.CodexUI = { render, reply, openDownload, prepareConfirmedExecution, cancelPreparedExecution, session, refresh,
+    getConnection: mod => ({ backend: task(mod.id).backend, model: task(mod.id).model || (task(mod.id).backend === 'codex' ? account?.model : null) || null }),
+    setInputBatch: (id, batch) => { saved[id] = { ...saved[id], inputBatch: batch }; persist(); },
+    useCodex: mod => !!mod && task(mod.id).backend === 'codex', getModel: mod => mod ? task(mod.id).model || null : null, busy: id => task(id).busy };
   function closeFiles() {
     const files = panel.querySelector('.codex-attachments[open]');
     if (!files) return;

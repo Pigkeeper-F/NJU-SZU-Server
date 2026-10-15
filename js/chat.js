@@ -285,6 +285,8 @@
     }).slice(-25).map(function (message) {
       return { role: message.role, text: message.text };
     });
+    var executionContext = root.LiteratureUI && root.LiteratureUI.context(moduleId);
+    if (executionContext) recent.unshift({ role: 'user', text: executionContext });
     var rules = root.TaskManager && root.TaskManager.confirmedRules();
     if (!rules) return recent;
     var chunks = [];
@@ -448,10 +450,13 @@
     var chip = el('span', 'status-chip', STATUS_META[st].glyph + ' ' + STATUS_META[st].text);
     chip.setAttribute('data-status', st);
     bar.appendChild(chip);
-    bar.appendChild(el('span', 'status-hint', STATUS_HINT[st] || ''));
+    var downloadPending = mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed');
+    bar.appendChild(el('span', 'status-hint', downloadPending ? '审核获取方案 → 按方案开始执行 → 讨论并处理问题 → 核查成果后交接' : STATUS_HINT[st] || ''));
 
     var actions = el('div', 'status-actions');
-    if (st === 'todo' || st === 'doing') {
+    if (downloadPending) {
+      // Actual download and handoff provide this module's completion gate.
+    } else if (st === 'todo' || st === 'doing') {
       actions.appendChild(actionButton('完成并提交审核', 'primary', function () {
         getStore().submitModule(mod.id);
       }));
@@ -520,6 +525,21 @@
     { value: 'mining', label: '参数挖掘' }
   ];
   var TEMPLATE_DEFAULT = 'standard';
+  function docProfile(mod) {
+    var type = mod && mod.type;
+    var title = '', hint = '', options;
+    if (type === 'download-data') { title = '数据下载方案'; hint = '确定数据来源、年份与范围、获取方式、保存格式，以及下载完整性的检查方法。'; }
+    if (type === 'clean-data') { title = '数据清洗规则'; hint = '确定字段、单位、缺失和异常处理及验收要求；需要统一国家、品类或统计口径时选择数据对齐规则。'; options = [{ value: 'standard', label: '数据清洗规则' }, { value: 'align', label: '数据对齐规则' }]; }
+    if (type === 'calculation') {
+      title = mod.mode === 'direct' ? '现有代码运行说明' : mod.mode === 'modify' ? '计算修改方案' : '计算方案';
+      hint = mod.mode === 'direct' ? '确定现有代码入口、输入文件、运行参数、输出和检查要求。' : mod.mode === 'modify' ? '确定修改目标、公式或参数变更、影响范围及验证办法。' : '先选择直接计算或修改计算，再确定对应方案。';
+    }
+    if (type === 'literature-mining') { title = '文献数据提取规则'; hint = '确定文献范围、提取字段、原文位置、缺失处理与人工核查要求。'; options = [{ value: 'mining', label: '文献数据提取规则' }]; }
+    if (type === 'result-audit') { title = '结果核查原则'; hint = '确定核查的运行版本、指标、判定依据、通过条件和问题定位办法。'; }
+    if (type === 'manual-review') { title = '人工审核要求'; hint = '确定审核对象、证据清单、通过与退回条件。'; }
+    if (type === 'plotting') { title = '绘图方案'; hint = '确定要表达的问题、数据来源、图型、单位、样式和交付格式。'; }
+    return { title: title || DOC_TITLE, hint: hint || DOC_EMPTY_HINT, options: options || (title ? [{ value: 'standard', label: title }] : TEMPLATE_OPTIONS) };
+  }
   var MAX_FILES_TOTAL = 1024 * 1024;   // 数据文件总量上限 1MB（前端先拦，不发送）
   var FILE_ACCEPT = '.csv,.txt,.json,.tsv,.md';
   var RUN_CAUSES = [
@@ -566,11 +586,19 @@
   }
 
   function templateOf(id) {
-    return docTemplate[id] || TEMPLATE_DEFAULT;
+    var state = getStore().getState();
+    var mod = findModule(state.modules, id);
+    var options = docProfile(mod).options;
+    var selected = docTemplate[id] || options[0].value || TEMPLATE_DEFAULT;
+    return options.some(function (option) { return option.value === selected; }) ? selected : options[0].value;
   }
 
   function filesOf(id) {
     return docFiles[id] || (docFiles[id] = []);
+  }
+  function templateLabel(mod) {
+    var selected = templateOf(mod.id);
+    return docProfile(mod).options.filter(function (option) { return option.value === selected; })[0].label;
   }
 
   /** 【X2】待下载 URL 清单（模块级，跨 render 保留） */
@@ -604,6 +632,7 @@
     if (!mod) return 'none';
     var d = mod.doc;
     var s = d ? (d.status + '|' + (d.updatedAt || '') + '|' + (d.approvedAt || '') + '|' + d.content.length) : 'none';
+    s += '#' + (mod.type || '') + '#' + (mod.mode || '');
     s += '#' + ((docEditingId === mod.id) ? 'E' : '-');
     // 执行记录（结果确认门）：状态/时间/产物任一变化都要全量重建（否则快速路径吞掉徽标翻转）
     var r = mod.run;
@@ -663,6 +692,9 @@
       mode: mode,
       module: {
         name: (mod && mod.name) ? mod.name : '',
+        type: mod && mod.type,
+        mode: mod && mod.mode,
+        doc: mod && mod.doc && mod.doc.status === 'approved' ? mod.doc : null,
         spec: {
           goal: spec.goal || '',
           todo: Array.isArray(spec.todo) ? spec.todo : [],
@@ -675,7 +707,7 @@
       credential: root.ApiKeys && typeof root.ApiKeys.getActiveCredential === 'function'
         ? root.ApiKeys.getActiveCredential() : null
     };
-    // 模板仅在生成标准文档时叠加（生成代码不传，服务端忽略未知字段亦安全）
+    // 文档与代码沿用同一适用模板。
     if (template) body.template = template;
     if (extra) {
       for (var key in extra) {
@@ -748,7 +780,7 @@
     ui.codeLoading = true; ui.codeErr = ''; ui.code = null; ui.exec = null; ui.execErr = ''; ui.notice = '';
     ui.genErr = '';
     render();
-    postCompose('code', mod, null, feedback ? { feedback: feedback } : null).then(function (text) {
+    postCompose('code', mod, templateOf(mod.id), feedback ? { feedback: feedback } : null).then(function (text) {
       ui.codeLoading = false;
       ui.code = text;
     }).catch(function (err) {
@@ -874,17 +906,21 @@
   /** 生成区模板下拉：标准文档 / 对齐文档 / 参数挖掘，默认标准；切换写模块级变量（不触发重建） */
   function buildTemplateRow(mod) {
     var row = el('div', 'doc-template-row');
-    row.appendChild(el('label', 'doc-template-label', '生成模板'));
+    var options = docProfile(mod).options;
+    row.appendChild(el('label', 'doc-template-label', '规则类型'));
+    if (options.length === 1) { row.appendChild(el('span', 'doc-template-label', options[0].label)); return row; }
     var sel = el('select', 'doc-template-select');
+    sel.setAttribute('aria-label', '规则类型');
     var cur = templateOf(mod.id);
-    for (var i = 0; i < TEMPLATE_OPTIONS.length; i++) {
-      var opt = el('option', 'doc-template-option', TEMPLATE_OPTIONS[i].label);
-      opt.value = TEMPLATE_OPTIONS[i].value;
-      if (TEMPLATE_OPTIONS[i].value === cur) opt.selected = true;
+    for (var i = 0; i < options.length; i++) {
+      var opt = el('option', 'doc-template-option', options[i].label);
+      opt.value = options[i].value;
+      if (options[i].value === cur) opt.selected = true;
       sel.appendChild(opt);
     }
     sel.addEventListener('change', function () {
       docTemplate[mod.id] = sel.value;
+      render();
     });
     row.appendChild(sel);
     return row;
@@ -1088,6 +1124,7 @@
 
   /** 结果确认门：run 存在时渲染护栏（ran→[确认结果]/[有问题]；confirmed→已确认徽标） */
   function buildRunGate(body, mod, ui) {
+    if (mod.type === 'download-data') { body.appendChild(el('span', 'status-hint', '文献获取的成果请在上方执行面板核查后交接；已有文件链接的下载结果在文件面板确认。')); return; }
     var run = mod && mod.run;
     if (!run) return;
     var gate = el('div', 'doc-run-gate');
@@ -1134,7 +1171,7 @@
   /** 标题行：标题 + 状态徽标（data-doc-status + 语义类名）+ 执行状态徽标（data-run-status） */
   function buildDocHead(mod, st) {
     var head = el('div', 'doc-card-head');
-    head.appendChild(el('div', 'doc-card-title', DOC_TITLE));
+    head.appendChild(el('div', 'doc-card-title', docProfile(mod).title));
     var meta = DOC_STATUS_META[st] || DOC_STATUS_META.none;
     var badge = el('span', 'doc-badge ' + meta.cls, meta.text);
     badge.setAttribute('data-doc-status', st);
@@ -1151,10 +1188,10 @@
   }
 
   function buildDocEmpty(body, mod, ui) {
-    body.appendChild(el('div', 'doc-empty-hint', DOC_EMPTY_HINT));
+    body.appendChild(el('div', 'doc-empty-hint', docProfile(mod).hint + ' 先讨论，确定后再起草和审核。'));
     body.appendChild(buildTemplateRow(mod));
     var actions = el('div', 'doc-actions');
-    actions.appendChild(docButton(ui.gen ? '生成中…（长任务可能需数分钟）' : 'AI 生成标准文档', 'primary', ui.gen, function () {
+    actions.appendChild(docButton(ui.gen ? '生成中…（长任务可能需数分钟）' : 'AI 起草' + templateLabel(mod), 'primary', ui.gen, function () {
       generateDoc(mod);
     }));
     actions.appendChild(docButton('手动编写', '', false, function () {
@@ -1316,6 +1353,10 @@
       // run.status === 'confirmed'（本环节产出已确认）时不再提供重新执行入口，引导进入下一步 / 下一模块
       if (mod.run && mod.run.status === 'confirmed') {
         actions.appendChild(el('span', 'status-hint', '本环节产出已确认，请进入下一步或下一个模块'));
+      } else if (mod.type === 'download-data' || mod.type === 'literature-mining') {
+        actions.appendChild(docButton('按审核方案开始执行', 'primary', !!(root.LiteratureUI && root.LiteratureUI.isBusy()), function () { root.LiteratureUI.start(mod); }));
+      } else if (mod.type === 'calculation' && mod.mode === 'direct') {
+        actions.appendChild(el('span', 'status-hint', '按上方“运行现有代码”执行，使用已有代码与输入数据。'));
       } else if (mod.type === 'clean-data' || mod.type === 'calculation') {
         actions.appendChild(docButton(ui.codeLoading ? '生成代码中…（长任务可能需数分钟）' : '生成代码并执行', 'primary', ui.codeLoading, function () {
           composeCode(mod);
@@ -1568,6 +1609,7 @@
   }
 
   function isBusy() {
+    if (root.LiteratureUI && root.LiteratureUI.isBusy()) return true;
     var state = getStore().getState();
     return (state.modules || []).some(function (mod) {
       return !!(pendingModules[mod.id] || (root.CodexUI && root.CodexUI.busy(mod.id)));

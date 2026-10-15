@@ -96,13 +96,15 @@
     var active = root.Store.getState();
     var mod = active.modules.filter(function (item) { return item.id === active.activeModuleId; })[0];
     var isAudit = !!mod && mod.type === 'result-audit';
-    var rulesVisible = !!mod && (mod.type === 'clean-data' || mod.type === 'calculation' && mod.mode === 'modify' || isAudit);
+    var isDownload = !!mod && mod.type === 'download-data';
+    var rulesVisible = !!mod && (isDownload || mod.type === 'clean-data' || mod.type === 'calculation' && mod.mode === 'modify' || isAudit);
     $('task-summary').hidden = !rulesVisible;
-    $('task-summary').firstElementChild.textContent = isAudit ? '核查原则' : '执行规则';
-    $('task-rules-open').textContent = isAudit ? '查看 / 编辑核查原则' : '查看 / 编辑规则';
-    $('rules-dialog').querySelector('h2').textContent = isAudit ? '核查原则' : '执行规则';
+    $('task-summary').firstElementChild.textContent = isAudit ? '核查原则' : isDownload ? '下载规则' : '执行规则';
+    $('task-rules-open').textContent = isAudit ? '查看 / 编辑核查原则' : isDownload ? '查看 / 编辑下载规则' : '查看 / 编辑规则';
+    $('rules-dialog').querySelector('h2').textContent = isAudit ? '核查原则' : isDownload ? '下载规则' : '执行规则';
     $('rules-dialog').querySelector('p').textContent = isAudit ? '保存你确定采用的核查对象、指标、阈值和通过条件。可自行填写，或从讨论中提取候选原则；确认后作为核查依据。已有标准也可在模块中直接上传。' : '这里只放你决定要执行的规则。可以自己填写，或让 AI 从对话中提取候选规则；AI 草稿须经你核对并确认。';
     $('task-summary-draft').placeholder = isAudit ? '核查对象与版本、指标、阈值或判定关系、抽样办法、通过与退回条件、参考标准……' : '处理范围、输入文件、具体清洗/转换规则、异常处理、验收标准、输出文件……只写已经确定的内容。';
+    if (isDownload) $('task-summary-draft').placeholder = '下载来源、实际文件地址、年份与范围、版本、文件名和格式、完整性检查……';
     $('task-summary-ai').textContent = isAudit ? 'AI 提取候选原则' : 'AI 提取候选规则';
     $('task-summary-save').textContent = isAudit ? '确认核查原则' : '确认规则';
     $('task-rules-execute').hidden = isAudit;
@@ -111,6 +113,11 @@
     $('task-summary-confirmed').hidden = !rules.confirmed;
     $('task-summary-confirmed').textContent = rules.confirmed ? '当前生效的规则（v' + (rules.versions || []).length + '）\n' + rules.confirmed : '';
     $('task-summary-status').textContent = rules.confirmed ? '已确认 v' + (rules.versions || []).length : '尚未确认';
+    if (isDownload) {
+      $('task-summary').firstElementChild.textContent = '获取方案';
+      $('task-summary-status').textContent = mod.doc && mod.doc.status === 'approved' ? '已审核 · 可执行' : mod.doc ? '待审核' : '待制定';
+      $('task-rules-open').textContent = '查看方案';
+    }
     var history = $('task-summary-history');
     history.replaceChildren();
     var initial = document.createElement('option');
@@ -125,7 +132,7 @@
     });
     history.disabled = !(rules.versions || []).length;
     $('task-summary-ai').disabled = !!pendingRules || busy();
-    $('task-rules-execute').textContent = mod && mod.type === 'calculation' ? '按规则修改并计算' : '按规则执行清洗';
+    $('task-rules-execute').textContent = isDownload ? '按审核方案开始执行' : mod && mod.type === 'calculation' ? '按规则修改并计算' : '按规则执行清洗';
     $('task-rules-execute').disabled = !rules.confirmed || !rulesVisible || !!pendingRules || busy();
   }
 
@@ -172,7 +179,8 @@
   function confirmedRules() {
     var state = root.Store.getState();
     var mod = state.modules.filter(function (item) { return item.id === state.activeModuleId; })[0];
-    if (!mod || !(mod.type === 'clean-data' || mod.type === 'calculation' && mod.mode === 'modify' || mod.type === 'result-audit')) return '';
+    if (mod && mod.type === 'download-data' && mod.doc && mod.doc.status === 'approved') return mod.doc.content;
+    if (!mod || !(mod.type === 'download-data' || mod.type === 'clean-data' || mod.type === 'calculation' && mod.mode === 'modify' || mod.type === 'result-audit')) return '';
     return rulesFor(current(), mod.id).confirmed || '';
   }
   function ruleVersion() { return rulesFor(current()).versions.length; }
@@ -218,6 +226,12 @@
     var mod = state.modules.filter(function (item) { return item.id === state.activeModuleId; })[0];
     var rules = confirmedRules();
     if (!rules) { showMessage('请先确认执行规则。'); return; }
+    if (mod && mod.type === 'download-data') {
+      if (busy() || pendingRules) { showMessage('当前任务尚未完成，请稍后。'); return; }
+      if (mod.doc && mod.doc.status === 'approved') { $('rules-dialog').close(); root.LiteratureUI.start(mod); }
+      else showMessage('文献获取需要先审核通过下方方案，然后按方案开始执行。已有明确文件链接可用模块中的辅助下载入口。');
+      return;
+    }
     if (!mod || !(mod.type === 'clean-data' || mod.type === 'calculation' && mod.mode === 'modify')) { showMessage('当前模块不支持按规则执行文件处理。'); return; }
     if (busy() || pendingRules) { showMessage('当前 AI 正在处理，请稍后。'); return; }
     if (!root.CodexUI || !root.CodexUI.useCodex(mod)) { showMessage('请先将模块助手切换为“本机 Codex”。'); return; }
@@ -238,7 +252,8 @@
   }
 
   initialize();
-  root.TaskManager = { confirmedRules: confirmedRules, switchTask: switchTask, createTask: createTask };
+  root.TaskManager = { confirmedRules: confirmedRules, switchTask: switchTask, createTask: createTask,
+    rulesForModule: function (moduleId) { var rules = rulesFor(current(), moduleId); return { text: rules.confirmed || '', version: (rules.versions || []).length }; } };
   $('task-select').addEventListener('change', function (event) { switchTask(event.target.value); });
   $('task-new').addEventListener('click', function () {
     if (busy() || pendingRules) { showMessage('当前 AI 正在回复，请等完成后再新建任务。'); return; }
@@ -256,7 +271,16 @@
       if ($('task-start').value === 'clean') $('rules-dialog').showModal();
     }
   });
-  $('task-rules-open').addEventListener('click', function () { $('rules-dialog').showModal(); render(); });
+  $('task-rules-open').addEventListener('click', function () {
+    var state = root.Store.getState();
+    var mod = state.modules.filter(function (item) { return item.id === state.activeModuleId; })[0];
+    if (mod && mod.type === 'download-data') {
+      var card = document.querySelector('#module-space .doc-card');
+      if (card) card.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      return;
+    }
+    $('rules-dialog').showModal(); render();
+  });
   $('rules-dialog-close').addEventListener('click', function () { $('rules-dialog').close(); });
   $('task-summary-ai').addEventListener('click', extractRules);
   $('task-summary-save').addEventListener('click', confirmRules);

@@ -1000,3 +1000,34 @@ exec 返回前，对 `artifacts` 中扩展名 ∈ {`.csv`, `.txt`, `.json`, `.md
 连接控件 `codex-connection` 默认隐藏，首次打开“设置 → 模型”时由 sidebar.js 移入模型设置页。登录、检查连接、后端与模型选项由 CodexUI 管理；后端/模型仍按模块保存，未选择模块时更新新模块的默认值（`fa_codex_connection_v1`）。主模块面板保留文件与执行按钮，不显示登录和模型配置。
 
 `POST /api/ai/compose` 可选 `backend:'codex'` 与 `codexModel`，只读生成文档/代码或诊断文本，继续使用现有模板、反馈和返回结构。生成的代码仍经过原人工确认与执行接口；没有自动执行。`CodexUI.getModel(mod)` 返回当前模块的模型。
+# 环节与规则模板对应（2026-10-14）
+
+下载模块使用下载方案；清洗模块使用清洗规则或数据对齐规则；直接计算使用现有代码运行说明，修改计算使用计算修改方案；文献挖掘默认使用参数提取模板；核查使用核查原则。通用历史模块仍保留原三种模板。只有一种适用模板时显示其名称，不出现选择框。
+
+compose 请求的 module 增加可选 type/mode/doc，服务端按真实模块类型添加职责约束；代码生成沿用该模块所选模板和已审核文档。直接计算不提供生成新代码入口，运行现有代码继续使用原按钮。既有 doc、规则历史和执行记录不作结构迁移。
+
+# 数据下载执行与清洗交接（2026-10-14）
+
+下载模块支持确认规则或审核下载方案后打开下载弹窗，填写公开 HTTP(S) 文件地址与文件名，明确点击“开始下载”。原始文件保存到当前任务 input，每个文件上限 20MB，最多 5 个地址；不修改内容、不执行用户代码。下载记录保存规则文本、来源、大小、SHA-256 和成功/失败状态。跳转、域名解析、大小和超时均受限；需要登录/检索的网页须另行确定获取方式。
+
+`POST /api/codex/fetch-source`：`{sessionId, rules, source:{url,name}, confirm:true}`，返回文件及记录。`POST /api/codex/import-input`：`{sessionId, sourceSessionId, names, confirm:true}`，复制选中的原始文件到清洗 input。两者沿用工作台同源与请求头保护。后端下载无需模型登录，AI 对话仍需要配置模型。
+
+下载完保留待确认状态；点击“确认文件并进入清洗”才导入下游并记录确认。允许部分失败后重新下载，已有成功文件与日志保留。清洗模块以最近确认交接的批次为当前输入，历史原始文件保留但不自动合并；研究者补传的文件加入当前批次。已下载不等于年份、范围等科学条件自动验收通过。
+
+下载优先使用 `SOURCE_DOWNLOAD_PROXY` 或协议对应的 `HTTPS_PROXY`/`HTTP_PROXY`，Windows 未指定时读取已启用的系统 HTTP 代理。代理隧道连接经校验的源 IP，HTTPS 仍校验证书；不将代理信息写入下载记录。
+
+# 审核方案后的文献获取小流程（2026-10-14）
+
+`tools/literature-flow.js` 编排已审核方案 → 执行方案解析 → Europe PMC/Crossref 检索 → 筛选 → 获取开放全文或研究者上传材料 → 带出处提取 → 人工核查。首批最多 20 条候选、3 篇全文；不是全量综述检索。不获取受限全文、不以摘要冒充全文数据。方案缺关键要求、获取失败或证据不明确时进入 waiting，保留问题、进度和部分产物，研究者答复后续跑当前步骤。材料中的指令按不可信来源处理。原始方案冻结并记录哈希，变更后须重新审核并新开运行；科学规则的补充答复记录为 decisions。
+
+新增同源接口：`POST /api/codex/literature/start {sessionId,plan:{content,status:'approved'},confirm:true,backend?,model?,credential?,settings?}`；`GET /api/codex/literature/status?session=…&id=…`；`POST /api/codex/literature/resume {sessionId,id,plan,answer,paperDecisions?:[{paperId,inputName?,skip?}],confirm:true,…模型配置}`；`POST /api/codex/literature/cancel {sessionId,id}`。模型配置只在内存中使用，不写入运行记录。状态为 running/waiting/failed/cancelled/completed，stage 为 plan/search/screen/acquire/extract/review；状态与 checkpoint 落盘，服务重启时可继续，原件与历史结果不覆盖。completed 表示产物已生成、待人工核查，不自动批准数据。
+
+新增 `js/literature.js`，导出 `window.LiteratureUI={render,isBusy,context}`；独立 DOM section 动态挂在 Codex 面板之后、module-space 之前。仅对 download-data/literature-mining 显示。后端按模块存储运行标识的新键 `research_literature_runs_v1`，不迁移或覆盖旧任务数据。审核后主按钮“按审核方案开始执行”；等待时提供答复框、上传材料关联及显式跳过选项，按钮“提交答复并继续”；运行可停止，刷新恢复。材料上传使用原 upload 路由的新增 `material` 组（PDF/XML/TXT/MD/CSV/TSV/XLSX），不作为清洗输入自动合并。原链接下载改为辅助入口。数据 CSV 的字段含 paper_id、field、value、unit、conditions、source_file、location、quote、status；quote 必须对应实际材料位置，数值无证据时留空并标为需讨论。清洗交接只复制提取 CSV，原材料与出处记录仍保留。
+
+新增 `tools/material-reader.py` 用已有 Python 读取 XML、文本、CSV/TSV/XLSX/PDF；PDF 使用已有 pypdf/pdfplumber/PyMuPDF 之一，无库/扫描件/超限时明示问题，不自动安装或偷偷截断。新增 `.literature-panel` 系列样式与 script 接线。自检仍用 check-contract.js，新增 tools/test-literature-flow.js 验证检索获取、证据、等待续跑、重启与版本约束。
+
+CodexUI 增加 `session(id) / refresh(id) / getConnection(mod) / setInputBatch(id,batch)` 供文献编排面板复用原文件会话和模型配置；LiteratureUI 增加 start(mod)。import-input 增加可选 sourceGroup:'input'|'output'（默认 input），允许把已人工核查的提取 CSV 交给清洗。脚本顺序在 codex.js 后增加 literature.js；check-contract.js 同步登记新 UI 文件、全局对象与同源 fetch 白名单，其他校验不变。
+
+CSV 另含 paper_title/doi/source_url，由服务端来源记录填写，不要求这些元数据出现在正文数值证据中。fields 仅列测量变量，单位、实验条件、论文信息和定位状态使用已有元数据列；解析时规范这些标准字段。allowMissing 仅在审核方案/明确答复允许缺失留空时生效，缺数值不得自动补零。问题历史、提取版本与各阶段模型配置记入运行记录；最新 CSV 是便于交接的别名，不删除之前版本。
+
+下载模块顶栏显示当前获取方案的审核状态，“查看方案”定位到本模块文档卡片；普通对话以当前已审核方案作为依据。旧下载规则历史仍保留，供旧直链任务核查使用；其他模块的规则弹窗与版本不变。

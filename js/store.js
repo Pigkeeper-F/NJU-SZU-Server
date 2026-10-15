@@ -797,6 +797,11 @@
 
   /** 提交人工审核（doing -> review） */
   function submitModule(id) {
+    var mod = findModule(id);
+    if (mod && mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed')) {
+      appendMessage(id, '请先开始下载、检查文件并确认交给清洗，再提交本环节审核。', 'system');
+      return false;
+    }
     return setModuleStatus(id, 'review');
   }
 
@@ -807,6 +812,7 @@
   function approveModule(id) {
     var mod = findModule(id);
     if (!mod) return { ok: false, reason: '模块不存在' };
+    if (mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed')) return { ok: false, reason: '下载文件尚未确认，不能跳过下载进入下游' };
     var idx = indexOfModule(id);
     var next = (idx >= 0 && idx + 1 < state.modules.length) ? state.modules[idx + 1] : null;
     var created = null;

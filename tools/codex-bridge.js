@@ -9,6 +9,7 @@ const os = require('node:os');
 const ID = /^[a-f0-9-]{36}$/;
 const ALLOWED = new Set(['.csv', '.tsv', '.xlsx', '.xls', '.json', '.txt', '.py', '.r', '.jl', '.m', '.ipynb']);
 const REFERENCE_ALLOWED = new Set(['.md', '.txt', '.pdf', '.docx', '.csv', '.tsv', '.xlsx', '.xls', '.json']);
+const MATERIAL_ALLOWED = new Set(['.md', '.txt', '.pdf', '.xml', '.csv', '.tsv', '.xlsx', '.zip']);
 
 // One stdio connection owned by the local Web server; no credentials enter the browser.
 class CodexBridge {
@@ -16,6 +17,7 @@ class CodexBridge {
     this.root = path.join(root, '.workbench');
     this.pending = new Map();
     this.jobs = new Map();
+    this.sourceBusy = new Set();
     this.sequence = 0;
   }
   send(value) { this.proc.stdin.write(JSON.stringify(value) + '\n'); }
@@ -30,7 +32,8 @@ class CodexBridge {
   async connect() {
     if (this.ready) return this.ready;
     this.ready = (async () => {
-      this.proc = spawn(process.env.CODEX_BIN || 'codex', ['app-server', '--listen', 'stdio://'], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const proxy = require('./source-download').proxyFor('https:');
+      this.proc = spawn(process.env.CODEX_BIN || 'codex', ['app-server', '--listen', 'stdio://'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...(proxy ? { HTTPS_PROXY: proxy.href, HTTP_PROXY: proxy.href } : {}) } });
       this.proc.stderr.on('data', () => {}); // Never forward runtime diagnostics or auth data to Web.
       this.proc.stdin.on('error', () => {});
       const fail = () => {
@@ -91,11 +94,12 @@ class CodexBridge {
     })().finally(() => { this.loginStarting = null; });
     return this.loginStarting;
   }
-  async compose(prompt, requestedModel) {
+  async compose(prompt, requestedModel, options = {}) {
     const session = this.createSession();
     const start = await this.run(session.id, [{ role: 'user', content: prompt }], '根据用户给出的提示生成文本。只输出所要求的文档、代码或诊断；不调用工具、不执行代码、不读取其他文件。', false, requestedModel, 'discussion', null);
     const deadline = Date.now() + 300000;
     while (Date.now() < deadline) {
+      if (options.signal?.aborted) { await this.cancel(start.id).catch(() => {}); throw new Error('已停止文献流程'); }
       const job = this.snapshot(start.id);
       if (job.status !== 'running') {
         if (job.status !== 'completed') throw new Error(job.error || 'Codex 生成未完成');
@@ -118,6 +122,7 @@ class CodexBridge {
     fs.mkdirSync(path.join(this.root, id, 'input'), { recursive: true });
     fs.mkdirSync(path.join(this.root, id, 'output'));
     fs.mkdirSync(path.join(this.root, id, 'reference'));
+    fs.mkdirSync(path.join(this.root, id, 'material'));
     return { id, files: [] };
   }
   files(id) {
@@ -135,13 +140,14 @@ class CodexBridge {
     };
     walk(path.join(dir, 'input'), 'input'); walk(path.join(dir, 'output'), 'output');
     if (fs.existsSync(path.join(dir, 'reference'))) walk(path.join(dir, 'reference'), 'reference');
+    if (fs.existsSync(path.join(dir, 'material'))) walk(path.join(dir, 'material'), 'material');
     return result;
   }
   upload(id, name, bytes, group = 'input') {
     const dir = this.session(id);
     if (this.active(id)) throw new Error('任务运行中，请结束后再上传');
-    if (!['input', 'reference'].includes(group)) throw new Error('无效上传类型');
-    const allowed = group === 'reference' ? REFERENCE_ALLOWED : ALLOWED;
+    if (!['input', 'reference', 'material'].includes(group)) throw new Error('无效上传类型');
+    const allowed = group === 'material' ? MATERIAL_ALLOWED : group === 'reference' ? REFERENCE_ALLOWED : ALLOWED;
     if (!name || name.length > 180 || /[\\/\x00-\x1f]/.test(name) || !allowed.has(path.extname(name).toLowerCase())) throw new Error(group === 'reference' ? '核查标准支持 MD、TXT、PDF、DOCX、CSV、TSV、Excel、JSON 文件' : '支持 CSV、TSV、Excel、JSON、TXT、PY、R、JL、M、IPYNB 文件');
     const stored = randomUUID().slice(0, 8) + '-' + name;
     fs.mkdirSync(path.join(dir, group), { recursive: true });
@@ -149,13 +155,45 @@ class CodexBridge {
     return { name: stored, files: this.files(id) };
   }
   download(id, group, name) {
-    if (!['input', 'output', 'reference'].includes(group)) throw new Error('无效文件类型');
+    if (!['input', 'output', 'reference', 'material'].includes(group)) throw new Error('无效文件类型');
     const base = fs.realpathSync(path.join(this.session(id), group));
     const file = fs.realpathSync(path.resolve(base, name));
     if (!file.startsWith(base + path.sep) || !fs.statSync(file).isFile()) throw new Error('文件不可访问');
     return file;
   }
-  active(sessionId) { return [...this.jobs.values()].find(j => j.sessionId === sessionId && j.status === 'running'); }
+  saveSource(id, result, report) {
+    const dir = this.session(id);
+    const recordId = randomUUID();
+    const reportDir = path.join(dir, 'output', recordId);
+    fs.mkdirSync(reportDir, { recursive: true });
+    let storedName = null;
+    if (result) {
+      if (!result.name || /[\\/\x00-\x1f]/.test(result.name)) throw new Error('无效文件名');
+      storedName = recordId.slice(0, 8) + '-' + result.name;
+      fs.writeFileSync(path.join(dir, 'input', storedName), result.data, { flag: 'wx', mode: 0o444 });
+    }
+    const record = { ...report, storedName, reportName: recordId + '/download-report.json', at: new Date().toISOString() };
+    fs.writeFileSync(path.join(reportDir, 'download-report.json'), JSON.stringify(record, null, 2));
+    return { download: record, files: this.files(id) };
+  }
+  importInput(targetId, sourceId, names, sourceGroup = 'input') {
+    if (!['input', 'output'].includes(sourceGroup)) throw new Error('无效交接文件类型');
+    if (this.active(targetId) || this.active(sourceId)) throw new Error('文件任务正在进行，请稍后交接');
+    if (!Array.isArray(names) || !names.length || names.length > 5) throw new Error('请先选择已下载的原始文件');
+    const dir = this.session(targetId);
+    const imported = [];
+    for (const name of [...new Set(names)]) {
+      if (typeof name !== 'string') throw new Error('无效文件名');
+      const original = this.download(sourceId, sourceGroup, name);
+      if (fs.statSync(original).size > 20 * 1024 * 1024) throw new Error('文件超过 20MB');
+      if (targetId === sourceId && sourceGroup === 'input') { imported.push(name); continue; }
+      const storedName = randomUUID().slice(0, 8) + '-' + path.basename(name).replace(/^[0-9a-f]{8}-/, '');
+      fs.copyFileSync(original, path.join(dir, 'input', storedName), fs.constants.COPYFILE_EXCL);
+      imported.push(storedName);
+    }
+    return { names: imported, files: this.files(targetId) };
+  }
+  active(sessionId) { return this.sourceBusy.has(sessionId) || [...this.jobs.values()].find(j => j.sessionId === sessionId && j.status === 'running'); }
   finish(job, status, error) {
     job.status = status; job.error = error || null;
     clearTimeout(job.timer);
@@ -221,6 +259,7 @@ class CodexBridge {
     void (async () => {
       try {
         const account = await this.status();
+        if (job.status !== 'running') return;
         if (!account.loggedIn) throw new Error('请先在终端执行 codex login，用 ChatGPT 账号登录。');
         if (!account.model) throw new Error('Codex 没有返回当前账号可用的模型');
         const selected = requestedModel
@@ -232,6 +271,7 @@ class CodexBridge {
         const thread = await this.rpc('thread/start', { model: selected.model, cwd: working, sandbox: 'read-only', approvalPolicy: 'never', developerInstructions: capabilities,
           config: { 'mcp_servers': {}, 'features.multi_agent': false, model_reasoning_effort: effort }, ephemeral: true });
         job.threadId = thread.thread.id;
+        if (job.status !== 'running') return;
         const sandboxPolicy = execute
           ? { type: 'workspaceWrite', writableRoots: [working], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
           : { type: 'readOnly', networkAccess: false };
@@ -252,7 +292,7 @@ class CodexBridge {
     const job = this.jobs.get(id);
     if (!job) throw new Error('运行记录不存在');
     if (job.status === 'running') {
-      if (!job.turnId) throw new Error('Codex 正在启动，请稍后再停止');
+      if (!job.turnId) { this.finish(job, 'cancelled'); return this.snapshot(id); }
       await this.rpc('turn/interrupt', { threadId: job.threadId, turnId: job.turnId });
       this.finish(job, 'cancelled');
     }

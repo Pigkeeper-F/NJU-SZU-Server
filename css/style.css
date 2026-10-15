@@ -776,3 +776,20 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
 .module-status[data-status="doing"] { color: #24507e; }
 .module-status[data-status="review"] { color: #b25000; }
 .module-status[data-status="approved"] { color: #2f7a46; }
+/* ---- 文献获取执行：按审核方案运行、问题答复与材料关联 ---- */
+.literature-panel { flex: 0 1 auto; max-height: 50vh; overflow: auto; margin: 12px 0 16px; padding: 18px 20px; border: 1px solid var(--border, #dfe5e1); border-radius: 12px; background: #f8faf9; }
+.literature-panel[hidden] { display: none; }
+.literature-panel h3, .literature-panel h4 { margin: 0 0 8px; }
+.literature-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+.literature-stages { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 14px 0; list-style: none; }
+.literature-stages li { padding: 6px 10px; border-radius: 8px; background: #edf1ee; font-size: 13px; }
+.literature-stages li[data-current="true"] { background: #315c4e; color: white; }
+.literature-question { margin: 14px 0; padding: 16px; border: 1px solid #c9d7cf; border-radius: 10px; background: white; }
+.literature-question li { margin-bottom: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.literature-question textarea { display: block; box-sizing: border-box; width: 100%; min-height: 120px; margin: 12px 0; padding: 12px; border: 1px solid #c9d7cf; border-radius: 8px; font: inherit; resize: vertical; }
+.literature-material-row { display: block; margin: 12px 0; padding: 10px; border: 1px solid #e1e7e3; border-radius: 8px; overflow-wrap: anywhere; }
+.literature-material-row select { display: block; width: 100%; margin: 8px 0; padding: 8px; }
+.literature-material-row label { display: block; font-size: 13px; }
+.literature-material-row input { margin-right: 6px; }
+.literature-files { display: grid; gap: 8px; padding-top: 10px; max-height: 250px; overflow: auto; }
+.literature-files a { padding: 8px 10px; border: 1px solid #e1e7e3; border-radius: 6px; overflow-wrap: anywhere; color: #315c4e; }

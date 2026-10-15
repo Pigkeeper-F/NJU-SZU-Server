@@ -10,9 +10,12 @@ const path = require('node:path');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { CodexBridge } = require('./tools/codex-bridge');
+const { fetchSource } = require('./tools/source-download');
+const { LiteratureFlow } = require('./tools/literature-flow');
 
 const ROOT = __dirname;
 const codex = new CodexBridge(ROOT);
+const literature = new LiteratureFlow(codex);
 // 【W2 · 2026-10-14】请求体上限 64KB → 2MB：exec 端点需要携带数据文件（文本），
 // 单文件 ≤512KB、files 总量 ≤1MB（业务校验见 §19），故整体上限统一抬高。
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -41,6 +44,7 @@ function workflowPrompt(module, executor = 'api') {
     '按定义、输入、执行、交付、检查、异常推进，直接帮助整理方案、规则、数据结构、代码、报告与交接内容；只在有证据时报告完成或通过检查。输出应具体、简洁，优先给出当前可用成果与下一步。',
     executor === 'api' ? '当前系统只提供文字对话，没有文件读取、下载、代码执行、浏览、数据库或模块操作工具。不能声称已经下载数据、读取未提供的文件、运行计算或生成实际附件。需要外部操作时提供可执行步骤或代码，并让用户提供结果后继续检查。API 接入不等于拥有这些工具。' : ['clean-data', 'calculation', 'result-audit'].includes(module.type) ? '本次是 Codex 本地文件任务。按任务模式读取已上传数据、代码与计算结果；只在允许执行的模块与模式下写入输出目录。只有实际执行成功时才报告完成。' : '本次是本机 Codex 模块对话。当前模块仅提供方案、规则和结果检查的文字指导；没有上传文件、联网浏览、下载或写入执行功能。不要声称已访问网站、读取未上传的文件、运行计算或生成实际附件。',
     '人工审核模块中，AI 只能提供审核建议和证据整理，最终人工决定由用户给出。SOC 是可替换示例，仅在主题适用时采用。',
+    ['download-data', 'literature-mining'].includes(module.type) ? '网页文献执行面板支持：审核通过获取方案后点击“按审核方案开始执行”，按方案检索 Europe PMC/Crossref、筛选首批最多3篇、获取开放全文、读取全文或上传材料、提取数据与原文证据；问题会暂停并列出，研究者答复并点击继续后续跑。此普通对话只讨论和补充方案，不自行执行上述工具；材料与进度以面板真实记录为准，不说已完成未发生的操作。原文件链接下载仅为辅助入口。方案应明确检索范围、筛选条件、提取字段/单位、验收；复杂来源登录、OCR、图中数值不自动执行。' : '',
     '区分用户提供的信息、假设、建议、待确认事项与已验证结果；不编造来源、数值、文献、运行结果或审核结论。保持当前模块职责，交接时说明下游需要的成果及版本。',
     module.type === 'calculation' ? '当前计算方式：' + ({ direct: '直接运行已有代码，不修改计算方法', modify: '按研究者确认的规则修改代码后计算', 'parameter-update': '参数更新后计算', 'activity-data-update': '活动数据更新后计算' }[module.mode] || '尚未选择，请结合用户需求对齐') : '',
     '当前模块工作流：\n' + workflow,
@@ -169,8 +173,44 @@ function openDependencies(res) {
 async function handleCodex(req, res, url) {
   try {
     const route = url.pathname;
+    if (req.method === 'GET' && route === '/api/codex/literature/status') return sendJson(res, 200, literature.snapshot(url.searchParams.get('session'), url.searchParams.get('id')));
+    if (req.method === 'POST' && route.startsWith('/api/codex/literature/')) {
+      const data = JSON.parse(await readBody(req));
+      if (!data || typeof data !== 'object') throw new Error('请求体无效');
+      codex.session(data.sessionId);
+      if (route.endsWith('/cancel')) return sendJson(res, 200, literature.cancel(data.sessionId, data.id));
+      if (!['/api/codex/literature/start', '/api/codex/literature/resume'].includes(route)) throw new Error('未知文献操作');
+      if (data.confirm !== true) throw new Error('请确认开始或继续执行');
+      const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
+      if (data.backend !== 'codex' && !cfg.apiKey) throw new Error('请先在设置中连接本机 Codex 或配置 API');
+      const generate = (prompt, signal) => data.backend === 'codex' ? codex.compose(prompt, typeof data.model === 'string' ? data.model : null, { signal }) : callModel(cfg, [{ role: 'user', content: prompt }], 300000, signal);
+      generate.modelLabel = data.backend === 'codex' ? data.model || 'Codex 账号默认' : cfg.model;
+      const run = route.endsWith('/start') ? literature.start(data.sessionId, data.plan, generate, data.backend === 'codex' ? data.model || 'Codex 账号默认' : cfg.model) : literature.resume(data.sessionId, data.id, data.plan, data.answer || '', data.paperDecisions || [], generate);
+      return sendJson(res, 202, run);
+    }
     if (req.method === 'GET' && route === '/api/codex/status') return sendJson(res, 200, await codex.status());
     if (req.method === 'POST' && route === '/api/codex/login') return sendJson(res, 200, await codex.login());
+    if (req.method === 'POST' && route === '/api/codex/fetch-source') {
+      const data = JSON.parse(await readBody(req));
+      if (!data || data.confirm !== true || typeof data.rules !== 'string' || !data.rules.trim() || data.rules.length > 20000) throw new Error('请先确认下载规则');
+      if (!data.source || typeof data.source.url !== 'string' || data.source.url.length > 3000) throw new Error('请提供实际文件下载地址');
+      codex.session(data.sessionId);
+      if (codex.active(data.sessionId)) throw new Error('当前任务正在运行');
+      codex.sourceBusy.add(data.sessionId);
+      try {
+        const result = await fetchSource(data.source);
+        return sendJson(res, 201, codex.saveSource(data.sessionId, result, { ok: true, source: data.source, rules: data.rules, name: result.name, size: result.size, finalUrl: result.finalUrl, sha256: result.sha256 }));
+      } catch (error) {
+        const message = error.name === 'AbortError' || error.name === 'TimeoutError' ? '下载超时，请检查地址或网络后重试' : error.message;
+        const result = codex.saveSource(data.sessionId, null, { ok: false, source: data.source, rules: data.rules, error: message });
+        return sendJson(res, 400, { ...result, error: message });
+      } finally { codex.sourceBusy.delete(data.sessionId); }
+    }
+    if (req.method === 'POST' && route === '/api/codex/import-input') {
+      const data = JSON.parse(await readBody(req));
+      if (!data || data.confirm !== true) throw new Error('请先确认下载文件');
+      return sendJson(res, 201, codex.importInput(data.sessionId, data.sourceSessionId, data.names, data.sourceGroup || 'input'));
+    }
     if (req.method === 'POST' && route === '/api/codex/session') return sendJson(res, 201, codex.createSession());
     if (req.method === 'GET' && route === '/api/codex/files') return sendJson(res, 200, { files: codex.files(url.searchParams.get('session')) });
     if (req.method === 'POST' && route === '/api/codex/upload') {
@@ -264,7 +304,7 @@ class UpstreamError extends Error {
 // 【E2E 修复 · 2026-10-14】超时参数化：生成代码等长输出任务需要更长时间，
 // 原硬编码 60s 会在 compose(code) 真实调用时超时（实测 60.4s 失败）。
 // 对话 60s（handleChat），文档/代码生成 180s（compose）。
-async function callModel(cfg, messages, timeoutMs) {
+async function callModel(cfg, messages, timeoutMs, signal) {
   let url;
   let requestBody;
   if (cfg.protocol === 'chat-completions') {
@@ -285,7 +325,7 @@ async function callModel(cfg, messages, timeoutMs) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
       body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(timeoutMs || 60000)
+      signal: signal || AbortSignal.timeout(timeoutMs || 60000)
     });
   } catch (error) {
     throw new UpstreamError(502, '无法连接 AI 服务，请检查 AI_API_BASE_URL 与网络。');
@@ -593,7 +633,19 @@ function buildComposePrompt(payload) {
     ? convo.map((m) => (m.role === 'user' ? '用户：' : 'AI：') + m.content).join('\n\n')
     : '（暂无对话记录）';
 
+  const type = payload.module && payload.module.type;
+  const mode = payload.module && payload.module.mode;
+  const guidance = {
+    'download-data': '当前是数据下载环节。方案应明确来源、检索或下载方式、年份与范围、格式、版本和完整性检查。不要混入数据清洗、文献数值提取或模型修改规则；不能声称已实际下载。',
+    'clean-data': '当前是数据清洗环节。规则应明确字段、单位、缺失、异常、重复、原值保留和验收。选择对齐模板时明确维度与口径映射。文献参数提取不属于本环节。',
+    'calculation': mode === 'direct' ? '当前是直接计算。编写现有代码的运行说明：代码入口、输入文件、参数、依赖、输出与检查要求。不得把修改公式或新建计算方法写成执行任务。' : '当前是修改计算。方案应明确已讨论的修改目标、公式/代码/参数变更、影响范围、输入输出约定及验证方法。',
+    'literature-mining': '当前是文献数据提取环节。明确文献范围、字段、单位、原文来源定位、取值与缺失处理、核查要求。不要把下载文献当成已提取数值。',
+    'result-audit': '当前是结果核查与定位。明确运行版本、指标、判定依据、证据、通过/退回条件和定位方式；不能在规则草稿中宣称结果已通过。',
+    'manual-review': '当前是人工审核。明确审核对象、证据和通过/退回条件。',
+    'plotting': '当前是绘图。明确研究问题、输入结果版本、图型、单位、图注、样式和输出要求。'
+  }[type];
   const blocks = [template, '【环节信息】\n' + brief];
+  if (guidance) blocks.push('【本环节职责】\n' + guidance + '\n仅把研究者明确采用的做法写成确定规则；信息不足处标“待确认”，候选建议须注明，不自行补造科学阈值或方法。');
   if (payload.mode === 'code') {
     const docText = moduleDocText(payload.module);
     blocks.push('【环节文档】\n' + (docText || '（尚未生成文档，请依据环节信息与对话记录自行推断）'));

@@ -26,20 +26,21 @@ const passed = [];
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
 
 // 【集成 · 2026-10-13】js/auth-pages.js 纳入检查（其 DOM id / CSS 类引用落在账号页，见 htmlIds / css 的扩展源）
-const JS_FILES = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/workspace.js", "js/tasks.js", "js/auth-pages.js"];
+const JS_FILES = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/literature.js", "js/workspace.js", "js/tasks.js", "js/auth-pages.js"];
 const UI_MODULES = [
   ["Sidebar", "js/sidebar.js"],
   ["ModuleTabs", "js/tabs.js"],
   ["ModuleSpace", "js/chat.js"],
   ["App", "js/app.js"]
+  , ["LiteratureUI", "js/literature.js"]
 ];
 const STATIC_NODES = ["composer-input", "btn-send", "btn-add-module", "btn-sidebar-toggle", "sidebar-resizer"];
 // 【集成 · 2026-10-13】账号系统上工作台：index.html 在数据层之前先加载账号配置/存储与守卫
-const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.js", "js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/workspace.js", "js/tasks.js"];
+const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.js", "js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/literature.js", "js/workspace.js", "js/tasks.js"];
 // 账号系统独立文件（登录/注册页自带脚本，不进工作台 index.html 的渲染链）
 const AUTH_FILES = ["js/auth-config.js", "js/auth-storage.js", "js/auth-pages.js", "js/guard.js", "login.html", "register.html", "css/auth.css"];
 // 契约 §2「两种运行模式」：前端只允许 js/chat.js 里对同源 /api/… 的 fetch；其余脚本零联网。
-const FETCH_ALLOWED = ["js/chat.js", "js/codex.js", "js/workspace.js", "js/tasks.js"];
+const FETCH_ALLOWED = ["js/chat.js", "js/codex.js", "js/literature.js", "js/workspace.js", "js/tasks.js"];
 
 // ---------- 读取 ----------
 for (const f of JS_FILES.concat(AUTH_FILES, ["index.html", "css/style.css", "docs/contract.md"])) {

@@ -1,0 +1,14 @@
+'use strict';
+const assert = require('node:assert/strict');
+const { buildComposePrompt } = require('../server');
+const prompt = (type, mode, template = 'standard', doc = null) => buildComposePrompt({ mode, template, module: { type, mode: type === 'calculation' ? 'direct' : null, name: '任意改名的模块', doc }, messages: [] });
+assert.match(prompt('download-data', 'doc'), /当前是数据下载环节/);
+assert.match(prompt('clean-data', 'doc', 'align'), /维度与口径映射/);
+assert.match(prompt('calculation', 'doc'), /代码入口、输入文件/);
+assert.match(prompt('literature-mining', 'doc', 'mining'), /原文来源定位/);
+assert.match(prompt('result-audit', 'doc'), /不能在规则草稿中宣称结果已通过/);
+const code = prompt('clean-data', 'code', 'align', { status: 'approved', content: '已确认规则：仅按映射表处理。' });
+assert.match(code, /aligned\.csv/);
+assert.match(code, /已确认规则：仅按映射表处理/);
+assert.match(code, /待确认/);
+console.log('MODULE_TEMPLATE_TESTS_PASS');
