@@ -1031,3 +1031,11 @@ CodexUI 增加 `session(id) / refresh(id) / getConnection(mod) / setInputBatch(i
 CSV 另含 paper_title/doi/source_url，由服务端来源记录填写，不要求这些元数据出现在正文数值证据中。fields 仅列测量变量，单位、实验条件、论文信息和定位状态使用已有元数据列；解析时规范这些标准字段。allowMissing 仅在审核方案/明确答复允许缺失留空时生效，缺数值不得自动补零。问题历史、提取版本与各阶段模型配置记入运行记录；最新 CSV 是便于交接的别名，不删除之前版本。
 
 下载模块顶栏显示当前获取方案的审核状态，“查看方案”定位到本模块文档卡片；普通对话以当前已审核方案作为依据。旧下载规则历史仍保留，供旧直链任务核查使用；其他模块的规则弹窗与版本不变。
+
+# 2026-10-15 上游 Scholar 合并
+
+合入 origin/main 1499524 的文献配置、Scholar 连接器、候选导出、手动验证续查、Python 最小环境及 macOS CLI 路径支持。保留本地设置登录、已审核方案执行、Europe PMC/Crossref、材料读取、证据验证、问题续跑与清洗交接。`/api/literature/*` 专供只发现候选；`/api/codex/literature/*` 保持完整执行，两者共享 ScholarConnector（server.js 的 scholar 变量），不混用 job id。
+
+tools/scholar-flow.js 将完整方案中的 google-scholar 查询交给上游连接器并读取 candidates.json；将冻结运行配置、检索时间、来源与候选文件复制进本批输出。完整流程先按方案筛选，再获取 PDF/XML 或等待上传，搜索片段字段只存 snippet，不冒充摘要或全文证据。captcha 时保存当前 Scholar job id 和配置；人工完成后点“验证后继续执行”，仅对未变更配置读取当前结果页，其他来源不被默默替代。source 支持 europepmc/crossref/google-scholar；每源每检索式最多10条，总候选上限20，全文仍最多3篇。未明确要求 Scholar 的既有方案不自动切来源。文献挖掘模块原上游“从对话整理规则/手动填写/确认配置并检索”折叠为“只找候选文献”，不要求完整方案审核；完整获取依然需要已审核方案。
+
+归档文件不可覆盖；同一已完成查询续跑时核对文件一致性并复用，不重新写只读配置。候选规则整理沿用模块所选 Codex 模型，不强制切到其他模型。tools/test-scholar-flow.js 用模拟检索与材料验证真实连接器 → 验证等待/续跑 → 全文 → 引文校验 → 归档复用；不依赖在线 Scholar 或模型额度。

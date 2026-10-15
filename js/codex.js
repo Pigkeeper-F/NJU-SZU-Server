@@ -26,7 +26,8 @@
   document.getElementById('module-space').before(panel);
   function persist() { try { localStorage.setItem(key, JSON.stringify(saved)); } catch (_) {} }
   function task(id) {
-    if (!tasks[id]) tasks[id] = { files: [], busy: false, backend: saved[id]?.backend || preferences.backend || 'codex', model: saved[id]?.model ?? preferences.model ?? '', execute: false, executeOnce: false, error: '', job: null, filesOpen: false, logOpen: false };
+    if (!tasks[id]) tasks[id] = { files: [], busy: false, backend: saved[id]?.backend || preferences.backend || 'codex', model: saved[id]?.model ?? preferences.model ?? '', execute: false, executeOnce: false, error: '', job: null, filesOpen: false, logOpen: false,
+      literatureConfig: saved[id]?.literatureConfig || null, literatureJob: null, literatureBusy: false, literatureError: '' };
     return tasks[id];
   }
   function node(tag, text, cls) { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (cls) el.className = cls; return el; }
@@ -169,6 +170,184 @@
       throw error;
     } finally { t.busy = false; render(); ModuleSpace.render(); }
     delete saved[id].jobId; persist();
+  }
+  async function watchLiterature(id, jobId) {
+    const t = task(id);
+    t.literatureBusy = true;
+    try {
+      while (true) {
+        const job = await request('/api/literature/job?id=' + encodeURIComponent(jobId));
+        t.literatureJob = job;
+        render();
+        if (job.status !== 'running') {
+          if (saved[id]?.literatureDelivered !== job.id) {
+            const text = job.status === 'completed'
+              ? '首批候选检索已保存 ' + job.count + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。'
+              : job.status === 'needs_attention' ? 'Google Scholar 需要人工验证。请在检索浏览器完成后点击“重新检索”。'
+              : '文献检索' + (job.status === 'cancelled' ? '已停止' : '未完成') + '：' + (job.error || job.message);
+            Store.appendMessage(id, text, 'system');
+            saved[id].literatureDelivered = job.id; persist();
+          }
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1200));
+      }
+      t.literatureError = '';
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  async function startLiterature(mod) {
+    const t = task(mod.id);
+    const config = t.literatureConfig;
+    if (!config) { t.literatureError = '请先从对话整理运行配置并核对'; render(); return; }
+    if (saved[mod.id]?.literatureSource !== literatureSource(mod)) { t.literatureError = '对话或已批准文档有更新，请重新整理规则后再检索'; render(); return; }
+    if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      const resumeCurrent = t.literatureJob?.status === 'needs_attention' && literatureConfigKey(t.literatureJob.config) === literatureConfigKey(config);
+      const job = await request('/api/literature/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config, resumeCurrent }) });
+      t.literatureJob = job;
+      saved[mod.id] = { ...saved[mod.id], literatureJobId: job.id, literatureConfig: config };
+      persist();
+      await watchLiterature(mod.id, job.id);
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  function literatureSource(mod) {
+    const entries = (mod.messages || []).filter(message => message.role === 'user' || message.role === 'assistant');
+    return JSON.stringify({ messages: entries.map(message => [message.id, message.at]),
+      approvedDoc: mod.doc?.status === 'approved' ? [mod.doc.content, mod.doc.approvedAt] : null });
+  }
+  function literatureConfigKey(config) {
+    if (!config) return '';
+    return JSON.stringify(['topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language',
+      'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit'].map(key => config[key] ?? null));
+  }
+  function parseLiteratureConfig(text) {
+    const raw = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const start = raw.indexOf('{'); const end = raw.lastIndexOf('}');
+    if (start < 0 || end <= start) throw new Error('AI 未返回运行配置；请重试或手动填写');
+    const config = JSON.parse(raw.slice(start, end + 1));
+    if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('AI 返回的配置格式无效');
+    if (!Array.isArray(config.sources)) throw new Error('AI 未明确返回检索来源，请重新整理规则');
+    return {
+      topic: String(config.topic || ''), query: String(config.query || ''),
+      sources: config.sources,
+      publicationYearFrom: config.publicationYearFrom ?? null, publicationYearTo: config.publicationYearTo ?? null,
+      geography: String(config.geography || ''), language: String(config.language || ''),
+      studyTypes: Array.isArray(config.studyTypes) ? config.studyTypes : [],
+      inclusion: Array.isArray(config.inclusion) ? config.inclusion : [],
+      exclusion: Array.isArray(config.exclusion) ? config.exclusion : [],
+      targetFields: Array.isArray(config.targetFields) ? config.targetFields : [],
+      limit: config.limit ?? 10
+    };
+  }
+  async function prepareLiterature(mod) {
+    const t = task(mod.id);
+    const messages = (mod.messages || []).filter(message => message.role === 'user' || message.role === 'assistant').slice(-30)
+      .map(message => ({ role: message.role, text: message.text }));
+    if (!messages.some(message => message.role === 'user')) { t.literatureError = '当前模块还没有用户提出的检索需求；请先讨论主题与检索规则'; render(); return; }
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      const source = literatureSource(mod);
+      const sid = await session(mod.id);
+      const started = await request('/api/literature/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sid, messages, model: t.model || account?.model, approvedDoc: mod.doc?.status === 'approved' ? mod.doc.content : '' }) });
+      let job = started;
+      while (job.status === 'running') {
+        await new Promise(resolve => setTimeout(resolve, 1200));
+        job = await request('/api/codex/job?id=' + encodeURIComponent(started.id));
+      }
+      if (job.status !== 'completed') throw new Error(job.error || '整理规则失败');
+      t.literatureConfig = parseLiteratureConfig(job.text);
+      saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureSource: source };
+      persist();
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  function manualLiterature(mod) {
+    const t = task(mod.id);
+    t.literatureConfig = { topic: '', query: '', sources: ['google-scholar'], publicationYearFrom: null, publicationYearTo: null,
+      geography: '', language: '', studyTypes: [], inclusion: [], exclusion: [], targetFields: [], limit: 10 };
+    saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureSource: literatureSource(mod) };
+    persist(); render();
+  }
+  function literaturePanel(mod, t, container = panel) {
+    const box = node('div', undefined, 'literature-connector');
+    box.append(node('p', '这里只运行 Google Scholar 首批候选检索。核对配置后开始，纳排规则与目标字段随配置保存；需要全文和数据提取时，请在下方审核方案并开始完整流程。'));
+    const row = node('div', undefined, 'codex-toolbar literature-toolbar');
+    const prepare = node('button', t.literatureBusy ? '处理中…' : '从对话整理规则', 'quiet-button');
+    prepare.type = 'button'; prepare.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy(); prepare.onclick = () => prepareLiterature(mod); row.append(prepare);
+    if (!t.literatureConfig) {
+      const manual = node('button', '手动填写', 'quiet-button'); manual.type = 'button'; manual.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+      manual.onclick = () => manualLiterature(mod); row.append(manual);
+    }
+    const start = node('button', t.literatureJob?.status === 'needs_attention' ? '验证后重新检索' : '确认配置并检索', 'primary-button');
+    start.type = 'button'; start.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !t.literatureConfig;
+    start.onclick = () => startLiterature(mod); row.append(start);
+    if (t.literatureJob?.status === 'running') {
+      const stop = node('button', '停止', 'quiet-button'); stop.type = 'button';
+      stop.onclick = async () => {
+        try { t.literatureJob = await request('/api/literature/cancel?id=' + encodeURIComponent(t.literatureJob.id), { method: 'POST' }); }
+        catch (error) { t.literatureError = error.message; }
+        render();
+      };
+      row.append(stop);
+    }
+    box.append(row);
+    if (t.literatureConfig) {
+      const config = t.literatureConfig;
+      const details = node('details', undefined, 'literature-config'); details.open = true;
+      details.append(node('summary', '核对本次运行配置' + (saved[mod.id]?.literatureSource !== literatureSource(mod) ? ' · 对话已更新' : '')));
+      const fields = node('div', undefined, 'literature-config-fields');
+      function input(label, key, type = 'text') {
+        const wrap = node('label', label); const field = node('input'); field.type = type;
+        if (type === 'number') { field.min = key === 'limit' ? '1' : '1800'; field.max = key === 'limit' ? '10' : String(new Date().getFullYear() + 1); }
+        field.value = config[key] ?? ''; field.oninput = () => { config[key] = type === 'number' ? (field.value ? Number(field.value) : null) : field.value; persistConfig(); };
+        wrap.append(field); fields.append(wrap);
+      }
+      function lines(label, key) {
+        const wrap = node('label', label); const field = node('textarea'); field.rows = 2; field.value = (config[key] || []).join('\n');
+        field.oninput = () => { config[key] = field.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean); persistConfig(); };
+        wrap.append(field); fields.append(wrap);
+      }
+      function persistConfig() { saved[mod.id] = { ...saved[mod.id], literatureConfig: config }; persist(); }
+      input('研究主题', 'topic'); input('Google Scholar 检索式', 'query');
+      const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（目前仅 Scholar 可执行）'));
+      [['google-scholar', 'Google Scholar'], ['cnki', '知网'], ['wanfang', '万方'], ['web-of-science', 'Web of Science'], ['scopus', 'Scopus'], ['pubmed', 'PubMed']].forEach(([value, label]) => {
+        const wrap = node('label', label); const check = node('input'); check.type = 'checkbox'; check.checked = config.sources.includes(value);
+        check.onchange = () => { config.sources = check.checked ? [...config.sources, value] : config.sources.filter(source => source !== value); persistConfig(); };
+        wrap.prepend(check); sources.append(wrap);
+      });
+      fields.append(sources);
+      input('发表年份起', 'publicationYearFrom', 'number'); input('发表年份止', 'publicationYearTo', 'number');
+      input('地域（需写入检索式才用于检索）', 'geography'); input('语言（供后续筛选）', 'language'); input('首批条数', 'limit', 'number');
+      lines('研究类型（每行一项）', 'studyTypes'); lines('纳入规则（每行一项）', 'inclusion');
+      lines('排除规则（每行一项）', 'exclusion'); lines('目标参数字段（每行一项）', 'targetFields');
+      details.append(fields); box.append(details);
+      if (config.sources.some(source => source !== 'google-scholar')) box.append(node('p', '配置含未接通来源：启动时会报错；如本次只做 Scholar 首批检索，请明确取消其他来源。', 'codex-error'));
+    } else box.append(node('p', '先在本模块对话确认规则，再点“从对话整理规则”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
+    if (!t.literatureJob) box.append(node('p', '首次运行将自动创建 .venv 并安装最小依赖及 Chromium；若 Scholar 出现验证码，请在新开的浏览器中手动完成。', 'codex-status'));
+    if (t.literatureJob) {
+      const job = t.literatureJob;
+      box.append(node('p', '状态：' + (job.message || job.stage || job.status) + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
+      if (Array.isArray(job.files) && job.files.length) {
+        const links = node('div', undefined, 'literature-downloads');
+        job.files.forEach(name => {
+          const link = node('a', name === 'candidates.csv' ? '下载候选 CSV' : name === 'run_config.json' ? '下载运行配置' : '下载候选 JSON');
+          link.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name);
+          links.append(link);
+        });
+        box.append(links);
+      }
+      if (Array.isArray(job.events) && job.events.length > 1) {
+        const details = node('details'); details.append(node('summary', '查看阶段记录'));
+        details.append(node('pre', job.events.map(event => event.message).join('\n')));
+        box.append(details);
+      }
+    }
+    if (t.literatureError) box.append(node('p', t.literatureError, 'codex-error'));
+    container.append(box);
   }
   async function reply(module, messages) {
     const t = task(module.id);
@@ -358,6 +537,14 @@
       }
     }
     panel.append(row);
+    if (mod.type === 'literature-mining') {
+      const discovery = node('details'); discovery.append(node('summary', '只找候选文献：Google Scholar'));
+      discovery.open = !!t.discoveryOpen;
+      discovery.ontoggle = () => { if (discovery.isConnected) t.discoveryOpen = discovery.open; };
+      literaturePanel(mod, t, discovery); panel.append(discovery);
+      if (t.error) panel.append(node('p', t.error, 'codex-error'));
+      return;
+    }
     if (t.backend === 'api' && mod.type !== 'download-data') { panel.append(node('p', 'API 模式提供文字指导；数据清洗的上传与执行需切换本机 Codex。')); return; }
     if (mod.type !== 'download-data' && account?.error) panel.append(node('p', account.error + '；请打开左下角设置检查连接。', 'codex-error'));
     else if (mod.type !== 'download-data' && account && !account.loggedIn) panel.append(node('p', '请打开左下角设置，登录本机 Codex。', 'codex-error'));
@@ -436,7 +623,7 @@
   root.CodexUI = { render, reply, openDownload, prepareConfirmedExecution, cancelPreparedExecution, session, refresh,
     getConnection: mod => ({ backend: task(mod.id).backend, model: task(mod.id).model || (task(mod.id).backend === 'codex' ? account?.model : null) || null }),
     setInputBatch: (id, batch) => { saved[id] = { ...saved[id], inputBatch: batch }; persist(); },
-    useCodex: mod => !!mod && task(mod.id).backend === 'codex', getModel: mod => mod ? task(mod.id).model || null : null, busy: id => task(id).busy };
+    useCodex: mod => !!mod && task(mod.id).backend === 'codex', getModel: mod => mod ? task(mod.id).model || null : null, busy: id => task(id).busy || task(id).literatureBusy };
   function closeFiles() {
     const files = panel.querySelector('.codex-attachments[open]');
     if (!files) return;
@@ -460,5 +647,6 @@
   Object.keys(saved).forEach(id => {
     if (saved[id].sessionId) refresh(id);
     if (saved[id].jobId) watch(id, saved[id].jobId).catch(() => {});
+    if (saved[id].literatureJobId) watchLiterature(id, saved[id].literatureJobId).catch(() => {});
   });
 })(window);

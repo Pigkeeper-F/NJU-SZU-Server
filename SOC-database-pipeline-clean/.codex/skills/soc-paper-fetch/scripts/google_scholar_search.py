@@ -27,9 +27,22 @@ from common import (
 SCHOLAR_BASE_URL = "https://scholar.google.com/scholar"
 
 
-def build_search_url(query: str) -> str:
-    params = urllib.parse.urlencode({"q": query, "hl": "en"})
+def build_search_url(query: str, year_from: int | None = None, year_to: int | None = None) -> str:
+    values: dict[str, str | int] = {"q": query, "hl": "en"}
+    if year_from is not None:
+        values["as_ylo"] = year_from
+    if year_to is not None:
+        values["as_yhi"] = year_to
+    params = urllib.parse.urlencode(values)
     return f"{SCHOLAR_BASE_URL}?{params}"
+
+
+def pick_search_page(context, scrape_current: bool):
+    if scrape_current:
+        for page in reversed(context.pages):
+            if page.url.startswith("https://scholar.google.com/"):
+                return page
+    return get_or_create_page(context)
 
 
 def _body_snippet(page, max_len: int = 800) -> str:
@@ -79,17 +92,17 @@ def _scrape_results(page, limit: int) -> list[dict[str, Any]]:
         return []
 
 
-def run(query: str | None, scrape_current: bool, limit: int) -> dict[str, Any]:
+def run(query: str | None, scrape_current: bool, limit: int, year_from: int | None = None, year_to: int | None = None) -> dict[str, Any]:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         _, context = connect_browser(p)
-        page = get_or_create_page(context)
+        page = pick_search_page(context, scrape_current)
         apply_stealth(page)
 
         if not scrape_current:
             assert query is not None
-            page.goto(build_search_url(query), wait_until="domcontentloaded", timeout=60_000)
+            page.goto(build_search_url(query, year_from, year_to), wait_until="domcontentloaded", timeout=60_000)
             human_pause(2.0, 4.0)
             try:
                 page.wait_for_selector(".gs_r, #gs_res_ccl_mid", timeout=15_000)
@@ -130,12 +143,14 @@ def main() -> None:
         help="Skip navigation and scrape the current Scholar result page.",
     )
     parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--year-from", type=int)
+    parser.add_argument("--year-to", type=int)
     args = parser.parse_args()
 
     if not args.query and not args.scrape_current:
         parser.error("must provide --query or --scrape-current")
 
-    print_json(run(args.query, args.scrape_current, args.limit))
+    print_json(run(args.query, args.scrape_current, args.limit, args.year_from, args.year_to))
 
 
 if __name__ == "__main__":

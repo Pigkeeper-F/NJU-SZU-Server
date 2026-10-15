@@ -10,6 +10,8 @@ js/*.local.js
 node_modules/
 .venv/
 .workbench/
+__pycache__/
+SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/state/
 
 # ---- 编辑器 / 系统杂项 ----
 .idea/

@@ -66,7 +66,7 @@
   }
   async function resume(mod) {
     const t = state(mod.id);
-    if (!t.answer.trim() && !Object.values(t.choices).some(Boolean) && !Object.values(t.skip).some(Boolean)) { t.error = '请填写答复，或关联材料/明确跳过文献。'; render(); return; }
+    if (!t.run?.scholarVerification && !t.answer.trim() && !Object.values(t.choices).some(Boolean) && !Object.values(t.skip).some(Boolean)) { t.error = '请填写答复，或关联材料/明确跳过文献。'; render(); return; }
     t.loading = true; t.error = ''; render();
     try {
       const paperDecisions = t.run.selected.filter(p => t.choices[p.id] || t.skip[p.id]).map(p => ({ paperId: p.id, inputName: t.choices[p.id] || null, skip: !!t.skip[p.id] }));
@@ -124,7 +124,7 @@
     panel.replaceChildren();
     const head = node('div', undefined, 'literature-actions');
     head.append(node('h3', '按方案获取文献数据'), node('span', handedOff ? '已人工确认并交接' : run ? statusNames[run.status] : '审核方案后可执行', 'codex-status')); panel.append(head);
-    panel.append(node('p', '首批最多检索 20 条候选、处理 3 篇文献。自动检索 Europe PMC / Crossref，获取开放全文或读取你上传的材料；提取数据并保留出处。有问题暂停，答复后继续。', 'codex-status'));
+    panel.append(node('p', '首批最多检索 20 条候选、处理 3 篇文献。按方案检索 Europe PMC / Crossref / Google Scholar，获取开放全文或读取你上传的材料；提取数据并保留出处。Scholar 如需验证，会暂停等待你操作。', 'codex-status'));
     const actions = node('div', undefined, 'literature-actions');
     actions.append(button(run ? '按当前审核方案开始新一批' : '按审核方案开始执行', () => start(mod), t.loading || run?.status === 'running' || mod.doc?.status !== 'approved', true));
     if (!run && mod.doc?.status !== 'approved') actions.append(node('span', '先在下方方案卡片审核通过，再开始。', 'codex-status'));
@@ -153,7 +153,7 @@
             const skipLabel = node('label', '本轮跳过此篇（保留缺失记录）'); const skip = node('input'); skip.type = 'checkbox'; skip.checked = !!t.skip[paper.id]; skip.onchange = () => { t.skip[paper.id] = skip.checked; }; skipLabel.prepend(skip); label.append(skipLabel); box.append(label);
           });
         }
-        box.append(button('提交答复并继续执行', () => resume(mod), t.loading || mod.doc?.status !== 'approved', true)); panel.append(box);
+        box.append(button(run.scholarVerification ? '验证后继续执行' : '提交答复并继续执行', () => resume(mod), t.loading || mod.doc?.status !== 'approved', true)); panel.append(box);
       }
       if (run.status === 'completed') panel.append(button(saved[mod.id]?.handoffId === run.id ? '查看已交接的清洗模块' : '核查通过，将提取表交给清洗', () => handoff(mod), t.loading || !run.rowCount, true));
       if (run.artifacts.length) {

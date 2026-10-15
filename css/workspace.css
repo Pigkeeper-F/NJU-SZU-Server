@@ -835,3 +835,22 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 .codex-connection select { max-width:260px; padding:7px; border:1px solid #d5dce6; border-radius:6px; background:white; }
 .codex-connection button { padding:8px 12px; }
 .codex-connection a { color:#263e60; text-decoration:underline; }
+
+/* 文献首批检索：真实阶段与可下载候选，不显示无法计算的百分比。 */
+.literature-connector{margin-top:8px;padding:9px 12px;border:1px solid var(--border);border-radius:9px;background:#f8faf8}
+.literature-connector p{margin:0 0 7px}
+.literature-toolbar input{flex:1 1 300px;min-width:180px;max-width:none;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:#fff}
+.literature-toolbar .primary-button{padding:7px 11px;font-size:12px}
+.literature-config{margin:8px 0;border-top:1px solid var(--border)}
+.literature-config-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px}
+.literature-config-fields>label{display:grid;gap:4px;font-size:11px;color:#64755c}
+.literature-config-fields input,.literature-config-fields textarea{box-sizing:border-box;width:100%;min-width:0;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:#fff;color:#40503b;font:inherit}
+.literature-config-fields textarea{resize:vertical}
+.literature-config-fields>label:nth-child(2),.literature-config-fields>label:nth-last-child(-n+4),.literature-sources{grid-column:1/-1}
+.literature-sources{display:flex;flex-wrap:wrap;align-items:center;gap:5px 14px;color:#64755c}
+.literature-sources>span{width:100%}
+.literature-sources label{display:inline-flex;align-items:center;gap:3px}
+.literature-sources input{width:auto}
+@media(max-width:680px){.literature-config-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.literature-downloads{display:flex;gap:12px;margin:7px 0}
+.literature-downloads a{color:var(--accent);text-decoration:underline;font-size:12px}
