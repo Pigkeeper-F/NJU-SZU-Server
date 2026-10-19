@@ -80,6 +80,21 @@ async function main() {
     assert.equal(response.status, 400, 'completed job without resumeStage must not advance');
     assert.equal((await response.json()).error, '该任务已完成全部阶段');
 
+    // 登录浏览器入口沿用写请求防护，且不接受任意 URL 或非等待任务。
+    response = await post('/api/literature/browser', { id: FAKE_ID });
+    assert.equal(response.status, 403);
+    response = await post('/api/literature/browser', { id: FAKE_ID }, { 'X-Workbench': '1', Origin: 'https://untrusted.test' });
+    assert.equal(response.status, 403);
+    response = await post('/api/literature/browser', { id: 'bad' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /无效检索任务标识/);
+    response = await post('/api/literature/browser', { id: FAKE_ID, url: 'file:///private' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /只需提供/);
+    response = await post('/api/literature/browser', { id: FAKE_ID }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /没有等待/);
+
     // ---- 新增：jobs 列表 ----
     response = await fetch(BASE + '/api/literature/jobs?limit=50');
     assert.equal(response.status, 200);

@@ -43,6 +43,18 @@ function batchConfig(raw, limit) {
   return { size, maxBatches };
 }
 
+function sourceQueries(raw) {
+  const value = object(raw, '分来源检索式');
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!isKnown(key)) throw new Error(`分来源检索式包含未知来源：${key}`);
+    const query = string(entry, `${key} 检索式`, 2000);
+    if (!query) throw new Error(`${key} 检索式不能为空`);
+    result[key] = query;
+  }
+  return result;
+}
+
 function fieldDefinitions(raw) {
   if (raw == null) return [];
   if (!Array.isArray(raw) || raw.length > 50) throw new Error('字段定义必须是列表且不超过 50 项');
@@ -116,7 +128,7 @@ function normalizeConfig(raw, options = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('运行配置必须是对象');
   const topic = string(raw.topic, '研究主题');
   const query = string(raw.query, '检索式');
-  if (!topic || !query) throw new Error('请填写研究主题和 Google Scholar 检索式');
+  if (!topic || !query) throw new Error('请填写研究主题和默认检索式');
   const sources = list(raw.sources, '检索来源', 10).map(value => value.toLowerCase());
   if (!sources.length || sources.some(value => !isKnown(value)) || new Set(sources).size !== sources.length) throw new Error('检索来源为空、重复或不受识别');
   if (options.executable) assertExecutable(sources);
@@ -136,6 +148,7 @@ function normalizeConfig(raw, options = {}) {
     exclusion: list(raw.exclusion, '排除规则'),
     targetFields: list(raw.targetFields, '目标字段'),
     limit,
+    sourceQueries: sourceQueries(raw.sourceQueries),
     batch: batchConfig(raw.batch, limit),
     fieldDefinitions: fieldDefinitions(raw.fieldDefinitions),
     templates: { literature: templatePath(templates.literature, '文献模板'), parameters: templatePath(templates.parameters, '参数模板') },

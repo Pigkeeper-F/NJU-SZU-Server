@@ -54,8 +54,7 @@ assert.ok(codex.includes('function attachLiteratureJob'), '点击历史任务应
 assert.ok(codex.includes('literatureJobId'), '选中的任务应写入 localStorage 以便刷新后重挂');
 
 // 5) until 续跑窗口 + 继续/重试入口
-assert.ok(codex.includes('body.until = t.literatureUntil'), 'search/advance 应带 until');
-assert.ok(codex.includes("t.literatureUntil && t.literatureUntil !== 'discover'"), 'until 缺省应保持 discover 语义');
+assert.ok(codex.includes("until: t.literatureUntil || 'discover'") && codex.includes('const body = { id: job.id, until }'), 'search/advance 应显式带 until，包括 discover');
 assert.ok(codex.includes('仅首批检索') && codex.includes('完整流水线'), '应有运行边界选择项');
 assert.ok(codex.includes('继续下一阶段'), 'completed 且 resumeStage 非空应可继续');
 assert.ok(codex.includes('重试当前阶段') && codex.includes('继续中断的任务'), 'failed（含 interrupted）应可重试/继续');
@@ -83,14 +82,102 @@ assert.ok(css.includes('.literature-stage.is-running') && css.includes('.literat
 assert.ok(css.includes('文献挖掘 · 第二阶段'), '样式应以独立分区追加');
 
 // 8) 第一阶段关键文案/行为零回归
-for (const text of ['从对话整理规则', '确认配置并检索', '手动填写', '验证后重新检索', '当前仅 Google Scholar 已接通',
-  '检索来源（目前仅 Scholar 可执行）', '请先从对话整理运行配置并核对', '对话或已批准文档有更新，请重新整理规则后再检索',
+for (const text of ['从对话整理规则', '确认配置并检索', '手动填写', '打开登录/检索页面', '检查并继续',
+  '检索来源（已接通 Scholar、知网、WOS）', '请先从对话整理运行配置并核对', '对话或已批准文档有更新，请重新整理规则后再检索',
   '首批候选检索已保存 ', '这不是已纳入文献，也未提取全文。可在文献检索区下载清单。']) {
   assert.ok(codex.includes(text), '第一阶段文案不得回归: ' + text);
 }
-assert.ok(codex.includes('Google Scholar 需要人工验证。请在检索浏览器完成后点击“重新检索”。'), '验证码人工关口文案保持原句');
+assert.ok(codex.includes('job.attention?.source') && codex.includes('job.message || job.error'), '人工关口应使用实际来源与原因');
 assert.ok(codex.includes("'/api/literature/prepare'") && codex.includes("'/api/literature/search'") && codex.includes("'/api/literature/cancel")
   && codex.includes("'/api/literature/download"), '既有路由与取消行为保持');
 assert.ok(codex.includes('t.busy || !t.literatureConfig'), '未配置时启动按钮保持禁用');
 
-console.log('LITERATURE_UI_STAGE2_TESTS_PASS');
+// 9) 多来源前端行为：直接执行受检函数，模拟服务端；不启浏览器、不调用真实账户。
+function functionSource(name) {
+  const start = codex.indexOf('  async function ' + name + '(') >= 0 ? codex.indexOf('  async function ' + name + '(') : codex.indexOf('  function ' + name + '(');
+  assert.ok(start >= 0, '找不到受检函数 ' + name);
+  const end = codex.indexOf('\n  }', start);
+  return codex.slice(start, end + 4);
+}
+class Element {
+  constructor(tag, text, className) { this.tag = tag; this.textContent = text || ''; this.className = className || ''; this.children = []; }
+  append(...items) { this.children.push(...items); }
+  prepend(...items) { this.children.unshift(...items); }
+  setAttribute(key, value) { this[key] = value; }
+}
+function elements(parent) { return [parent, ...parent.children.flatMap(elements)]; }
+const calls = [];
+let responseJob = { id: 'existing-job' };
+const current = { literatureBusy: false, busy: false };
+const container = new Element('section');
+const context = vm.createContext({
+  task: () => current, root: { LiteratureUI: { isBusy: () => false } }, saved: {}, panel: container, account: { model: 'fixture-model' },
+  node: (tag, text, className) => new Element(tag, text, className), render() {}, persist() {},
+  request: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return responseJob; },
+  watchLiterature: async (id, jobId) => calls.push({ watch: jobId }), applyLiteratureJob() {},
+  literatureSource: () => 'current-source', literatureStageLabel: stage => stage,
+  literatureHistory: () => new Element('details'), literatureStageBar: () => null, literatureDeliverables: () => null,
+  prepareLiterature() {}, manualLiterature() {}, startLiterature() {}, literatureConfirmForm: () => new Element('form'),
+  CustomEvent: class {}, document: { dispatchEvent() {} }
+});
+const configCode = codex.slice(codex.indexOf('  const LITERATURE_CONFIG_KEYS'), codex.indexOf('  async function prepareLiterature'));
+const labelsCode = codex.slice(codex.indexOf('  const LITERATURE_STAGE_ORDER'), codex.indexOf('  function literatureFileLabel'));
+vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literaturePanel'].map(functionSource).join('\n')
+  + '\nglobalThis.subject = { parseLiteratureConfig, sameLiteratureConfig, startLiterature, continueLiterature, openLiteratureBrowser, literatureAttentionMessage, literaturePanel };', context);
+const subject = context.subject;
+
+async function multiSourceTests() {
+  const config = subject.parseLiteratureConfig(JSON.stringify({ topic: '温度与肉鸡', query: 'broiler heat stress',
+    sources: ['google-scholar', 'cnki', 'web-of-science'], sourceQueries: { cnki: '肉鸡 热应激', 'web-of-science': 'broiler AND heat' } }));
+  assert.equal(config.sourceQueries.cnki, '肉鸡 热应激', 'AI整理结果不能丢来源检索式');
+  assert.equal(subject.sameLiteratureConfig(config, { ...config, sourceQueries: { 'web-of-science': 'broiler AND heat', cnki: '肉鸡 热应激' } }), true, '映射顺序不改变冻结配置');
+  assert.equal(subject.sameLiteratureConfig(config, { ...config, sourceQueries: { cnki: '肉鸡 高温' } }), false, '来源检索式变化须新建任务');
+  assert.equal(subject.sameLiteratureConfig({ ...config, sourceQueries: undefined }, { ...config, sourceQueries: {} }), true, '旧任务缺省来源映射兼容');
+  assert.throws(() => subject.parseLiteratureConfig(JSON.stringify({ ...config, sourceQueries: { cnki: [] } })), /格式无效/);
+  context.saved['module-1'] = { literatureSource: 'current-source' };
+  current.literatureConfig = config; current.literatureUntil = 'discover';
+  responseJob = { id: 'existing-job', config: { ...config, extraction: { model: 'fixture-model', maxCharsPerPaper: 120000 } } };
+  await subject.startLiterature({ id: 'module-1' });
+  assert.equal(current.literatureConfig.extraction.maxCharsPerPaper, 120000, '新任务应保存服务端规范化后的冻结配置，避免默认字段误报配置已改');
+  assert.notEqual(current.literatureConfig, responseJob.config, '编辑草稿不得改变已冻结任务对象');
+  assert.equal(calls[0].body.until, 'discover', '首次只检索也显式发送运行边界');
+  calls.length = 0; responseJob = { id: 'existing-job' };
+  current.literatureConfig = config;
+  current.literatureUntil = 'discover';
+  current.literatureJob = { id: 'existing-job', config, status: 'needs_attention', stage: 'login', resumeStage: 'discover', until: 'discover',
+    attention: { source: 'cnki', reason: 'login' }, message: '请完成知网机构登录' };
+  await subject.continueLiterature({ id: 'module-1' });
+  assert.deepEqual(calls[0], { url: '/api/literature/advance', body: { id: 'existing-job', until: 'discover' } }, '登录恢复必须同一job，且仅首批不隐式export');
+  assert.ok(!calls.some(call => call.url === '/api/literature/search'), '恢复不得另建检索');
+  assert.ok(subject.literatureAttentionMessage(current.literatureJob).includes('中国知网：请完成知网机构登录'), '提示须呈现真实来源与消息');
+  calls.length = 0;
+  await subject.openLiteratureBrowser({ id: 'module-1' });
+  assert.deepEqual(calls[0], { url: '/api/literature/browser', body: { id: 'existing-job' } }, '打开页面只传任务id，不能传URL或凭据');
+  calls.length = 0;
+  current.literatureConfig = { ...config, sourceQueries: { cnki: '新的检索式' } };
+  await subject.continueLiterature({ id: 'module-1' });
+  assert.equal(calls.length, 0); assert.match(current.literatureError, /不能混入旧任务/);
+  current.literatureConfig = config;
+  current.literatureJob = { ...current.literatureJob, status: 'completed', resumeStage: 'dedupe' };
+  await subject.continueLiterature({ id: 'module-1' });
+  assert.equal(calls.length, 0, '完成检索后仍选择discover应先提示调整阶段'); assert.match(current.literatureError, /选择/);
+  current.literatureUntil = 'fulltext';
+  await subject.continueLiterature({ id: 'module-1' });
+  assert.equal(calls[0].body.until, 'fulltext', '继续按用户新选边界推进');
+
+  container.children.length = 0;
+  current.literatureJob = { ...current.literatureJob, status: 'needs_attention', stage: 'access_required', resumeStage: 'discover',
+    attention: { source: 'web-of-science', reason: 'access_required' }, message: '机构访问权限不足' };
+  subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  const nodes = elements(container);
+  assert.ok(nodes.some(item => item.tag === 'button' && item.textContent === '打开登录/检索页面'));
+  assert.ok(nodes.some(item => item.tag === 'button' && item.textContent === '检查并继续'));
+  assert.ok(nodes.some(item => item.textContent.includes('Web of Science 核心合集：机构访问权限不足')));
+  const cnkiField = nodes.find(item => item.tag === 'label' && item.textContent === '中国知网 检索式（留空沿用默认）').children[0];
+  cnkiField.value = '肉鸡 高温 日增重'; cnkiField.oninput();
+  assert.equal(current.literatureConfig.sourceQueries.cnki, '肉鸡 高温 日增重');
+  cnkiField.value = ''; cnkiField.oninput();
+  assert.equal(current.literatureConfig.sourceQueries.cnki, undefined, '空来源检索式回到默认query');
+  console.log('LITERATURE_UI_STAGE2_TESTS_PASS');
+}
+multiSourceTests().catch(error => { console.error(error); process.exitCode = 1; });

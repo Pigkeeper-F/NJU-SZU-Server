@@ -1207,3 +1207,23 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 文献挖掘主页面仅提供六阶段任务入口。原 LiteratureFlow 在文献模块仅展示已有批次的折叠记录及续跑、补传、交接，不再提供开始新一批的按钮；下载模块继续使用原方案入口。已审核文献方案卡片指向上方统一执行区域，不调用第二套开始接口。
 
 原页内工作流说明移到按需打开的原生 dialog，使用按钮触发 DOM 自定义事件 `literature-help-open`，由 workspace.js 管理弹窗和关闭；不新增全局对象或存储键。新增样式 `.literature-overview`、`.literature-help-dialog`、`.literature-help-head`、`.literature-legacy-history`；旧主页面不再插入 `.literature-workflow` 大块说明。任务卡标题为“文献任务”，配置折叠区显示“本次检索设置（点击查看或修改）”，运行范围标签显示“本次做到哪一步”。模型、科学规则、任务记录与 API 路由保持现有契约。
+
+## 2026-10-19 多来源检索与人工登录
+
+六阶段 discover 接入 Google Scholar、知网（cnki）、Web of Science 核心合集（web-of-science）；万方、Scopus、PubMed 仍 registered，执行时明确拒绝。运行配置新增可选 `sourceQueries`：已登记来源 key 到非空检索式字符串的映射，单项最多 2000 字；未设置的来源沿用 `query`。旧任务、Scholar 查询和前 13 个配置字段保持兼容。每来源每批最多 10 条，不将三来源合计数量误称为单来源上限。
+
+`tools/literature_browser.py` 提供可注入/可测试的浏览器适配：复用本机持久检索浏览器，为各任务各来源绑定独立标签页；根据实际 DOM 执行检索并读取真实结果。遇到登录、验证码、缺少机构权限或不能识别结果页时返回 attention，不把阻拦页当零命中。用户只在数据库官方网页中输入凭据；平台不接收或导出密码、Cookie、SSO URL/令牌。浏览器会话状态仍仅在本机忽略目录。网页访问权限不等于全文权限；fulltext 阶段仍逐项登记实际获取结果。
+
+`literature_search.py` 按选择来源顺序执行，`discovery-state.json` 保存配置指纹、批次、各来源完成记录和当前等待来源（内部检查点，不是可下载成果）。已完成来源的候选立即保存；某来源等待登录时不会丢掉先前候选。相同任务 advance 从待处理来源继续，不重新检索已完成来源；来源/检索式变更则启动新任务。候选保留 source_key；编号分别 GSC-/CNKI-/WOS-，跨批保持 B<n> 前缀；跨来源重复留到 dedupe 归并并保留来源。applied_filters/deferred_rules 按真实执行登记，发表年份不冒充实验年份。
+
+discover 的 attention 事件增加 `source` 和 `reason`（login/verification/access_required/results_unrecognized），可附已生成 files；节点向网页公开 `attention:{source,reason}`，从磁盘恢复该状态。页面据此显示当前来源、问题和“打开登录/检索页面”“检查并继续”按钮。continue 使用原 job id 和运行边界，通过 advance 续跑，不创建新批次。验证码由用户完成；页面仍可停止或查看先前成果。
+
+新增同源 `POST /api/literature/browser {id}`：只接受已存在且 discover 阶段等待人工处理的任务，按其冻结来源打开/前置该任务绑定的官方标签页，不接受任意 URL、命令、文件路径或凭据；沿用 X-Workbench、Host、Origin 防护。返回 `{opened:true,source,label}`，不返回浏览器调试地址或登录信息。运行中的任务拒绝此操作，以免改变检索页面。新内部 CLI `literature_browser.py --open-source <key> --output-dir <job目录>` 从任务配置/检查点决定固定来源页面。
+
+检索规则整理同时保留用户已确认的 sourceQueries；建议不能替代用户确认。UI 在来源选择后提供独立检索词，未填写时说明沿用默认检索式。sourceQueries 参与冻结配置一致性检查。六阶段入口说明与工作流提示同步列出三来源及人工登录续跑；不宣称已完成未经实际验证的账户检索。
+
+人工登录恢复的 advance 即使未传 until，也沿用 job.until；普通继续保持原缺省 export 行为。目标阶段不得早于 resumeStage。等待人工处理的任务可取消，已有材料保留。部分 discover 产物明确 discovery_complete=false，服务重启不能据此跳过尚未检索的来源。WOS 每次提交前确认主题（Topic）字段；无法识别字段或结果页即暂停。手动修改结果页查询后不得用子串匹配冒充冻结检索式，必要时重新提交原查询。
+
+验证：新增 tools/test-literature-login.js（等待来源、部分成果、重启恢复、原 id/边界续跑、停止与打开页面守卫）；tools/test_literature_browser.py 用 DOM mock 验证登录/验证码/机构权限/明确零命中/未知布局/稳定标签/WOS Topic/敏感信息过滤；tools/test_literature_search.py 验证三源、独立查询、部分检查点及重启续跑。既有六阶段 HTTP 提取/校验/导出端到端测试及全部阶段 Python 回归通过。CUA 核对三来源选择、检索词输入和刷新保留。实际 WOS 站点重定向后在当前网络连接重置，尚未用研究者机构账号验证授权后搜索；知网亦未代用户完成认证，实际站点布局或权限失败保持显式等待/错误，不能以 mock 测试声称真实数据库已检索成功。
+
+浏览器 API 依据既有 SOC 实现以及 Playwright 官方 BrowserContext.new_cdp_session、BrowserType.connect_over_cdp、Page.bring_to_front 文档；浏览器与 context 不主动关闭，避免登录会话丢失。

@@ -21,6 +21,6 @@ assert.ok(codexUi.includes('awaiting_confirmation') && codexUi.includes('确认�
 assert.ok(codexUi.includes('/api/literature/advance'), '多阶段推进应走 advance 接口');
 assert.ok(codexUi.includes('/api/literature/jobs'), '刷新后应能经 jobs 列表找回历史任务');
 assert.ok(codexUi.includes('dedupe') && codexUi.includes('fulltext') && codexUi.includes('validation') && codexUi.includes('export'), '阶段词汇应覆盖第二阶段六阶段');
-assert.ok(codexUi.includes('/api/literature/cancel') && codexUi.includes('resumeCurrent'), '取消与验证码恢复路径必须保持');
+assert.ok(codexUi.includes('/api/literature/cancel') && codexUi.includes('检查并继续') && codexUi.includes('/api/literature/advance'), '取消与同任务登录/验证码续跑路径必须保持');
 
 console.log('LITERATURE_GUIDANCE_TESTS_PASS');

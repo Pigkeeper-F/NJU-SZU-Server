@@ -11,6 +11,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { normalizeConfig } = require('./literature-config');
+const { executableSources } = require('./literature-sources');
 const { proxyFor } = require('./source-download');
 
 function childEnv() {
@@ -83,6 +84,13 @@ function loadJsonFile(file) {
   } catch (_) {
     return null;
   }
+}
+
+function sourceAttention(value) {
+  if (!value || typeof value !== 'object') return null;
+  if (!executableSources().some(source => source.key === value.source)) return null;
+  if (!['login', 'verification', 'access_required', 'results_unrecognized'].includes(value.reason)) return null;
+  return { source: value.source, reason: value.reason };
 }
 
 function runCommand(command, args, options = {}) {
@@ -228,7 +236,7 @@ function extractionCoverage(jobDir) {
 function detectStagedArtifacts(jobDir) {
   const stages = {};
   const candidates = loadJsonFile(path.join(jobDir, 'candidates.json'));
-  stages.discover = candidates && Array.isArray(candidates.batches) && candidates.batches.length ? 'done' : 'pending';
+  stages.discover = candidates && candidates.discovery_complete !== false && Array.isArray(candidates.batches) && candidates.batches.length ? 'done' : 'pending';
 
   const dedupe = loadJsonFile(path.join(jobDir, 'dedupe', 'dedupe.json'));
   stages.dedupe = dedupe && Number.isInteger(dedupe.version) && dedupe.version >= 1 && Array.isArray(dedupe.groups) ? 'done' : 'pending';
@@ -343,12 +351,20 @@ class LiteratureConnector {
     this.prepare = options.prepare || ((job, progress) => preparePython(root, job, progress));
     this.search = options.search || null;
     this.extract = options.extract || null;
+    this.openSource = options.openSource || (async (job, python, source) => {
+      const raw = await runCommand(python, ['-u', path.join(this.root, 'tools', 'literature_browser.py'), '--open-source', source, '--output-dir', job.dir], { cwd: this.root, timeout: 45000 });
+      let result;
+      try { result = JSON.parse(raw); } catch (_) { throw new Error('检索浏览器未返回有效状态，请重试'); }
+      if (!result || result.opened !== true || result.source !== source) throw new Error('无法打开对应检索页面，请检查本机浏览器环境');
+      return result;
+    });
   }
 
   public(job) {
     return { id: job.id, status: job.status, stage: job.stage, message: job.message,
       count: job.count, config: job.config, files: job.files, events: job.events, error: job.error,
-      stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters };
+      stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters,
+      attention: sourceAttention(job.attention) };
   }
 
   persist(job) {
@@ -421,6 +437,9 @@ class LiteratureConnector {
     if (event.type === 'attention') {
       job.status = 'needs_attention';
       job.resumeStage = stageKey;
+      job.attention = sourceAttention(event);
+      this.registerFiles(job, event.files);
+      if (Number.isInteger(event.count)) { job.count = event.count; this.mergeCounters(job, stageKey, event); }
       const label = String(event.stage || (stageKey === 'discover' ? 'verification' : stageKey));
       this.update(job, label, String(event.message || '需要人工处理'));
       return;
@@ -428,6 +447,8 @@ class LiteratureConnector {
     if (event.type === 'error') {
       job.status = 'failed';
       job.error = String(event.message || '检索失败');
+      this.registerFiles(job, event.files);
+      if (Number.isInteger(event.count)) { job.count = event.count; this.mergeCounters(job, stageKey, event); }
       if (job.stages) job.stages[stageKey] = 'failed';
       job.resumeStage = stageKey;
       this.update(job, 'failed', job.error);
@@ -458,6 +479,7 @@ class LiteratureConnector {
     const extraArgs = [];
     if (stage === 'discover') {
       if (job.resumeCurrent) extraArgs.push('--scrape-current');
+      if (job.resumeRun) extraArgs.push('--resume');
     } else if (job.resumeRun) {
       extraArgs.push('--resume');
     }
@@ -516,14 +538,14 @@ class LiteratureConnector {
 
   start(rawConfig, resumeCurrent = false, until = null) {
     const config = normalizeConfig(rawConfig, { executable: true });
-    if ([...this.jobs.values()].some(job => job.status === 'running')) throw new Error('已有文献检索正在运行，请等待或停止后重试');
+    if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening)) throw new Error('已有文献检索正在运行，请等待或停止后重试');
     const boundary = until == null || until === '' ? 'discover' : String(until);
     if (!STAGES.includes(boundary)) throw new Error('阶段边界必须是 discover–export 的有效阶段名');
     const id = randomUUID();
     const job = { id, dir: path.join(this.base, id), config, resumeCurrent: resumeCurrent === true, status: 'running', stage: 'queued',
       message: '任务已排队', count: 0, files: ['run_config.json'], events: [], error: null, child: null,
       stages: Object.fromEntries(STAGES.map(stage => [stage, 'pending'])), resumeStage: null, until: boundary,
-      counters: {}, limits: resolveLimits(config), activeStage: null, python: null, resumeRun: false };
+      counters: {}, limits: resolveLimits(config), activeStage: null, python: null, resumeRun: false, attention: null };
     this.jobs.set(id, job);
     fs.mkdirSync(job.dir, { recursive: true });
     fs.writeFileSync(path.join(job.dir, 'run_config.json'), JSON.stringify(config, null, 2) + '\n', { flag: 'wx', mode: 0o444 });
@@ -551,7 +573,8 @@ class LiteratureConnector {
       resumeStage: typeof saved.resumeStage === 'string' && STAGES.includes(saved.resumeStage) ? saved.resumeStage : null,
       until: typeof saved.until === 'string' ? saved.until : null,
       counters: saved.counters && typeof saved.counters === 'object' ? saved.counters : {},
-      limits: resolveLimits(saved.config || diskConfig), activeStage: null, python: null, resumeRun: true
+      limits: resolveLimits(saved.config || diskConfig), activeStage: null, python: null, resumeRun: true,
+      attention: sourceAttention(saved.attention), browserOpening: false
     };
     const detected = detectStagedArtifacts(dir);
     if (saved.status === 'running') {
@@ -575,24 +598,46 @@ class LiteratureConnector {
   advance(id, options = {}) {
     const requested = options && typeof options === 'object' ? options : {};
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
-    const until = requested.until == null || requested.until === '' ? 'export' : String(requested.until);
+    let until = requested.until == null || requested.until === '' ? 'export' : String(requested.until);
     if (!STAGES.includes(until)) throw new Error('阶段边界必须是 discover–export 的有效阶段名');
-    if ([...this.jobs.values()].some(job => job.status === 'running')) throw new Error('已有文献检索正在运行，请等待或停止后重试');
+    if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening)) throw new Error('已有文献检索正在运行，请等待或停止后重试');
     const job = this.jobs.get(id) || this.loadPersisted(id);
+    if ((requested.until == null || requested.until === '') && job.status === 'needs_attention' && job.resumeStage === 'discover' && job.attention) until = job.until || 'discover';
     if (job.status === 'cancelled') throw new Error('任务已停止，不能继续；请发起新检索');
     if (job.status === 'running') throw new Error('已有文献检索正在运行，请等待或停止后重试');
     const stage = job.resumeStage || null;
     if (!stage) throw new Error('该任务已完成全部阶段');
     if (!['completed', 'needs_attention', 'failed'].includes(job.status)) throw new Error('该任务已完成全部阶段');
+    if (job.browserOpening) throw new Error('正在打开检索页面，请稍后继续');
+    if (STAGES.indexOf(until) < STAGES.indexOf(stage)) throw new Error('请选择当前待运行阶段或之后的阶段');
     if (requested.confirmations != null) this.appendConfirmations(job, requested.confirmations);
     job.resumeRun = true;
-    if (stage === 'discover' && (job.stage === 'verification' || job.stage === 'interrupted')) job.resumeCurrent = true;
+    if (stage === 'discover' && (job.attention || job.stage === 'verification' || job.stage === 'interrupted')) job.resumeCurrent = true;
+    job.attention = null;
     job.status = 'running';
     job.error = null;
     job.until = until;
     this.update(job, stage, `继续${STAGE_LABELS[stage] || stage}`);
     void this.run(job, stage, until);
     return this.public(job);
+  }
+
+  async openLogin(id) {
+    if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    const job = this.jobs.get(id) || this.loadPersisted(id);
+    if (job.status !== 'needs_attention' || job.resumeStage !== 'discover') throw new Error('当前任务没有等待登录或验证的检索来源');
+    if ([...this.jobs.values()].some(item => item.status === 'running' || item.browserOpening)) throw new Error('检索浏览器正在使用，请稍后再打开');
+    const attention = sourceAttention(job.attention);
+    const source = attention && job.config?.sources?.includes(attention.source) ? attention.source : null;
+    if (!source) throw new Error('缺少当前等待来源，请先继续任务以重新检查');
+    job.browserOpening = true;
+    try {
+      const python = job.python || await this.prepare(job, () => {});
+      if (job.status !== 'needs_attention') throw new Error('任务状态已变化，请刷新后再操作');
+      const result = await this.openSource(job, python, source);
+      if (!result || result.opened !== true || result.source !== source) throw new Error('检索页面打开失败');
+      return { opened: true, source, label: executableSources().find(item => item.key === source).label };
+    } finally { job.browserOpening = false; }
   }
 
   //: 追加确认记录（append-only，原子重写；§3.2）。
@@ -666,8 +711,9 @@ class LiteratureConnector {
   }
 
   cancel(id) {
-    const job = this.jobs.get(id);
-    if (!job || job.status !== 'running') throw new Error('检索任务未在运行');
+    if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    const job = this.jobs.get(id) || this.loadPersisted(id);
+    if (!job || !['running', 'needs_attention'].includes(job.status)) throw new Error('检索任务未在运行');
     job.status = 'cancelled';
     if (job.child) { try { job.child.kill('SIGTERM'); } catch (_) {} }
     const discover = !job.activeStage || job.activeStage === 'discover';

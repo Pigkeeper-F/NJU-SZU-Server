@@ -40,7 +40,7 @@ function executableSources() {
 function assertExecutable(sources) {
   const available = new Set(executableSources().map(item => item.key));
   const unavailable = (Array.isArray(sources) ? sources : []).filter(source => !available.has(source));
-  if (unavailable.length) throw new Error(`尚未接通以下检索来源：${unavailable.join('、')}；请明确改为仅检索 Google Scholar，或等待相应连接器。`);
+  if (unavailable.length) throw new Error(`尚未接通以下检索来源：${unavailable.join('、')}；请选择已接通来源，或等待相应连接器。`);
   return true;
 }
 

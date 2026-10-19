@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from literature_search import (  # noqa: E402
-    main, normalize_candidates, normalize_doi, parse_byline, resolve_batch_index,
+    config_fingerprint, main, normalize_candidates, normalize_doi, parse_byline, resolve_batch_index,
     run, safe_csv_cell, validate_config, write_results,
 )
 
@@ -66,13 +66,12 @@ class LiteratureSearchTest(unittest.TestCase):
 
     def test_run_forwards_confirmed_publication_years_to_scholar(self) -> None:
         received = []
-        scholar = types.SimpleNamespace(run=lambda *args: (received.append(args) or {"status": "no_results", "url": "https://scholar.google.com/scholar", "results": []}))
-        browser = types.SimpleNamespace(launch=lambda: {"status": "already_running"})
+        adapter = types.SimpleNamespace(run=lambda *args, **kwargs: (received.append((args, kwargs)) or {"status": "no_results", "url": "https://scholar.google.com/scholar", "results": []}))
         config = {"topic": "中国水产养殖", "query": "China aquaculture climate change", "sources": ["google-scholar"],
                   "publicationYearFrom": 2015, "publicationYearTo": 2023, "limit": 10}
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"browser": browser, "google_scholar_search": scholar}):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": adapter}):
             self.assertEqual(run(config, Path(temp)), 0)
-            self.assertEqual(received, [(config["query"], False, 10, 2015, 2023)])
+            self.assertEqual(received, [(("google-scholar", config["query"], False, 10, 2015, 2023), {"job_dir": Path(temp)})])
             report = read_report(Path(temp))
             self.assertEqual(report["run_config"]["publicationYearFrom"], 2015)
 
@@ -173,20 +172,162 @@ class LiteratureSearchTest(unittest.TestCase):
                 code = run(CONFIG, output, batch_index=0)
             self.assertEqual(code, 1)
 
-    def test_validate_config_rejects_unconnected_sources_with_frozen_message(self) -> None:
+    def test_validate_config_rejects_still_unconnected_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch("sys.argv", ["literature_search.py", "--config", str(Path(temp) / "c.json"), "--output-dir", str(Path(temp) / "out")]):
             config_path = Path(temp) / "c.json"
-            config_path.write_text(json.dumps({**CONFIG, "sources": ["google-scholar", "cnki"]}), encoding="utf-8")
+            config_path.write_text(json.dumps({**CONFIG, "sources": ["google-scholar", "scopus"]}), encoding="utf-8")
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 code = main()
             self.assertEqual(code, 1)
             events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
-            self.assertIn("尚未接通以下检索来源：cnki；请明确改为仅检索 Google Scholar，或等待相应连接器。", events[-1]["message"])
+            self.assertIn("尚未接通以下检索来源：scopus；请选择已接通来源，或等待相应连接器。", events[-1]["message"])
 
     def test_validate_config_keeps_stage1_generic_message(self) -> None:
         with self.assertRaisesRegex(ValueError, "运行配置缺少检索式或包含未接通来源"):
             validate_config({**CONFIG, "sources": ["arxiv"]})
+
+    def test_source_queries_are_validated_and_optional_for_old_tasks(self) -> None:
+        validate_config({**CONFIG, "sources": ["cnki", "web-of-science"], "sourceQueries": {"cnki": "肉鸡 高温"}})
+        self.assertEqual(config_fingerprint(CONFIG), config_fingerprint({**CONFIG, "sourceQueries": {}}))
+        self.assertNotEqual(config_fingerprint(CONFIG), config_fingerprint({**CONFIG, "sourceQueries": {"google-scholar": "new query"}}))
+        for queries in ([], {"arxiv": "q"}, {"cnki": " "}, {"cnki": "a" * 2001}, {"cnki": 5}):
+            with self.subTest(queries=queries), self.assertRaises(ValueError):
+                validate_config({**CONFIG, "sourceQueries": queries})
+        with self.assertRaisesRegex(ValueError, "不能晚于"):
+            validate_config({**CONFIG, "publicationYearFrom": 2024})
+
+    def test_normalization_keeps_cross_source_duplicates_and_actual_metadata(self) -> None:
+        records = normalize_candidates([
+            {"title": "Same paper", "source_key": "google-scholar", "byline": "Old - Journal, 2018"},
+            {"title": "Same paper", "source_key": "cnki", "year": "2021-03-15", "authors": ["张三", "李四"], "venue": "真实期刊", "byline": "Old - Wrong, 2017"},
+            {"title": "Same paper", "source_key": "web-of-science", "year": "JAN 2020"},
+            {"title": "Same paper", "source_key": "cnki"},
+        ], "q", "now", batch_index=2)
+        self.assertEqual([item["candidate_id"] for item in records], ["GSC-B2-001", "CNKI-B2-001", "WOS-B2-001"])
+        self.assertEqual(records[1]["year"], 2021)
+        self.assertEqual(records[1]["authors"], "张三; 李四")
+        self.assertEqual(records[1]["venue"], "真实期刊")
+        self.assertEqual(records[2]["year"], 2020)
+        self.assertIsNone(normalize_candidates([{"title": "Range", "year": "2019-2021"}], "q", "now")[0]["year"])
+
+    def test_login_checkpoint_preserves_sources_and_resumes_only_pending_tab(self) -> None:
+        config = {**CONFIG, "sources": ["google-scholar", "cnki", "web-of-science"],
+                  "sourceQueries": {"cnki": "肉鸡 高温", "web-of-science": "broiler heat stress"}}
+        calls = []
+        paused = True
+
+        def browser_run(source, query, scrape_current, limit, year_from, year_to, *, job_dir):
+            nonlocal paused
+            calls.append((source, query, scrape_current, limit, year_from, year_to))
+            if source == "google-scholar":
+                return {"status": "ok", "url": "https://scholar.google.com/scholar", "results": [{"title": "Same paper", "year": 2020}]}
+            if source == "cnki" and paused:
+                paused = False
+                return {"status": "attention", "reason": "login", "message": "请登录知网"}
+            if source == "cnki":
+                return {"status": "ok", "results": [{"title": "Same paper", "year": 2020}, {"title": "Older paper", "year": 2014}, {"title": "Unknown year"}],
+                        "applied_filters": ["query"], "deferred_rules": ["publicationYearFrom", "publicationYearTo"]}
+            return {"status": "ok", "results": [{"title": "Same paper", "year": 2022}], "applied_filters": ["query"]}
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}):
+            output, stdout = Path(temp), io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(run(config, output), 0)
+            report = read_report(output)
+            self.assertFalse(report["discovery_complete"])
+            self.assertEqual(report["batches"][0]["status"], "partial")
+            self.assertEqual([item["candidate_id"] for item in report["records"]], ["GSC-001"])
+            attention = [json.loads(line) for line in stdout.getvalue().splitlines()][-1]
+            self.assertEqual((attention["type"], attention["source"], attention["reason"]), ("attention", "cnki", "login"))
+            self.assertEqual(attention["files"], ["candidates.json", "candidates.csv"])
+            state = json.loads((output / "discovery-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["pending_source"], "cnki")
+            self.assertEqual(state["sources"]["google-scholar"]["status"], "ok")
+            # Resume reconstructs from disk rather than keeping Python object state.
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(run(config, output, resume=True), 0)
+            self.assertEqual([call[0] for call in calls], ["google-scholar", "cnki", "cnki", "web-of-science"])
+            self.assertEqual([call[2] for call in calls], [False, False, True, False])
+            self.assertEqual(calls[2][1], "肉鸡 高温")
+            self.assertEqual(calls[3][1], "broiler heat stress")
+            report = read_report(output)
+            self.assertTrue(report["discovery_complete"])
+            self.assertEqual(report["batches"][0]["status"], "complete")
+            self.assertEqual([item["candidate_id"] for item in report["records"]], ["GSC-001", "CNKI-001", "CNKI-002", "WOS-001"])
+            self.assertEqual(len(read_csv_rows(output)), 4)
+            status = report["source_status"]["cnki"]
+            self.assertEqual(status["year_filtering"], {"mode": "post_filter_known_years", "excluded": 1, "unknown_year_retained": 1})
+            self.assertNotIn("publicationYearFrom", status["applied_filters"])
+            self.assertIn("unknown_publication_year_review", status["deferred_rules"])
+            self.assertEqual(report["source_status"]["web-of-science"]["year_filtering"]["mode"], "post_filter_known_years")
+            count = len(calls)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(run(config, output, resume=True), 0)
+            self.assertEqual(len(calls), count, "已完成来源不会重复检索")
+
+    def test_checkpoint_refuses_changed_queries_and_attention_is_not_zero_hits(self) -> None:
+        adapter = types.SimpleNamespace(run=lambda *args, **kwargs: {"status": "attention", "reason": "results_unrecognized"})
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": adapter}):
+            output = Path(temp)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(run({**CONFIG, "sources": ["web-of-science"]}, output), 0)
+            report = read_report(output)
+            self.assertFalse(report["discovery_complete"])
+            self.assertEqual(report["source_status"]["web-of-science"]["status"], "attention")
+            original = (output / "discovery-state.json").read_bytes()
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(run({**CONFIG, "sources": ["web-of-science"], "sourceQueries": {"web-of-science": "changed"}}, output, resume=True), 1)
+            self.assertIn("检索配置已更改", json.loads(stdout.getvalue())["message"])
+            self.assertEqual((output / "discovery-state.json").read_bytes(), original)
+
+    def test_sources_execute_in_user_order_and_per_source_limit(self) -> None:
+        calls = []
+        def browser_run(source, query, scrape_current, limit, year_from, year_to, **kwargs):
+            calls.append(source)
+            return {"status": "ok", "results": [{"title": f"{source} {index}", "year": 2020} for index in range(15)]}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+            self.assertEqual(run({**CONFIG, "sources": ["web-of-science", "cnki", "google-scholar"]}, Path(temp)), 0)
+            report = read_report(Path(temp))
+        self.assertEqual(calls, ["web-of-science", "cnki", "google-scholar"])
+        self.assertEqual(report["count"], 30)
+        self.assertEqual([record["candidate_id"] for record in report["records"]][::10], ["WOS-001", "CNKI-001", "GSC-001"])
+
+    def test_technical_failure_keeps_previous_source_and_retries_normal_search(self) -> None:
+        calls, failed = [], False
+        def browser_run(source, query, scrape_current, limit, year_from, year_to, **kwargs):
+            nonlocal failed
+            calls.append((source, scrape_current))
+            if source == "cnki" and not failed:
+                failed = True
+                return {"status": "error", "message": "浏览器连接暂时失败"}
+            return {"status": "ok", "results": [{"title": source, "year": 2020}]}
+        config = {**CONFIG, "sources": ["google-scholar", "cnki"]}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+            output = Path(temp)
+            self.assertEqual(run(config, output), 1)
+            report = read_report(output)
+            self.assertFalse(report["discovery_complete"])
+            self.assertEqual(report["count"], 1)
+            self.assertEqual(report["source_status"]["cnki"]["status"], "error")
+            self.assertEqual(run(config, output, resume=True), 0)
+            self.assertEqual(read_report(output)["count"], 2)
+        self.assertEqual(calls, [("google-scholar", False), ("cnki", False), ("cnki", False)])
+
+    def test_new_batch_has_new_checkpoint_and_preserves_old_batch(self) -> None:
+        calls = []
+        def browser_run(source, query, scrape_current, limit, year_from, year_to, **kwargs):
+            calls.append(source)
+            return {"status": "ok", "results": [{"title": "Repeated candidate", "year": 2020}]}
+        config = {**CONFIG, "sources": ["cnki", "web-of-science"], "batch": {"size": 2, "maxBatches": 2}}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+            output = Path(temp)
+            self.assertEqual(run(config, output), 0)
+            self.assertEqual(run(config, output), 0)
+            report = read_report(output)
+            self.assertEqual([record["candidate_id"] for record in report["records"]], ["CNKI-001", "WOS-001", "CNKI-B2-001", "WOS-B2-001"])
+        self.assertEqual(calls, ["cnki", "web-of-science", "cnki", "web-of-science"])
 
 
 if __name__ == "__main__":

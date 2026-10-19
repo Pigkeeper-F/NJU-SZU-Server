@@ -12,11 +12,17 @@ const base = { topic: '气候变化与养殖', query: 'climate change aquacultur
 function main() {
   // 注册表内容与设计 §7 冻结一致
   assert.deepEqual(SOURCES.map(item => item.key), ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed']);
-  assert.deepEqual(executableSources().map(item => item.key), ['google-scholar']);
+  assert.deepEqual(executableSources().map(item => item.key), ['google-scholar', 'cnki', 'web-of-science']);
   assert.equal(SOURCES[0].adapter.kind, 'soc-script');
   assert.ok(SOURCES[0].adapter.script.endsWith('google_scholar_search.py'));
   assert.equal(stateOf('google-scholar'), 'executable');
-  assert.equal(stateOf('cnki'), 'registered');
+  assert.equal(stateOf('cnki'), 'executable');
+  assert.equal(stateOf('web-of-science'), 'executable');
+  for (const key of ['cnki', 'web-of-science']) {
+    const adapter = SOURCES.find(item => item.key === key).adapter;
+    assert.equal(adapter.kind, 'browser-script');
+    assert.equal(adapter.script, 'tools/literature_browser.py');
+  }
   assert.equal(stateOf('arxiv'), null);
   assert.ok(isKnown('pubmed'));
   assert.ok(!isKnown('arxiv'));
@@ -26,12 +32,12 @@ function main() {
   assert.equal(SOURCES[0].state, 'executable', 'listSources 必须返回副本');
 
   // 双层防线：拒绝文案逐字保持（设计 §7/§10）
-  assert.equal(assertExecutable(['google-scholar']), true);
-  assert.throws(() => assertExecutable(['cnki', 'pubmed']),
-    error => error.message === '尚未接通以下检索来源：cnki、pubmed；请明确改为仅检索 Google Scholar，或等待相应连接器。');
+  assert.equal(assertExecutable(['google-scholar', 'cnki', 'web-of-science']), true);
+  assert.throws(() => assertExecutable(['wanfang', 'pubmed']),
+    error => error.message === '尚未接通以下检索来源：wanfang、pubmed；请选择已接通来源，或等待相应连接器。');
 
   // normalizeConfig：12 字段校验文案不回归 + v2 可选字段
-  assert.throws(() => normalizeConfig({ ...base, topic: '' }), /请填写研究主题和 Google Scholar 检索式/);
+  assert.throws(() => normalizeConfig({ ...base, topic: '' }), /请填写研究主题和默认检索式/);
   assert.throws(() => normalizeConfig({ ...base, sources: [] }), /检索来源为空、重复或不受识别/);
   assert.throws(() => normalizeConfig({ ...base, sources: ['google-scholar', 'google-scholar'] }), /检索来源为空、重复或不受识别/);
   assert.throws(() => normalizeConfig({ ...base, sources: ['arxiv'] }), /检索来源为空、重复或不受识别/);
@@ -45,6 +51,13 @@ function main() {
   assert.equal(normalized.version, 2);
   assert.deepEqual(Object.keys(normalized).slice(0, 13),
     ['version', 'topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language', 'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit']);
+  assert.deepEqual(normalized.sourceQueries, {});
+  assert.deepEqual(normalizeConfig({ ...base, sources: ['cnki', 'web-of-science'], sourceQueries: { cnki: ' 肉鸡 高温 ', 'web-of-science': 'broiler heat stress' } }, { executable: true }).sourceQueries,
+    { cnki: '肉鸡 高温', 'web-of-science': 'broiler heat stress' });
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: [] }), /分来源检索式必须是对象/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { arxiv: 'test' } }), /未知来源/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: ' ' } }), /不能为空/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: 'a'.repeat(2001) } }), /过长/);
 
   // v2 缺省值（设计 §3.1：缺省时行为与 v1 逐字一致）
   assert.deepEqual(normalized.batch, { size: 10, maxBatches: 1 });
