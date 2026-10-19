@@ -1195,3 +1195,9 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 ## 2026-10-19 本地整合：六阶段与已审核方案流程
 
 `/api/literature/*` 由共享的 ScholarConnector（server.js 中的 scholar）承载六阶段任务，包含 start/advance/list/snapshot/cancel/download；提取适配器显式传入 bridge/jobDir/config/python/onEvent。`/api/codex/literature/*` 继续由 LiteratureFlow 承载已审核方案执行、上传材料补充和清洗交接，两类运行标识不混用。文献模块将原候选检索折叠卡升级为默认展开的“文献检索与提取（六阶段）”，保留已有审核方案入口。新旧入口共用原同源服务、浏览器存储键与 Codex 设置登录；新六阶段的准备、继续与字段确认在旧流程运行时禁用。Python 子进程同时保留系统代理、已取消守卫和显式 UTF-8 编码。设置页 API 分组及测试连通控件随当前后端切换显示；契约检查同时登记 sidebar.js 与 literature.js 的同源请求权限。
+
+## 2026-10-19 模型目录与运行时发现
+
+新增内部模块 `tools/codex-runtime.js`：显式 `CODEX_BIN` 优先；Windows 自动发现 `%LOCALAPPDATA%/OpenAI/Codex/bin/*/codex.exe` 中最新安装的可执行文件，缺省时回落 npm 原生程序与 PATH；macOS 保留桌面内置 CLI。启动脚本不再将 CODEX_BIN 固定为旧 npm 程序。`/api/codex/status` 保持原返回结构，使用所选运行时的 `model/list`，跟随 nextCursor 收集全部可见模型并按精确 model 标识去重。前端所有模块共用此目录，连接状态显示模型数量；既有选择继续保留，当前目录不可用的旧选项禁用并提示重新选择。模型名称与调用标识不替换、不手写固定列表。
+
+首次读取账号若遇到特定工作区路由发现超时，使用同一 CLI 的官方 `login status` 命令核对已有本机登录；只有命令成功且明确识别登录类型时才回退，不读出、修改或另存凭据。模型目录和登录状态不替代实际推理成功检查。六阶段新任务将当前模块选择（或账号默认）的模型写入 `config.extraction.model` 后冻结，后续按冻结配置提取，不能只改变对话模型而仍用其他默认提取模型。

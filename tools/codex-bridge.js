@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const os = require('node:os');
+const { resolveCodexBin, readLocalLoginStatus } = require('./codex-runtime');
 const ID = /^[a-f0-9-]{36}$/;
 const ALLOWED = new Set(['.csv', '.tsv', '.xlsx', '.xls', '.json', '.txt', '.py', '.r', '.jl', '.m', '.ipynb']);
 const REFERENCE_ALLOWED = new Set(['.md', '.txt', '.pdf', '.docx', '.csv', '.tsv', '.xlsx', '.xls', '.json']);
@@ -33,8 +34,7 @@ class CodexBridge {
     if (this.ready) return this.ready;
     this.ready = (async () => {
       const proxy = require('./source-download').proxyFor('https:');
-      const desktopCli = process.platform === 'darwin' ? '/Applications/ChatGPT.app/Contents/Resources/codex' : '';
-      const codexBin = process.env.CODEX_BIN || (desktopCli && fs.existsSync(desktopCli) ? desktopCli : 'codex');
+      const codexBin = resolveCodexBin();
       this.proc = spawn(codexBin, ['app-server', '--listen', 'stdio://'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...(proxy ? { HTTPS_PROXY: proxy.href, HTTP_PROXY: proxy.href } : {}) } });
       this.proc.stderr.on('data', () => {}); // Never forward runtime diagnostics or auth data to Web.
       this.proc.stdin.on('error', () => {});
@@ -68,15 +68,36 @@ class CodexBridge {
     })();
     try { await this.ready; } catch (error) { this.ready = null; throw error; }
   }
+  localLogin() { return readLocalLoginStatus(resolveCodexBin()); }
   async status() {
     await this.connect();
-    const info = await this.rpc('account/read', { refreshToken: false });
-    const models = info.account ? await this.rpc('model/list', { limit: 50, includeHidden: false }) : { data: [] };
-    const model = models.data.find(m => m.isDefault) || models.data[0];
+    let info;
+    try { info = await this.rpc('account/read', { refreshToken: false }); }
+    catch (error) {
+      if (!error.message?.includes('workspace routing discovery timed out')) throw error;
+      const type = await this.localLogin();
+      if (!type) throw error;
+      info = { account: { type } };
+    }
+    const entries = [];
+    const cursors = new Set();
+    if (info.account) {
+      let cursor;
+      do {
+        const page = await this.rpc('model/list', { limit: 50, includeHidden: false, ...(cursor ? { cursor } : {}) });
+        if (!Array.isArray(page.data)) throw new Error('Codex 返回的模型目录格式无效，请检查连接');
+        entries.push(...page.data);
+        cursor = page.nextCursor || null;
+        if (cursor && cursors.has(cursor)) throw new Error('Codex 模型目录分页重复，请检查连接后重试');
+        if (cursor) cursors.add(cursor);
+      } while (cursor);
+    }
+    const models = [...new Map(entries.filter(m => typeof m.model === 'string' && m.hidden !== true).map(m => [m.model, m])).values()];
+    const model = models.find(m => m.isDefault) || models[0];
     return {
       available: true, loggedIn: !!info.account, authType: info.account?.type || null,
       model: model?.model, effort: model?.defaultReasoningEffort,
-      models: models.data.filter(m => typeof m.model === 'string').map(m => ({
+      models: models.map(m => ({
         model: m.model, displayName: m.displayName || m.model,
         defaultReasoningEffort: m.defaultReasoningEffort || 'medium'
       }))

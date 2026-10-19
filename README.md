@@ -54,7 +54,7 @@ Scholar 首次运行需要 Python 3.10+，自动准备项目 `.venv/`、`require
 
 新增任务阶段条、历史任务找回、字段含义与单位确认，以及文献表和参数明细表的 CSV/Excel 导出。首次检索会自动准备 `.venv/`、`requirements-literature.txt` 和 Chromium；正式网络检索遇到验证时需研究者手动完成。设置页新增模型分组和测试连通，已有本机 Codex 登录与模块模型选择继续保留。
 
-本地 Windows 启动脚本会在未设置 `CODEX_BIN` 时尝试使用 npm 安装的 x64 原生 Codex 可执行文件，避免 PowerShell 启动脚本不能被服务子进程直接执行的问题。其他安装位置仍可通过 `CODEX_BIN` 指定。
+Windows 默认优先发现已安装的桌面 Codex 运行时，再回落 npm 原生程序与 PATH，避免旧 npm CLI 遗漏新模型以及 PowerShell 脚本不能直接启动的问题。自定义安装位置可通过 `CODEX_BIN` 指定。模型选择读取该运行时的完整可见目录，各模块均可选择；点击“检查连接”可刷新目录，旧选择若不再可用会明确提示。
 
 ## 配置与检查
 
@@ -63,6 +63,7 @@ Scholar 首次运行需要 Python 3.10+，自动准备项目 `.venv/`、`require
 ```bash
 npm run check
 node tools/check-contract.js
+node tools/test-codex-models.js
 node tools/test-merge-store.js
 node tools/test-source-download.js
 node tools/test-literature-flow.js

@@ -80,12 +80,12 @@
     modelPicker.replaceChildren();
     const initial = node('option', '账号默认 · ' + (account?.model || '登录后显示')); initial.value = ''; modelPicker.append(initial);
     (account?.models || []).forEach(item => { const option = node('option', item.displayName || item.model); option.value = item.model; modelPicker.append(option); });
-    if (t.model && !(account?.models || []).some(item => item.model === t.model)) { const option = node('option', t.model + '（当前不可用）'); option.value = t.model; modelPicker.append(option); }
+    if (t.model && !(account?.models || []).some(item => item.model === t.model)) { const option = node('option', t.model + '（当前不可用，请重新选择）'); option.value = t.model; option.disabled = true; modelPicker.append(option); }
     modelPicker.value = t.model || ''; modelPicker.disabled = !!t.busy || checking || !account?.loggedIn;
     loginButton.textContent = account?.loggedIn ? '本机 Codex 已连接' : '登录本机 Codex'; loginButton.disabled = loginBusy || !!t.busy;
     refreshButton.disabled = checking;
     const connectionError = account?.error?.includes('workspace routing discovery timed out') ? 'Codex 工作区连接超时，请检查本机网络后重试。' : account?.error;
-    connectionStatus.textContent = checking ? '检查连接中…' : loginNotice || connectionError || (account?.loggedIn ? '本机 Codex 已登录' : '未连接，请先安装 Codex CLI 并点击登录');
+    connectionStatus.textContent = checking ? '检查连接中…' : loginNotice || connectionError || (account?.loggedIn ? '本机 Codex 已登录 · ' + (account.models || []).length + ' 个模型' : '未连接，请先安装 Codex CLI 并点击登录');
     document.querySelectorAll('[data-api-settings]').forEach(item => { item.hidden = backendPicker.value !== 'api'; });
   }
   function saveConnection() {
@@ -223,8 +223,9 @@
   }
   async function startLiterature(mod) {
     const t = task(mod.id);
-    const config = t.literatureConfig;
-    if (!config) { t.literatureError = '请先从对话整理运行配置并核对'; render(); return; }
+    if (!t.literatureConfig) { t.literatureError = '请先从对话整理运行配置并核对'; render(); return; }
+    const config = { ...t.literatureConfig, extraction: { ...t.literatureConfig.extraction,
+      model: t.model || account?.model || t.literatureConfig.extraction?.model || null } };
     if (saved[mod.id]?.literatureSource !== literatureSource(mod)) { t.literatureError = '对话或已批准文档有更新，请重新整理规则后再检索'; render(); return; }
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
     t.literatureBusy = true; t.literatureError = ''; render();
@@ -235,6 +236,7 @@
       if (t.literatureUntil && t.literatureUntil !== 'discover') body.until = t.literatureUntil;
       const job = await request('/api/literature/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       t.literatureJob = job;
+      t.literatureConfig = config;
       saved[mod.id] = { ...saved[mod.id], literatureJobId: job.id, literatureConfig: config };
       persist();
       await watchLiterature(mod.id, job.id);
