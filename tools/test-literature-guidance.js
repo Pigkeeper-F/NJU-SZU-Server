@@ -16,4 +16,11 @@ assert.ok(!prompt.includes('不要一次性要求回答全部待对齐项'), '�
 const codexUi = fs.readFileSync(path.join(__dirname, '..', 'js', 'codex.js'), 'utf8');
 assert.ok(codexUi.includes('从对话整理规则') && codexUi.includes('确认配置并检索'), '界面应先整理并核对运行配置');
 
+// 【W1b · 第二阶段】新阶段文案与守卫（静态断言，契约 §21 / 设计 §9.7）
+assert.ok(codexUi.includes('awaiting_confirmation') && codexUi.includes('确认并继续提取'), '字段确认关口应提供确认表单与继续动作');
+assert.ok(codexUi.includes('/api/literature/advance'), '多阶段推进应走 advance 接口');
+assert.ok(codexUi.includes('/api/literature/jobs'), '刷新后应能经 jobs 列表找回历史任务');
+assert.ok(codexUi.includes('dedupe') && codexUi.includes('fulltext') && codexUi.includes('validation') && codexUi.includes('export'), '阶段词汇应覆盖第二阶段六阶段');
+assert.ok(codexUi.includes('/api/literature/cancel') && codexUi.includes('resumeCurrent'), '取消与验证码恢复路径必须保持');
+
 console.log('LITERATURE_GUIDANCE_TESTS_PASS');

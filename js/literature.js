@@ -20,7 +20,10 @@
   }
   function modelOptions(mod) {
     let settings = null;
-    try { settings = JSON.parse(localStorage.getItem('fa_llm_settings_v1')) || null; } catch (_) {}
+    try {
+      const api = root.Store?.llmSettings;
+      settings = api ? api.resolve(api.read()) : JSON.parse(localStorage.getItem('fa_llm_settings_v1')) || null;
+    } catch (_) {}
     return { ...root.CodexUI.getConnection(mod), credential: root.ApiKeys?.getActiveCredential() || null, settings };
   }
   function notify(id) {

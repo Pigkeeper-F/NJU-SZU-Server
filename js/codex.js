@@ -27,7 +27,9 @@
   function persist() { try { localStorage.setItem(key, JSON.stringify(saved)); } catch (_) {} }
   function task(id) {
     if (!tasks[id]) tasks[id] = { files: [], busy: false, backend: saved[id]?.backend || preferences.backend || 'codex', model: saved[id]?.model ?? preferences.model ?? '', execute: false, executeOnce: false, error: '', job: null, filesOpen: false, logOpen: false,
-      literatureConfig: saved[id]?.literatureConfig || null, literatureJob: null, literatureBusy: false, literatureError: '' };
+      literatureConfig: saved[id]?.literatureConfig || null, literatureJob: null, literatureBusy: false, literatureError: '',
+      literatureUntil: saved[id]?.literatureUntil || 'discover', literatureJobs: null, literatureJobsTried: false, literatureJobsLoading: false, literatureJobsError: '',
+      literatureConfirmJob: null, literatureConfirmDrafts: null };
     return tasks[id];
   }
   function node(tag, text, cls) { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (cls) el.className = cls; return el; }
@@ -171,6 +173,20 @@
     } finally { t.busy = false; render(); ModuleSpace.render(); }
     delete saved[id].jobId; persist();
   }
+  function literatureCompletedMessage(job) {
+    const base = '首批候选检索已保存 ' + job.count + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。';
+    const extra = literatureDeliverableSummary(job);
+    return extra ? base + extra : base;
+  }
+  function literatureDeliverableSummary(job) {
+    const files = Array.isArray(job.files) ? job.files : [];
+    if (files.includes('export/literature.xlsx')) return '本次已导出文献表与参数明细表（CSV+Excel）；去重、校验与待审核结果见下载区。';
+    if (files.includes('validation/validation.json')) return '已完成参数校验；待审核清单与阻断明细见下载区。';
+    if (files.some(name => /^extraction\/[^/]+\.json$/.test(name))) return '已完成参数提取；结果与校验报告见下载区。';
+    if (files.includes('fulltext/status.json')) return '已记录全文获取状态（含“待补充”项）；明细见下载区。';
+    if (files.includes('dedupe/dedupe.json')) return '已完成跨来源去重；疑似重复组未静默合并，见下载区待审清单。';
+    return '';
+  }
   async function watchLiterature(id, jobId) {
     const t = task(id);
     t.literatureBusy = true;
@@ -180,14 +196,17 @@
         t.literatureJob = job;
         render();
         if (job.status !== 'running') {
-          if (saved[id]?.literatureDelivered !== job.id) {
-            const text = job.status === 'completed'
-              ? '首批候选检索已保存 ' + job.count + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。'
+          const stamp = job.id + ':' + job.status + ':' + (job.stage || '') + ':' + (Array.isArray(job.events) ? job.events.length : 0);
+          if (saved[id]?.literatureDelivered !== stamp) {
+            const text = job.status === 'completed' ? literatureCompletedMessage(job)
+              : job.status === 'needs_attention' && job.stage === 'awaiting_confirmation'
+                ? '提取前需由研究者确认参数字段含义与单位：请在文献检索区核对字段并点击“确认并继续提取”。'
               : job.status === 'needs_attention' ? 'Google Scholar 需要人工验证。请在检索浏览器完成后点击“重新检索”。'
               : '文献检索' + (job.status === 'cancelled' ? '已停止' : '未完成') + '：' + (job.error || job.message);
             Store.appendMessage(id, text, 'system');
-            saved[id].literatureDelivered = job.id; persist();
+            saved[id].literatureDelivered = stamp; persist();
           }
+          t.literatureJobsTried = false;
           break;
         }
         await new Promise(resolve => setTimeout(resolve, 1200));
@@ -195,6 +214,12 @@
       t.literatureError = '';
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
+  }
+  function applyLiteratureJob(mod, job) {
+    const t = task(mod.id);
+    t.literatureJob = job;
+    if (job?.id) saved[mod.id] = { ...saved[mod.id], literatureJobId: job.id };
+    persist();
   }
   async function startLiterature(mod) {
     const t = task(mod.id);
@@ -204,8 +229,11 @@
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
     t.literatureBusy = true; t.literatureError = ''; render();
     try {
-      const resumeCurrent = t.literatureJob?.status === 'needs_attention' && literatureConfigKey(t.literatureJob.config) === literatureConfigKey(config);
-      const job = await request('/api/literature/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config, resumeCurrent }) });
+      const resumeCurrent = t.literatureJob?.status === 'needs_attention' && t.literatureJob.stage !== 'awaiting_confirmation'
+        && sameLiteratureConfig(t.literatureJob.config, config);
+      const body = { config, resumeCurrent };
+      if (t.literatureUntil && t.literatureUntil !== 'discover') body.until = t.literatureUntil;
+      const job = await request('/api/literature/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       t.literatureJob = job;
       saved[mod.id] = { ...saved[mod.id], literatureJobId: job.id, literatureConfig: config };
       persist();
@@ -213,15 +241,80 @@
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
+  async function continueLiterature(mod) {
+    const t = task(mod.id);
+    if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
+    const job = t.literatureJob;
+    if (!job?.id) { t.literatureError = '没有可继续的检索任务'; render(); return; }
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      const body = { id: job.id };
+      if (t.literatureUntil && t.literatureUntil !== 'discover') body.until = t.literatureUntil;
+      const next = await request('/api/literature/advance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      applyLiteratureJob(mod, next);
+      await watchLiterature(mod.id, next.id || job.id);
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  async function confirmLiteratureFields(mod) {
+    const t = task(mod.id);
+    if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
+    const job = t.literatureJob;
+    if (!job?.id) { t.literatureError = '没有可确认的检索任务'; render(); return; }
+    const fields = (t.literatureConfirmDrafts || []).map(draft => ({ key: String(draft.key || '').trim(), label: String(draft.label || '').trim(),
+      meaning: String(draft.meaning || '').trim(), unit: String(draft.unit || '').trim(), valueType: draft.valueType || 'text', required: draft.required === true }));
+    if (!fields.length) { t.literatureError = '没有可确认的参数字段；请先在“目标参数字段”中填写后再回到本关口'; render(); return; }
+    if (fields.some(field => !field.key)) { t.literatureError = '每个参数字段都需要填写 key（字段标识）后才能确认'; render(); return; }
+    if (new Set(fields.map(field => field.key)).size !== fields.length) { t.literatureError = '参数字段 key 不能重复'; render(); return; }
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      const next = await request('/api/literature/advance', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: job.id, confirmations: { fields } }) });
+      t.literatureConfirmJob = null; t.literatureConfirmDrafts = null;
+      applyLiteratureJob(mod, next);
+      Store.appendMessage(mod.id, '已记录研究者确认的参数字段（' + fields.length + ' 项），继续执行提取。', 'system');
+      await watchLiterature(mod.id, next.id || job.id);
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  async function loadLiteratureJobs(mod, options = {}) {
+    const t = task(mod.id);
+    if (t.literatureJobsLoading) return;
+    t.literatureJobsLoading = true; t.literatureJobsTried = true;
+    try {
+      const data = await request('/api/literature/jobs?limit=20');
+      t.literatureJobs = Array.isArray(data.jobs) ? data.jobs : [];
+      t.literatureJobsError = '';
+    } catch (error) {
+      t.literatureJobs = t.literatureJobs || [];
+      t.literatureJobsError = options.silent ? '' : error.message;
+    }
+    finally { t.literatureJobsLoading = false; render(); }
+  }
+  function attachLiteratureJob(mod, job) {
+    const t = task(mod.id);
+    if (!job?.id) return;
+    t.literatureError = '';
+    applyLiteratureJob(mod, job);
+    render();
+    if (job.status === 'running') watchLiterature(mod.id, job.id).catch(() => {});
+  }
   function literatureSource(mod) {
     const entries = (mod.messages || []).filter(message => message.role === 'user' || message.role === 'assistant');
     return JSON.stringify({ messages: entries.map(message => [message.id, message.at]),
       approvedDoc: mod.doc?.status === 'approved' ? [mod.doc.content, mod.doc.approvedAt] : null });
   }
-  function literatureConfigKey(config) {
+  const LITERATURE_CONFIG_KEYS = ['topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language',
+    'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit'];
+  const LITERATURE_CONFIG_EXTRA_KEYS = ['batch', 'fieldDefinitions', 'templates', 'fulltext', 'extraction', 'limits'];
+  function literatureConfigKey(config, keys = LITERATURE_CONFIG_KEYS) {
     if (!config) return '';
-    return JSON.stringify(['topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language',
-      'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit'].map(key => config[key] ?? null));
+    return JSON.stringify(keys.map(key => config[key] ?? null));
+  }
+  function sameLiteratureConfig(one, other) {
+    if (!one || !other) return false;
+    const keys = [...LITERATURE_CONFIG_KEYS, ...LITERATURE_CONFIG_EXTRA_KEYS.filter(key => one[key] !== undefined && other[key] !== undefined)];
+    return literatureConfigKey(one, keys) === literatureConfigKey(other, keys);
   }
   function parseLiteratureConfig(text) {
     const raw = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -230,7 +323,7 @@
     const config = JSON.parse(raw.slice(start, end + 1));
     if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('AI 返回的配置格式无效');
     if (!Array.isArray(config.sources)) throw new Error('AI 未明确返回检索来源，请重新整理规则');
-    return {
+    const parsed = {
       topic: String(config.topic || ''), query: String(config.query || ''),
       sources: config.sources,
       publicationYearFrom: config.publicationYearFrom ?? null, publicationYearTo: config.publicationYearTo ?? null,
@@ -241,6 +334,13 @@
       targetFields: Array.isArray(config.targetFields) ? config.targetFields : [],
       limit: config.limit ?? 10
     };
+    ['batch', 'templates', 'fulltext', 'extraction', 'limits'].forEach(key => {
+      if (config[key] && typeof config[key] === 'object' && !Array.isArray(config[key])) parsed[key] = config[key];
+    });
+    if (Array.isArray(config.fieldDefinitions) && config.fieldDefinitions.every(field => field && typeof field === 'object' && !Array.isArray(field))) {
+      parsed.fieldDefinitions = config.fieldDefinitions;
+    }
+    return parsed;
   }
   async function prepareLiterature(mod) {
     const t = task(mod.id);
@@ -272,9 +372,174 @@
     saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureSource: literatureSource(mod) };
     persist(); render();
   }
+  const LITERATURE_STAGE_ORDER = ['discover', 'dedupe', 'fulltext', 'extract', 'validate', 'export'];
+  const LITERATURE_STAGE_LABELS = { 'queued': '排队中', 'environment': '准备环境', 'browser': '启动浏览器', 'search': '检索候选', 'save': '保存候选',
+    'dedupe': '跨来源去重', 'fulltext': '获取全文', 'extraction': '提取参数', 'extract': '提取参数', 'validation': '校验参数', 'validate': '校验参数',
+    'export': '导出两表', 'verification': '等待人工验证', 'awaiting_confirmation': '等待确认字段',
+    'completed': '已完成', 'failed': '失败', 'cancelled': '已停止', 'interrupted': '已中断', 'running': '进行中' };
+  const LITERATURE_STAGE_STATES = { 'pending': '待运行', 'running': '进行中', 'done': '已完成', 'failed': '失败', 'skipped': '已跳过' };
+  const LITERATURE_COUNTER_LABELS = { 'candidates': '候选', 'uniqueGroups': '去重组', 'fulltextFetched': '已获取全文', 'extractedPapers': '已提取论文', 'parameterRows': '参数行' };
+  const LITERATURE_UNTIL_OPTIONS = [['discover', '仅首批检索'], ['dedupe', '续跑到去重'], ['fulltext', '续跑到全文获取'],
+    ['extract', '续跑到参数提取'], ['validate', '续跑到校验'], ['export', '完整流水线']];
+  const LITERATURE_STATUS_LABELS = { 'running': '进行中', 'completed': '已完成', 'needs_attention': '需要人工', 'failed': '失败', 'cancelled': '已停止' };
+  const LITERATURE_FILE_LABELS = { 'run_config.json': '运行配置（冻结）', 'candidates.json': '候选清单 JSON（累计）', 'candidates.csv': '候选清单 CSV（累计）',
+    'dedupe/dedupe.json': '去重结果 JSON', 'dedupe/dedupe.csv': '去重结果 CSV', 'fulltext/status.json': '全文获取状态',
+    'extraction/check_report.json': '提取校验报告', 'validation/validation.json': '校验结果 JSON', 'validation/validation.md': '待审核清单',
+    'export/literature.csv': '文献表 CSV', 'export/literature.xlsx': '文献表 Excel', 'export/parameters.csv': '参数明细表 CSV',
+    'export/parameters.xlsx': '参数明细表 Excel', 'export/export_report.md': '导出报告' };
+  const LITERATURE_FILE_GROUPS = [['dedupe', '去重产物'], ['fulltext', '全文产物'], ['extraction', '提取产物'], ['validation', '校验产物'], ['export', '导出产物']];
+  function literatureStageLabel(stage) { return LITERATURE_STAGE_LABELS[stage] || String(stage || ''); }
+  function literatureFileLabel(name) {
+    if (LITERATURE_FILE_LABELS[name]) return LITERATURE_FILE_LABELS[name];
+    let match = name.match(/^fulltext\/files\/(.+)\.(pdf|txt)$/);
+    if (match) return '全文 · ' + match[1] + (match[2] === 'pdf' ? '（PDF）' : '（文本）');
+    match = name.match(/^extraction\/inputs\/(.+)\.json$/);
+    if (match) return '提取输入包 · ' + match[1];
+    match = name.match(/^extraction\/(.+)\.json$/);
+    if (match) return '提取结果 · ' + match[1];
+    return name;
+  }
+  function literatureFileGroups(files) {
+    const groups = [{ key: '', label: '检索与配置', files: [] }];
+    LITERATURE_FILE_GROUPS.forEach(([key, label]) => groups.push({ key, label, files: [] }));
+    files.forEach(name => {
+      const known = LITERATURE_FILE_GROUPS.find(([key]) => name.startsWith(key + '/'));
+      groups[known ? groups.findIndex(group => group.key === known[0]) : 0].files.push(name);
+    });
+    return groups.filter(group => group.files.length);
+  }
+  function literatureDeliverables(job) {
+    const files = (Array.isArray(job.files) ? job.files : []).filter(name => typeof name === 'string');
+    if (!files.length) return null;
+    const box = node('div', undefined, 'literature-deliverables');
+    literatureFileGroups(files).forEach(group => {
+      const section = node('div', undefined, 'literature-deliverable-group');
+      section.append(node('span', group.label + ' · ' + group.files.length + ' 个', 'literature-deliverable-title'));
+      const list = node('div', undefined, 'literature-deliverable-list');
+      const collapsed = group.files.length > 8;
+      const link = name => {
+        const anchor = node('a', literatureFileLabel(name));
+        anchor.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name);
+        anchor.title = name;
+        return anchor;
+      };
+      (collapsed ? group.files.slice(0, 6) : group.files).forEach(name => list.append(link(name)));
+      if (collapsed) {
+        const more = node('details', undefined, 'literature-deliverable-more');
+        more.append(node('summary', '展开其余 ' + (group.files.length - 6) + ' 个文件'));
+        const inner = node('div', undefined, 'literature-deliverable-list');
+        group.files.slice(6).forEach(name => inner.append(link(name)));
+        more.append(inner); list.append(more);
+      }
+      section.append(list); box.append(section);
+    });
+    return box;
+  }
+  function literatureStageBar(job) {
+    if (!job || !job.stages || typeof job.stages !== 'object') return null;
+    const bar = node('div', undefined, 'literature-stages');
+    LITERATURE_STAGE_ORDER.forEach(stage => {
+      const state = LITERATURE_STAGE_STATES[job.stages[stage]] ? job.stages[stage] : 'pending';
+      const item = node('span', undefined, 'literature-stage is-' + state);
+      item.append(node('span', LITERATURE_STAGE_LABELS[stage] || stage));
+      item.append(node('span', LITERATURE_STAGE_STATES[state], 'literature-stage-state'));
+      bar.append(item);
+    });
+    const meta = [];
+    if (job.resumeStage) meta.push('下一阶段：' + literatureStageLabel(job.resumeStage));
+    if (job.until) meta.push('本次运行到：' + literatureStageLabel(job.until));
+    if (job.counters && typeof job.counters === 'object') {
+      Object.keys(job.counters).forEach(key => {
+        if (typeof job.counters[key] === 'number') meta.push((LITERATURE_COUNTER_LABELS[key] || key) + ' ' + job.counters[key]);
+      });
+    }
+    if (meta.length) bar.append(node('span', meta.join(' · '), 'literature-stage-meta'));
+    return bar;
+  }
+  function literatureConfirmFields(t, job) {
+    const sources = [job?.config || {}, t.literatureConfig || {}];
+    for (const source of sources) {
+      if (Array.isArray(source.fieldDefinitions) && source.fieldDefinitions.length) {
+        return source.fieldDefinitions.map(field => ({ key: String(field?.key ?? ''), label: String(field?.label ?? field?.key ?? ''),
+          meaning: String(field?.meaning ?? ''), unit: String(field?.unit ?? ''), valueType: String(field?.valueType || 'text'), required: field?.required === true }));
+      }
+    }
+    for (const source of sources) {
+      if (Array.isArray(source.targetFields) && source.targetFields.length) {
+        return source.targetFields.map(field => ({ key: String(field), label: String(field), meaning: '', unit: '', valueType: 'text', required: false }));
+      }
+    }
+    return [];
+  }
+  function literatureConfirmForm(mod, t, job) {
+    const box = node('div', undefined, 'literature-confirm');
+    box.append(node('p', '提取前需研究者确认参数字段的含义与单位：AI 建议不作为已确认规则，确认后才进入参数提取（确认记录写入任务目录）。'));
+    if (t.literatureConfirmJob !== job.id) { t.literatureConfirmJob = job.id; t.literatureConfirmDrafts = literatureConfirmFields(t, job); }
+    const drafts = t.literatureConfirmDrafts || [];
+    if (!drafts.length) {
+      box.append(node('p', '没有可确认的字段：请先在“目标参数字段”中填写字段（每行一项），回到本关口再确认。', 'codex-status'));
+      return box;
+    }
+    const fields = node('div', undefined, 'literature-confirm-fields');
+    drafts.forEach(draft => {
+      const cell = node('div', undefined, 'literature-confirm-row');
+      [['key', '字段 key'], ['label', '标签'], ['meaning', '含义'], ['unit', '单位']].forEach(([key, title]) => {
+        const wrap = node('label', title); const field = node('input'); field.type = 'text';
+        field.value = draft[key] ?? ''; field.disabled = t.literatureBusy;
+        field.oninput = () => { draft[key] = field.value; };
+        wrap.append(field); cell.append(wrap);
+      });
+      const typeWrap = node('label', '类型');
+      const type = node('select');
+      const types = ['text', 'number'].concat(['text', 'number'].includes(draft.valueType) ? [] : [draft.valueType]);
+      types.forEach(value => { const option = node('option', value === 'number' ? '数值' : value === 'text' ? '文本' : value); option.value = value; type.append(option); });
+      type.value = draft.valueType; type.disabled = t.literatureBusy;
+      type.onchange = () => { draft.valueType = type.value; };
+      typeWrap.append(type); cell.append(typeWrap);
+      const requiredWrap = node('label', '必填');
+      const required = node('input'); required.type = 'checkbox'; required.checked = draft.required === true; required.disabled = t.literatureBusy;
+      required.onchange = () => { draft.required = required.checked; };
+      requiredWrap.prepend(required); cell.append(requiredWrap);
+      fields.append(cell);
+    });
+    box.append(fields);
+    const actions = node('div', undefined, 'literature-confirm-actions');
+    const confirm = node('button', t.literatureBusy ? '提交中…' : '确认并继续提取', 'primary-button');
+    confirm.type = 'button'; confirm.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+    confirm.onclick = () => confirmLiteratureFields(mod);
+    actions.append(confirm); box.append(actions);
+    return box;
+  }
+  function literatureHistory(mod, t) {
+    if (!t.literatureJobs && !t.literatureJobsTried && !t.literatureJobsLoading) void loadLiteratureJobs(mod, { silent: true });
+    const box = node('details', undefined, 'literature-history');
+    box.append(node('summary', '历史任务（刷新后仍可找回）' + (Array.isArray(t.literatureJobs) ? ' · ' + t.literatureJobs.length : '')));
+    const head = node('div', undefined, 'literature-history-head');
+    const refresh = node('button', t.literatureJobsLoading ? '刷新中…' : '刷新任务列表', 'quiet-button');
+    refresh.type = 'button'; refresh.disabled = t.literatureJobsLoading;
+    refresh.onclick = () => loadLiteratureJobs(mod);
+    head.append(refresh); box.append(head);
+    if (!Array.isArray(t.literatureJobs)) box.append(node('p', '正在读取历史任务…', 'codex-status'));
+    else if (!t.literatureJobs.length) box.append(node('p', '暂无历史任务记录。', 'codex-status'));
+    else {
+      const list = node('div', undefined, 'literature-history-list');
+      t.literatureJobs.forEach(job => {
+        const row = node('div', undefined, 'literature-history-row' + (job.id === t.literatureJob?.id ? ' is-current' : ''));
+        row.append(node('span', String(job.id || '').slice(0, 8), 'literature-history-id'));
+        row.append(node('span', (LITERATURE_STATUS_LABELS[job.status] || job.status || '') + (job.stage ? ' · ' + literatureStageLabel(job.stage) : ''), 'literature-history-status'));
+        row.append(node('span', String(job.message || '').slice(0, 60), 'literature-history-message'));
+        const open = node('button', '查看', 'quiet-button'); open.type = 'button'; open.disabled = t.literatureBusy || t.busy;
+        open.onclick = () => attachLiteratureJob(mod, job);
+        row.append(open); list.append(row);
+      });
+      box.append(list);
+    }
+    if (t.literatureJobsError) box.append(node('p', '历史任务列表读取失败：' + t.literatureJobsError, 'codex-error'));
+    return box;
+  }
   function literaturePanel(mod, t, container = panel) {
     const box = node('div', undefined, 'literature-connector');
-    box.append(node('p', '这里只运行 Google Scholar 首批候选检索。核对配置后开始，纳排规则与目标字段随配置保存；需要全文和数据提取时，请在下方审核方案并开始完整流程。'));
+    box.append(node('p', '对话确认规则 → 核对运行配置 → 分阶段执行：候选检索、跨来源去重、全文获取、参数提取、校验、导出。当前仅 Google Scholar 已接通；全文提取前需要你确认参数字段含义与单位。'));
     const row = node('div', undefined, 'codex-toolbar literature-toolbar');
     const prepare = node('button', t.literatureBusy ? '处理中…' : '从对话整理规则', 'quiet-button');
     prepare.type = 'button'; prepare.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy(); prepare.onclick = () => prepareLiterature(mod); row.append(prepare);
@@ -282,10 +547,13 @@
       const manual = node('button', '手动填写', 'quiet-button'); manual.type = 'button'; manual.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
       manual.onclick = () => manualLiterature(mod); row.append(manual);
     }
-    const start = node('button', t.literatureJob?.status === 'needs_attention' ? '验证后重新检索' : '确认配置并检索', 'primary-button');
-    start.type = 'button'; start.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !t.literatureConfig;
+    const job = t.literatureJob;
+    const awaitingConfirm = !!job && job.status === 'needs_attention' && job.stage === 'awaiting_confirmation';
+    const start = node('button', job?.status === 'needs_attention' && !awaitingConfirm ? '验证后重新检索' : '确认配置并检索', 'primary-button');
+    start.type = 'button'; start.disabled = t.literatureBusy || !!root.LiteratureUI?.isBusy() || t.busy || !t.literatureConfig;
+    if (awaitingConfirm) start.title = '当前任务停在字段确认关口；本按钮发起一次新检索，继续原任务请用下方“确认并继续提取”。';
     start.onclick = () => startLiterature(mod); row.append(start);
-    if (t.literatureJob?.status === 'running') {
+    if (job?.status === 'running') {
       const stop = node('button', '停止', 'quiet-button'); stop.type = 'button';
       stop.onclick = async () => {
         try { t.literatureJob = await request('/api/literature/cancel?id=' + encodeURIComponent(t.literatureJob.id), { method: 'POST' }); }
@@ -294,6 +562,20 @@
       };
       row.append(stop);
     }
+    const canAdvance = !!job && !!job.resumeStage && ['completed', 'failed', 'needs_attention'].includes(job.status)
+      && !(job.status === 'needs_attention' && (job.stage === 'verification' || job.stage === 'awaiting_confirmation'));
+    if (canAdvance) {
+      const label = job.status === 'completed' ? '继续下一阶段' : job.status === 'failed' ? (job.stage === 'interrupted' ? '继续中断的任务' : '重试当前阶段') : '继续';
+      const advance = node('button', label, 'quiet-button'); advance.type = 'button'; advance.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+      advance.title = '从下一个未完成阶段继续；缺省运行到下一个人工关口或流水线末尾。';
+      advance.onclick = () => continueLiterature(mod); row.append(advance);
+    }
+    const untilWrap = node('label', '运行到');
+    const until = node('select'); until.setAttribute('aria-label', '本次运行到');
+    LITERATURE_UNTIL_OPTIONS.forEach(([value, title]) => { const option = node('option', title); option.value = value; until.append(option); });
+    until.value = t.literatureUntil || 'discover'; until.disabled = t.literatureBusy || t.busy;
+    until.onchange = () => { t.literatureUntil = until.value; saved[mod.id] = { ...saved[mod.id], literatureUntil: t.literatureUntil }; persist(); };
+    untilWrap.append(until); row.append(untilWrap);
     box.append(row);
     if (t.literatureConfig) {
       const config = t.literatureConfig;
@@ -327,25 +609,21 @@
       details.append(fields); box.append(details);
       if (config.sources.some(source => source !== 'google-scholar')) box.append(node('p', '配置含未接通来源：启动时会报错；如本次只做 Scholar 首批检索，请明确取消其他来源。', 'codex-error'));
     } else box.append(node('p', '先在本模块对话确认规则，再点“从对话整理规则”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
-    if (!t.literatureJob) box.append(node('p', '首次运行将自动创建 .venv 并安装最小依赖及 Chromium；若 Scholar 出现验证码，请在新开的浏览器中手动完成。', 'codex-status'));
-    if (t.literatureJob) {
-      const job = t.literatureJob;
-      box.append(node('p', '状态：' + (job.message || job.stage || job.status) + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
-      if (Array.isArray(job.files) && job.files.length) {
-        const links = node('div', undefined, 'literature-downloads');
-        job.files.forEach(name => {
-          const link = node('a', name === 'candidates.csv' ? '下载候选 CSV' : name === 'run_config.json' ? '下载运行配置' : '下载候选 JSON');
-          link.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name);
-          links.append(link);
-        });
-        box.append(links);
-      }
+    if (!job) box.append(node('p', '首次运行将自动创建 .venv 并安装最小依赖及 Chromium；若 Scholar 出现验证码，请在新开的浏览器中手动完成。', 'codex-status'));
+    if (job) {
+      box.append(node('p', '状态：' + (job.message || literatureStageLabel(job.stage) || job.status) + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
+      const stages = literatureStageBar(job);
+      if (stages) box.append(stages);
+      if (awaitingConfirm) box.append(literatureConfirmForm(mod, t, job));
+      const deliverables = literatureDeliverables(job);
+      if (deliverables) box.append(deliverables);
       if (Array.isArray(job.events) && job.events.length > 1) {
         const details = node('details'); details.append(node('summary', '查看阶段记录'));
         details.append(node('pre', job.events.map(event => event.message).join('\n')));
         box.append(details);
       }
     }
+    box.append(literatureHistory(mod, t));
     if (t.literatureError) box.append(node('p', t.literatureError, 'codex-error'));
     container.append(box);
   }
@@ -538,8 +816,8 @@
     }
     panel.append(row);
     if (mod.type === 'literature-mining') {
-      const discovery = node('details'); discovery.append(node('summary', '只找候选文献：Google Scholar'));
-      discovery.open = !!t.discoveryOpen;
+      const discovery = node('details'); discovery.append(node('summary', '文献检索与提取（六阶段）'));
+      discovery.open = t.discoveryOpen !== false;
       discovery.ontoggle = () => { if (discovery.isConnected) t.discoveryOpen = discovery.open; };
       literaturePanel(mod, t, discovery); panel.append(discovery);
       if (t.error) panel.append(node('p', t.error, 'codex-error'));

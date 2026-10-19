@@ -1207,6 +1207,155 @@
     return true;
   }
 
+  /* ------------------------------------------------------------------
+   * 模型设置（模型分组 v2；契约 §15.6）
+   *   一个 Base URL + 一个 API Key = 一个分组；分组内维护模型列表。
+   *   存储键沿用 fa_llm_settings_v1；旧 v1 单配置读取时自动迁移为「默认分组」。
+   * ------------------------------------------------------------------ */
+  var LLM_SETTINGS_KEY = 'fa_llm_settings_v1';
+  var LLM_PROTOCOLS = ['chat-completions', 'responses'];
+
+  function llmStr(value, max) {
+    return typeof value === 'string' ? value.trim().slice(0, max) : '';
+  }
+
+  function llmNewId() {
+    return 'g-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  }
+
+  /** 单个分组字段归一化；models 去重，且当前模型必然在列表内 */
+  function llmSanitizeGroup(raw, fallbackName) {
+    var src = (raw && typeof raw === 'object') ? raw : {};
+    var models = [];
+    if (Array.isArray(src.models)) {
+      for (var i = 0; i < src.models.length && models.length < 50; i++) {
+        var item = llmStr(src.models[i], 200);
+        if (item && models.indexOf(item) < 0) models.push(item);
+      }
+    }
+    var model = llmStr(src.model, 200);
+    if (model && models.indexOf(model) < 0) models.push(model);
+    return {
+      id: llmStr(src.id, 60) || llmNewId(),
+      name: llmStr(src.name, 60) || fallbackName || '',
+      baseUrl: llmStr(src.baseUrl, 500),
+      apiKey: llmStr(src.apiKey, 500),
+      protocol: LLM_PROTOCOLS.indexOf(src.protocol) >= 0 ? src.protocol : 'chat-completions',
+      model: model,
+      models: models,
+      systemPrompt: llmStr(src.systemPrompt, 2000)
+    };
+  }
+
+  /** 任意形状 → 规范 v2（含 v1 迁移与脏数据容错） */
+  function llmNormalize(raw) {
+    var out = { version: 2, activeGroupId: '', groups: [] };
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+    if (Array.isArray(raw.groups)) {
+      for (var i = 0; i < raw.groups.length && out.groups.length < 20; i++) {
+        out.groups.push(llmSanitizeGroup(raw.groups[i], '分组 ' + (out.groups.length + 1)));
+      }
+    } else if (raw.baseUrl || raw.apiKey || raw.model) {
+      out.groups.push(llmSanitizeGroup(raw, '默认分组'));
+    }
+    var want = llmStr(raw.activeGroupId, 60);
+    for (var j = 0; j < out.groups.length; j++) {
+      if (out.groups[j].id === want) { out.activeGroupId = want; break; }
+    }
+    if (!out.activeGroupId && out.groups.length) out.activeGroupId = out.groups[0].id;
+    return out;
+  }
+
+  /** 当前激活分组（activeGroupId 失效时回落第一个；无分组返回 null） */
+  function llmActiveGroup(norm) {
+    if (!norm || !Array.isArray(norm.groups) || !norm.groups.length) return null;
+    for (var i = 0; i < norm.groups.length; i++) {
+      if (norm.groups[i].id === norm.activeGroupId) return norm.groups[i];
+    }
+    return norm.groups[0];
+  }
+
+  /** 读 + 规范化（localStorage 不可用时返回空结构） */
+  function llmRead() {
+    return llmNormalize(readJSON(LLM_SETTINGS_KEY, null));
+  }
+
+  /** 规范化后写回（v2）；返回是否写入成功 */
+  function llmWrite(norm) {
+    return writeJSON(LLM_SETTINGS_KEY, llmNormalize(norm));
+  }
+
+  /** 清空全部模型设置（回落服务端 .env） */
+  function llmClear() {
+    try {
+      if (!root.localStorage || typeof root.localStorage.removeItem !== 'function') return false;
+      root.localStorage.removeItem(LLM_SETTINGS_KEY);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /** 请求体 settings 解析：激活分组 → {baseUrl, apiKey, model, protocol, systemPrompt}；全空 → null */
+  function llmResolve(raw) {
+    var norm = (raw && raw.version === 2 && Array.isArray(raw.groups)) ? raw : llmNormalize(raw);
+    var group = llmActiveGroup(norm);
+    if (!group) return null;
+    var out = {};
+    if (group.baseUrl) out.baseUrl = group.baseUrl;
+    if (group.model) out.model = group.model;
+    if (group.apiKey) out.apiKey = group.apiKey;
+    if (group.protocol === 'responses' || group.protocol === 'chat-completions') out.protocol = group.protocol;
+    if (group.systemPrompt) out.systemPrompt = group.systemPrompt;
+    return Object.keys(out).length ? out : null;
+  }
+
+  /** 追加分组并设为激活；返回新分组深拷贝 */
+  function llmAddGroup(norm, name) {
+    if (!norm || !Array.isArray(norm.groups)) return null;
+    var group = llmSanitizeGroup({ name: name }, '分组 ' + (norm.groups.length + 1));
+    norm.groups.push(group);
+    norm.activeGroupId = group.id;
+    return deepClone(group);
+  }
+
+  /** 删除分组（最后一个不允许删）；删除的是激活项时回退到相邻项 */
+  function llmRemoveGroup(norm, groupId) {
+    if (!norm || !Array.isArray(norm.groups) || norm.groups.length <= 1) return false;
+    var index = -1;
+    for (var i = 0; i < norm.groups.length; i++) {
+      if (norm.groups[i].id === groupId) { index = i; break; }
+    }
+    if (index < 0) return false;
+    var wasActive = norm.activeGroupId === groupId;
+    norm.groups.splice(index, 1);
+    if (wasActive) norm.activeGroupId = norm.groups[Math.min(index, norm.groups.length - 1)].id;
+    return true;
+  }
+
+  /** 用表单字段更新分组（字段先归一化；model 自动并入 models）；找不到分组返回 null */
+  function llmUpdateGroup(norm, groupId, fields) {
+    if (!norm || !Array.isArray(norm.groups)) return null;
+    var input = fields || {};
+    for (var i = 0; i < norm.groups.length; i++) {
+      var group = norm.groups[i];
+      if (group.id !== groupId) continue;
+      var merged = llmSanitizeGroup({
+        id: group.id,
+        name: group.name,
+        baseUrl: input.baseUrl !== undefined ? input.baseUrl : group.baseUrl,
+        apiKey: input.apiKey !== undefined ? input.apiKey : group.apiKey,
+        protocol: input.protocol !== undefined ? input.protocol : group.protocol,
+        model: input.model !== undefined ? input.model : group.model,
+        models: group.models,
+        systemPrompt: input.systemPrompt !== undefined ? input.systemPrompt : group.systemPrompt
+      }, group.name);
+      norm.groups[i] = merged;
+      return deepClone(merged);
+    }
+    return null;
+  }
+
   root.Store = {
     // —— 状态读写
     getState: getState,
@@ -1285,6 +1434,19 @@
     CURRENT_ID_KEY: CURRENT_ID_KEY,
     currentProjectId: currentProjectId,
     saveCurrentProject: saveCurrentProject,
-    deleteProject: deleteProject
+    deleteProject: deleteProject,
+    // —— 模型设置（模型分组 v2；契约 §15.6）
+    llmSettings: {
+      KEY: LLM_SETTINGS_KEY,
+      normalize: llmNormalize,
+      resolve: llmResolve,
+      read: llmRead,
+      write: llmWrite,
+      clear: llmClear,
+      activeGroup: llmActiveGroup,
+      addGroup: llmAddGroup,
+      removeGroup: llmRemoveGroup,
+      updateGroup: llmUpdateGroup
+    }
   };
 })(typeof window !== 'undefined' ? window : this);

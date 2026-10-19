@@ -1,2 +1,5 @@
-# 文献挖掘首批候选检索的最小环境；SOC 浏览器脚本中的 stealth 为可选增强。
+# 文献挖掘最小环境；SOC 浏览器脚本中的 stealth 为可选增强。
+# export 写 xlsx/读用户模板用 openpyxl；PDF→文本用 pypdf（依赖变更由 .literature-ready marker v2 感知）。
 playwright>=1.40,<2
+openpyxl>=3.1,<4
+pypdf>=4,<7
