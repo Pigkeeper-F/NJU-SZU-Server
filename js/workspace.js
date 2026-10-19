@@ -32,19 +32,18 @@
     return panel;
   }
   function literatureWorkflow() {
-    const panel = node('details', 'literature-workflow');
-    panel.append(node('summary', '', '工作流说明 · 文献 meta 与参数挖掘'));
-    panel.setAttribute('aria-labelledby', 'literature-workflow-title');
+    const panel = node('section', 'literature-workflow');
+    panel.setAttribute('aria-label', '文献挖掘使用说明');
     const head = node('div', 'literature-workflow-head');
-    head.append(node('div', 'eyebrow', 'WORKFLOW'), node('h2', '', '从研究主题到文献 meta 与参数'), node('p', '', '通用工作流定义。每个主题单独配置检索范围、纳入规则和字段；SOC 只是一个实例，不是全局规则。'));
+    head.append(node('h2', '', '讨论需求 → 确认设置 → 执行 → 核查结果'), node('p', '', '这里是操作说明，不是本次研究的执行方案。每个主题分别确定检索范围、纳入规则和提取字段。'));
     panel.append(head);
     const stages = [
-      ['定义', '输入一个研究主题，形成可追溯、可复核的结构化文献及研究参数数据。'],
-      ['输入', '必填：主题。可选：研究目的、地域/时间范围、目标数量、纳入/排除标准、字段模板、已有文献或数据。缺省项先提出建议，确认后执行。'],
-      ['执行', '扩展检索词并检索来源；合并去重；按规则标注纳入/排除/待复核；获取全文（HTML 优先、PDF 备选）；提取文献 meta 与主题参数；统一单位和分类，同时保留原始值及证据。'],
-      ['交付', '结构化 CSV/XLSX（可附逐篇 JSON）、检索与筛选日志、规则版本、纳入/排除数量、来源证据，以及待人工复核清单。'],
-      ['检查', '检查必填字段、重复记录、单位与范围、来源可追溯性、提取值是否有原文证据；抽样复核准确性并报告检索覆盖与缺失。'],
-      ['异常', '全文不可得、字段缺失/冲突、图表无法可靠读取、候选不足或规则有歧义时，明确标记原因并转人工审核；不得猜测或补造数据。']
+      ['先讨论需求', '在底部 AI 对话中说明要找的研究和数据，讨论范围、纳排条件及字段。讨论本身不会开始检索。'],
+      ['核对本次检索设置', '点“从对话整理规则”，再展开“本次检索设置”检查主题、检索词、来源、年份和目标字段。可以直接修改，AI 建议需你核对。'],
+      ['选择本次做到哪一步', '可先只检索候选文献，或继续到全文获取、提取、校验和导出。确认后点击“确认配置并检索”才开始。'],
+      ['确认字段后提取', '进入提取前，确认每个字段的含义与单位。模型按确认内容逐篇提取，并保存原文出处和缺失情况。'],
+      ['核查结果与历史任务', '检查提取值和出处，下载 CSV/Excel。历史任务用于查看已运行批次，也可继续尚未完成的阶段。'],
+      ['遇到问题', '当前六阶段自动检索仅接通 Google Scholar。验证码需你在检索浏览器中完成；无法取得全文或数据时如实标记。Meta 作者的分析输入附件需要另行核查，不能默认已经拿齐。']
     ];
     const grid = node('div', 'literature-workflow-grid');
     stages.forEach(([title, description], index) => {
@@ -53,6 +52,7 @@
       grid.append(item);
     });
     panel.append(grid);
+    panel.append(node('p', '', '首次运行可能需要准备 Python 依赖和 Chromium 浏览器组件。提取前的字段确认、执行中的提示与结果核查，仍需要研究者参与。'));
     const example = node('details', 'literature-workflow-example');
     const summary = node('summary', '', 'SOC 示例配置（仅作为主题实例）');
     const exampleText = node('p', '', '主题可限定为中国地区、可定位样点的原始田间研究和明确报告的土壤有机碳（SOC）数据；按地点、年份、处理、作物与施肥等字段提取并保留原文证据。综述、无法定位或不符合地域范围的记录按该实例规则排除或复核。切换主题时，应替换这些筛选条件与字段，不沿用 SOC 专属规则。');
@@ -60,6 +60,20 @@
     panel.append(example);
     return panel;
   }
+  let literatureHelpDialog = null;
+  document.addEventListener('literature-help-open', () => {
+    if (!literatureHelpDialog) {
+      literatureHelpDialog = node('dialog', 'literature-help-dialog');
+      literatureHelpDialog.setAttribute('aria-label', '文献挖掘使用说明');
+      const head = node('div', 'literature-help-head');
+      const close = node('button', 'quiet-button', '关闭'); close.type = 'button';
+      close.addEventListener('click', () => literatureHelpDialog.close());
+      head.append(node('h2', '', '文献挖掘 · 使用说明'), close);
+      literatureHelpDialog.append(head, literatureWorkflow());
+      document.body.append(literatureHelpDialog);
+    }
+    if (!literatureHelpDialog.open) literatureHelpDialog.showModal();
+  });
   function decorateSpace() {
     const state = Store.getState();
     const notes = $('conversation-mode').value === 'notes';
@@ -67,12 +81,6 @@
     const existingWorkflow = moduleSpace.querySelector('.literature-workflow');
     if (existingWorkflow) existingWorkflow.remove();
     const activeModule = state.modules.find(mod => mod.id === state.activeModuleId);
-    if (activeModule && activeModule.type === 'literature-mining') {
-      const workflow = literatureWorkflow();
-      const messages = moduleSpace.querySelector('.msg-list');
-      if (messages) moduleSpace.insertBefore(workflow, messages);
-      else moduleSpace.append(workflow);
-    }
     if (!state.modules.length) $('module-space').replaceChildren(welcome());
     if (notes && state.activeModuleId) {
       $('composer-input').disabled = false;

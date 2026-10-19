@@ -1201,3 +1201,9 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 新增内部模块 `tools/codex-runtime.js`：显式 `CODEX_BIN` 优先；Windows 自动发现 `%LOCALAPPDATA%/OpenAI/Codex/bin/*/codex.exe` 中最新安装的可执行文件，缺省时回落 npm 原生程序与 PATH；macOS 保留桌面内置 CLI。启动脚本不再将 CODEX_BIN 固定为旧 npm 程序。`/api/codex/status` 保持原返回结构，使用所选运行时的 `model/list`，跟随 nextCursor 收集全部可见模型并按精确 model 标识去重。前端所有模块共用此目录，连接状态显示模型数量；既有选择继续保留，当前目录不可用的旧选项禁用并提示重新选择。模型名称与调用标识不替换、不手写固定列表。
 
 首次读取账号若遇到特定工作区路由发现超时，使用同一 CLI 的官方 `login status` 命令核对已有本机登录；只有命令成功且明确识别登录类型时才回退，不读出、修改或另存凭据。模型目录和登录状态不替代实际推理成功检查。六阶段新任务将当前模块选择（或账号默认）的模型写入 `config.extraction.model` 后冻结，后续按冻结配置提取，不能只改变对话模型而仍用其他默认提取模型。
+
+## 2026-10-19 文献页面入口整理
+
+文献挖掘主页面仅提供六阶段任务入口。原 LiteratureFlow 在文献模块仅展示已有批次的折叠记录及续跑、补传、交接，不再提供开始新一批的按钮；下载模块继续使用原方案入口。已审核文献方案卡片指向上方统一执行区域，不调用第二套开始接口。
+
+原页内工作流说明移到按需打开的原生 dialog，使用按钮触发 DOM 自定义事件 `literature-help-open`，由 workspace.js 管理弹窗和关闭；不新增全局对象或存储键。新增样式 `.literature-overview`、`.literature-help-dialog`、`.literature-help-head`、`.literature-legacy-history`；旧主页面不再插入 `.literature-workflow` 大块说明。任务卡标题为“文献任务”，配置折叠区显示“本次检索设置（点击查看或修改）”，运行范围标签显示“本次做到哪一步”。模型、科学规则、任务记录与 API 路由保持现有契约。

@@ -122,25 +122,29 @@
     const mod = active(); panel.hidden = !supported(mod) || !document.getElementById('records-view').hidden;
     if (panel.hidden) return;
     const t = state(mod.id), run = t.run;
+    const legacy = mod.type === 'literature-mining';
+    if (legacy && !run && !saved[mod.id]?.id) { panel.hidden = true; return; }
     const handedOff = !!run && saved[mod.id]?.handoffId === run.id;
     if (!t.initialized && saved[mod.id]?.id) { t.initialized = true; void watch(mod.id); }
     panel.replaceChildren();
+    const content = legacy ? node('details', undefined, 'literature-legacy-history') : panel;
+    if (legacy) { content.append(node('summary', '已有批次记录（可查看或继续）')); panel.append(content); }
     const head = node('div', undefined, 'literature-actions');
-    head.append(node('h3', '按方案获取文献数据'), node('span', handedOff ? '已人工确认并交接' : run ? statusNames[run.status] : '审核方案后可执行', 'codex-status')); panel.append(head);
-    panel.append(node('p', '首批最多检索 20 条候选、处理 3 篇文献。按方案检索 Europe PMC / Crossref / Google Scholar，获取开放全文或读取你上传的材料；提取数据并保留出处。Scholar 如需验证，会暂停等待你操作。', 'codex-status'));
+    head.append(node('h3', legacy ? '已有批次' : '按方案获取文献数据'), node('span', handedOff ? '已人工确认并交接' : run ? statusNames[run.status] : '审核方案后可执行', 'codex-status')); content.append(head);
+    content.append(node('p', legacy ? '这是以前按审核方案建立的批次，可查看成果或继续未完成步骤；新任务使用上方“文献任务”。' : '首批最多检索 20 条候选、处理 3 篇文献。按方案检索 Europe PMC / Crossref / Google Scholar，获取开放全文或读取你上传的材料；提取数据并保留出处。Scholar 如需验证，会暂停等待你操作。', 'codex-status'));
     const actions = node('div', undefined, 'literature-actions');
-    actions.append(button(run ? '按当前审核方案开始新一批' : '按审核方案开始执行', () => start(mod), t.loading || run?.status === 'running' || mod.doc?.status !== 'approved', true));
-    if (!run && mod.doc?.status !== 'approved') actions.append(node('span', '先在下方方案卡片审核通过，再开始。', 'codex-status'));
+    if (!legacy) actions.append(button(run ? '按当前审核方案开始新一批' : '按审核方案开始执行', () => start(mod), t.loading || run?.status === 'running' || mod.doc?.status !== 'approved', true));
+    if (!legacy && !run && mod.doc?.status !== 'approved') actions.append(node('span', '先在下方方案卡片审核通过，再开始。', 'codex-status'));
     if (run) actions.append(button('刷新状态', () => { t.error = ''; void watch(mod.id); }, t.loading || t.watching));
     if (run?.status === 'running' || run?.status === 'waiting') actions.append(button('停止本批执行', async () => { try { t.run = await request('/api/codex/literature/cancel', { sessionId: run.sessionId, id: run.id }); render(); } catch (error) { t.error = error.message; render(); } }, t.loading));
-    panel.append(actions);
+    content.append(actions);
     if (run) {
       const stages = node('ol', undefined, 'literature-stages');
       const keys = Object.keys(stageNames), index = keys.indexOf(run.stage);
-      keys.forEach((key, i) => { const step = node('li', (handedOff || i < index ? '✓ ' : i === index ? '● ' : '') + stageNames[key]); step.setAttribute('data-current', String(!handedOff && i === index)); stages.append(step); }); panel.append(stages);
-      panel.append(node('p', handedOff ? '本批已人工确认并交给数据清洗；原件和出处记录保留在此。' : run.progress));
-      panel.append(node('p', '候选 ' + run.candidateCount + ' 篇 · 入选 ' + run.selected.length + ' 篇 · 提取记录 ' + run.rowCount + ' 行（含需核查的空值）', 'codex-status'));
-      if (mod.doc?.content !== run.plan || mod.doc?.status !== 'approved') panel.append(node('p', '当前方案与本批审核版本不同；本批仍按冻结方案运行，变更请重新审核并开始新一批。', 'codex-error'));
+      keys.forEach((key, i) => { const step = node('li', (handedOff || i < index ? '✓ ' : i === index ? '● ' : '') + stageNames[key]); step.setAttribute('data-current', String(!handedOff && i === index)); stages.append(step); }); content.append(stages);
+      content.append(node('p', handedOff ? '本批已人工确认并交给数据清洗；原件和出处记录保留在此。' : run.progress));
+      content.append(node('p', '候选 ' + run.candidateCount + ' 篇 · 入选 ' + run.selected.length + ' 篇 · 提取记录 ' + run.rowCount + ' 行（含需核查的空值）', 'codex-status'));
+      if (mod.doc?.content !== run.plan || mod.doc?.status !== 'approved') content.append(node('p', '当前方案与本批审核版本不同；本批仍按冻结方案运行，变更请重新审核并开始新一批。', 'codex-error'));
       if (run.status === 'waiting') {
         const box = node('div', undefined, 'literature-question'); box.append(node('h4', '需要与你讨论'));
         const list = node('ul'); run.questions.forEach(q => list.append(node('li', q))); box.append(list);
@@ -156,16 +160,16 @@
             const skipLabel = node('label', '本轮跳过此篇（保留缺失记录）'); const skip = node('input'); skip.type = 'checkbox'; skip.checked = !!t.skip[paper.id]; skip.onchange = () => { t.skip[paper.id] = skip.checked; }; skipLabel.prepend(skip); label.append(skipLabel); box.append(label);
           });
         }
-        box.append(button(run.scholarVerification ? '验证后继续执行' : '提交答复并继续执行', () => resume(mod), t.loading || mod.doc?.status !== 'approved', true)); panel.append(box);
+        box.append(button(run.scholarVerification ? '验证后继续执行' : '提交答复并继续执行', () => resume(mod), t.loading || mod.doc?.status !== 'approved', true)); content.append(box);
       }
-      if (run.status === 'completed') panel.append(button(saved[mod.id]?.handoffId === run.id ? '查看已交接的清洗模块' : '核查通过，将提取表交给清洗', () => handoff(mod), t.loading || !run.rowCount, true));
+      if (run.status === 'completed') content.append(button(saved[mod.id]?.handoffId === run.id ? '查看已交接的清洗模块' : '核查通过，将提取表交给清洗', () => handoff(mod), t.loading || !run.rowCount, true));
       if (run.artifacts.length) {
         const files = node('details'); files.open = ['waiting', 'completed'].includes(run.status); files.append(node('summary', '本批材料与成果 · ' + run.artifacts.length));
         const list = node('div', undefined, 'literature-files');
-        run.artifacts.filter(f => !/run-state\.(json|tmp)$/.test(f.name)).forEach(f => { const link = node('a', f.name.slice(run.id.length + 1) + ' · ' + Math.ceil(f.size / 1024) + 'KB'); link.href = '/api/codex/download?session=' + run.sessionId + '&group=output&name=' + encodeURIComponent(f.name); list.append(link); }); files.append(list); panel.append(files);
+        run.artifacts.filter(f => !/run-state\.(json|tmp)$/.test(f.name)).forEach(f => { const link = node('a', f.name.slice(run.id.length + 1) + ' · ' + Math.ceil(f.size / 1024) + 'KB'); link.href = '/api/codex/download?session=' + run.sessionId + '&group=output&name=' + encodeURIComponent(f.name); list.append(link); }); files.append(list); content.append(files);
       }
     }
-    if (t.error) panel.append(node('p', t.error, 'codex-error'));
+    if (t.error) content.append(node('p', t.error, 'codex-error'));
   }
   root.LiteratureUI = { render, start, isBusy: () => Object.values(states).some(t => t.loading || t.run?.status === 'running'), context: id => { const run = state(id).run; return run ? '当前文献获取状态：' + statusNames[run.status] + '；步骤：' + stageNames[run.stage] + '。待讨论问题：' + (run.questions || []).join('；') + '。对话只讨论，点击答复并继续才续跑。' : ''; } };
   Store.subscribe(render); render();

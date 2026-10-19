@@ -1344,7 +1344,9 @@
       // run.status === 'confirmed'（本环节产出已确认）时不再提供重新执行入口，引导进入下一步 / 下一模块
       if (mod.run && mod.run.status === 'confirmed') {
         actions.appendChild(el('span', 'status-hint', '本环节产出已确认，请进入下一步或下一个模块'));
-      } else if (mod.type === 'download-data' || mod.type === 'literature-mining') {
+      } else if (mod.type === 'literature-mining') {
+        actions.appendChild(el('span', 'status-hint', '方案已审核；在上方“文献任务”中核对本次检索设置，再开始执行。'));
+      } else if (mod.type === 'download-data') {
         actions.appendChild(docButton('按审核方案开始执行', 'primary', !!(root.LiteratureUI && root.LiteratureUI.isBusy()), function () { root.LiteratureUI.start(mod); }));
       } else if (mod.type === 'calculation' && mod.mode === 'direct') {
         actions.appendChild(el('span', 'status-hint', '按上方“运行现有代码”执行，使用已有代码与输入数据。'));

@@ -541,7 +541,12 @@
   }
   function literaturePanel(mod, t, container = panel) {
     const box = node('div', undefined, 'literature-connector');
-    box.append(node('p', '对话确认规则 → 核对运行配置 → 分阶段执行：候选检索、跨来源去重、全文获取、参数提取、校验、导出。当前仅 Google Scholar 已接通；全文提取前需要你确认参数字段含义与单位。'));
+    const overview = node('div', undefined, 'literature-overview');
+    const introduction = node('div');
+    introduction.append(node('h3', '文献任务'), node('p', '讨论需求 → 确认设置 → 执行 → 核查结果', 'codex-status'));
+    const help = node('button', '使用说明', 'quiet-button'); help.type = 'button';
+    help.onclick = () => document.dispatchEvent(new CustomEvent('literature-help-open'));
+    overview.append(introduction, help); box.append(overview);
     const row = node('div', undefined, 'codex-toolbar literature-toolbar');
     const prepare = node('button', t.literatureBusy ? '处理中…' : '从对话整理规则', 'quiet-button');
     prepare.type = 'button'; prepare.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy(); prepare.onclick = () => prepareLiterature(mod); row.append(prepare);
@@ -572,7 +577,7 @@
       advance.title = '从下一个未完成阶段继续；缺省运行到下一个人工关口或流水线末尾。';
       advance.onclick = () => continueLiterature(mod); row.append(advance);
     }
-    const untilWrap = node('label', '运行到');
+    const untilWrap = node('label', '本次做到哪一步');
     const until = node('select'); until.setAttribute('aria-label', '本次运行到');
     LITERATURE_UNTIL_OPTIONS.forEach(([value, title]) => { const option = node('option', title); option.value = value; until.append(option); });
     until.value = t.literatureUntil || 'discover'; until.disabled = t.literatureBusy || t.busy;
@@ -582,7 +587,8 @@
     if (t.literatureConfig) {
       const config = t.literatureConfig;
       const details = node('details', undefined, 'literature-config'); details.open = true;
-      details.append(node('summary', '核对本次运行配置' + (saved[mod.id]?.literatureSource !== literatureSource(mod) ? ' · 对话已更新' : '')));
+      details.append(node('summary', '本次检索设置（点击查看或修改）' + (saved[mod.id]?.literatureSource !== literatureSource(mod) ? ' · 对话已更新' : '')));
+      details.append(node('p', '这里是本次任务的要求表。核对检索什么、检索范围和需要提取的字段；修改后再开始执行。', 'codex-status'));
       const fields = node('div', undefined, 'literature-config-fields');
       function input(label, key, type = 'text') {
         const wrap = node('label', label); const field = node('input'); field.type = type;
@@ -611,7 +617,7 @@
       details.append(fields); box.append(details);
       if (config.sources.some(source => source !== 'google-scholar')) box.append(node('p', '配置含未接通来源：启动时会报错；如本次只做 Scholar 首批检索，请明确取消其他来源。', 'codex-error'));
     } else box.append(node('p', '先在本模块对话确认规则，再点“从对话整理规则”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
-    if (!job) box.append(node('p', '首次运行将自动创建 .venv 并安装最小依赖及 Chromium；若 Scholar 出现验证码，请在新开的浏览器中手动完成。', 'codex-status'));
+    if (!job) box.append(node('p', '当前仅 Google Scholar 已接通；全文提取前需要你确认参数字段含义与单位。', 'codex-status'));
     if (job) {
       box.append(node('p', '状态：' + (job.message || literatureStageLabel(job.stage) || job.status) + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
       const stages = literatureStageBar(job);
@@ -818,10 +824,7 @@
     }
     panel.append(row);
     if (mod.type === 'literature-mining') {
-      const discovery = node('details'); discovery.append(node('summary', '文献检索与提取（六阶段）'));
-      discovery.open = t.discoveryOpen !== false;
-      discovery.ontoggle = () => { if (discovery.isConnected) t.discoveryOpen = discovery.open; };
-      literaturePanel(mod, t, discovery); panel.append(discovery);
+      literaturePanel(mod, t);
       if (t.error) panel.append(node('p', t.error, 'codex-error'));
       return;
     }
