@@ -197,11 +197,37 @@ class PubMedTests(unittest.TestCase):
 
     def test_invalid_configuration_makes_no_request(self):
         for kwargs in ({"limit": 11}, {"limit": True}, {"year_from": 2025, "year_to": 2020},
-                       {"year_from": "2020"}, {"year_to": False}):
+                       {"year_from": "2020"}, {"year_to": False}, {"page_index": -1},
+                       {"page_index": True}, {"page_index": 1000}):
             network = FakeNetwork()
             result = self.run_query(network, **kwargs)
             self.assertEqual(result["status"], "error", result)
             self.assertEqual(network.calls, [])
+
+    def test_offset_pages_keep_actual_total_and_last_partial_page(self):
+        network = FakeNetwork(search(12, ["111", "222"]), xml(article(pmid="111"), article(pmid="222")))
+        result = self.run_query(network, page_index=1)
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["page_index"], 1)
+        self.assertEqual(result["total_count"], 12)
+        self.assertFalse(result["has_next"])
+        params = parse_qs(urlsplit(network.calls[0][0]).query)
+        self.assertEqual(params["retstart"], ["10"])
+        self.assertEqual([row["pmid"] for row in result["results"]], ["111", "222"])
+
+    def test_full_page_and_confirmed_end_beyond_count(self):
+        ids = [str(number) for number in range(1, 11)]
+        result = self.run_query(FakeNetwork(search(30, ids), xml(*(article(pmid=pmid) for pmid in ids))), page_index=1)
+        self.assertTrue(result["has_next"])
+        end = self.run_query(FakeNetwork(search(12, [])), page_index=2)
+        self.assertEqual(end["status"], "ok")
+        self.assertEqual(end["results"], [])
+        self.assertFalse(end["has_next"])
+
+    def test_later_offset_inconsistent_ids_is_not_silent_end(self):
+        result = self.run_query(FakeNetwork(search(30, [])), page_index=1)
+        self.assertEqual(result["status"], "error")
+        self.assertIsNone(result["has_next"])
 
 
 if __name__ == "__main__":

@@ -217,7 +217,7 @@ def _fetch_records(data: bytes, ids: list[str]) -> list[dict]:
 
 
 def run(query: str, limit: int = 10, year_from: int | None = None,
-        year_to: int | None = None, *, opener=None, timeout: float = 25,
+        year_to: int | None = None, *, page_index: int = 0, opener=None, timeout: float = 25,
         max_response_bytes: int = MAX_RESPONSE_BYTES, sleep=time.sleep,
         clock=time.monotonic) -> dict[str, Any]:
     """Return public bibliographic candidates; ``opener`` is injectable for tests.
@@ -229,12 +229,15 @@ def run(query: str, limit: int = 10, year_from: int | None = None,
     result: dict[str, Any] = {"status": "error", "message": "", "source_key": "pubmed",
                             "url": "https://pubmed.ncbi.nlm.nih.gov/", "results": [],
                             "applied_filters": applied, "deferred_rules": [],
-                            "transport": "ncbi_eutilities"}
+                            "transport": "ncbi_eutilities", "page_index": page_index,
+                            "has_next": None, "total_count": None}
     try:
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise PubMedError("PubMed 检索式必须为 1 到 2000 字的非空文本。")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
             raise PubMedError("PubMed 每批返回数量必须为 1 到 10。")
+        if isinstance(page_index, bool) or not isinstance(page_index, int) or not 0 <= page_index <= 999:
+            raise PubMedError("PubMed 页码必须为 0 到 999。")
         for value in (year_from, year_to):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1000 <= value <= 9999):
                 raise PubMedError("PubMed 发表年份必须为四位整数。")
@@ -246,7 +249,7 @@ def run(query: str, limit: int = 10, year_from: int | None = None,
             raise PubMedError("PubMed 响应大小配置无效。")
         query = query.strip()
         params = {"db": "pubmed", "term": query, "retmode": "json",
-                  "retmax": limit, "retstart": 0, "sort": "relevance", "tool": "NJU_SZU_Workbench"}
+                  "retmax": limit, "retstart": page_index * limit, "sort": "relevance", "tool": "NJU_SZU_Workbench"}
         web_query = query
         if year_from is not None or year_to is not None:
             lower, upper = year_from or 1000, year_to or 9999
@@ -274,11 +277,15 @@ def run(query: str, limit: int = 10, year_from: int | None = None,
                 or not isinstance(ids, list) or any(not isinstance(pmid, str) or not re.fullmatch(r"[1-9]\d{0,19}", pmid) for pmid in ids)):
             raise PubMedError("PubMed 检索计数或 PMID 清单无效。")
         count = int(raw_count)
-        if len(ids) != min(count, limit) or len(set(ids)) != len(ids):
+        if len(ids) != min(max(count - page_index * limit, 0), limit) or len(set(ids)) != len(ids):
             raise PubMedError("PubMed 检索计数与 PMID 清单不一致，不能据此判定零命中。")
         result["total_count"] = count
+        result["has_next"] = page_index * limit + len(ids) < count
         if count == 0:
             result.update(status="no_results", message="PubMed 官方接口确认本检索式零命中。")
+            return result
+        if not ids:
+            result.update(status="ok", message="PubMed 官方接口确认已到本次结果末尾。")
             return result
         raw = _read("efetch.fcgi", {"db": "pubmed", "id": ",".join(ids), "retmode": "xml",
                                     "tool": "NJU_SZU_Workbench"}, **request_options)

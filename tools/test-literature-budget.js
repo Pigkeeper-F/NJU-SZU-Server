@@ -17,6 +17,19 @@ for (const count of [1, 2, 3, 6]) {
   assert.equal(normalizeConfig({ ...raw, limits: { discover: 7200 } }).limits.discover, 7200, '显式较大预算不被六来源上限压缩');
   assert.equal(resolveLimits({ ...raw, limits: { discover: 7200 } }).discover, 7200);
   assert.equal(normalized.limits.dedupe, DEFAULT_LIMITS.dedupe, '其他阶段预算不乘来源数');
+  const testMode = normalizeConfig({ ...raw, searchMode: 'test', perSourceLimit: 999 });
+  assert.equal(testMode.limits.discover, count * 180, '测试模式固定每源十条，不使用遗留正式数量扩张预算');
+  for (const target of [1, 10, 11, 25, 100, 1000]) {
+    const formal = { ...raw, searchMode: 'formal', perSourceLimit: target };
+    const expected = Math.min(86400, 180 * count * Math.ceil(target / 10));
+    const normalizedFormal = normalizeConfig(formal);
+    assert.equal(normalizedFormal.limits.discover, expected);
+    assert.equal(resolveLimits(formal).discover, expected, '恢复的正式配置与新建配置使用相同分页预算');
+    assert.equal(resolveLimits(normalizedFormal).discover, expected);
+    assert.equal(normalizeConfig({ ...formal, limits: { discover: 60 } }).limits.discover, 60, '正式模式仍遵守显式短预算');
+    assert.equal(resolveLimits({ ...formal, limits: { discover: 7200 } }).discover, 7200);
+  }
+  assert.equal(resolveLimits({ ...raw, searchMode: 'formal' }).discover, count * 1800, '正式缺省每源100条');
 }
 assert.equal(resolveLimits({ sources: [] }).discover, 180, '旧配置边界至少一来源预算');
 assert.equal(resolveLimits({ sources: Array(20).fill('unknown') }).discover, 1080, '缺省预算最大六来源；来源合法性由配置校验负责');
@@ -27,4 +40,5 @@ const prompt = workflowPrompt({ type: 'literature-mining' }, 'codex');
 for (const label of ['Google Scholar', '知网', '万方', 'Web of Science', 'Scopus', 'PubMed']) assert.ok(prompt.includes(label));
 assert.ok(prompt.includes('NCBI官方E-utilities接口') && prompt.includes('通常无需登录'));
 assert.ok(!prompt.includes('万方、Scopus、PubMed仍未接通'));
+assert.ok(prompt.includes('测试') && prompt.includes('正式') && prompt.includes('自动翻页'));
 console.log('LITERATURE_BUDGET_TESTS_PASS');

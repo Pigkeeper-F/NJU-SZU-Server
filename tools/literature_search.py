@@ -304,7 +304,7 @@ def write_results(output_dir: Path, query: str, search: dict, config: dict | Non
         "search_url": batch["search_url"],
         "retrieved_at": retrieved_at,
         "count": len(all_records),
-        "scope": "first_page_candidates_only",
+        "scope": "paged_candidates_up_to_source_limit" if (config or {}).get("searchMode") == "formal" else "first_page_candidates_only",
         "applied_filters": batch["applied_filters"],
         "deferred_rules": batch["deferred_rules"],
         "caution": "Search snippets are not verified abstracts or full text; all records await screening.",
@@ -335,6 +335,15 @@ def validate_config(config: object) -> None:
     limit = config.get("limit", 0)
     if not isinstance(query, str) or not query.strip() or not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10:
         raise ValueError("运行配置缺少检索式或包含未接通来源")
+    mode = config.get("searchMode")
+    if mode is not None:
+        if mode not in ("test", "formal"):
+            raise ValueError("检索模式必须是 test 或 formal")
+        target = config.get("perSourceLimit", 10 if mode == "test" else 100)
+        if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= 1000:
+            raise ValueError("每来源候选上限必须为 1–1000")
+        if mode == "test" and (target != 10 or limit != 10):
+            raise ValueError("测试运行固定每来源10条")
     for key in ("publicationYearFrom", "publicationYearTo"):
         value = config.get(key)
         if value is not None and (not isinstance(value, int) or isinstance(value, bool) or not 1800 <= value <= datetime.now(timezone.utc).year + 1):
@@ -375,14 +384,17 @@ def config_fingerprint(config: dict) -> str:
     inputs = {key: config.get(key) for key in ("query", "sources", "publicationYearFrom", "publicationYearTo", "limit")}
     inputs["sourceQueries"] = config.get("sourceQueries") or {}
     inputs["batch"] = {"size": batch_size(config), "maxBatches": batch_max(config)}
+    if config.get("searchMode") is not None:
+        inputs["searchMode"] = config["searchMode"]
+        inputs["perSourceLimit"] = config.get("perSourceLimit", 10 if config["searchMode"] == "test" else 100)
     return hashlib.sha256(json.dumps(inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def filtered_source_results(search: dict, config: dict, source: str, query: str) -> dict:
+def filtered_source_results(search: dict, config: dict, source: str, query: str, *, full_page: bool = False) -> dict:
     """Normalize metadata and honestly distinguish UI filters from post-filters."""
     low, high = config.get("publicationYearFrom"), config.get("publicationYearTo")
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    raw = [item for item in search.get("results", []) if isinstance(item, dict)][:batch_size(config)]
+    raw = [item for item in search.get("results", []) if isinstance(item, dict)][:200 if full_page else batch_size(config)]
     supplied_applied = search.get("applied_filters")
     if isinstance(supplied_applied, dict):
         supplied_applied = list(supplied_applied)
@@ -441,7 +453,184 @@ def checkpoint_report(output_dir: Path, config: dict, state: dict) -> dict:
                          config, batch_index=state["batch_index"])
 
 
+def _record_keys(row: dict) -> set[str]:
+    """Source-local identities, including the legacy normalized-title key."""
+    keys = set()
+    title = re.sub(r"\W+", "", str(row.get("title") or "").strip()[:500]).casefold()
+    if title:
+        keys.add("title:" + title)
+    doi, pmid = normalize_doi(row.get("doi")), metadata_pmid(row.get("pmid"))
+    if doi:
+        keys.add("doi:" + doi)
+    if pmid:
+        keys.add("pmid:" + pmid)
+    url = safe_url(row.get("result_url"))
+    if url:
+        keys.add("url:" + url)
+    return keys
+
+
+def _page_fingerprint(rows: list[dict]) -> str:
+    # Ignore transient result-link tracking parameters and result order. A
+    # repeated page must not count toward the target after a failed Next click.
+    identities = [sorted(key for key in _record_keys(row) if not key.startswith("url:"))
+                  or sorted(_record_keys(row)) for row in rows]
+    return hashlib.sha256(json.dumps(sorted(identities), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
+               batch_index: int | None = None, resume: bool = False) -> int:
+    """One discovery batch, many pages; commit every page before advancing."""
+    import literature_browser
+
+    output_dir = Path(output_dir)
+    validate_config(config)
+    target = config.get("perSourceLimit", 100)
+    checkpoint_path = output_dir / "discovery-state.json"
+    state = _common.load_json(checkpoint_path, default=None)
+    fingerprint = config_fingerprint(config)
+    if checkpoint_path.exists() and not isinstance(state, dict):
+        emit("error", message="检索检查点损坏；请新建任务，避免混用已有成果")
+        return 1
+    if state and state.get("config_fingerprint") != fingerprint:
+        emit("error", message="检索配置已更改；请新建任务，不能与已保存的来源结果混用")
+        return 1
+    index = resolve_batch_index(output_dir, config, requested=batch_index, resume=resume)
+    if state and (resume or scrape_current) and batch_index is None:
+        index = state["batch_index"]
+    if state and state.get("pending_source") and not (resume or scrape_current):
+        emit("error", message="当前来源尚未完成；请继续原任务，不要创建新批次")
+        return 1
+    if state and state.get("pending_source") and index != state["batch_index"]:
+        emit("error", message="待处理来源属于原批次；请继续原批次或新建任务")
+        return 1
+    if index < 1 or index > batch_max(config):
+        emit("error", message=f"检索批次无效或已达本任务批数上限（{batch_max(config)}）")
+        return 1
+    if not state or state["batch_index"] != index:
+        state = {"version": 2, "config_fingerprint": fingerprint, "batch_index": index,
+                 "sources": {}, "pending_source": None, "pending_reason": None}
+    resumed_source = state.get("pending_source") if (resume or scrape_current) and state.get("pending_reason") in ATTENTION_REASONS else None
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def persist():
+        _common.atomic_write_json(checkpoint_path, state)
+        return checkpoint_report(output_dir, config, state)
+
+    def stop(entry, source, *, reason="results_unrecognized", message="", error=False):
+        # Keep this source's completed pages as well as previous sources.
+        entry.update(status="error" if error else "attention", reason=reason,
+                     stop_reason="error" if error else "needs_attention")
+        state.update(pending_source=source, pending_reason=None if error else reason)
+        result = persist()
+        emit("error" if error else "attention", stage="search" if error else "verification",
+             source=source, reason=reason,
+             message=message or "无法确认下一检索页；已有候选已保留，请核对官方页面后检查并继续。", **result)
+        return 1 if error else 0
+
+    for source in config["sources"]:
+        entry = state["sources"].get(source)
+        if entry and entry.get("status") in {"ok", "no_results"}:
+            continue
+        query = (config.get("sourceQueries") or {}).get(source, config["query"])
+        if entry is None:
+            entry = {"status": "running", "query": query, "url": "", "results": [],
+                     "applied_filters": [], "deferred_rules": deferred_rules(config),
+                     "pages": [], "next_page": 0, "pages_fetched": 0, "retrieved_count": 0,
+                     "count": 0, "total_count": None, "stop_reason": None}
+            state["sources"][source] = entry
+        entry.update(status="running", stop_reason=None)
+        state.update(pending_source=source, pending_reason=None)
+        persist()
+        seen = set().union(*(_record_keys(row) for row in entry["results"])) if entry["results"] else set()
+        while len(entry["results"]) < target:
+            page_index = entry["next_page"]
+            if page_index >= 1000:
+                return stop(entry, source, message="已达单来源1000页保护上限，已有结果保留。请缩小检索范围后新建任务。")
+            emit("stage", stage="search", source=source,
+                 message=f"{_sources.label_of(source)}：正在获取第{page_index + 1}页，已保留{len(entry['results'])}/{target}条候选")
+            search = literature_browser.run(source, query, source == resumed_source, batch_size(config),
+                                            config.get("publicationYearFrom"), config.get("publicationYearTo"),
+                                            job_dir=output_dir, page_index=page_index, full_page=True)
+            resumed_source = None  # only the paused page may read a manual tab
+            if search.get("status") in {"attention", "captcha"}:
+                reason = search.get("reason", "verification" if search.get("status") == "captcha" else "results_unrecognized")
+                if reason not in ATTENTION_REASONS:
+                    reason = "results_unrecognized"
+                return stop(entry, source, reason=reason, message=search.get("message") or "当前来源需要人工处理；登录或验证后检查并继续。")
+            if search.get("status") not in {"ok", "no_results"}:
+                return stop(entry, source, message=search.get("message") or "本页检索失败，已完成页已保留。", error=True)
+            previous_transport = entry.get("transport")
+            next_transport = metadata_transport(search.get("transport"))
+            if source == "pubmed" and entry["pages"] and previous_transport and next_transport and previous_transport != next_transport:
+                return stop(entry, source, message="PubMed获取方式发生变化，页大小可能不同；已保留已有候选，请按原方式重试本页。", error=True)
+            if search.get("page_index", page_index) != page_index:
+                return stop(entry, source, message="返回页码与当前等待页不一致，已有成果已保留，请核对后继续。")
+            raw = [row for row in search.get("results", []) if isinstance(row, dict)][:200]
+            signature = _page_fingerprint(raw)
+            if raw and any(page.get("fingerprint") == signature for page in entry["pages"]):
+                return stop(entry, source, message="检测到重复检索页，已停止累加。请核对下一页是否加载成功后检查并继续。")
+            if not raw and search.get("status") != "no_results" and search.get("has_next") is not False:
+                return stop(entry, source, message="本页没有可核对的题录，无法确认是末页；请核对后检查并继续。")
+            page = filtered_source_results(search, config, source, query, full_page=True)
+            for row in page["results"]:
+                keys = _record_keys(row)
+                if not keys or keys & seen:
+                    continue
+                seen.update(keys)
+                entry["results"].append(row)
+                if len(entry["results"]) >= target:
+                    break
+            if not entry["pages"]:
+                entry["applied_filters"] = page["applied_filters"]
+            else:
+                entry["applied_filters"] = [name for name in entry["applied_filters"] if name in page["applied_filters"]]
+            entry["deferred_rules"] = list(dict.fromkeys(entry["deferred_rules"] + page["deferred_rules"]))
+            entry["url"] = page["url"]
+            entry["transport"] = page["transport"]
+            entry["retrieved_at"] = page["retrieved_at"]
+            filtering = entry.setdefault("year_filtering", {"mode": page["year_filtering"]["mode"], "excluded": 0, "unknown_year_retained": 0})
+            if filtering["mode"] != page["year_filtering"]["mode"]:
+                filtering["mode"] = "mixed_source_and_post_filter"
+            for key in ("excluded", "unknown_year_retained"):
+                filtering[key] += page["year_filtering"][key]
+            total_count = search.get("total_count")
+            if isinstance(total_count, int) and not isinstance(total_count, bool) and total_count >= 0:
+                entry["total_count"] = total_count
+            entry["pages"].append({"page_index": page_index, "fingerprint": signature, "returned": len(raw)})
+            entry["next_page"] = page_index + 1
+            entry["pages_fetched"] = len(entry["pages"])
+            entry["retrieved_count"] += len(raw)
+            entry["returned"] = entry["retrieved_count"]
+            entry["count"] = len(entry["results"])
+            ended = search.get("has_next") is False or search.get("status") == "no_results"
+            if entry["count"] >= target:
+                entry.update(status="ok", stop_reason="limit_reached")
+            elif ended:
+                entry.update(status="ok" if entry["count"] else "no_results", stop_reason="exhausted")
+            result = persist()
+            total_hint = f"，来源报告总命中{entry['total_count']}条" if entry["total_count"] is not None else ""
+            emit("stage", stage="search", source=source,
+                 message=f"{_sources.label_of(source)}：第{page_index + 1}页已保存，已保留{entry['count']}/{target}条候选{total_hint}", **result)
+            if entry["status"] in {"ok", "no_results"}:
+                break
+            if search.get("has_next") is not True:
+                return stop(entry, source, message="本页已保存，但无法确认后续页。请核对官方分页控件后检查并继续。")
+        state.update(pending_source=next((key for key in config["sources"]
+                                         if (state["sources"].get(key) or {}).get("status") not in {"ok", "no_results"}), None),
+                     pending_reason=None)
+        persist()
+    result = persist()
+    counts = "；".join(f"{_sources.label_of(source)} {state['sources'][source]['count']}/{target}条"
+                      + ("（已到末页）" if state["sources"][source].get("stop_reason") == "exhausted" else "（已达上限）")
+                      for source in config["sources"])
+    emit("result", stage="completed", message="正式检索已保存：" + counts + "；仍待人工筛选与跨来源去重。", **result)
+    return 0
+
+
 def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_index: int | None = None, resume: bool = False) -> int:
+    if config.get("searchMode") == "formal":
+        return run_formal(config, output_dir, scrape_current, batch_index=batch_index, resume=resume)
     output_dir = Path(output_dir)
     validate_config(config)
     checkpoint_path = output_dir / "discovery-state.json"

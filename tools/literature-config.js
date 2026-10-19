@@ -36,9 +36,9 @@ function integer(value, name, min, max) {
   return result;
 }
 
-function batchConfig(raw, limit) {
+function batchConfig(raw, limit, fixedSize = false) {
   const value = object(raw, '批配置');
-  const size = value.size == null ? limit : integer(value.size, '每批检索数量', 1, 10);
+  const size = fixedSize ? 10 : value.size == null ? limit : integer(value.size, '每批检索数量', 1, 10);
   const maxBatches = value.maxBatches == null ? 1 : integer(value.maxBatches, '批数上限', 1, 50);
   return { size, maxBatches };
 }
@@ -114,10 +114,18 @@ function extractionConfig(raw) {
   return { maxCharsPerPaper, model };
 }
 
-function limitsConfig(raw, sourceCount = 1) {
+function discoverBudget(config) {
+  const sourceCount = Array.isArray(config?.sources) ? config.sources.length : 1;
+  const target = config?.searchMode === 'formal'
+    ? (Number.isInteger(config.perSourceLimit) && config.perSourceLimit >= 1 && config.perSourceLimit <= 1000 ? config.perSourceLimit : 100)
+    : 10;
+  return Math.min(86400, 180 * Math.min(6, Math.max(1, sourceCount)) * Math.ceil(target / 10));
+}
+
+function limitsConfig(raw, config) {
   const value = object(raw, '阶段超时');
   const result = { ...DEFAULT_LIMITS };
-  result.discover *= Math.min(6, Math.max(1, Number.isInteger(sourceCount) ? sourceCount : 1));
+  result.discover = discoverBudget(config);
   for (const stage of Object.keys(DEFAULT_LIMITS)) {
     if (value[stage] == null) continue;
     result[stage] = integer(value[stage], `${stage} 阶段超时`, 1, 86400);
@@ -136,7 +144,14 @@ function normalizeConfig(raw, options = {}) {
   const publicationYearFrom = year(raw.publicationYearFrom, '发表起始年份');
   const publicationYearTo = year(raw.publicationYearTo, '发表截止年份');
   if (publicationYearFrom && publicationYearTo && publicationYearFrom > publicationYearTo) throw new Error('发表起始年份不能晚于截止年份');
-  const limit = raw.limit == null ? 10 : Number(raw.limit);
+  const searchMode = raw.searchMode == null ? null : string(raw.searchMode, '检索模式', 20);
+  if (searchMode !== null && !['test', 'formal'].includes(searchMode)) throw new Error('检索模式必须是 test 或 formal');
+  let perSourceLimit = 10;
+  if (searchMode === 'formal') {
+    if (typeof raw.perSourceLimit === 'boolean') throw new Error('每来源检索数量必须为 1–1000 的整数');
+    perSourceLimit = raw.perSourceLimit == null ? 100 : integer(raw.perSourceLimit, '每来源检索数量', 1, 1000);
+  }
+  const limit = searchMode ? 10 : raw.limit == null ? 10 : Number(raw.limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 10) throw new Error('首批检索数量必须为 1–10');
   const templates = object(raw.templates, '模板配置');
   return {
@@ -149,14 +164,15 @@ function normalizeConfig(raw, options = {}) {
     exclusion: list(raw.exclusion, '排除规则'),
     targetFields: list(raw.targetFields, '目标字段'),
     limit,
+    ...(searchMode ? { searchMode, perSourceLimit } : {}),
     sourceQueries: sourceQueries(raw.sourceQueries),
-    batch: batchConfig(raw.batch, limit),
+    batch: batchConfig(raw.batch, limit, !!searchMode),
     fieldDefinitions: fieldDefinitions(raw.fieldDefinitions),
     templates: { literature: templatePath(templates.literature, '文献模板'), parameters: templatePath(templates.parameters, '参数模板') },
     fulltext: fulltextConfig(raw.fulltext),
     extraction: extractionConfig(raw.extraction),
-    limits: limitsConfig(raw.limits, sources.length)
+    limits: limitsConfig(raw.limits, { sources, searchMode, perSourceLimit })
   };
 }
 
-module.exports = { normalizeConfig, DEFAULT_LIMITS };
+module.exports = { normalizeConfig, DEFAULT_LIMITS, discoverBudget };

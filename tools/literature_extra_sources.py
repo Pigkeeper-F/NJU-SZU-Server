@@ -49,7 +49,11 @@ _SNAPSHOT_JS = r"""/* literature_extra_snapshot */ ({source,limit}) => {
   if(summary) queries.push(summary);
   let rows=[], resultContainer=false, noResults=false;
   if(source==='pubmed') {
-    rows=Array.from(document.querySelectorAll('article.full-docsum'));
+    // PubMed's visible Show more control appends a new results chunk.  Reading
+    // only the last nonempty chunk avoids returning the first page repeatedly.
+    const chunks=Array.from(document.querySelectorAll('.search-results-chunk'))
+      .filter(chunk=>visible(chunk) && chunk.querySelector('article.full-docsum'));
+    rows=Array.from((chunks.at(-1) || document).querySelectorAll('article.full-docsum'));
     resultContainer=!!first(document,['.search-results-chunk','.search-results','.results-amount']);
     noResults=/no results were found|no results found|your search.*did not retrieve any results/i.test(texts('.no-results,.no-results-message,.search-results p,.search-results .error-message'));
   } else if(source==='scopus') {
@@ -134,14 +138,15 @@ _SNAPSHOT_JS = r"""/* literature_extra_snapshot */ ({source,limit}) => {
     }
     results.push(result);
   }
-  return {captcha,password,loginPrompt,accessRequired,queries,results,resultContainer,noResults};
+  return {captcha,password,loginPrompt,accessRequired,queries,results,resultContainer,noResults,
+    visible_result_count:rows.filter(visible).length};
 }"""
 
 
 def snapshot(page, source, limit):
     if source not in SOURCE_INFO:
         raise ValueError("该检索来源未接通。")
-    return page.evaluate(_SNAPSHOT_JS, {"source": source, "limit": max(1, min(int(limit), 10))})
+    return page.evaluate(_SNAPSHOT_JS, {"source": source, "limit": max(1, min(int(limit), 200))})
 
 
 def _wanfang_detail_url(value):
@@ -168,7 +173,7 @@ def resolve_result_links(page, source, rows, limit=10):
     if source != "wanfang":
         return rows
     resolved = []
-    maximum = max(1, min(int(limit), 10))
+    maximum = max(1, min(int(limit), 200))
     for original in rows[:maximum]:
         row = dict(original)
         index = row.pop("_title_index", None)

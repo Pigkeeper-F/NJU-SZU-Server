@@ -844,7 +844,7 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 .literature-config{margin:8px 0;border-top:1px solid var(--border)}
 .literature-config-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px}
 .literature-config-fields>label{display:grid;gap:4px;font-size:11px;color:#64755c}
-.literature-config-fields input,.literature-config-fields textarea{box-sizing:border-box;width:100%;min-width:0;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:#fff;color:#40503b;font:inherit}
+.literature-config-fields input,.literature-config-fields textarea,.literature-config-fields select{box-sizing:border-box;width:100%;min-width:0;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:#fff;color:#40503b;font:inherit}
 .literature-config-fields textarea{resize:vertical}
 .literature-config-fields>label:nth-child(2),.literature-config-fields>label:nth-last-child(-n+4),.literature-sources{grid-column:1/-1}
 .literature-sources{display:flex;flex-wrap:wrap;align-items:center;gap:5px 14px;color:#64755c}

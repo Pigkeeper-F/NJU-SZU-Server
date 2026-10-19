@@ -55,7 +55,7 @@ assert.ok(codex.includes('literatureJobId'), '选中的任务应写入 localStor
 
 // 5) until 续跑窗口 + 继续/重试入口
 assert.ok(codex.includes("until: t.literatureUntil || 'discover'") && codex.includes('const body = { id: job.id, until }'), 'search/advance 应显式带 until，包括 discover');
-assert.ok(codex.includes('仅首批检索') && codex.includes('完整流水线'), '应有运行边界选择项');
+assert.ok(codex.includes('仅检索候选') && codex.includes('完整流水线'), '应有运行边界选择项，检索阶段不混同测试模式');
 assert.ok(codex.includes('继续下一阶段'), 'completed 且 resumeStage 非空应可继续');
 assert.ok(codex.includes('重试当前阶段') && codex.includes('继续中断的任务'), 'failed（含 interrupted）应可重试/继续');
 
@@ -84,7 +84,7 @@ assert.ok(css.includes('文献挖掘 · 第二阶段'), '样式应以独立分�
 // 8) 第一阶段关键文案/行为零回归
 for (const text of ['从对话整理规则', '确认配置并检索', '手动填写', '打开登录/检索页面', '检查并继续',
   '检索来源（六个来源均可选择，按研究需要勾选）', '请先从对话整理运行配置并核对', '对话或已批准文档有更新，请重新整理规则后再检索',
-  '首批候选检索已保存 ', '这不是已纳入文献，也未提取全文。可在文献检索区下载清单。']) {
+  '候选检索已保存 ', '这不是已纳入文献，也未提取全文。可在文献检索区下载清单。']) {
   assert.ok(codex.includes(text), '第一阶段文案不得回归: ' + text);
 }
 assert.ok(codex.includes('job.attention?.source') && codex.includes('job.message || job.error'), '人工关口应使用实际来源与原因');
@@ -93,6 +93,9 @@ assert.ok(codex.includes("'/api/literature/prepare'") && codex.includes("'/api/l
 assert.ok(codex.includes('t.busy || !t.literatureConfig'), '未配置时启动按钮保持禁用');
 assert.ok(codex.includes('PubMed 公开检索通常无需登录'), '公开接口与需人工登录来源应区分');
 assert.ok(!codex.includes('（未接通）') && !codex.includes('请取消万方、Scopus、PubMed'), '六来源不再展示预留未接通文案');
+for (const text of ['测试运行（每来源10条）', '正式检索（自选数量）', '每来源候选上限（1–1000）', '历史任务（按原数量）', '登录流程：']) {
+  assert.ok(codex.includes(text), '模式与登录说明应可见：' + text);
+}
 
 // 9) 多来源前端行为：直接执行受检函数，模拟服务端；不启浏览器、不调用真实账户。
 function functionSource(name) {
@@ -125,7 +128,7 @@ const context = vm.createContext({
 const configCode = codex.slice(codex.indexOf('  const LITERATURE_CONFIG_KEYS'), codex.indexOf('  async function prepareLiterature'));
 const labelsCode = codex.slice(codex.indexOf('  const LITERATURE_STAGE_ORDER'), codex.indexOf('  function literatureFileLabel'));
 vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literaturePanel'].map(functionSource).join('\n')
-  + '\nglobalThis.subject = { parseLiteratureConfig, sameLiteratureConfig, startLiterature, continueLiterature, openLiteratureBrowser, literatureAttentionMessage, literaturePanel };', context);
+  + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, openLiteratureBrowser, literatureAttentionMessage, literaturePanel };', context);
 const subject = context.subject;
 
 async function multiSourceTests() {
@@ -134,6 +137,17 @@ async function multiSourceTests() {
     sourceQueries: { cnki: '肉鸡 热应激', wanfang: '肉鸡 高温', 'web-of-science': 'broiler AND heat',
       scopus: '(broiler OR broilers) AND "heat stress"', pubmed: 'broiler[Title/Abstract] AND "heat stress"[Title/Abstract]' } }));
   assert.equal(config.sourceQueries.cnki, '肉鸡 热应激', 'AI整理结果不能丢来源检索式');
+  assert.equal(config.searchMode, 'test', '新整理配置默认测试');
+  assert.equal(config.perSourceLimit, 10, '测试每来源固定10条');
+  const formal = subject.parseLiteratureConfig(JSON.stringify({ ...config, searchMode: 'formal', perSourceLimit: 120, limit: 2, batch: { size: 2, maxBatches: 3 } }));
+  assert.equal(formal.limit, 10, '正式数量独立于接口页大小');
+  assert.equal(formal.batch.size, 10, '新模式接口页大小为10');
+  assert.equal(formal.perSourceLimit, 120, '正式目标数量保留');
+  assert.equal(subject.newLiteratureSearchConfig({ ...config, searchMode: 'formal', perSourceLimit: undefined }).perSourceLimit, 100);
+  for (const value of [0, 1001, 1.5, null, 'wrong']) assert.throws(() => subject.newLiteratureSearchConfig({ ...formal, perSourceLimit: value }), /1–1000/);
+  assert.equal(subject.newLiteratureSearchConfig({ ...config, searchMode: 'test', perSourceLimit: 999 }).perSourceLimit, 10, '测试模式不能扩大数量');
+  assert.equal(subject.sameLiteratureConfig(config, { ...config, searchMode: 'formal', perSourceLimit: 10 }), false, '模式改变需新任务');
+  assert.equal(subject.sameLiteratureConfig(formal, { ...formal, perSourceLimit: 121 }), false, '正式目标数量改变需新任务');
   assert.equal(subject.sameLiteratureConfig(config, { ...config, sourceQueries: Object.fromEntries(Object.entries(config.sourceQueries).reverse()) }), true, '映射顺序不改变冻结配置');
   assert.equal(subject.sameLiteratureConfig(config, { ...config, sourceQueries: { cnki: '肉鸡 高温' } }), false, '来源检索式变化须新建任务');
   assert.equal(subject.sameLiteratureConfig({ ...config, sourceQueries: undefined }, { ...config, sourceQueries: {} }), true, '旧任务缺省来源映射兼容');
@@ -195,11 +209,74 @@ async function multiSourceTests() {
   assert.ok(nodes.some(item => item.tag === 'button' && item.textContent === '打开登录/检索页面'));
   assert.ok(nodes.some(item => item.tag === 'button' && item.textContent === '检查并继续'));
   assert.ok(nodes.some(item => item.textContent.includes('Web of Science 核心合集：机构访问权限不足')));
+  const waitIndex = nodes.findIndex(item => item.tag === 'button' && item.textContent === '检查并继续');
+  const settingsIndex = nodes.findIndex(item => item.className === 'literature-config');
+  assert.ok(waitIndex >= 0 && waitIndex < settingsIndex, '人工关口按钮须置于设置前，避免被长设置表掩埋');
+  assert.equal(nodes[settingsIndex].open, false, '等待处理时设置默认收起');
   const cnkiField = nodes.find(item => item.tag === 'label' && item.textContent === '中国知网 检索式（留空沿用默认）').children[0];
   cnkiField.value = '肉鸡 高温 日增重'; cnkiField.oninput();
   assert.equal(current.literatureConfig.sourceQueries.cnki, '肉鸡 高温 日增重');
   cnkiField.value = ''; cnkiField.oninput();
   assert.equal(current.literatureConfig.sourceQueries.cnki, undefined, '空来源检索式回到默认query');
+
+  // 旧任务按原冻结数量恢复；显示设置时不补模式，也不改变原来的小批大小。
+  const legacy = { ...config, limit: 2, batch: { size: 2, maxBatches: 3 }, limits: { discover: 180, fulltext: 3600 } };
+  delete legacy.searchMode; delete legacy.perSourceLimit;
+  const legacyBefore = JSON.stringify(legacy);
+  current.literatureConfig = JSON.parse(legacyBefore); current.literatureUntil = 'discover';
+  current.literatureJob = { id: 'legacy-job', config: legacy, status: 'needs_attention', stage: 'login', resumeStage: 'discover', until: 'discover',
+    attention: { source: 'cnki', reason: 'login' }, message: '请完成登录' };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  let modeNodes = elements(container);
+  let modeSelect = modeNodes.find(item => item.tag === 'select' && item['aria-label'] === '文献检索运行模式');
+  assert.equal(modeSelect.value, '', '历史任务显示原数量选项');
+  assert.ok(modeNodes.some(item => item.textContent.includes('每来源每批最多 2 条')), '旧limit2不能显示成测试10');
+  assert.equal(JSON.stringify(current.literatureConfig), legacyBefore, '渲染不得补写旧模式或改变检查点配置');
+  calls.length = 0;
+  await subject.continueLiterature({ id: 'module-1' });
+  assert.deepEqual(calls[0], { url: '/api/literature/advance', body: { id: 'legacy-job', until: 'discover' } }, '旧任务保留原id续跑');
+  assert.equal(JSON.stringify(legacy), legacyBefore, '恢复不能改变旧任务冻结配置');
+  const legacyNew = subject.newLiteratureSearchConfig(legacy);
+  assert.equal(legacyNew.searchMode, 'test'); assert.equal(legacyNew.perSourceLimit, 10);
+  assert.equal(legacyNew.limit, 10); assert.equal(legacyNew.batch.size, 10);
+  assert.equal(JSON.stringify(legacy), legacyBefore, '新检索模式转换只修改副本');
+  assert.equal(subject.sameLiteratureConfig(legacy, legacyNew), false, '旧limit2不能误判成测试10');
+
+  // 模式和正式上限可编辑；变更后重新计算自动检索预算，并禁止旧任务继续。
+  modeSelect.value = 'formal'; modeSelect.onchange();
+  assert.equal(current.literatureConfig.searchMode, 'formal'); assert.equal(current.literatureConfig.perSourceLimit, 100);
+  assert.equal(current.literatureConfig.limits.discover, undefined, '模式变更后由服务端重算检索预算');
+  assert.equal(current.literatureConfig.limits.fulltext, 3600, '其他阶段预算保留');
+  assert.equal(JSON.stringify(legacy), legacyBefore, '编辑草稿不能改变历史job');
+  calls.length = 0; await subject.continueLiterature({ id: 'module-1' });
+  assert.equal(calls.length, 0, '模式变更必须新检索'); assert.match(current.literatureError, /不能混入旧任务/);
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  modeNodes = elements(container);
+  const quantityInput = modeNodes.find(item => item.tag === 'input' && item['aria-label'] === '正式检索每来源候选上限');
+  assert.equal(quantityInput.value, 100); assert.equal(quantityInput.min, '1'); assert.equal(quantityInput.max, '1000');
+  current.literatureConfig.limits.discover = 180;
+  quantityInput.value = '125'; quantityInput.oninput();
+  assert.equal(current.literatureConfig.perSourceLimit, 125); assert.equal(current.literatureConfig.limits.discover, undefined);
+  current.literatureConfig.limits.discover = 180;
+  const formalCnki = modeNodes.find(item => item.tag === 'label' && item.textContent === '中国知网').children[0];
+  formalCnki.checked = false; formalCnki.onchange();
+  assert.equal(current.literatureConfig.limits.discover, undefined, '来源变更后重算自动预算');
+  calls.length = 0; responseJob = { id: 'new-formal', config: JSON.parse(JSON.stringify(current.literatureConfig)) };
+  await subject.startLiterature({ id: 'module-1' });
+  assert.equal(calls[0].body.config.searchMode, 'formal'); assert.equal(calls[0].body.config.perSourceLimit, 125);
+  assert.equal(calls[0].body.config.limit, 10, '正式请求使用独立数量字段，页大小仍为10');
+
+  // 普通页面持续说明登录位置，只有真正等待人工时才提供续跑按钮。
+  current.literatureJob = null;
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  modeNodes = elements(container);
+  assert.ok(modeNodes.some(item => item.textContent.includes('登录流程：')));
+  assert.ok(!modeNodes.some(item => item.tag === 'button' && ['打开登录/检索页面', '检查并继续'].includes(item.textContent)), '没有等待任务时不提供假登录或续跑按钮');
+  modeSelect = modeNodes.find(item => item.tag === 'select' && item['aria-label'] === '文献检索运行模式');
+  modeSelect.value = 'test'; modeSelect.onchange();
+  assert.equal(current.literatureConfig.perSourceLimit, 10, '从正式切回测试恢复固定10条');
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.ok(!elements(container).some(item => item['aria-label'] === '正式检索每来源候选上限'), '测试模式不提供可扩大数量的输入');
   console.log('LITERATURE_UI_STAGE2_TESTS_PASS');
 }
 multiSourceTests().catch(error => { console.error(error); process.exitCode = 1; });

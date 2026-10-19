@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import re
 import sys
+import time
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
@@ -97,7 +98,7 @@ def _target_id(context, page) -> str:
         session.detach()
 
 
-def _save_binding(job_dir, source, target_id, query_hash=""):
+def _save_binding(job_dir, source, target_id, query_hash="", *, page_index=None, result_fingerprint=""):
     path = _binding_path(job_dir)
     if path is None:
         return
@@ -107,6 +108,12 @@ def _save_binding(job_dir, source, target_id, query_hash=""):
     previous = data.get(source) if isinstance(data.get(source), dict) else {}
     data[source] = {"target_id": target_id, "label": SOURCES[source][0],
                     "query_hash": query_hash or previous.get("query_hash", "")}
+    if page_index is not None:
+        data[source].update(page_index=page_index, result_fingerprint=result_fingerprint)
+    elif previous.get("target_id") == target_id and previous.get("query_hash") == data[source]["query_hash"]:
+        for key in ("page_index", "result_fingerprint"):
+            if key in previous:
+                data[source][key] = previous[key]
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -195,7 +202,8 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
     results.push({title,authors,byline:byline||authors,venue,year,result_url:a?.href||'',snippet,fulltext_links,
       doi:doiAnchor ? doiAnchor.href.replace(/^https?:\/\/(?:dx\.)?doi\.org\//i,'') : (doiMatch?.[0] || '')});
   }
-  return {captcha:!!captcha,password,loginPrompt,accessRequired:explicitAccess,queries,results,resultContainer,noResults};
+  return {captcha:!!captcha,password,loginPrompt,accessRequired:explicitAccess,queries,results,resultContainer,noResults,
+    visible_result_count:rows.filter(visible).length};
 }"""
 
 
@@ -213,6 +221,8 @@ def _matches_query(snapshot, page_url, source, query):
     def comparable(value):
         normalized = _normalized(value)
         wrapper = re.fullmatch(r"title-abs-key\s*\((.*)\)", normalized, re.S) if source == "scopus" else None
+        if source == "web-of-science":
+            wrapper = re.fullmatch(r"ts\s*=\s*\((.*)\)", normalized, re.S)
         if wrapper:
             return wrapper.group(1).strip()
         return normalized
@@ -404,79 +414,301 @@ def _clean_results(rows, limit):
     return cleaned
 
 
-def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, *, job_dir=None):
-    """Search/continue exactly this job's source tab in the persistent browser."""
+_NEXT_SELECTORS = {
+    "google-scholar": ['#gs_n a:has(.gs_ico_nav_next)', '#gs_n a[aria-label="Next"]',
+                       '#gs_n a:has-text("Next")', '#gs_n a:has-text("下一页")'],
+    "cnki": ['#PageNext', '.pages a:has-text("下一页")', '.pager a:has-text("下一页")',
+             '.pagination a:has-text("下一页")', '.pagination button:has-text("下一页")'],
+    "web-of-science": ['button[data-ta="next-page"]', 'button[aria-label="Next Page"]',
+                       'button[aria-label="Next page"]', 'button[aria-label="下一页"]',
+                       'app-page-controls button:has-text("Next")'],
+    "wanfang": ['.bottom-pagination .next', '.small-paginate .ctrl-btn:text-is(">")',
+                '.el-pagination .btn-next', '.ant-pagination-next button',
+                '.pagination a:has-text("下一页")', '.pagination button:has-text("下一页")',
+                '.pagination li.next a'],
+    "scopus": ['button[data-testid="next-page"]', 'button[aria-label="Next page"]',
+               'button[aria-label="Next Page"]', 'button[aria-label="下一页"]',
+               '.pagination-next button', '[aria-label="Pagination"] button:has-text("Next")'],
+    "pubmed": ['.search-results button.load-button.next-page', '.search-results button:has-text("Show more")',
+               '.pagination button.next-page-btn', '.pagination a.next-page-btn'],
+}
+
+_PAGINATION_JS = r"""/* literature_pagination */ ({source}) => {
+  const visible=el=>!!el && !!(el.offsetWidth||el.offsetHeight||el.getClientRects().length)
+    && getComputedStyle(el).visibility!=='hidden' && getComputedStyle(el).display!=='none';
+  const text=el=>(el?.innerText||el?.textContent||'').trim().replace(/\s+/g,' ');
+  const first=selectors=>Array.from(document.querySelectorAll(selectors)).find(visible);
+  const selectors={
+    'google-scholar':'#gs_ab_md',cnki:'.pagerTitleCell,.result-count,.total-count',
+    'web-of-science':'[data-ta="search-results-count"],.results-count',
+    wanfang:'.total-number .mark-number,.search-result-count,.result-count,.el-pagination__total',
+    scopus:'h2[data-testid="label-search-results-header"],[data-testid="results-count"],[data-testid="document-results-count"]',
+    pubmed:'.results-amount .value,.results-amount'
+  };
+  const countText=text(first(selectors[source]||'.result-count'));
+  let total=null;
+  const patterns=source==='pubmed' ? [/^([\d,]+)(?:\s+results?)?$/i]
+    : source==='google-scholar' ? [/(?:about|约)\s*([\d,]+)\s*(?:results?|条)/i,/^([\d,]+)\s+results?/i]
+    : source==='wanfang' ? [/^([\d,]+)$/,/(?:共|找到)\s*([\d,]+)\s*(?:条|篇)/]
+    : [/(?:共|找到|检索到)\s*([\d,]+)\s*(?:条|篇)/,/^([\d,]+)\s*(?:documents?|results?|records?)/i];
+  for(const pattern of patterns) {const match=countText.match(pattern); if(match) {total=Number(match[1].replace(/,/g,''));break;}}
+  // A pager ending at its active final number is only proof when it also
+  // explicitly reports the last page; absence of a Next button alone is not.
+  let end=Array.from(document.querySelectorAll('[data-testid="last-page-message"],.pagination-end,.pager-end'))
+    .some(el=>visible(el)&&/end of results|last page|已到最后|没有更多|无更多结果/i.test(text(el)));
+  if(source==='wanfang') {
+    const pages=text(first('.small-paginate .page-number')).match(/^(\d+)\s*\/\s*(\d+)$/);
+    if(pages && Number(pages[2])>0 && Number(pages[1])===Number(pages[2])) end=true;
+  }
+  return {total_count:Number.isSafeInteger(total)&&total>=0?total:null,explicit_end:end};
+}"""
+
+
+def _next_control(page, source):
+    return _first_visible(page, _NEXT_SELECTORS[source])
+
+
+def _control_disabled(control):
+    try:
+        if not control.is_enabled():
+            return True
+        if control.get_attribute("disabled") is not None or control.get_attribute("aria-disabled") == "true":
+            return True
+        return bool(control.evaluate("el => !!el.closest('[disabled],[aria-disabled=\"true\"],.disabled,.is-disabled,.ant-pagination-disabled')"))
+    except Exception:
+        # Unknown actionability cannot be used as evidence of the final page.
+        return None
+
+
+def _pagination(page, source):
+    try:
+        data = page.evaluate(_PAGINATION_JS, {"source": source})
+    except Exception:
+        data = {}
+    control = _next_control(page, source)
+    disabled = _control_disabled(control) if control is not None else None
+    has_next = False if data.get("explicit_end") else not disabled if disabled is not None else None
+    return {"has_next": has_next, "total_count": data.get("total_count")}
+
+
+def _row_fingerprint(snapshot):
+    rows = [{key: row.get(key) for key in ("title", "result_url", "doi", "pmid")}
+            for row in snapshot.get("results") or [] if isinstance(row, dict)]
+    return hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _official_result_page(page, source):
+    try:
+        parsed = urlsplit(page.url)
+        host = (parsed.hostname or "").lower()
+        domain = {"google-scholar": "scholar.google.com", "cnki": "cnki.net",
+                  "web-of-science": "webofscience.com", "wanfang": "wanfangdata.com.cn",
+                  "scopus": "scopus.com", "pubmed": "pubmed.ncbi.nlm.nih.gov"}[source]
+        return parsed.scheme in ("https", "http") and (host == domain or host.endswith("." + domain))
+    except ValueError:
+        return False
+
+
+def _query_consistent(snapshot, page, source, query, *, submitted=False, trusted=False):
+    # A visible changed query always invalidates the prior target/page proof.
+    if snapshot.get("queries"):
+        return _matches_query(snapshot, page.url, source, query)
+    return _matches_query(snapshot, page.url, source, query) or submitted or trusted
+
+
+def _advance_page(page, source, previous, limit):
+    control = _next_control(page, source)
+    if control is None or _control_disabled(control) is not False:
+        return None
+    before = _row_fingerprint(previous)
+    control.click(timeout=15_000)
+    # A click can load an AJAX page or open an authentication screen.  Wait for
+    # changed bibliographic rows/auth DOM; existing result nodes are insufficient.
+    deadline = time.monotonic() + 15
+    while True:
+        current = _snapshot(page, source, limit)
+        if (_auth_reason(page, current) or current.get("noResults")
+                or (current.get("results") and _row_fingerprint(current) != before)):
+            return current
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.2)
+
+
+def _pubmed_transport(job_dir, query, *, save=None):
+    """Lock a task's public transport so API offsets never become browser pages."""
+    if job_dir is None:
+        return None
+    path = Path(job_dir) / "pubmed-transport.json"
+    fingerprint = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    if save is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"query_hash": fingerprint, "transport": save}), encoding="utf-8")
+        temporary.replace(path)
+        return save
+    if not path.exists():
+        return None
+    value = _load_json(path, {})
+    if (not isinstance(value, dict) or value.get("query_hash") != fingerprint
+            or value.get("transport") not in ("ncbi_eutilities", "browser_after_api_error")):
+        raise ValueError("PubMed 任务传输检查点无效，请新建任务以免混用分页结果。")
+    return value["transport"]
+
+
+def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, *, job_dir=None,
+        page_index=0, full_page=False):
+    """Read one proven results page, optionally advancing this job's bound tab.
+
+    The discovery driver owns page checkpoints and aggregate target counts.
+    Browser pages may contain 20/50 records; formal runs read the whole visible
+    page rather than skipping everything after a ten-record API batch.
+    """
     if source_key not in SOURCES:
         return {"status": "error", "reason": None, "message": "该检索来源未接通。", "source_key": source_key,
                 "url": "", "results": [], "applied_filters": {}, "deferred_rules": []}
     if not isinstance(query, str) or not query.strip() or len(query) > 2000:
         return {**_envelope(source_key, "error"), "message": "检索式无效。"}
+    if isinstance(page_index, bool) or not isinstance(page_index, int) or not 0 <= page_index <= 999:
+        return {**_envelope(source_key, "error"), "message": "检索页码必须为 0 到 999。"}
     limit = max(1, min(int(limit), 10))
+    read_limit = 200 if full_page else limit
     api_failed = False
-    if source_key == "pubmed" and not scrape_current:
-        result = literature_pubmed.run(query, limit=limit, year_from=year_from, year_to=year_to)
+    try:
+        pubmed_transport = _pubmed_transport(job_dir, query) if source_key == "pubmed" else None
+    except Exception:
+        return {**_envelope(source_key, "error"), "message": "PubMed 分页传输检查点无效；请保留已有成果并新建检索任务。"}
+    if source_key == "pubmed" and scrape_current and pubmed_transport is None:
+        try:
+            pubmed_transport = _pubmed_transport(job_dir, query, save="browser_after_api_error")
+        except Exception:
+            return {**_envelope(source_key, "error"), "message": "PubMed 分页传输检查点未能保存，请重试当前任务。"}
+    if source_key == "pubmed" and (pubmed_transport == "ncbi_eutilities" or
+                                   (not scrape_current and pubmed_transport != "browser_after_api_error")):
+        api_options = {"page_index": page_index} if page_index else {}
+        result = literature_pubmed.run(query, limit=limit, year_from=year_from, year_to=year_to, **api_options)
         if result.get("status") in ("ok", "no_results"):
+            try:
+                _pubmed_transport(job_dir, query, save="ncbi_eutilities")
+            except Exception:
+                return {**_envelope(source_key, "error"), "message": "PubMed 分页传输检查点未能保存，请重试当前任务。"}
             return result
+        if pubmed_transport == "ncbi_eutilities" or page_index > 0:
+            # API pages are fixed ten-record offsets; browser pages can have
+            # another size.  Switching here would skip or duplicate records.
+            return result
+        try:
+            _pubmed_transport(job_dir, query, save="browser_after_api_error")
+        except Exception:
+            return {**_envelope(source_key, "error"), "message": "PubMed 分页传输检查点未能保存，请重试当前任务。"}
         api_failed = True
     options = {"year_from": year_from, "year_to": year_to}
-    if api_failed:
+    if api_failed or pubmed_transport == "browser_after_api_error":
         options["transport"] = "browser_after_api_error"
     page = None
+    current = None
+
+    def response(status, *, results=None, reason=None, pagination=None):
+        output = _envelope(source_key, status, results=results, reason=reason, **options)
+        output.update(page_index=page_index, has_next=None, total_count=None)
+        if pagination:
+            output.update(pagination)
+        return output
+
     try:
         with _runtime() as context:
             page, created = _pick_page(context, source_key, job_dir)
             page.bring_to_front()
-            submitted = False
-            if not scrape_current or created:
-                submitted = _navigate_search(page, source_key, query, year_from, year_to)
-            snapshot = _snapshot(page, source_key, limit)
-            reason = _auth_reason(page, snapshot)
-            if reason:
-                return _envelope(source_key, "attention", reason=reason, **options)
-            verified = _matches_query(snapshot, page.url, source_key, query)
-            if source_key == "scopus":
-                verified = verified and extra_sources.query_context_valid(page, source_key)
-            if scrape_current and not created and not verified:
-                # SSO often returns to basic search. Re-submit the frozen query
-                # through that UI; do not scrape a different manually-run query.
-                submitted = _navigate_search(page, source_key, query, year_from, year_to)
-                snapshot = _snapshot(page, source_key, limit)
-                reason = _auth_reason(page, snapshot)
+            query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
+            bindings = _load_json(_binding_path(job_dir), {}) if job_dir is not None else {}
+            binding = bindings.get(source_key, {}) if isinstance(bindings, dict) else {}
+            proven_index = None
+            if scrape_current or page_index:
+                current = _snapshot(page, source_key, read_limit)
+                reason = _auth_reason(page, current)
                 if reason:
-                    return _envelope(source_key, "attention", reason=reason, **options)
-                verified = _matches_query(snapshot, page.url, source_key, query)
+                    return response("attention", reason=reason)
+                if (not created and binding.get("query_hash") == query_hash
+                        and isinstance(binding.get("page_index"), int)
+                        and binding.get("result_fingerprint") == _row_fingerprint(current)
+                        and _official_result_page(page, source_key)
+                        and _query_consistent(current, page, source_key, query, trusted=True)):
+                    proven_index = binding["page_index"]
+            use_bound = proven_index in (page_index, page_index - 1) if page_index else proven_index == 0
+            verified = bool(current and _matches_query(current, page.url, source_key, query))
+            if source_key == "scopus" and verified:
+                verified = extra_sources.query_context_valid(page, source_key)
+            # Keep the legacy manual first-batch behavior. Formal runs without
+            # proof re-submit from page one: an identical query can be on page N.
+            manual_first = (scrape_current and not full_page and not created and page_index == 0
+                            and verified and binding.get("page_index", 0) == 0)
+            if use_bound:
+                current_index = proven_index
+            elif manual_first:
+                current_index = 0
+            else:
+                submitted = _navigate_search(page, source_key, query, year_from, year_to)
+                current = _snapshot(page, source_key, read_limit)
+                reason = _auth_reason(page, current)
+                if reason:
+                    return response("attention", reason=reason)
+                verified = _matches_query(current, page.url, source_key, query)
                 if source_key == "scopus":
                     verified = verified and extra_sources.query_context_valid(page, source_key)
-            if not verified and not (source_key in ("web-of-science", "scopus") and submitted):
-                return _envelope(source_key, "attention", reason="results_unrecognized", **options)
-            raw_rows = snapshot.get("results") or []
+                if not verified and not (source_key in ("web-of-science", "scopus") and submitted and not current.get("queries")):
+                    return response("attention", reason="results_unrecognized")
+                current_index = 0
+            while current_index < page_index:
+                if not _official_result_page(page, source_key):
+                    return response("attention", reason="results_unrecognized")
+                pagination = _pagination(page, source_key)
+                if pagination["has_next"] is False:
+                    return response("ok", pagination={**pagination, "has_next": False})
+                advanced = _advance_page(page, source_key, current, read_limit)
+                if advanced is None:
+                    return response("attention", reason="results_unrecognized", pagination=pagination)
+                current = advanced
+                reason = _auth_reason(page, current)
+                if reason:
+                    return response("attention", reason=reason)
+                if not _official_result_page(page, source_key) or not _query_consistent(current, page, source_key, query, trusted=True):
+                    return response("attention", reason="results_unrecognized")
+                current_index += 1
+                # Only bibliographic fingerprints and page numbers are persisted.
+                _save_binding(job_dir, source_key, _target_id(context, page), query_hash,
+                              page_index=current_index, result_fingerprint=_row_fingerprint(current))
+            if (full_page or page_index) and not _official_result_page(page, source_key):
+                return response("attention", reason="results_unrecognized")
+            if full_page and current.get("visible_result_count", 0) > read_limit:
+                result = response("attention", reason="results_unrecognized")
+                result["message"] = "当前数据库每页超过200条；请在官方页面将每页显示量调到200或以下，再检查并继续，避免翻页时遗漏记录。"
+                return result
+            raw_rows = current.get("results") or []
             if source_key == "wanfang" and raw_rows:
-                raw_rows = extra_sources.resolve_result_links(page, source_key, raw_rows, limit)
+                raw_rows = extra_sources.resolve_result_links(page, source_key, raw_rows, read_limit)
                 if any(not safe_url(row.get("result_url")) and not row.get("doi") for row in raw_rows):
-                    return _envelope(source_key, "attention", reason="results_unrecognized", **options)
-            rows = _clean_results(raw_rows, limit)
+                    return response("attention", reason="results_unrecognized")
+            rows = _clean_results(raw_rows, read_limit)
+            pagination = _pagination(page, source_key)
             if rows:
-                fingerprint = hashlib.sha256(query.encode("utf-8")).hexdigest()
-                _save_binding(job_dir, source_key, _target_id(context, page), fingerprint)
-                result = _envelope(source_key, "ok", results=rows, **options)
+                _save_binding(job_dir, source_key, _target_id(context, page), query_hash,
+                              page_index=page_index, result_fingerprint=_row_fingerprint(current))
+                result = response("ok", results=rows, pagination=pagination)
                 if api_failed:
                     result["deferred_rules"].append("公开 API 暂不可用，已改用同一 PubMed 官方网页；结果范围以网页实际返回为准。")
                 return result
-            if snapshot.get("noResults"):
-                return _envelope(source_key, "no_results", **options)
-            return _envelope(source_key, "attention", reason="results_unrecognized", **options)
+            if current.get("noResults"):
+                return response("no_results" if page_index == 0 else "ok", pagination={**pagination, "has_next": False})
+            return response("attention", reason="results_unrecognized", pagination=pagination)
     except Exception:
         if page is not None:
             try:
-                # Navigation can time out after SSO has opened. Keep the task
-                # resumable without exporting the redirect from the exception.
-                reason = _auth_reason(page, _snapshot(page, source_key, limit))
+                reason = _auth_reason(page, _snapshot(page, source_key, read_limit))
                 if reason:
-                    return _envelope(source_key, "attention", reason=reason, **options)
+                    return response("attention", reason=reason)
             except Exception:
                 pass
-        # Exception text can contain SSO redirect URLs; deliberately fixed text.
-        return {**_envelope(source_key, "error", **options),
+        return {**response("error"),
                 "message": "检索浏览器操作未完成。请检查本机检索浏览器是否可用，再继续该任务。"}
 
 

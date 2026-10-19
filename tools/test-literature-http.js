@@ -74,6 +74,22 @@ async function main() {
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /阶段边界/, '36KB 来源配置应通过请求体读取和配置检查');
 
+    // 新模式先校验目标数量；使用非法阶段验证合法模式，不触发真实数据库访问。
+    for (const target of [0, 1001, true]) {
+      response = await post('/api/literature/search', { config: { topic: '正式检索', query: 'q', sources: ['pubmed'],
+        searchMode: 'formal', perSourceLimit: target } }, { 'X-Workbench': '1' });
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /每来源检索数量/);
+    }
+    response = await post('/api/literature/search', { config: { topic: '正式检索', query: 'q', sources: ['pubmed'],
+      searchMode: 'formal', perSourceLimit: 25 }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /阶段边界/);
+    response = await post('/api/literature/search', { config: { topic: '测试检索', query: 'q', sources: ['pubmed'],
+      searchMode: 'test', perSourceLimit: 999, limit: 999 }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /阶段边界/, '测试模式固定十条并忽略遗留正式数量');
+
     // ---- 新增：advance 路由 ----
     response = await post('/api/literature/advance', { id: FAKE_ID });
     assert.equal(response.status, 403, 'advance must require X-Workbench');

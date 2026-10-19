@@ -174,7 +174,7 @@
     delete saved[id].jobId; persist();
   }
   function literatureCompletedMessage(job) {
-    const base = '首批候选检索已保存 ' + job.count + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。';
+    const base = '候选检索已保存 ' + job.count + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。';
     const extra = literatureDeliverableSummary(job);
     return extra ? base + extra : base;
   }
@@ -224,8 +224,11 @@
   async function startLiterature(mod) {
     const t = task(mod.id);
     if (!t.literatureConfig) { t.literatureError = '请先从对话整理运行配置并核对'; render(); return; }
-    const config = { ...t.literatureConfig, extraction: { ...t.literatureConfig.extraction,
-      model: t.model || account?.model || t.literatureConfig.extraction?.model || null } };
+    let config;
+    try {
+      config = newLiteratureSearchConfig(t.literatureConfig);
+      config.extraction = { ...config.extraction, model: t.model || account?.model || config.extraction?.model || null };
+    } catch (error) { t.literatureError = error.message; render(); return; }
     if (saved[mod.id]?.literatureSource !== literatureSource(mod)) { t.literatureError = '对话或已批准文档有更新，请重新整理规则后再检索'; render(); return; }
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
     t.literatureBusy = true; t.literatureError = ''; render();
@@ -335,13 +338,23 @@
       approvedDoc: mod.doc?.status === 'approved' ? [mod.doc.content, mod.doc.approvedAt] : null });
   }
   const LITERATURE_CONFIG_KEYS = ['topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language',
-    'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit', 'sourceQueries'];
+    'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit', 'sourceQueries', 'searchMode', 'perSourceLimit'];
   const LITERATURE_CONFIG_EXTRA_KEYS = ['batch', 'fieldDefinitions', 'templates', 'fulltext', 'extraction', 'limits'];
   function literatureConfigKey(config, keys = LITERATURE_CONFIG_KEYS) {
     if (!config) return '';
     return JSON.stringify(keys.map(key => key === 'sourceQueries'
       ? Object.entries(config.sourceQueries || {}).filter(([, value]) => String(value).trim()).sort(([a], [b]) => a.localeCompare(b))
+      : key === 'perSourceLimit' && config.searchMode === 'test' ? 10
+      : key === 'perSourceLimit' && config.searchMode === 'formal' ? config.perSourceLimit === undefined ? 100 : config.perSourceLimit
       : config[key] ?? null));
+  }
+  function newLiteratureSearchConfig(config) {
+    const mode = config.searchMode ?? 'test';
+    if (!['test', 'formal'].includes(mode)) throw new Error('请选择测试运行或正式检索');
+    const target = mode === 'test' ? 10 : config.perSourceLimit === undefined ? 100 : Number(config.perSourceLimit);
+    if (!Number.isInteger(target) || target < 1 || target > 1000) throw new Error('正式检索的每来源数量必须为 1–1000 的整数');
+    return { ...config, searchMode: mode, perSourceLimit: target, limit: 10,
+      ...(config.batch ? { batch: { ...config.batch, size: 10 } } : {}) };
   }
   function sameLiteratureConfig(one, other) {
     if (!one || !other) return false;
@@ -379,7 +392,7 @@
     if (Array.isArray(config.fieldDefinitions) && config.fieldDefinitions.every(field => field && typeof field === 'object' && !Array.isArray(field))) {
       parsed.fieldDefinitions = config.fieldDefinitions;
     }
-    return parsed;
+    return newLiteratureSearchConfig({ ...parsed, searchMode: config.searchMode ?? 'test', perSourceLimit: config.perSourceLimit });
   }
   async function prepareLiterature(mod) {
     const t = task(mod.id);
@@ -407,7 +420,7 @@
   function manualLiterature(mod) {
     const t = task(mod.id);
     t.literatureConfig = { topic: '', query: '', sources: ['google-scholar'], sourceQueries: {}, publicationYearFrom: null, publicationYearTo: null,
-      geography: '', language: '', studyTypes: [], inclusion: [], exclusion: [], targetFields: [], limit: 10 };
+      geography: '', language: '', studyTypes: [], inclusion: [], exclusion: [], targetFields: [], limit: 10, searchMode: 'test', perSourceLimit: 10 };
     saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureSource: literatureSource(mod) };
     persist(); render();
   }
@@ -419,7 +432,7 @@
     'completed': '已完成', 'failed': '失败', 'cancelled': '已停止', 'interrupted': '已中断', 'running': '进行中' };
   const LITERATURE_STAGE_STATES = { 'pending': '待运行', 'running': '进行中', 'done': '已完成', 'failed': '失败', 'skipped': '已跳过' };
   const LITERATURE_COUNTER_LABELS = { 'candidates': '候选', 'uniqueGroups': '去重组', 'fulltextFetched': '已获取全文', 'extractedPapers': '已提取论文', 'parameterRows': '参数行' };
-  const LITERATURE_UNTIL_OPTIONS = [['discover', '仅首批检索'], ['dedupe', '续跑到去重'], ['fulltext', '续跑到全文获取'],
+  const LITERATURE_UNTIL_OPTIONS = [['discover', '仅检索候选'], ['dedupe', '续跑到去重'], ['fulltext', '续跑到全文获取'],
     ['extract', '续跑到参数提取'], ['validate', '续跑到校验'], ['export', '完整流水线']];
   const LITERATURE_STATUS_LABELS = { 'running': '进行中', 'completed': '已完成', 'needs_attention': '需要人工', 'failed': '失败', 'cancelled': '已停止' };
   const LITERATURE_SOURCE_LABELS = { 'google-scholar': 'Google Scholar', 'cnki': '中国知网', 'web-of-science': 'Web of Science 核心合集',
@@ -628,15 +641,34 @@
     until.onchange = () => { t.literatureUntil = until.value; saved[mod.id] = { ...saved[mod.id], literatureUntil: t.literatureUntil }; persist(); };
     untilWrap.append(until); row.append(untilWrap);
     box.append(row);
+    box.append(node('p', '登录流程：开始检索后，需要登录或验证时会在这里提示。打开官方页面完成操作，回到本平台点击“检查并继续”，任务才会恢复。', 'codex-status'));
+    if (job) {
+      box.append(node('p', '状态：' + (job.message || literatureStageLabel(job.stage) || job.status) + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
+      const stages = literatureStageBar(job);
+      if (stages) box.append(stages);
+    }
+    if (awaitingAccess) {
+      const attention = node('section', undefined, 'literature-confirm'); attention.setAttribute('aria-live', 'polite');
+      attention.append(node('h4', '当前需要处理：' + (LITERATURE_SOURCE_LABELS[job.attention?.source] || '检索页面')));
+      attention.append(node('p', literatureAttentionMessage(job), 'codex-status'));
+      const actions = node('div', undefined, 'literature-confirm-actions');
+      const open = node('button', '打开登录/检索页面', 'quiet-button'); open.type = 'button';
+      open.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+      open.onclick = () => openLiteratureBrowser(mod);
+      const resume = node('button', '检查并继续', 'primary-button'); resume.type = 'button';
+      resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
+      resume.onclick = () => continueLiterature(mod);
+      actions.append(open, resume); attention.append(actions); box.append(attention);
+    }
     if (t.literatureConfig) {
       const config = t.literatureConfig;
-      const details = node('details', undefined, 'literature-config'); details.open = true;
+      const details = node('details', undefined, 'literature-config'); details.open = !awaitingAccess;
       details.append(node('summary', '本次检索设置（点击查看或修改）' + (saved[mod.id]?.literatureSource !== literatureSource(mod) ? ' · 对话已更新' : '')));
       details.append(node('p', '这里是本次任务的要求表。核对检索什么、检索范围和需要提取的字段；修改后再开始执行。', 'codex-status'));
       const fields = node('div', undefined, 'literature-config-fields');
       function input(label, key, type = 'text') {
         const wrap = node('label', label); const field = node('input'); field.type = type;
-        if (type === 'number') { field.min = key === 'limit' ? '1' : '1800'; field.max = key === 'limit' ? '10' : String(new Date().getFullYear() + 1); }
+        if (type === 'number') { field.min = '1800'; field.max = String(new Date().getFullYear() + 1); }
         field.value = config[key] ?? ''; field.oninput = () => { config[key] = type === 'number' ? (field.value ? Number(field.value) : null) : field.value; persistConfig(); };
         wrap.append(field); fields.append(wrap);
       }
@@ -646,12 +678,39 @@
         wrap.append(field); fields.append(wrap);
       }
       function persistConfig() { saved[mod.id] = { ...saved[mod.id], literatureConfig: config }; persist(); }
+      function resetDiscoverBudget() {
+        if (config.limits) { config.limits = { ...config.limits }; delete config.limits.discover; }
+      }
       input('研究主题', 'topic'); input('默认检索式（未单独填写的来源沿用）', 'query');
+      const modeWrap = node('label', '运行模式'); const mode = node('select'); mode.setAttribute('aria-label', '文献检索运行模式');
+      if (!config.searchMode) { const legacy = node('option', '历史任务（按原数量）'); legacy.value = ''; mode.append(legacy); }
+      [['test', '测试运行（每来源10条）'], ['formal', '正式检索（自选数量）']].forEach(([value, label]) => {
+        const option = node('option', label); option.value = value; mode.append(option);
+      });
+      mode.value = config.searchMode || ''; mode.disabled = t.literatureBusy || t.busy;
+      mode.onchange = () => {
+        if (!['test', 'formal'].includes(mode.value)) return;
+        config.searchMode = mode.value; config.perSourceLimit = mode.value === 'formal' ? 100 : 10; config.limit = 10;
+        if (config.batch) config.batch = { ...config.batch, size: 10 };
+        resetDiscoverBudget(); persistConfig(); render();
+      };
+      modeWrap.append(mode); fields.append(modeWrap);
+      if (config.searchMode === 'formal') {
+        const targetWrap = node('label', '每来源候选上限（1–1000）'); const target = node('input'); target.type = 'number';
+        target.min = '1'; target.max = '1000'; target.step = '1'; target.value = config.perSourceLimit === undefined ? 100 : config.perSourceLimit ?? '';
+        target.disabled = t.literatureBusy || t.busy; target.setAttribute('aria-label', '正式检索每来源候选上限');
+        target.oninput = () => { config.perSourceLimit = target.value === '' ? null : Number(target.value); resetDiscoverBudget(); persistConfig(); };
+        targetWrap.append(target); fields.append(targetWrap);
+      }
+      const quantity = !config.searchMode ? '历史配置保持原数量：每来源每批最多 ' + (config.batch?.size ?? config.limit ?? 10) + ' 条。继续原任务不会改变数量；切换模式将用于新检索。'
+        : config.searchMode === 'formal' ? '正式检索会自动翻页，直到每来源去重及已知年份筛选后的候选达到所选上限，或该来源没有更多结果。登录、验证或页面异常时暂停并保留已有结果。'
+        : '测试运行：每个来源最多取10条候选，用于检查检索词和流程；不会自动扩大到正式数量。';
+      details.append(node('p', quantity, 'codex-status'));
       const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（六个来源均可选择，按研究需要勾选）'));
       Object.entries(LITERATURE_SOURCE_LABELS).forEach(([value, label]) => {
         const wrap = node('label', label); const check = node('input'); check.type = 'checkbox'; check.checked = config.sources.includes(value);
         check.disabled = t.literatureBusy || t.busy;
-        check.onchange = () => { config.sources = check.checked ? [...new Set([...config.sources, value])] : config.sources.filter(source => source !== value); persistConfig(); render(); };
+        check.onchange = () => { config.sources = check.checked ? [...new Set([...config.sources, value])] : config.sources.filter(source => source !== value); resetDiscoverBudget(); persistConfig(); render(); };
         wrap.prepend(check); sources.append(wrap);
       });
       fields.append(sources);
@@ -677,7 +736,7 @@
         wrap.append(field); fields.append(wrap);
       });
       input('发表年份起', 'publicationYearFrom', 'number'); input('发表年份止', 'publicationYearTo', 'number');
-      input('地域（需写入检索式才用于检索）', 'geography'); input('语言（供后续筛选）', 'language'); input('每来源每批条数（最多 10）', 'limit', 'number');
+      input('地域（需写入检索式才用于检索）', 'geography'); input('语言（供后续筛选）', 'language');
       lines('研究类型（每行一项）', 'studyTypes'); lines('纳入规则（每行一项）', 'inclusion');
       lines('排除规则（每行一项）', 'exclusion'); lines('目标参数字段（每行一项）', 'targetFields');
       details.append(fields); box.append(details);
@@ -686,21 +745,7 @@
     } else box.append(node('p', '先在本模块对话确认规则，再点“从对话整理规则”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
     if (!job) box.append(node('p', '已接入 Google Scholar、中国知网、万方、Web of Science 核心合集、Scopus 和 PubMed，按研究需要选择来源。PubMed 公开检索通常无需登录；其他来源需要登录、验证或机构权限时暂停，请在官方页面操作后继续。全文提取前需要你确认参数字段含义与单位。', 'codex-status'));
     if (job) {
-      box.append(node('p', '状态：' + (job.message || literatureStageLabel(job.stage) || job.status) + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
-      const stages = literatureStageBar(job);
-      if (stages) box.append(stages);
       if (awaitingConfirm) box.append(literatureConfirmForm(mod, t, job));
-      if (awaitingAccess) {
-        box.append(node('p', literatureAttentionMessage(job), 'codex-status'));
-        const actions = node('div', undefined, 'literature-confirm-actions');
-        const open = node('button', '打开登录/检索页面', 'quiet-button'); open.type = 'button';
-        open.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
-        open.onclick = () => openLiteratureBrowser(mod);
-        const resume = node('button', '检查并继续', 'primary-button'); resume.type = 'button';
-        resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
-        resume.onclick = () => continueLiterature(mod);
-        actions.append(open, resume); box.append(actions);
-      }
       const deliverables = literatureDeliverables(job);
       if (deliverables) box.append(deliverables);
       if (Array.isArray(job.events) && job.events.length > 1) {

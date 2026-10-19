@@ -142,6 +142,53 @@ class Context:
         return CDPSession(page)
 
 
+class PagerControl:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def is_enabled(self):
+        return self.page.position < len(self.page.result_pages) - 1
+
+    def get_attribute(self, name):
+        return None
+
+    def evaluate(self, script):
+        return False
+
+    def click(self, **kwargs):
+        self.page.position += 1
+        self.page.next_clicks += 1
+        self.page.dom = copy.deepcopy(self.page.result_pages[self.page.position])
+
+
+class PagedPage(Page):
+    def __init__(self, pages):
+        super().__init__("paged-target", pages[0])
+        self.result_pages, self.position, self.next_clicks = pages, 0, 0
+
+    def goto(self, url, **kwargs):
+        self.position = 0
+        self.dom = copy.deepcopy(self.result_pages[0])
+        super().goto(url, **kwargs)
+
+    def locator(self, selector):
+        return PagerControl(self) if selector == "#PageNext" else EmptyControl()
+
+    def evaluate(self, javascript, arguments):
+        if "literature_pagination" in javascript:
+            return {"total_count": 41, "explicit_end": False}
+        return super().evaluate(javascript, arguments)
+
+
 class BrowserAdapterTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="literature-browser-test-")
@@ -388,6 +435,161 @@ class BrowserAdapterTests(unittest.TestCase):
             result = self.call("scopus", resume=True)
         self.assertEqual(result["reason"], "results_unrecognized")
         self.assertGreaterEqual(navigate.call_count, 1)
+
+    def paged(self, count=3, rows=20):
+        pages = [snapshot(results=[{**ROW, "title": f"Page {number} paper {index}",
+                 "result_url": f"https://example.org/{number}/{index}"} for index in range(rows)], resultContainer=True)
+                 for number in range(count)]
+        page = PagedPage(pages)
+        self.context.pages.append(page)
+        adapter._save_binding(self.job, "cnki", page.target)
+        return page
+
+    def test_formal_reads_full_visible_page_without_losing_after_first_ten(self):
+        self.paged()
+        result = self.call(full_page=True)
+        self.assertEqual(len(result["results"]), 20)
+        self.assertTrue(result["has_next"])
+        self.assertEqual(result["total_count"], 41)
+        self.assertEqual(result["page_index"], 0)
+
+    def test_default_call_still_returns_at_most_ten(self):
+        self.paged()
+        result = self.call()
+        self.assertEqual(len(result["results"]), 10)
+
+    def test_native_page_larger_than_read_cap_pauses_instead_of_skipping_tail(self):
+        page = self.paged()
+        page.result_pages[0]["visible_result_count"] = 500
+        result = self.call(full_page=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertEqual(result["results"], [])
+        self.assertIn("200", result["message"])
+
+    def test_sequential_page_reuses_confirmed_target_and_visible_next(self):
+        page = self.paged()
+        self.call(full_page=True)
+        second = self.call(page_index=1, full_page=True)
+        third = self.call(page_index=2, full_page=True)
+        self.assertEqual((second["status"], third["status"]), ("ok", "ok"))
+        self.assertIn("Page 1", second["results"][0]["title"])
+        self.assertIn("Page 2", third["results"][0]["title"])
+        self.assertEqual(page.next_clicks, 2)
+        self.assertEqual(len(page.navigations), 1)
+        self.assertFalse(third["has_next"])
+        binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["cnki"]
+        self.assertEqual(binding["page_index"], 2)
+        self.assertEqual(len(binding["result_fingerprint"]), 64)
+        self.assertNotIn("url", binding)
+
+    def test_return_from_login_replays_frozen_search_to_requested_page(self):
+        page = self.paged()
+        self.call(full_page=True)
+        page.dom = snapshot(password=True, queries=[])
+        waiting = self.call(page_index=1, full_page=True)
+        self.assertEqual(waiting["reason"], "login")
+        page.dom = snapshot(results=[{**ROW, "title": "Unproven manual page"}])
+        result = self.call(resume=True, page_index=1, full_page=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Page 1", result["results"][0]["title"])
+        self.assertEqual(len(page.navigations), 2)
+
+    def test_changed_manual_query_does_not_reuse_page_proof(self):
+        page = self.paged()
+        self.call(full_page=True)
+        page.dom["queries"] = ["another query"]
+        result = self.call(page_index=1, full_page=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(page.navigations), 2)
+        self.assertIn("Page 1", result["results"][0]["title"])
+
+    def test_formal_first_page_without_page_proof_resubmits_after_manual_login(self):
+        page = self.paged()
+        page.dom = copy.deepcopy(page.result_pages[2])
+        page.url = adapter.SOURCES["cnki"][1] + "?kw=broiler"
+        result = self.call(resume=True, full_page=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Page 0", result["results"][0]["title"])
+        self.assertEqual(len(page.navigations), 1)
+
+    def test_missing_or_unchanged_next_page_is_attention(self):
+        self.paged()
+        self.call(full_page=True)
+        with patch.object(adapter, "_advance_page", return_value=None):
+            result = self.call(page_index=1, full_page=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+
+    def test_next_waits_through_empty_ajax_loading_frame(self):
+        page = self.paged()
+        previous = page.dom
+        fresh = page.result_pages[1]
+        with patch.object(adapter, "_snapshot", side_effect=[snapshot(), fresh]) as read, \
+                patch.object(adapter.time, "sleep"):
+            result = adapter._advance_page(page, "cnki", previous, 200)
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(result, fresh)
+
+    def test_absent_next_button_is_unknown_not_proven_last_page(self):
+        result = self.call(full_page=True)
+        self.assertIsNone(result["has_next"])
+
+    def test_recreated_browser_target_cannot_inherit_old_page_proof(self):
+        self.paged()
+        self.call(full_page=True)
+        adapter._save_binding(self.job, "cnki", "new-target")
+        binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["cnki"]
+        self.assertNotIn("page_index", binding)
+        self.assertNotIn("result_fingerprint", binding)
+
+    def test_actual_wanfang_pager_and_count_dom(self):
+        from test_literature_extra_sources import dom_snapshot
+        for current, end in [("2 / 19", False), ("19 / 19", True)]:
+            metadata = dom_snapshot("wanfang", {"count": {"text": "369"}, "pages": {"text": current}},
+                {".total-number .mark-number": ["count"], ".small-paginate .page-number": ["pages"]},
+                script=adapter._PAGINATION_JS)
+            self.assertEqual(metadata["total_count"], 369)
+            self.assertEqual(metadata["explicit_end"], end)
+
+    def test_actual_scopus_results_header_exposes_reported_total_count(self):
+        from test_literature_extra_sources import dom_snapshot
+        metadata = dom_snapshot("scopus", {"header": {"text": "2,417 documents found"}},
+            {'h2[data-testid="label-search-results-header"]': ["header"]},
+            script=adapter._PAGINATION_JS)
+        self.assertEqual(metadata["total_count"], 2417)
+        self.assertFalse(metadata["explicit_end"])
+
+    def test_pubmed_forwards_exact_offset_page(self):
+        published = {"status": "ok", "results": [], "page_index": 3, "has_next": False, "total_count": 21}
+        with patch.object(adapter.literature_pubmed, "run", return_value=published) as api:
+            result = self.call("pubmed", page_index=3, full_page=True)
+        self.assertEqual(result, published)
+        api.assert_called_once_with(QUERY, limit=10, year_from=None, year_to=None, page_index=3)
+
+    def test_pubmed_api_transport_does_not_switch_to_browser_at_later_offset(self):
+        published = {"status": "ok", "results": [ROW], "transport": "ncbi_eutilities", "page_index": 0}
+        failed = {"status": "error", "results": [], "transport": "ncbi_eutilities", "page_index": 1}
+        with patch.object(adapter.literature_pubmed, "run", side_effect=[published, failed]) as api, \
+                patch.object(adapter, "_runtime", side_effect=AssertionError("API task must retain offset")):
+            self.call("pubmed")
+            result = self.call("pubmed", resume=True, page_index=1, full_page=True)
+        self.assertEqual(result, failed)
+        self.assertEqual(api.call_count, 2)
+
+    def test_pubmed_browser_fallback_is_locked_for_subsequent_pages(self):
+        dom = snapshot(captcha=True)
+        with patch.object(adapter.literature_pubmed, "run", return_value={"status": "error"}) as api, \
+                patch.object(adapter.extra_sources, "snapshot", return_value=dom), \
+                patch.object(adapter.extra_sources, "navigate", return_value=True):
+            self.call("pubmed")
+            result = self.call("pubmed", page_index=1, full_page=True)
+        self.assertEqual(api.call_count, 1)
+        self.assertEqual(result["transport"], "browser_after_api_error")
+        self.assertEqual(result["reason"], "verification")
+
+    def test_corrupt_pubmed_transport_marker_cannot_mix_pagination(self):
+        (self.job / "pubmed-transport.json").write_text('{"query_hash":"different","transport":"ncbi_eutilities"}', encoding="utf-8")
+        with patch.object(adapter.literature_pubmed, "run", side_effect=AssertionError("invalid checkpoint")):
+            self.assertEqual(self.call("pubmed")["status"], "error")
 
 
 if __name__ == "__main__":

@@ -105,6 +105,7 @@ class El {
    return [...new Set(keys.map(key=>nodes[key]))];
  }
  getAttribute(name){return this.attrs?.[name]||null;}
+ querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
  closest(selector){return nodes[this.parent]||null;}
 }
 const nodes={}; for(const [key,data] of Object.entries(input.nodes)) nodes[key]=new El(data);
@@ -299,6 +300,28 @@ class SourceSnapshotTests(unittest.TestCase):
         nodes["second"]["hidden"] = True
         self.assertEqual(dom_snapshot("scopus", nodes, mapping)["results"], [])
 
+    def test_formal_snapshot_reads_twenty_visible_rows(self):
+        nodes, mapping = bibliographic_fixture("scopus")
+        mapping['[data-testid="search-result"]'] = []
+        for number in range(20):
+            nodes[f"row{number}"] = copy.deepcopy(nodes["row"])
+            mapping['[data-testid="search-result"]'].append(f"row{number}")
+        self.assertEqual(len(dom_snapshot("scopus", nodes, mapping, limit=200)["results"]), 20)
+
+    def test_pubmed_show_more_reads_latest_nonempty_visible_chunk(self):
+        nodes, mapping = bibliographic_fixture("pubmed")
+        nodes["old"] = copy.deepcopy(nodes["row"])
+        nodes["oldTitle"] = {"text": "Earlier page result", "href": "https://pubmed.ncbi.nlm.nih.gov/1/"}
+        nodes["old"]["map"]["a.docsum-title"] = ["oldTitle"]
+        nodes["chunk1"] = {"map": {"article.full-docsum": ["old"]}}
+        nodes["chunk2"] = {"map": {"article.full-docsum": ["row"]}}
+        nodes["emptyChunk"] = {"map": {}}
+        mapping[".search-results-chunk"] = ["chunk1", "chunk2", "emptyChunk"]
+        mapping["article.full-docsum"] = ["old", "row"]
+        results = dom_snapshot("pubmed", nodes, mapping, limit=200)["results"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["pmid"], "12345678")
+
     def test_actual_wanfang_visible_span_card_preserves_authors_year_and_position(self):
         nodes = {
             "row": {"className": "normal-list periodical-list", "text": "Real paper card", "map": {
@@ -447,6 +470,14 @@ class WanfangDetailLinkTests(unittest.TestCase):
         self.assertEqual(result[0]["result_url"], self.actual)
         self.assertEqual(page.url, page.initial)
         self.assertEqual(page.restored, 1)
+
+    def test_formal_resolves_records_after_the_tenth_visible_title(self):
+        page = ResultPage(self.actual)
+        rows = [dict(self.rows[0]) for _ in range(20)]
+        result = adapter.resolve_result_links(page, "wanfang", rows, limit=200)
+        self.assertEqual(len(result), 20)
+        self.assertEqual(page.clicks, 20)
+        self.assertTrue(all(row["result_url"] == self.actual for row in result))
 
     def test_authentication_popup_is_not_exported_as_bibliography(self):
         page = ResultPage("https://login.wanfangdata.com.cn/sso?ticket=private")

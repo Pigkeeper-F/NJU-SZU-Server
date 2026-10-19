@@ -262,6 +262,52 @@ async function main() {
     assert.ok(done.events.some(event => event.stage === 'search'));
     assert.ok(fs.readFileSync(path.join(root, '.workbench', 'literature', done.id, 'events.jsonl'), 'utf8').includes('mock search'));
 
+    // 正式分页的进度计数、登录暂停、服务重启与原冻结数量续跑。
+    let pageAttempt = 0;
+    let progressSnapshot;
+    let paged;
+    const pagedOptions = {
+      prepare: async () => 'mock-python',
+      search: async (job, _python, onEvent) => {
+        pageAttempt += 1;
+        assert.equal(job.config.searchMode, 'formal');
+        assert.equal(job.config.perSourceLimit, 25);
+        assert.equal(job.limits.discover, 540);
+        const count = pageAttempt === 1 ? 10 : 25;
+        fs.writeFileSync(path.join(job.dir, 'candidates.json'), JSON.stringify({ version: 2, count, discovery_complete: pageAttempt !== 1,
+          batches: [{ batch_index: 1 }], records: [{ candidate_id: 'GSC-001' }] }));
+        fs.writeFileSync(path.join(job.dir, 'candidates.csv'), 'candidate_id\nGSC-001\n');
+        onEvent({ type: 'stage', stage: 'search', count, message: `Google Scholar 第 ${pageAttempt} 页，已保留 ${count}/25 条` });
+        progressSnapshot = paged.snapshot(job.id);
+        onEvent({ type: 'stage', stage: 'search', count: -10, message: '无效负数不得覆盖候选计数' });
+        assert.equal(paged.snapshot(job.id).count, count);
+        if (pageAttempt === 1) onEvent({ type: 'attention', stage: 'verification', source: 'google-scholar', reason: 'verification', count,
+          message: '请完成验证后检查并继续', files: ['candidates.json', 'candidates.csv'] });
+        else onEvent({ type: 'result', count, files: ['candidates.json', 'candidates.csv'], message: '已保存25条候选' });
+      }
+    };
+    paged = new LiteratureConnector(root, pagedOptions);
+    const pagedStarted = paged.start({ ...config, searchMode: 'formal', perSourceLimit: 25 });
+    const pagedPaused = await waitDone(paged, pagedStarted.id);
+    assert.equal(progressSnapshot.count, 10);
+    assert.equal(progressSnapshot.counters.candidates, 10, '逐页stage事件应即时更新候选计数');
+    assert.equal(pagedPaused.status, 'needs_attention');
+    assert.equal(pagedPaused.resumeStage, 'discover');
+    const frozen = paged.download(pagedStarted.id, 'run_config.json');
+    const frozenBytes = fs.readFileSync(frozen, 'utf8');
+    assert.equal(__internals.detectStagedArtifacts(path.dirname(frozen)).stages.discover, 'pending');
+    paged = new LiteratureConnector(root, pagedOptions);
+    assert.equal(paged.snapshot(pagedStarted.id).count, 10, '重启保留已完成页的计数');
+    assert.equal(paged.snapshot(pagedStarted.id).config.perSourceLimit, 25);
+    paged.advance(pagedStarted.id);
+    const pagedCompleted = await waitDone(paged, pagedStarted.id);
+    assert.equal(pagedCompleted.id, pagedStarted.id);
+    assert.equal(pagedCompleted.until, 'discover');
+    assert.equal(pagedCompleted.count, 25);
+    assert.equal(pagedCompleted.counters.candidates, 25);
+    assert.equal(pagedCompleted.status, 'completed');
+    assert.equal(fs.readFileSync(frozen, 'utf8'), frozenBytes, '继续执行不能回写原模式和目标');
+
     // ---------- 桩阶段脚本场景（S1/S2/S3/S4/S7 共用同一工作区） ----------
     const python = findPython();
     if (!python) {

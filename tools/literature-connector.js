@@ -10,7 +10,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
-const { normalizeConfig } = require('./literature-config');
+const { normalizeConfig, discoverBudget } = require('./literature-config');
 const { executableSources } = require('./literature-sources');
 const { proxyFor } = require('./source-download');
 
@@ -64,8 +64,7 @@ function pythonEnv() {
 
 function resolveLimits(config) {
   const limits = { ...STAGE_TIMEOUTS };
-  const sourceCount = Array.isArray(config?.sources) ? config.sources.length : 1;
-  limits.discover *= Math.min(6, Math.max(1, sourceCount));
+  limits.discover = discoverBudget(config);
   if (config && typeof config === 'object' && config.limits && typeof config.limits === 'object') {
     for (const stage of STAGES) {
       const value = config.limits[stage];
@@ -433,6 +432,10 @@ class LiteratureConnector {
     if (Number.isInteger(runId) && job.runId !== runId) return; // 旧一代 run：只审计不改状态
     if (job.status === 'cancelled') return;
     if (event.type === 'stage') {
+      if (stageKey === 'discover' && Number.isSafeInteger(event.count) && event.count >= 0) {
+        job.count = event.count;
+        this.mergeCounters(job, stageKey, event);
+      }
       this.update(job, String(event.stage || stageKey), String(event.message || '正在处理'));
       return;
     }
