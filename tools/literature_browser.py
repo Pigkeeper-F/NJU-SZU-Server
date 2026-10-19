@@ -156,7 +156,7 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
       rows = Array.from(document.querySelectorAll(sel)); if (rows.length) break;
     }
     resultContainer = !!document.querySelector('.result-table-list,.search-table,.result-list');
-    noResults = /未找到|没有找到|暂无检索结果|检索结果为\s*0|共\s*0\s*条|0\s*条结果/i.test(visibleText('.no-result,.no-results,.no-data,.nodata,.result-tip,.result-blank,.result-count,.pagerTitleCell,.search-result')); 
+    noResults = /未找到|没有找到|暂无检索结果|检索结果为\s*0|共\s*0\s*条|0\s*条结果/i.test(visibleText('.no-result,.no-results,.no-data,.nodata,.result-tip,.result-blank,.result-count,.pagerTitleCell,.search-result'));
   } else {
     for (const sel of ['app-record','app-summary-record','.summary-record','[data-ta="summary-record"]']) {
       rows = Array.from(document.querySelectorAll(sel)); if (rows.length) break;
