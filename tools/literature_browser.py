@@ -491,6 +491,41 @@ def _pagination(page, source):
     return {"has_next": has_next, "total_count": data.get("total_count")}
 
 
+def _source_pagination(page, source, snapshot, pagination):
+    """Distinguish a database's display cap from the scientific result end.
+
+    Scholar documents a maximum of 1,000 displayed records for one query.
+    Its reported hit count is approximate: it cannot override an explicitly
+    disabled Next control below that cap. Flag the documented source cap only
+    once the actual displayed range reaches it and the source reports more.
+    The current page remains successful so its rows can be checkpointed first.
+    https://scholar.google.com/intl/us/scholar/help.html
+    """
+    if source != "google-scholar":
+        return pagination
+    total = pagination.get("total_count")
+    if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+        return pagination
+    try:
+        parsed = urlsplit(page.url)
+        if not _official_result_page(page, source):
+            return pagination
+        starts = parse_qs(parsed.query).get("start", ["0"])
+        if len(starts) != 1 or not re.fullmatch(r"\d+", starts[0]):
+            return pagination
+        start = int(starts[0])
+    except (TypeError, ValueError):
+        return pagination
+    visible_count = snapshot.get("visible_result_count")
+    if isinstance(visible_count, bool) or not isinstance(visible_count, int) or visible_count < 0:
+        visible_count = len(snapshot.get("results") or [])
+    observed_end = start + visible_count
+    if observed_end >= 1000 and total > observed_end:
+        return {**pagination, "has_next": True, "source_limit_reached": True,
+                "source_limit_message": "Google Scholar 报告的命中数仍多于已取回结果，但当前结果已到来源显示上限或无法继续翻页。该来源单个检索式最多显示1000条；请缩小或拆分检索式后新建检索，不能将此标记为全部检索完成。"}
+    return pagination
+
+
 def _row_fingerprint(snapshot):
     rows = [{key: row.get(key) for key in ("title", "result_url", "doi", "pmid")}
             for row in snapshot.get("results") or [] if isinstance(row, dict)]
@@ -569,8 +604,8 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 "url": "", "results": [], "applied_filters": {}, "deferred_rules": []}
     if not isinstance(query, str) or not query.strip() or len(query) > 2000:
         return {**_envelope(source_key, "error"), "message": "检索式无效。"}
-    if isinstance(page_index, bool) or not isinstance(page_index, int) or not 0 <= page_index <= 999:
-        return {**_envelope(source_key, "error"), "message": "检索页码必须为 0 到 999。"}
+    if isinstance(page_index, bool) or not isinstance(page_index, int) or page_index < 0:
+        return {**_envelope(source_key, "error"), "message": "检索页码必须为非负整数。"}
     limit = max(1, min(int(limit), 10))
     read_limit = 200 if full_page else limit
     api_failed = False
@@ -661,7 +696,11 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             while current_index < page_index:
                 if not _official_result_page(page, source_key):
                     return response("attention", reason="results_unrecognized")
-                pagination = _pagination(page, source_key)
+                pagination = _source_pagination(page, source_key, current, _pagination(page, source_key))
+                if pagination.get("source_limit_reached"):
+                    result = response("attention", reason="results_unrecognized", pagination=pagination)
+                    result["message"] = pagination["source_limit_message"]
+                    return result
                 if pagination["has_next"] is False:
                     return response("ok", pagination={**pagination, "has_next": False})
                 advanced = _advance_page(page, source_key, current, read_limit)
@@ -689,7 +728,7 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 if any(not safe_url(row.get("result_url")) and not row.get("doi") for row in raw_rows):
                     return response("attention", reason="results_unrecognized")
             rows = _clean_results(raw_rows, read_limit)
-            pagination = _pagination(page, source_key)
+            pagination = _source_pagination(page, source_key, current, _pagination(page, source_key))
             if rows:
                 _save_binding(job_dir, source_key, _target_id(context, page), query_hash,
                               page_index=page_index, result_fingerprint=_row_fingerprint(current))

@@ -75,6 +75,14 @@ async function main() {
     assert.match((await response.json()).error, /阶段边界/, '36KB 来源配置应通过请求体读取和配置检查');
 
     // 新模式先校验目标数量；使用非法阶段验证合法模式，不触发真实数据库访问。
+    response = await post('/api/literature/search', { config: { topic: '正式到末页', query: 'q', sources: ['pubmed'],
+      searchMode: 'formal', stopMode: 'end', perSourceLimit: 1001 }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /阶段边界/, '到末页忽略遗留数量，合法配置进入阶段校验');
+    response = await post('/api/literature/search', { config: { topic: '非法测试到末页', query: 'q', sources: ['pubmed'],
+      searchMode: 'test', stopMode: 'end' }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /只适用于正式模式/);
     for (const target of [0, 1001, true]) {
       response = await post('/api/literature/search', { config: { topic: '正式检索', query: 'q', sources: ['pubmed'],
         searchMode: 'formal', perSourceLimit: target } }, { 'X-Workbench': '1' });

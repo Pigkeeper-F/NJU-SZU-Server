@@ -93,9 +93,10 @@ assert.ok(codex.includes("'/api/literature/prepare'") && codex.includes("'/api/l
 assert.ok(codex.includes('t.busy || !t.literatureConfig'), '未配置时启动按钮保持禁用');
 assert.ok(codex.includes('PubMed 公开检索通常无需登录'), '公开接口与需人工登录来源应区分');
 assert.ok(!codex.includes('（未接通）') && !codex.includes('请取消万方、Scopus、PubMed'), '六来源不再展示预留未接通文案');
-for (const text of ['测试运行（每来源10条）', '正式检索（自选数量）', '每来源候选上限（1–1000）', '历史任务（按原数量）', '登录流程：']) {
+for (const text of ['测试运行（每来源10条）', '正式检索（检索到末页）', '历史任务（按原数量）', '登录流程：', '数据库当前可访问末页']) {
   assert.ok(codex.includes(text), '模式与登录说明应可见：' + text);
 }
+assert.ok(!codex.includes('正式检索每来源候选上限') && !codex.includes('每来源候选上限（1–1000）'), '新界面不再提供正式数量输入');
 
 // 9) 多来源前端行为：直接执行受检函数，模拟服务端；不启浏览器、不调用真实账户。
 function functionSource(name) {
@@ -138,16 +139,33 @@ async function multiSourceTests() {
       scopus: '(broiler OR broilers) AND "heat stress"', pubmed: 'broiler[Title/Abstract] AND "heat stress"[Title/Abstract]' } }));
   assert.equal(config.sourceQueries.cnki, '肉鸡 热应激', 'AI整理结果不能丢来源检索式');
   assert.equal(config.searchMode, 'test', '新整理配置默认测试');
+  assert.equal(config.stopMode, 'count', '测试模式按数量停止');
   assert.equal(config.perSourceLimit, 10, '测试每来源固定10条');
   const formal = subject.parseLiteratureConfig(JSON.stringify({ ...config, searchMode: 'formal', perSourceLimit: 120, limit: 2, batch: { size: 2, maxBatches: 3 } }));
   assert.equal(formal.limit, 10, '正式数量独立于接口页大小');
   assert.equal(formal.batch.size, 10, '新模式接口页大小为10');
-  assert.equal(formal.perSourceLimit, 120, '正式目标数量保留');
-  assert.equal(subject.newLiteratureSearchConfig({ ...config, searchMode: 'formal', perSourceLimit: undefined }).perSourceLimit, 100);
-  for (const value of [0, 1001, 1.5, null, 'wrong']) assert.throws(() => subject.newLiteratureSearchConfig({ ...formal, perSourceLimit: value }), /1–1000/);
+  assert.equal(formal.stopMode, 'end', '新整理的正式检索直接到可访问末页');
+  assert.equal(formal.perSourceLimit, null, '正式检索不保留AI建议的数量停止条件');
+  for (const value of [undefined, 120, 1001, null]) {
+    const end = subject.newLiteratureSearchConfig({ ...config, searchMode: 'formal', perSourceLimit: value });
+    assert.equal(end.perSourceLimit, null, '新正式配置不使用数量上限'); assert.equal(end.stopMode, 'end');
+  }
   assert.equal(subject.newLiteratureSearchConfig({ ...config, searchMode: 'test', perSourceLimit: 999 }).perSourceLimit, 10, '测试模式不能扩大数量');
   assert.equal(subject.sameLiteratureConfig(config, { ...config, searchMode: 'formal', perSourceLimit: 10 }), false, '模式改变需新任务');
-  assert.equal(subject.sameLiteratureConfig(formal, { ...formal, perSourceLimit: 121 }), false, '正式目标数量改变需新任务');
+  const legacyFormal = { ...formal, perSourceLimit: 120, limits: { discover: 1800, fulltext: 3600 } }; delete legacyFormal.stopMode;
+  const originalFormalLimits = JSON.stringify(legacyFormal.limits);
+  const convertedFormal = subject.newLiteratureSearchConfig(legacyFormal);
+  assert.equal(convertedFormal.limits.discover, undefined, '旧数量正式任务转新末页任务时重算检索预算');
+  assert.equal(convertedFormal.limits.fulltext, 3600, '转换仍保留其他阶段预算');
+  assert.equal(JSON.stringify(legacyFormal.limits), originalFormalLimits, '转换不能修改旧任务的冻结预算');
+  assert.notEqual(convertedFormal.limits, legacyFormal.limits, '转换使用独立预算副本');
+  const explicitEnd = { ...formal, limits: { discover: 4321, fulltext: 3600 } };
+  assert.equal(subject.newLiteratureSearchConfig(explicitEnd).limits.discover, 4321, '已有末页配置保留显式运行预算');
+  assert.equal(subject.parseLiteratureConfig(JSON.stringify(explicitEnd)).limits.discover, 4321, '整理已有末页配置也保留显式运行预算');
+  assert.equal(subject.sameLiteratureConfig(legacyFormal, { ...legacyFormal, stopMode: 'count' }), true, '旧正式缺省停止方式仍为count');
+  assert.equal(subject.sameLiteratureConfig(legacyFormal, { ...legacyFormal, perSourceLimit: 121 }), false, '旧正式目标数量改变需新任务');
+  assert.equal(subject.sameLiteratureConfig(legacyFormal, formal), false, '旧按数量任务与新末页任务不混用');
+  assert.equal(subject.sameLiteratureConfig({ ...config, stopMode: undefined }, config), true, '旧测试缺省停止方式仍按数量');
   assert.equal(subject.sameLiteratureConfig(config, { ...config, sourceQueries: Object.fromEntries(Object.entries(config.sourceQueries).reverse()) }), true, '映射顺序不改变冻结配置');
   assert.equal(subject.sameLiteratureConfig(config, { ...config, sourceQueries: { cnki: '肉鸡 高温' } }), false, '来源检索式变化须新建任务');
   assert.equal(subject.sameLiteratureConfig({ ...config, sourceQueries: undefined }, { ...config, sourceQueries: {} }), true, '旧任务缺省来源映射兼容');
@@ -221,7 +239,7 @@ async function multiSourceTests() {
 
   // 旧任务按原冻结数量恢复；显示设置时不补模式，也不改变原来的小批大小。
   const legacy = { ...config, limit: 2, batch: { size: 2, maxBatches: 3 }, limits: { discover: 180, fulltext: 3600 } };
-  delete legacy.searchMode; delete legacy.perSourceLimit;
+  delete legacy.searchMode; delete legacy.perSourceLimit; delete legacy.stopMode;
   const legacyBefore = JSON.stringify(legacy);
   current.literatureConfig = JSON.parse(legacyBefore); current.literatureUntil = 'discover';
   current.literatureJob = { id: 'legacy-job', config: legacy, status: 'needs_attention', stage: 'login', resumeStage: 'discover', until: 'discover',
@@ -242,9 +260,10 @@ async function multiSourceTests() {
   assert.equal(JSON.stringify(legacy), legacyBefore, '新检索模式转换只修改副本');
   assert.equal(subject.sameLiteratureConfig(legacy, legacyNew), false, '旧limit2不能误判成测试10');
 
-  // 模式和正式上限可编辑；变更后重新计算自动检索预算，并禁止旧任务继续。
+  // 正式固定到末页；模式变更后重算自动检索预算，并禁止旧任务继续。
   modeSelect.value = 'formal'; modeSelect.onchange();
-  assert.equal(current.literatureConfig.searchMode, 'formal'); assert.equal(current.literatureConfig.perSourceLimit, 100);
+  assert.equal(current.literatureConfig.searchMode, 'formal'); assert.equal(current.literatureConfig.perSourceLimit, null);
+  assert.equal(current.literatureConfig.stopMode, 'end');
   assert.equal(current.literatureConfig.limits.discover, undefined, '模式变更后由服务端重算检索预算');
   assert.equal(current.literatureConfig.limits.fulltext, 3600, '其他阶段预算保留');
   assert.equal(JSON.stringify(legacy), legacyBefore, '编辑草稿不能改变历史job');
@@ -252,19 +271,47 @@ async function multiSourceTests() {
   assert.equal(calls.length, 0, '模式变更必须新检索'); assert.match(current.literatureError, /不能混入旧任务/);
   container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
   modeNodes = elements(container);
-  const quantityInput = modeNodes.find(item => item.tag === 'input' && item['aria-label'] === '正式检索每来源候选上限');
-  assert.equal(quantityInput.value, 100); assert.equal(quantityInput.min, '1'); assert.equal(quantityInput.max, '1000');
-  current.literatureConfig.limits.discover = 180;
-  quantityInput.value = '125'; quantityInput.oninput();
-  assert.equal(current.literatureConfig.perSourceLimit, 125); assert.equal(current.literatureConfig.limits.discover, undefined);
+  assert.ok(!modeNodes.some(item => item['aria-label'] === '正式检索每来源候选上限'), '正式没有数量停止输入');
+  assert.ok(modeNodes.some(item => item.textContent.includes('数据库当前可访问末页')), '正式说明可访问范围，不声称获取全部主题文献');
   current.literatureConfig.limits.discover = 180;
   const formalCnki = modeNodes.find(item => item.tag === 'label' && item.textContent === '中国知网').children[0];
   formalCnki.checked = false; formalCnki.onchange();
   assert.equal(current.literatureConfig.limits.discover, undefined, '来源变更后重算自动预算');
   calls.length = 0; responseJob = { id: 'new-formal', config: JSON.parse(JSON.stringify(current.literatureConfig)) };
   await subject.startLiterature({ id: 'module-1' });
-  assert.equal(calls[0].body.config.searchMode, 'formal'); assert.equal(calls[0].body.config.perSourceLimit, 125);
+  assert.equal(calls[0].body.config.searchMode, 'formal'); assert.equal(calls[0].body.config.perSourceLimit, null);
+  assert.equal(calls[0].body.config.stopMode, 'end');
   assert.equal(calls[0].body.config.limit, 10, '正式请求使用独立数量字段，页大小仍为10');
+
+  // 历史按数量正式任务仍可恢复；新启动副本转换末页，不改旧配置。
+  const legacyFormalBefore = JSON.stringify(legacyFormal);
+  current.literatureConfig = JSON.parse(legacyFormalBefore); current.literatureUntil = 'discover';
+  current.literatureJob = { id: 'legacy-formal', config: legacyFormal, status: 'needs_attention', stage: 'login', resumeStage: 'discover', until: 'discover',
+    attention: { source: 'cnki', reason: 'login' }, message: '请完成登录' };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  modeNodes = elements(container);
+  assert.ok(modeNodes.some(item => item.textContent.includes('历史正式配置保持原数量：每来源候选上限 120 条')));
+  assert.ok(!modeNodes.some(item => item['aria-label'] === '正式检索每来源候选上限'));
+  assert.equal(JSON.stringify(current.literatureConfig), legacyFormalBefore, '渲染不能把旧正式任务改成末页');
+  calls.length = 0; await subject.continueLiterature({ id: 'module-1' });
+  assert.deepEqual(calls[0], { url: '/api/literature/advance', body: { id: 'legacy-formal', until: 'discover' } }, '旧正式任务继续用原id与配置');
+  calls.length = 0; responseJob = { id: 'new-end' };
+  await subject.startLiterature({ id: 'module-1' });
+  assert.equal(calls[0].body.config.stopMode, 'end'); assert.equal(calls[0].body.config.perSourceLimit, null);
+  assert.equal(calls[0].body.config.limits.discover, undefined); assert.equal(calls[0].body.config.limits.fulltext, 3600);
+  assert.equal(JSON.stringify(legacyFormal), legacyFormalBefore, '新正式请求转换不能修改旧冻结配置');
+
+  // 非数据库登录的通用暂停可检查续跑，不显示无效登录按钮。
+  current.literatureJob = { id: 'network-pause', config: JSON.parse(JSON.stringify(current.literatureConfig)), status: 'needs_attention', stage: 'interrupted',
+    resumeStage: 'discover', until: 'discover', message: '检索单次运行超时，已保存7页，请检查网络后继续' };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  modeNodes = elements(container);
+  assert.ok(modeNodes.some(item => item.tag === 'button' && item.textContent === '检查并继续' && !item.disabled));
+  assert.ok(!modeNodes.some(item => item.tag === 'button' && item.textContent === '打开登录/检索页面'));
+  const pausedMessage = subject.literatureAttentionMessage(current.literatureJob);
+  assert.match(pausedMessage, /已保存7页/); assert.ok(!pausedMessage.includes('请打开登录'));
+  calls.length = 0; await subject.continueLiterature({ id: 'module-1' });
+  assert.deepEqual(calls[0], { url: '/api/literature/advance', body: { id: 'network-pause', until: 'discover' } });
 
   // 普通页面持续说明登录位置，只有真正等待人工时才提供续跑按钮。
   current.literatureJob = null;

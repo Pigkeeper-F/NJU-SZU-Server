@@ -26,6 +26,7 @@ import xml.etree.ElementTree as ET
 BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_REQUEST_INTERVAL = 0.35  # NCBI: at most 3 requests/second without an API key.
+MAX_ESEARCH_RECORDS = 10_000  # Official PubMed ESearch per-query retrieval cap.
 _request_lock = threading.Lock()
 _last_request: float | None = None
 
@@ -236,8 +237,8 @@ def run(query: str, limit: int = 10, year_from: int | None = None,
             raise PubMedError("PubMed 检索式必须为 1 到 2000 字的非空文本。")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
             raise PubMedError("PubMed 每批返回数量必须为 1 到 10。")
-        if isinstance(page_index, bool) or not isinstance(page_index, int) or not 0 <= page_index <= 999:
-            raise PubMedError("PubMed 页码必须为 0 到 999。")
+        if isinstance(page_index, bool) or not isinstance(page_index, int) or page_index < 0:
+            raise PubMedError("PubMed 页码必须为非负整数。")
         for value in (year_from, year_to):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1000 <= value <= 9999):
                 raise PubMedError("PubMed 发表年份必须为四位整数。")
@@ -247,9 +248,20 @@ def run(query: str, limit: int = 10, year_from: int | None = None,
             raise PubMedError("PubMed 请求超时配置无效。")
         if not isinstance(max_response_bytes, int) or not 1 <= max_response_bytes <= MAX_RESPONSE_BYTES:
             raise PubMedError("PubMed 响应大小配置无效。")
+        offset = page_index * limit
+        if offset >= MAX_ESEARCH_RECORDS:
+            # ESearch's cap is a source restriction, not a zero-result/final-page
+            # signal. Earlier pages have already been saved by the driver. Do
+            # not replace this API offset with a differently sized browser page.
+            # https://ncbiinsights.ncbi.nlm.nih.gov/2022/11/22/updated-pubmed-eutilities-live/
+            result.update(status="attention", reason="results_unrecognized", source_limit_reached=True,
+                message="PubMed ESearch 单个检索式只能取回前10000条记录，已到来源可访问上限。已有结果已保留；请缩小或拆分检索式后新建检索，不能将此标记为全部检索完成。")
+            result["source_limit_message"] = result["message"]
+            return result
         query = query.strip()
         params = {"db": "pubmed", "term": query, "retmode": "json",
-                  "retmax": limit, "retstart": page_index * limit, "sort": "relevance", "tool": "NJU_SZU_Workbench"}
+                  "retmax": min(limit, MAX_ESEARCH_RECORDS - offset), "retstart": offset,
+                  "sort": "relevance", "tool": "NJU_SZU_Workbench"}
         web_query = query
         if year_from is not None or year_to is not None:
             lower, upper = year_from or 1000, year_to or 9999
@@ -277,10 +289,10 @@ def run(query: str, limit: int = 10, year_from: int | None = None,
                 or not isinstance(ids, list) or any(not isinstance(pmid, str) or not re.fullmatch(r"[1-9]\d{0,19}", pmid) for pmid in ids)):
             raise PubMedError("PubMed 检索计数或 PMID 清单无效。")
         count = int(raw_count)
-        if len(ids) != min(max(count - page_index * limit, 0), limit) or len(set(ids)) != len(ids):
+        if len(ids) != min(max(count - offset, 0), params["retmax"]) or len(set(ids)) != len(ids):
             raise PubMedError("PubMed 检索计数与 PMID 清单不一致，不能据此判定零命中。")
         result["total_count"] = count
-        result["has_next"] = page_index * limit + len(ids) < count
+        result["has_next"] = offset + len(ids) < count
         if count == 0:
             result.update(status="no_results", message="PubMed 官方接口确认本检索式零命中。")
             return result

@@ -173,11 +173,14 @@ def resolve_limits(config: dict | None) -> dict:
     if isinstance(config, dict):
         sources = config.get("sources")
         source_count = len(sources) if isinstance(sources, list) else 1
-        target = config.get("perSourceLimit", 100) if config.get("searchMode") == "formal" else 10
-        if not isinstance(target, int) or isinstance(target, bool) or not 1 <= target <= 1000:
-            target = 100 if config.get("searchMode") == "formal" else 10
-        pages = (target + 9) // 10
-        limits["discover"] = min(86400, 180 * min(6, max(1, source_count)) * pages)
+        if config.get("searchMode") == "formal" and config.get("stopMode") == "end":
+            limits["discover"] = 86400
+        else:
+            target = config.get("perSourceLimit", 100) if config.get("searchMode") == "formal" else 10
+            if not isinstance(target, int) or isinstance(target, bool) or not 1 <= target <= 1000:
+                target = 100 if config.get("searchMode") == "formal" else 10
+            pages = (target + 9) // 10
+            limits["discover"] = min(86400, 180 * min(6, max(1, source_count)) * pages)
     if isinstance(config, dict) and isinstance(config.get("limits"), dict):
         for stage, value in config["limits"].items():
             if stage in limits and isinstance(value, int) and not isinstance(value, bool) and value > 0:

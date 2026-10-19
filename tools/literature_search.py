@@ -304,7 +304,8 @@ def write_results(output_dir: Path, query: str, search: dict, config: dict | Non
         "search_url": batch["search_url"],
         "retrieved_at": retrieved_at,
         "count": len(all_records),
-        "scope": "paged_candidates_up_to_source_limit" if (config or {}).get("searchMode") == "formal" else "first_page_candidates_only",
+        "scope": ("accessible_pages_until_end" if (config or {}).get("stopMode") == "end" else "paged_candidates_up_to_source_limit")
+                 if (config or {}).get("searchMode") == "formal" else "first_page_candidates_only",
         "applied_filters": batch["applied_filters"],
         "deferred_rules": batch["deferred_rules"],
         "caution": "Search snippets are not verified abstracts or full text; all records await screening.",
@@ -336,11 +337,19 @@ def validate_config(config: object) -> None:
     if not isinstance(query, str) or not query.strip() or not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10:
         raise ValueError("运行配置缺少检索式或包含未接通来源")
     mode = config.get("searchMode")
+    stop_mode = config.get("stopMode", "count")
+    if stop_mode not in ("count", "end"):
+        raise ValueError("检索停止方式必须是 count 或 end")
+    if stop_mode == "end" and mode != "formal":
+        raise ValueError("只有正式检索可以检索到末页")
     if mode is not None:
         if mode not in ("test", "formal"):
             raise ValueError("检索模式必须是 test 或 formal")
-        target = config.get("perSourceLimit", 10 if mode == "test" else 100)
-        if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= 1000:
+        target = config.get("perSourceLimit", None if stop_mode == "end" else 10 if mode == "test" else 100)
+        if stop_mode == "end":
+            if target is not None:
+                raise ValueError("检索到末页不设置候选数量上限")
+        elif isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= 1000:
             raise ValueError("每来源候选上限必须为 1–1000")
         if mode == "test" and (target != 10 or limit != 10):
             raise ValueError("测试运行固定每来源10条")
@@ -387,6 +396,9 @@ def config_fingerprint(config: dict) -> str:
     if config.get("searchMode") is not None:
         inputs["searchMode"] = config["searchMode"]
         inputs["perSourceLimit"] = config.get("perSourceLimit", 10 if config["searchMode"] == "test" else 100)
+        if config.get("stopMode") == "end":
+            inputs["stopMode"] = "end"
+            inputs["perSourceLimit"] = None
     return hashlib.sha256(json.dumps(inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -485,7 +497,8 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
 
     output_dir = Path(output_dir)
     validate_config(config)
-    target = config.get("perSourceLimit", 100)
+    to_end = config.get("stopMode") == "end"
+    target = None if to_end else config.get("perSourceLimit", 100)
     checkpoint_path = output_dir / "discovery-state.json"
     state = _common.load_json(checkpoint_path, default=None)
     fingerprint = config_fingerprint(config)
@@ -519,6 +532,7 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
 
     def stop(entry, source, *, reason="results_unrecognized", message="", error=False):
         # Keep this source's completed pages as well as previous sources.
+        error = error and not to_end
         entry.update(status="error" if error else "attention", reason=reason,
                      stop_reason="error" if error else "needs_attention")
         state.update(pending_source=source, pending_reason=None if error else reason)
@@ -543,12 +557,13 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
         state.update(pending_source=source, pending_reason=None)
         persist()
         seen = set().union(*(_record_keys(row) for row in entry["results"])) if entry["results"] else set()
-        while len(entry["results"]) < target:
+        while target is None or len(entry["results"]) < target:
             page_index = entry["next_page"]
-            if page_index >= 1000:
+            if not to_end and page_index >= 1000:
                 return stop(entry, source, message="已达单来源1000页保护上限，已有结果保留。请缩小检索范围后新建任务。")
+            quantity = f"已保留{len(entry['results'])}条候选，检索到可访问末页" if to_end else f"已保留{len(entry['results'])}/{target}条候选"
             emit("stage", stage="search", source=source,
-                 message=f"{_sources.label_of(source)}：正在获取第{page_index + 1}页，已保留{len(entry['results'])}/{target}条候选")
+                 message=f"{_sources.label_of(source)}：正在获取第{page_index + 1}页，{quantity}")
             search = literature_browser.run(source, query, source == resumed_source, batch_size(config),
                                             config.get("publicationYearFrom"), config.get("publicationYearTo"),
                                             job_dir=output_dir, page_index=page_index, full_page=True)
@@ -579,7 +594,7 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
                     continue
                 seen.update(keys)
                 entry["results"].append(row)
-                if len(entry["results"]) >= target:
+                if target is not None and len(entry["results"]) >= target:
                     break
             if not entry["pages"]:
                 entry["applied_filters"] = page["applied_filters"]
@@ -603,17 +618,21 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
             entry["retrieved_count"] += len(raw)
             entry["returned"] = entry["retrieved_count"]
             entry["count"] = len(entry["results"])
-            ended = search.get("has_next") is False or search.get("status") == "no_results"
-            if entry["count"] >= target:
+            source_limited = search.get("source_limit_reached") is True
+            ended = (search.get("has_next") is False or search.get("status") == "no_results") and not source_limited
+            if target is not None and entry["count"] >= target:
                 entry.update(status="ok", stop_reason="limit_reached")
             elif ended:
                 entry.update(status="ok" if entry["count"] else "no_results", stop_reason="exhausted")
             result = persist()
             total_hint = f"，来源报告总命中{entry['total_count']}条" if entry["total_count"] is not None else ""
+            quantity = f"已保留{entry['count']}条候选" if to_end else f"已保留{entry['count']}/{target}条候选"
             emit("stage", stage="search", source=source,
-                 message=f"{_sources.label_of(source)}：第{page_index + 1}页已保存，已保留{entry['count']}/{target}条候选{total_hint}", **result)
+                 message=f"{_sources.label_of(source)}：第{page_index + 1}页已保存，{quantity}{total_hint}", **result)
             if entry["status"] in {"ok", "no_results"}:
                 break
+            if source_limited:
+                return stop(entry, source, message=str(search.get("source_limit_message") or "已触及来源可访问结果上限，已有结果已保存；尚不能确认主题文献已全部获取。请核对或缩小检索范围。"))
             if search.get("has_next") is not True:
                 return stop(entry, source, message="本页已保存，但无法确认后续页。请核对官方分页控件后检查并继续。")
         state.update(pending_source=next((key for key in config["sources"]
@@ -621,10 +640,12 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
                      pending_reason=None)
         persist()
     result = persist()
-    counts = "；".join(f"{_sources.label_of(source)} {state['sources'][source]['count']}/{target}条"
+    counts = "；".join((f"{_sources.label_of(source)} {state['sources'][source]['count']}条" if to_end
+                       else f"{_sources.label_of(source)} {state['sources'][source]['count']}/{target}条")
                       + ("（已到末页）" if state["sources"][source].get("stop_reason") == "exhausted" else "（已达上限）")
                       for source in config["sources"])
-    emit("result", stage="completed", message="正式检索已保存：" + counts + "；仍待人工筛选与跨来源去重。", **result)
+    emit("result", stage="completed", message=("已检索到各来源可访问末页：" if to_end else "正式检索已保存：")
+         + counts + "；仍待人工筛选与跨来源去重。", **result)
     return 0
 
 

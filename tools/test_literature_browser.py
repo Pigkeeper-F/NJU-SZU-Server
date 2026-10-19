@@ -533,6 +533,77 @@ class BrowserAdapterTests(unittest.TestCase):
         result = self.call(full_page=True)
         self.assertIsNone(result["has_next"])
 
+    def test_bound_source_page_above_999_is_not_rejected(self):
+        import hashlib
+        page = self.paged()
+        page.position = 2
+        page.dom = copy.deepcopy(page.result_pages[2])
+        page.url = adapter.SOURCES["cnki"][1]
+        adapter._save_binding(self.job, "cnki", page.target,
+            hashlib.sha256(QUERY.encode("utf-8")).hexdigest(),
+            page_index=1000, result_fingerprint=adapter._row_fingerprint(page.dom))
+        result = self.call(page_index=1000, full_page=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["page_index"], 1000)
+        self.assertIn("Page 2", result["results"][0]["title"])
+        self.assertEqual(page.next_clicks, 0)
+
+    def test_scholar_display_cap_keeps_current_rows_before_pause(self):
+        import hashlib
+        page = Page("scholar-cap", snapshot(results=[ROW] * 10, resultContainer=True))
+        page.url = "https://scholar.google.com/scholar?q=broiler&start=990"
+        self.context.pages.append(page)
+        adapter._save_binding(self.job, "google-scholar", page.target,
+            hashlib.sha256(QUERY.encode("utf-8")).hexdigest(),
+            page_index=99, result_fingerprint=adapter._row_fingerprint(page.dom))
+        with patch.object(adapter, "_pagination", return_value={"has_next": False, "total_count": 5000}):
+            result = self.call("google-scholar", page_index=99, full_page=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["results"]), 10)
+        self.assertTrue(result["source_limit_reached"])
+        self.assertTrue(result["has_next"])
+        self.assertIn("1000", result["source_limit_message"])
+
+    def test_scholar_thousandth_result_with_more_hits_is_not_complete(self):
+        page = Page("scholar", snapshot(results=[ROW] * 10))
+        page.url = "https://scholar.google.com/scholar?q=broiler&start=990"
+        result = adapter._source_pagination(page, "google-scholar", page.dom,
+            {"has_next": None, "total_count": 5000})
+        self.assertTrue(result["source_limit_reached"])
+        self.assertTrue(result["has_next"])
+
+    def test_scholar_real_end_with_matching_count_is_unchanged(self):
+        page = Page("scholar", snapshot(results=[ROW] * 5))
+        page.url = "https://scholar.google.com/scholar?q=broiler&start=10"
+        result = adapter._source_pagination(page, "google-scholar", page.dom,
+            {"has_next": False, "total_count": 15})
+        self.assertFalse(result["has_next"])
+        self.assertNotIn("source_limit_reached", result)
+
+    def test_scholar_estimated_total_does_not_override_disabled_next_below_cap(self):
+        page = Page("scholar", snapshot(results=[ROW] * 5))
+        page.url = "https://scholar.google.com/scholar?q=broiler&start=10"
+        result = adapter._source_pagination(page, "google-scholar", page.dom,
+            {"has_next": False, "total_count": 41})
+        self.assertFalse(result["has_next"])
+        self.assertNotIn("source_limit_reached", result)
+
+    def test_scholar_estimated_total_keeps_missing_next_unknown_below_cap(self):
+        page = Page("scholar", snapshot(results=[ROW] * 5))
+        page.url = "https://scholar.google.com/scholar?q=broiler&start=10"
+        result = adapter._source_pagination(page, "google-scholar", page.dom,
+            {"has_next": None, "total_count": 41})
+        self.assertIsNone(result["has_next"])
+        self.assertNotIn("source_limit_reached", result)
+
+    def test_scholar_unknown_count_does_not_invent_source_limit_or_end(self):
+        page = Page("scholar", snapshot(results=[ROW]))
+        page.url = "https://scholar.google.com/scholar?q=broiler"
+        result = adapter._source_pagination(page, "google-scholar", page.dom,
+            {"has_next": None, "total_count": None})
+        self.assertIsNone(result["has_next"])
+        self.assertNotIn("source_limit_reached", result)
+
     def test_recreated_browser_target_cannot_inherit_old_page_proof(self):
         self.paged()
         self.call(full_page=True)
@@ -574,6 +645,14 @@ class BrowserAdapterTests(unittest.TestCase):
             result = self.call("pubmed", resume=True, page_index=1, full_page=True)
         self.assertEqual(result, failed)
         self.assertEqual(api.call_count, 2)
+
+    def test_pubmed_source_limit_attention_does_not_open_browser(self):
+        limited = {"status": "attention", "reason": "results_unrecognized", "results": [],
+                   "has_next": None, "source_limit_reached": True, "page_index": 1000}
+        with patch.object(adapter.literature_pubmed, "run", return_value=limited), \
+                patch.object(adapter, "_runtime", side_effect=AssertionError("source cap is not browser fallback")):
+            result = self.call("pubmed", page_index=1000, full_page=True)
+        self.assertEqual(result, limited)
 
     def test_pubmed_browser_fallback_is_locked_for_subsequent_pages(self):
         dom = snapshot(captcha=True)

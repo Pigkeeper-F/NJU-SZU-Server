@@ -184,7 +184,9 @@ function runStageProcess(root, job, python, scriptName, extraArgs, onEvent) {
     let settled = false;
     const timer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch (_) {}
-      finish(new Error(timeoutText(stage, seconds)));
+      const error = new Error(timeoutText(stage, seconds));
+      error.code = 'LITERATURE_STAGE_TIMEOUT';
+      finish(error);
     }, seconds * 1000);
     function finish(error) {
       if (settled) return;
@@ -426,6 +428,22 @@ class LiteratureConnector {
     if (stage === 'export' && integer(event.count) !== null) counters.parameterRows = event.count;
   }
 
+  pauseEndDiscovery(job, message, attention = null) {
+    this.registerFiles(job, scanDeliverables(job.dir));
+    const candidates = loadJsonFile(path.join(job.dir, 'candidates.json'));
+    const count = Number.isSafeInteger(candidates?.count) && candidates.count >= 0
+      ? candidates.count : Array.isArray(candidates?.records) ? candidates.records.length : null;
+    if (count !== null) { job.count = count; this.mergeCounters(job, 'discover', { count }); }
+    job.status = 'needs_attention';
+    job.error = null;
+    job.resumeStage = 'discover';
+    job.attention = sourceAttention(attention);
+    if (job.stages) job.stages.discover = 'pending';
+    const note = `${message} 已有分页结果保留，尚未确认末页；处理后点击“检查并继续”。`;
+    this.appendEventLog(job, { type: 'attention', stage: 'interrupted', message: note });
+    this.update(job, 'interrupted', note);
+  }
+
   onStageEvent(job, runId, stageKey, event) {
     if (!event || typeof event !== 'object') return;
     this.appendEventLog(job, event);
@@ -450,6 +468,12 @@ class LiteratureConnector {
       return;
     }
     if (event.type === 'error') {
+      if (stageKey === 'discover' && job.config?.searchMode === 'formal' && job.config.stopMode === 'end') {
+        this.registerFiles(job, event.files);
+        if (Number.isSafeInteger(event.count) && event.count >= 0) { job.count = event.count; this.mergeCounters(job, stageKey, event); }
+        this.pauseEndDiscovery(job, String(event.message || '本页检索遇到问题，已暂停。'), { source: event.source, reason: 'results_unrecognized' });
+        return;
+      }
       job.status = 'failed';
       job.error = String(event.message || '检索失败');
       this.registerFiles(job, event.files);
@@ -514,6 +538,10 @@ class LiteratureConnector {
           return;
         }
         if (job.stages && job.stages[stage] !== 'done') {
+          if (stage === 'discover' && job.config?.searchMode === 'formal' && job.config.stopMode === 'end') {
+            this.pauseEndDiscovery(job, '检索进程未返回明确结束结果，已暂停。');
+            return;
+          }
           // 干净退出但无收尾事件 → 失败（§2.2）
           job.status = 'failed';
           job.stages[stage] = 'failed';
@@ -532,6 +560,14 @@ class LiteratureConnector {
       if (job.runId !== runId) return;
       if (job.status === 'cancelled') return;
       const stage = job.activeStage;
+      if (stage === 'discover' && job.config?.searchMode === 'formal' && job.config.stopMode === 'end') {
+        if (job.status === 'needs_attention') { this.persist(job); return; }
+        const message = error.code === 'LITERATURE_STAGE_TIMEOUT'
+          ? '本次检索达到单次运行时间保护，已暂停。'
+          : '本地检索环境或进程遇到问题，已暂停；请检查网络和运行环境。';
+        this.pauseEndDiscovery(job, message);
+        return;
+      }
       if (stage && job.stages && job.stages[stage] !== 'done') job.stages[stage] = 'failed';
       if (!job.resumeStage) job.resumeStage = stage || 'discover';
       if (job.status === 'failed' && job.error) { this.persist(job); return; }
@@ -590,6 +626,12 @@ class LiteratureConnector {
       job.files = scanDeliverables(dir);
       job.stages = detected.stages;
       job.resumeStage = detected.resumeStage;
+      if (config?.searchMode === 'formal' && config.stopMode === 'end' && job.resumeStage === 'discover') {
+        job.status = 'needs_attention';
+        job.error = null;
+        job.message = '本地服务已重启，检索已暂停；已有分页结果保留，尚未确认末页。请点击“检查并继续”恢复原任务。';
+        job.attention = null;
+      }
     } else {
       // 新格式（含 stages/resumeStage 字段）按登记值；缺失（旧任务）才按产物推导。
       if (!job.stages) job.stages = detected.stages;
@@ -607,7 +649,7 @@ class LiteratureConnector {
     if (!STAGES.includes(until)) throw new Error('阶段边界必须是 discover–export 的有效阶段名');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening)) throw new Error('已有文献检索正在运行，请等待或停止后重试');
     const job = this.jobs.get(id) || this.loadPersisted(id);
-    if ((requested.until == null || requested.until === '') && job.status === 'needs_attention' && job.resumeStage === 'discover' && job.attention) until = job.until || 'discover';
+    if ((requested.until == null || requested.until === '') && job.status === 'needs_attention' && job.resumeStage === 'discover') until = job.until || 'discover';
     if (job.status === 'cancelled') throw new Error('任务已停止，不能继续；请发起新检索');
     if (job.status === 'running') throw new Error('已有文献检索正在运行，请等待或停止后重试');
     const stage = job.resumeStage || null;
@@ -680,6 +722,13 @@ class LiteratureConnector {
       const detected = detectStagedArtifacts(dir);
       saved.stages = detected.stages;
       saved.resumeStage = detected.resumeStage;
+      const config = saved.config || loadJsonFile(path.join(dir, 'run_config.json'));
+      if (config?.searchMode === 'formal' && config.stopMode === 'end' && saved.resumeStage === 'discover') {
+        saved.status = 'needs_attention';
+        saved.error = null;
+        saved.attention = null;
+        saved.message = '本地服务已重启，检索已暂停；已有分页结果保留，尚未确认末页。请点击“检查并继续”恢复原任务。';
+      }
     }
     return saved;
   }

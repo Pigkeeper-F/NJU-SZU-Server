@@ -198,7 +198,7 @@ class PubMedTests(unittest.TestCase):
     def test_invalid_configuration_makes_no_request(self):
         for kwargs in ({"limit": 11}, {"limit": True}, {"year_from": 2025, "year_to": 2020},
                        {"year_from": "2020"}, {"year_to": False}, {"page_index": -1},
-                       {"page_index": True}, {"page_index": 1000}):
+                       {"page_index": True}, {"page_index": 1.5}):
             network = FakeNetwork()
             result = self.run_query(network, **kwargs)
             self.assertEqual(result["status"], "error", result)
@@ -228,6 +228,41 @@ class PubMedTests(unittest.TestCase):
         result = self.run_query(FakeNetwork(search(30, [])), page_index=1)
         self.assertEqual(result["status"], "error")
         self.assertIsNone(result["has_next"])
+
+    def test_official_ten_thousand_boundary_is_attention_not_result_end(self):
+        network = FakeNetwork()
+        result = self.run_query(network, page_index=1000)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertTrue(result["source_limit_reached"])
+        self.assertIsNone(result["has_next"])
+        self.assertIn("10000", result["message"])
+        self.assertEqual(result["results"], [])
+        self.assertEqual(network.calls, [])
+
+    def test_last_accessible_page_preserves_records_and_reports_more_hits(self):
+        ids = [str(number) for number in range(9991, 10001)]
+        network = FakeNetwork(search(12000, ids), xml(*(article(pmid=pmid) for pmid in ids)))
+        result = self.run_query(network, page_index=999)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["total_count"], 12000)
+        self.assertEqual(len(result["results"]), 10)
+        self.assertTrue(result["has_next"])
+
+    def test_exact_accessible_count_can_confirm_real_end(self):
+        ids = [str(number) for number in range(9991, 10001)]
+        result = self.run_query(FakeNetwork(search(10000, ids), xml(*(article(pmid=pmid) for pmid in ids))), page_index=999)
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result["has_next"])
+
+    def test_partial_api_batch_at_accessible_boundary_requests_only_allowed_ids(self):
+        network = FakeNetwork(search(12000, ["10000"]), xml(article(pmid="10000")))
+        result = self.run_query(network, limit=3, page_index=3333)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["results"]), 1)
+        self.assertTrue(result["has_next"])
+        params = parse_qs(urlsplit(network.calls[0][0]).query)
+        self.assertEqual(params["retstart"], ["9999"])
+        self.assertEqual(params["retmax"], ["1"])
 
 
 if __name__ == "__main__":

@@ -20,6 +20,14 @@ class RetrievalConfigTest(unittest.TestCase):
                 self.assertEqual(common.resolve_limits({**config, "limits": {"discover": 60}})["discover"], 60)
         self.assertEqual(common.resolve_limits({"sources": SOURCES, "searchMode": "formal"})["discover"], 10800)
 
+    def test_end_budget_and_explicit_runtime_protection(self) -> None:
+        for source_count in (1, 3, 6):
+            for stale_target in (None, 1, 25, 1000, 10000, True):
+                config = {"sources": SOURCES[:source_count], "searchMode": "formal", "stopMode": "end", "perSourceLimit": stale_target}
+                self.assertEqual(common.resolve_limits(config)["discover"], 86400)
+                self.assertEqual(common.resolve_limits({**config, "limits": {"discover": 60}})["discover"], 60)
+        self.assertEqual(common.resolve_limits({"sources": SOURCES, "searchMode": "test", "stopMode": "count"})["discover"], 1080)
+
     def test_legacy_test_and_invalid_saved_limits(self) -> None:
         self.assertEqual(common.resolve_limits(None), common.DEFAULT_LIMITS)
         for count in (1, 3, 6):

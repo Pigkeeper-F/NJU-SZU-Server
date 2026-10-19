@@ -30,6 +30,12 @@ for (const count of [1, 2, 3, 6]) {
     assert.equal(resolveLimits({ ...formal, limits: { discover: 7200 } }).discover, 7200);
   }
   assert.equal(resolveLimits({ ...raw, searchMode: 'formal' }).discover, count * 1800, '正式缺省每源100条');
+  const end = { ...raw, searchMode: 'formal', stopMode: 'end', perSourceLimit: null };
+  assert.equal(normalizeConfig(end).limits.discover, 86400, '到末页使用单次一天运行保护，不使用候选数量乘数');
+  assert.equal(resolveLimits(end).discover, 86400);
+  assert.equal(resolveLimits({ ...end, perSourceLimit: 1 }).discover, 86400, '遗留数量不能改变到末页预算');
+  assert.equal(normalizeConfig({ ...end, limits: { discover: 60 } }).limits.discover, 60);
+  assert.equal(resolveLimits({ ...end, limits: { discover: 60 } }).discover, 60);
 }
 assert.equal(resolveLimits({ sources: [] }).discover, 180, '旧配置边界至少一来源预算');
 assert.equal(resolveLimits({ sources: Array(20).fill('unknown') }).discover, 1080, '缺省预算最大六来源；来源合法性由配置校验负责');
@@ -41,4 +47,6 @@ for (const label of ['Google Scholar', '知网', '万方', 'Web of Science', 'Sc
 assert.ok(prompt.includes('NCBI官方E-utilities接口') && prompt.includes('通常无需登录'));
 assert.ok(!prompt.includes('万方、Scopus、PubMed仍未接通'));
 assert.ok(prompt.includes('测试') && prompt.includes('正式') && prompt.includes('自动翻页'));
+assert.ok(prompt.includes('stopMode=end') && prompt.includes('perSourceLimit=null') && prompt.includes('可访问末页'));
+assert.ok(!prompt.includes('正式模式并设置每来源1–1000条上限'), '新对话不再建议数量上限模式');
 console.log('LITERATURE_BUDGET_TESTS_PASS');

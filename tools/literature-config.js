@@ -115,6 +115,7 @@ function extractionConfig(raw) {
 }
 
 function discoverBudget(config) {
+  if (config?.searchMode === 'formal' && config.stopMode === 'end') return 86400;
   const sourceCount = Array.isArray(config?.sources) ? config.sources.length : 1;
   const target = config?.searchMode === 'formal'
     ? (Number.isInteger(config.perSourceLimit) && config.perSourceLimit >= 1 && config.perSourceLimit <= 1000 ? config.perSourceLimit : 100)
@@ -146,8 +147,13 @@ function normalizeConfig(raw, options = {}) {
   if (publicationYearFrom && publicationYearTo && publicationYearFrom > publicationYearTo) throw new Error('发表起始年份不能晚于截止年份');
   const searchMode = raw.searchMode == null ? null : string(raw.searchMode, '检索模式', 20);
   if (searchMode !== null && !['test', 'formal'].includes(searchMode)) throw new Error('检索模式必须是 test 或 formal');
+  const stopMode = raw.stopMode == null ? null : string(raw.stopMode, '检索停止方式', 20);
+  if (stopMode !== null && !['count', 'end'].includes(stopMode)) throw new Error('检索停止方式必须是 count 或 end');
+  if (stopMode === 'end' && searchMode !== 'formal') throw new Error('检索到末页只适用于正式模式');
   let perSourceLimit = 10;
-  if (searchMode === 'formal') {
+  if (searchMode === 'formal' && stopMode === 'end') {
+    perSourceLimit = null;
+  } else if (searchMode === 'formal') {
     if (typeof raw.perSourceLimit === 'boolean') throw new Error('每来源检索数量必须为 1–1000 的整数');
     perSourceLimit = raw.perSourceLimit == null ? 100 : integer(raw.perSourceLimit, '每来源检索数量', 1, 1000);
   }
@@ -164,14 +170,14 @@ function normalizeConfig(raw, options = {}) {
     exclusion: list(raw.exclusion, '排除规则'),
     targetFields: list(raw.targetFields, '目标字段'),
     limit,
-    ...(searchMode ? { searchMode, perSourceLimit } : {}),
+    ...(searchMode ? { searchMode, perSourceLimit, ...(stopMode ? { stopMode } : {}) } : {}),
     sourceQueries: sourceQueries(raw.sourceQueries),
     batch: batchConfig(raw.batch, limit, !!searchMode),
     fieldDefinitions: fieldDefinitions(raw.fieldDefinitions),
     templates: { literature: templatePath(templates.literature, '文献模板'), parameters: templatePath(templates.parameters, '参数模板') },
     fulltext: fulltextConfig(raw.fulltext),
     extraction: extractionConfig(raw.extraction),
-    limits: limitsConfig(raw.limits, { sources, searchMode, perSourceLimit })
+    limits: limitsConfig(raw.limits, { sources, searchMode, perSourceLimit, stopMode })
   };
 }
 

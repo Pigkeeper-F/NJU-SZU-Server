@@ -266,6 +266,9 @@
   }
   function literatureAttentionMessage(job) {
     const source = job.attention?.source;
+    if (!LITERATURE_EXECUTABLE_SOURCES.includes(source)) {
+      return (job.message || job.error || '检索已暂停，已有结果保留') + '。处理问题后点击“检查并继续”，从原任务保存的位置恢复。';
+    }
     const label = LITERATURE_SOURCE_LABELS[source] || source || '当前来源';
     return label + '：' + (job.message || job.error || '需要人工处理') + '。请打开登录/检索页面处理后，点击“检查并继续”。';
   }
@@ -338,23 +341,27 @@
       approvedDoc: mod.doc?.status === 'approved' ? [mod.doc.content, mod.doc.approvedAt] : null });
   }
   const LITERATURE_CONFIG_KEYS = ['topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language',
-    'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit', 'sourceQueries', 'searchMode', 'perSourceLimit'];
+    'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit', 'sourceQueries', 'searchMode', 'perSourceLimit', 'stopMode'];
   const LITERATURE_CONFIG_EXTRA_KEYS = ['batch', 'fieldDefinitions', 'templates', 'fulltext', 'extraction', 'limits'];
   function literatureConfigKey(config, keys = LITERATURE_CONFIG_KEYS) {
     if (!config) return '';
     return JSON.stringify(keys.map(key => key === 'sourceQueries'
       ? Object.entries(config.sourceQueries || {}).filter(([, value]) => String(value).trim()).sort(([a], [b]) => a.localeCompare(b))
+      : key === 'stopMode' ? config.stopMode ?? 'count'
       : key === 'perSourceLimit' && config.searchMode === 'test' ? 10
+      : key === 'perSourceLimit' && config.searchMode === 'formal' && config.stopMode === 'end' ? null
       : key === 'perSourceLimit' && config.searchMode === 'formal' ? config.perSourceLimit === undefined ? 100 : config.perSourceLimit
       : config[key] ?? null));
   }
   function newLiteratureSearchConfig(config) {
     const mode = config.searchMode ?? 'test';
     if (!['test', 'formal'].includes(mode)) throw new Error('请选择测试运行或正式检索');
-    const target = mode === 'test' ? 10 : config.perSourceLimit === undefined ? 100 : Number(config.perSourceLimit);
-    if (!Number.isInteger(target) || target < 1 || target > 1000) throw new Error('正式检索的每来源数量必须为 1–1000 的整数');
-    return { ...config, searchMode: mode, perSourceLimit: target, limit: 10,
+    const next = { ...config, searchMode: mode, stopMode: mode === 'formal' ? 'end' : 'count', perSourceLimit: mode === 'formal' ? null : 10, limit: 10,
       ...(config.batch ? { batch: { ...config.batch, size: 10 } } : {}) };
+    if (mode === 'formal' && config.stopMode !== 'end' && config.limits) {
+      next.limits = { ...config.limits }; delete next.limits.discover;
+    }
+    return next;
   }
   function sameLiteratureConfig(one, other) {
     if (!one || !other) return false;
@@ -392,7 +399,7 @@
     if (Array.isArray(config.fieldDefinitions) && config.fieldDefinitions.every(field => field && typeof field === 'object' && !Array.isArray(field))) {
       parsed.fieldDefinitions = config.fieldDefinitions;
     }
-    return newLiteratureSearchConfig({ ...parsed, searchMode: config.searchMode ?? 'test', perSourceLimit: config.perSourceLimit });
+    return newLiteratureSearchConfig({ ...parsed, searchMode: config.searchMode ?? 'test', stopMode: config.stopMode });
   }
   async function prepareLiterature(mod) {
     const t = task(mod.id);
@@ -420,7 +427,7 @@
   function manualLiterature(mod) {
     const t = task(mod.id);
     t.literatureConfig = { topic: '', query: '', sources: ['google-scholar'], sourceQueries: {}, publicationYearFrom: null, publicationYearTo: null,
-      geography: '', language: '', studyTypes: [], inclusion: [], exclusion: [], targetFields: [], limit: 10, searchMode: 'test', perSourceLimit: 10 };
+      geography: '', language: '', studyTypes: [], inclusion: [], exclusion: [], targetFields: [], limit: 10, searchMode: 'test', stopMode: 'count', perSourceLimit: 10 };
     saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureSource: literatureSource(mod) };
     persist(); render();
   }
@@ -649,16 +656,20 @@
     }
     if (awaitingAccess) {
       const attention = node('section', undefined, 'literature-confirm'); attention.setAttribute('aria-live', 'polite');
-      attention.append(node('h4', '当前需要处理：' + (LITERATURE_SOURCE_LABELS[job.attention?.source] || '检索页面')));
+      const hasSourcePage = LITERATURE_EXECUTABLE_SOURCES.includes(job.attention?.source);
+      attention.append(node('h4', '当前需要处理：' + (hasSourcePage ? LITERATURE_SOURCE_LABELS[job.attention.source] : '检索暂停')));
       attention.append(node('p', literatureAttentionMessage(job), 'codex-status'));
       const actions = node('div', undefined, 'literature-confirm-actions');
-      const open = node('button', '打开登录/检索页面', 'quiet-button'); open.type = 'button';
-      open.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
-      open.onclick = () => openLiteratureBrowser(mod);
+      if (hasSourcePage) {
+        const open = node('button', '打开登录/检索页面', 'quiet-button'); open.type = 'button';
+        open.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+        open.onclick = () => openLiteratureBrowser(mod);
+        actions.append(open);
+      }
       const resume = node('button', '检查并继续', 'primary-button'); resume.type = 'button';
       resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
       resume.onclick = () => continueLiterature(mod);
-      actions.append(open, resume); attention.append(actions); box.append(attention);
+      actions.append(resume); attention.append(actions); box.append(attention);
     }
     if (t.literatureConfig) {
       const config = t.literatureConfig;
@@ -684,26 +695,20 @@
       input('研究主题', 'topic'); input('默认检索式（未单独填写的来源沿用）', 'query');
       const modeWrap = node('label', '运行模式'); const mode = node('select'); mode.setAttribute('aria-label', '文献检索运行模式');
       if (!config.searchMode) { const legacy = node('option', '历史任务（按原数量）'); legacy.value = ''; mode.append(legacy); }
-      [['test', '测试运行（每来源10条）'], ['formal', '正式检索（自选数量）']].forEach(([value, label]) => {
+      [['test', '测试运行（每来源10条）'], ['formal', '正式检索（检索到末页）']].forEach(([value, label]) => {
         const option = node('option', label); option.value = value; mode.append(option);
       });
       mode.value = config.searchMode || ''; mode.disabled = t.literatureBusy || t.busy;
       mode.onchange = () => {
         if (!['test', 'formal'].includes(mode.value)) return;
-        config.searchMode = mode.value; config.perSourceLimit = mode.value === 'formal' ? 100 : 10; config.limit = 10;
+        config.searchMode = mode.value; config.stopMode = mode.value === 'formal' ? 'end' : 'count'; config.perSourceLimit = mode.value === 'formal' ? null : 10; config.limit = 10;
         if (config.batch) config.batch = { ...config.batch, size: 10 };
         resetDiscoverBudget(); persistConfig(); render();
       };
       modeWrap.append(mode); fields.append(modeWrap);
-      if (config.searchMode === 'formal') {
-        const targetWrap = node('label', '每来源候选上限（1–1000）'); const target = node('input'); target.type = 'number';
-        target.min = '1'; target.max = '1000'; target.step = '1'; target.value = config.perSourceLimit === undefined ? 100 : config.perSourceLimit ?? '';
-        target.disabled = t.literatureBusy || t.busy; target.setAttribute('aria-label', '正式检索每来源候选上限');
-        target.oninput = () => { config.perSourceLimit = target.value === '' ? null : Number(target.value); resetDiscoverBudget(); persistConfig(); };
-        targetWrap.append(target); fields.append(targetWrap);
-      }
       const quantity = !config.searchMode ? '历史配置保持原数量：每来源每批最多 ' + (config.batch?.size ?? config.limit ?? 10) + ' 条。继续原任务不会改变数量；切换模式将用于新检索。'
-        : config.searchMode === 'formal' ? '正式检索会自动翻页，直到每来源去重及已知年份筛选后的候选达到所选上限，或该来源没有更多结果。登录、验证或页面异常时暂停并保留已有结果。'
+        : config.searchMode === 'formal' && config.stopMode !== 'end' ? '历史正式配置保持原数量：每来源候选上限 ' + (config.perSourceLimit ?? 100) + ' 条。继续原任务沿用原上限；发起新的正式检索会改为检索到可访问末页，不混用旧结果。'
+        : config.searchMode === 'formal' ? '正式检索：自动翻页，直到各来源数据库当前可访问末页，不按候选数量停止。遇到登录、验证、网站访问限制或其他问题时暂停并保留已有结果；可访问末页不代表主题相关文献已全部获取。'
         : '测试运行：每个来源最多取10条候选，用于检查检索词和流程；不会自动扩大到正式数量。';
       details.append(node('p', quantity, 'codex-status'));
       const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（六个来源均可选择，按研究需要勾选）'));
