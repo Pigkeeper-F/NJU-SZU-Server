@@ -46,7 +46,7 @@ assert.ok(codex.includes('confirmations: { fields }'), '确认记录应以 confi
 assert.ok(codex.includes("'/api/literature/advance'"), '多阶段推进应走 advance');
 assert.ok(codex.includes('function literatureConfirmFields'), '应从 fieldDefinitions/targetFields 预填确认表单');
 assert.ok(codex.includes('fieldDefinitions') && codex.includes('targetFields'), '确认表单应优先使用 fieldDefinitions，退回 targetFields');
-assert.ok(codex.includes('请先在“目标参数字段”中填写字段'), '无字段时应给出可执行提示而不是空表单');
+assert.ok(codex.includes('新增提取字段') && codex.includes('设置提取字段'), '已有任务可从空字段直接录入，不修改冻结检索配置');
 
 // 4) jobs 历史任务找回
 assert.ok(codex.includes("'/api/literature/jobs?limit=20'"), '历史任务应经 GET /jobs 读取');

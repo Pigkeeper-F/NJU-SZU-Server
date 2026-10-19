@@ -5,6 +5,13 @@
   const key = 'research_codex_tasks_v1';
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(key)) || {}; } catch (_) {}
+  const literatureFieldDraftKey = 'research_literature_field_drafts_v1';
+  let literatureFieldDrafts = {};
+  try {
+    const value = JSON.parse(localStorage.getItem(literatureFieldDraftKey));
+    if (value && typeof value === 'object' && !Array.isArray(value)) literatureFieldDrafts = value;
+  } catch (_) {}
+  let literatureFieldsDialog = null;
   let account = null;
   let checking = false;
   let loginBusy = false;
@@ -287,25 +294,32 @@
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
     const job = t.literatureJob;
     if (!job?.id) { t.literatureError = '没有可确认的检索任务'; render(); return; }
+    if (job.status !== 'needs_attention' || job.stage !== 'awaiting_confirmation') {
+      t.literatureFieldsError = '当前可先保存字段草稿；运行到提取阶段后再确认。'; renderLiteratureFieldsDialog(); return;
+    }
+    if (t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig)) {
+      t.literatureFieldsError = '检索设置已改变，请从历史任务重新载入原配置后再确认提取字段；字段草稿会保留。'; renderLiteratureFieldsDialog(); return;
+    }
     const until = t.literatureUntil || job.until || 'discover';
     if (LITERATURE_STAGE_ORDER.indexOf(until) < LITERATURE_STAGE_ORDER.indexOf('extract')) {
-      t.literatureError = '请先将“本次做到哪一步”改为参数提取或更后的阶段，再确认字段'; render(); return;
+      t.literatureFieldsError = '请先将“本次做到哪一步”改为参数提取或更后的阶段，再确认字段'; renderLiteratureFieldsDialog(); return;
     }
-    const fields = (t.literatureConfirmDrafts || []).map(draft => ({ key: String(draft.key || '').trim(), label: String(draft.label || '').trim(),
-      meaning: String(draft.meaning || '').trim(), unit: String(draft.unit || '').trim(), valueType: draft.valueType || 'text', required: draft.required === true }));
-    if (!fields.length) { t.literatureError = '没有可确认的参数字段；请先在“目标参数字段”中填写后再回到本关口'; render(); return; }
-    if (fields.some(field => !field.key)) { t.literatureError = '每个参数字段都需要填写 key（字段标识）后才能确认'; render(); return; }
-    if (new Set(fields.map(field => field.key)).size !== fields.length) { t.literatureError = '参数字段 key 不能重复'; render(); return; }
-    t.literatureBusy = true; t.literatureError = ''; render();
+    ensureLiteratureFieldDrafts(t, job);
+    let fields;
+    try { fields = validatedLiteratureFields(t); }
+    catch (error) { t.literatureFieldsError = error.message; renderLiteratureFieldsDialog(); return; }
+    if (!saveLiteratureFieldDrafts(t, job)) { renderLiteratureFieldsDialog(); return; }
+    t.literatureBusy = true; t.literatureError = ''; t.literatureFieldsError = ''; render(); renderLiteratureFieldsDialog();
     try {
       const next = await request('/api/literature/advance', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: job.id, until, confirmations: { fields } }) });
       t.literatureConfirmJob = null; t.literatureConfirmDrafts = null;
+      closeLiteratureFields();
       applyLiteratureJob(mod, next);
       Store.appendMessage(mod.id, '已记录研究者确认的参数字段（' + fields.length + ' 项），继续执行提取。', 'system');
       await watchLiterature(mod.id, next.id || job.id);
-    } catch (error) { t.literatureError = error.message; }
-    finally { t.literatureBusy = false; render(); }
+    } catch (error) { t.literatureError = error.message; t.literatureFieldsError = error.message; }
+    finally { t.literatureBusy = false; render(); renderLiteratureFieldsDialog(); }
   }
   async function loadLiteratureJobs(mod, options = {}) {
     const t = task(mod.id);
@@ -520,10 +534,10 @@
     return bar;
   }
   function literatureConfirmFields(t, job) {
-    const sources = [job?.config || {}, t.literatureConfig || {}];
+    const sources = [job?.config || {}];
     for (const source of sources) {
       if (Array.isArray(source.fieldDefinitions) && source.fieldDefinitions.length) {
-        return source.fieldDefinitions.map(field => ({ key: String(field?.key ?? ''), label: String(field?.label ?? field?.key ?? ''),
+        return source.fieldDefinitions.map(field => ({ ...JSON.parse(JSON.stringify(field)), key: String(field?.key ?? ''), label: String(field?.label ?? field?.key ?? ''),
           meaning: String(field?.meaning ?? ''), unit: String(field?.unit ?? ''), valueType: String(field?.valueType || 'text'), required: field?.required === true }));
       }
     }
@@ -534,43 +548,141 @@
     }
     return [];
   }
+  function ensureLiteratureFieldDrafts(t, job) {
+    if (t.literatureConfirmJob !== job.id || !Array.isArray(t.literatureConfirmDrafts)) {
+      const stored = Object.prototype.hasOwnProperty.call(literatureFieldDrafts, job.id) ? literatureFieldDrafts[job.id] : null;
+      const fields = Array.isArray(stored?.fields) ? stored.fields : literatureConfirmFields(t, job);
+      t.literatureConfirmDrafts = JSON.parse(JSON.stringify(fields.filter(field => field && typeof field === 'object' && !Array.isArray(field))));
+      t.literatureConfirmJob = job.id;
+      t.literatureFieldsError = '';
+    }
+    return t.literatureConfirmDrafts;
+  }
+  function saveLiteratureFieldDrafts(t, job) {
+    if (!job?.id || t.literatureConfirmJob !== job.id || !Array.isArray(t.literatureConfirmDrafts)) return false;
+    literatureFieldDrafts[job.id] = { fields: JSON.parse(JSON.stringify(t.literatureConfirmDrafts)) };
+    try {
+      localStorage.setItem(literatureFieldDraftKey, JSON.stringify(literatureFieldDrafts));
+      t.literatureFieldsError = ''; return true;
+    } catch (_) {
+      t.literatureFieldsError = '字段草稿暂时无法保存到浏览器，请保留当前页面并检查浏览器存储空间。'; return false;
+    }
+  }
+  function addLiteratureField(mod, t, job) {
+    if (t.literatureBusy || t.busy || job.status === 'running') return;
+    const drafts = ensureLiteratureFieldDrafts(t, job);
+    if (drafts.length >= 50) { t.literatureFieldsError = '每个任务最多设置50个提取字段。'; renderLiteratureFieldsDialog(); return; }
+    const keys = new Set(drafts.map(field => String(field.key || '').trim()));
+    let index = 1; while (keys.has('field_' + index)) index++;
+    drafts.push({ key: 'field_' + index, label: '', meaning: '', unit: '', valueType: 'text', required: false });
+    saveLiteratureFieldDrafts(t, job); renderLiteratureFieldsDialog();
+  }
+  function removeLiteratureField(mod, t, job, index) {
+    if (t.literatureBusy || t.busy || job.status === 'running') return;
+    const drafts = ensureLiteratureFieldDrafts(t, job);
+    if (!Number.isInteger(index) || index < 0 || index >= drafts.length) return;
+    drafts.splice(index, 1); saveLiteratureFieldDrafts(t, job); renderLiteratureFieldsDialog();
+  }
+  function validatedLiteratureFields(t) {
+    const drafts = t.literatureConfirmDrafts || [];
+    if (!drafts.length) throw new Error('请点击“新增提取字段”，填写本次要提取的表头。');
+    if (drafts.length > 50) throw new Error('每个任务最多设置50个提取字段。');
+    const fields = drafts.map(draft => ({ ...JSON.parse(JSON.stringify(draft)), key: String(draft.key || '').trim(), label: String(draft.label || '').trim(),
+      meaning: String(draft.meaning || '').trim(), unit: String(draft.unit || '').trim(), valueType: draft.valueType || 'text', required: draft.required === true }));
+    if (fields.some(field => !field.key || field.key.length > 100)) throw new Error('字段标识无效，请删除该行后重新新增。');
+    if (new Set(fields.map(field => field.key)).size !== fields.length) throw new Error('字段标识重复，请删除重复行后重新新增。');
+    if (fields.some(field => !field.label || field.label.length > 200)) throw new Error('请为每个字段填写表头名称（最多200字）。');
+    if (new Set(fields.map(field => field.label)).size !== fields.length) throw new Error('表头名称不能重复，请明确区分不同字段。');
+    if (fields.some(field => !field.meaning || field.meaning.length > 500)) throw new Error('请填写每个字段的含义（最多500字）。');
+    if (fields.some(field => field.unit.length > 100 || (field.valueType === 'number' && !field.unit))) throw new Error('请明确数值字段的单位，可填写“无量纲”或“原文单位”（最多100字）。');
+    if (new TextEncoder().encode(JSON.stringify(fields)).byteLength > 60 * 1024) throw new Error('字段说明总量超过单次确认容量，请精简含义或其他字段规则后再确认；草稿会保留。');
+    return fields;
+  }
+  function closeLiteratureFields() {
+    if (!literatureFieldsDialog) return;
+    const dialog = literatureFieldsDialog.element;
+    literatureFieldsDialog = null;
+    dialog.close(); dialog.remove();
+  }
+  function renderLiteratureFieldsDialog() {
+    if (!literatureFieldsDialog) return;
+    const { element: dialog, mod, jobId } = literatureFieldsDialog;
+    const t = task(mod.id), job = t.literatureJob;
+    if (job?.id !== jobId) { closeLiteratureFields(); return; }
+    dialog.replaceChildren();
+    const head = node('div', undefined, 'literature-help-head');
+    head.append(node('h2', '提取字段与表头'));
+    const close = node('button', '关闭', 'quiet-button'); close.type = 'button'; close.onclick = closeLiteratureFields;
+    head.append(close); dialog.append(head, literatureConfirmForm(mod, t, job));
+    const save = node('button', '保存草稿并关闭', 'quiet-button'); save.type = 'button'; save.disabled = t.literatureBusy || t.busy;
+    save.onclick = () => { if (saveLiteratureFieldDrafts(t, job)) { closeLiteratureFields(); render(); } else renderLiteratureFieldsDialog(); };
+    dialog.append(save);
+  }
+  function openLiteratureFields(mod) {
+    const t = task(mod.id), job = t.literatureJob;
+    if (!job?.id || t.literatureBusy || t.busy || job.status === 'running') return;
+    ensureLiteratureFieldDrafts(t, job);
+    closeLiteratureFields();
+    const dialog = node('dialog', undefined, 'literature-help-dialog');
+    dialog.setAttribute('aria-label', '提取字段与表头');
+    dialog.onclose = () => { if (literatureFieldsDialog?.element === dialog) literatureFieldsDialog = null; dialog.remove(); };
+    literatureFieldsDialog = { element: dialog, mod, jobId: job.id };
+    document.body.append(dialog); renderLiteratureFieldsDialog(); dialog.showModal();
+  }
   function literatureConfirmForm(mod, t, job) {
     const box = node('div', undefined, 'literature-confirm');
-    box.append(node('p', '提取前需研究者确认参数字段的含义与单位：AI 建议不作为已确认规则，确认后才进入参数提取（确认记录写入任务目录）。'));
-    if (t.literatureConfirmJob !== job.id) { t.literatureConfirmJob = job.id; t.literatureConfirmDrafts = literatureConfirmFields(t, job); }
-    const drafts = t.literatureConfirmDrafts || [];
-    if (!drafts.length) {
-      box.append(node('p', '没有可确认的字段：请先在“目标参数字段”中填写字段（每行一项），回到本关口再确认。', 'codex-status'));
-      return box;
-    }
+    const awaitingConfirm = job.status === 'needs_attention' && job.stage === 'awaiting_confirmation';
+    box.append(node('p', awaitingConfirm ? '请核对表头名称、字段含义和单位；确认后继续当前任务的提取。'
+      : '先讨论并填写提取字段。保存草稿后可继续获取全文，进入提取阶段时再确认。'));
+    box.append(node('p', '当前任务 ' + job.id.slice(0, 8) + ' · 已有候选与全文保留；编辑字段不会重新检索。', 'codex-status'));
+    const drafts = ensureLiteratureFieldDrafts(t, job);
+    const disabled = t.literatureBusy || t.busy || job.status === 'running';
+    if (!drafts.length) box.append(node('p', '还没有提取字段，点击“新增提取字段”开始填写。', 'codex-status'));
+    const notice = node('p', t.literatureFieldsError || '草稿自动保存在本浏览器，保存草稿不会启动提取。', t.literatureFieldsError ? 'codex-error' : 'codex-status');
+    notice.setAttribute('aria-live', 'polite');
+    const saveDraft = () => {
+      saveLiteratureFieldDrafts(t, job);
+      notice.textContent = t.literatureFieldsError || '草稿已保存在本浏览器，尚未提交确认。';
+      notice.className = t.literatureFieldsError ? 'codex-error' : 'codex-status';
+    };
     const fields = node('div', undefined, 'literature-confirm-fields');
-    drafts.forEach(draft => {
+    drafts.forEach((draft, index) => {
       const cell = node('div', undefined, 'literature-confirm-row');
-      [['key', '字段 key'], ['label', '标签'], ['meaning', '含义'], ['unit', '单位']].forEach(([key, title]) => {
+      [['label', '表头名称', 200], ['meaning', '含义', 500], ['unit', '单位', 100]].forEach(([key, title, maxLength]) => {
         const wrap = node('label', title); const field = node('input'); field.type = 'text';
-        field.value = draft[key] ?? ''; field.disabled = t.literatureBusy;
-        field.oninput = () => { draft[key] = field.value; };
+        field.setAttribute('aria-label', '第' + (index + 1) + '个字段' + title); field.maxLength = maxLength;
+        field.value = draft[key] ?? ''; field.disabled = disabled;
+        field.oninput = () => { draft[key] = field.value; saveDraft(); };
         wrap.append(field); cell.append(wrap);
       });
       const typeWrap = node('label', '类型');
       const type = node('select');
       const types = ['text', 'number'].concat(['text', 'number'].includes(draft.valueType) ? [] : [draft.valueType]);
       types.forEach(value => { const option = node('option', value === 'number' ? '数值' : value === 'text' ? '文本' : value); option.value = value; type.append(option); });
-      type.value = draft.valueType; type.disabled = t.literatureBusy;
-      type.onchange = () => { draft.valueType = type.value; };
+      type.setAttribute('aria-label', '第' + (index + 1) + '个字段类型');
+      type.value = draft.valueType; type.disabled = disabled;
+      type.onchange = () => { draft.valueType = type.value; saveDraft(); };
       typeWrap.append(type); cell.append(typeWrap);
       const requiredWrap = node('label', '必填');
-      const required = node('input'); required.type = 'checkbox'; required.checked = draft.required === true; required.disabled = t.literatureBusy;
-      required.onchange = () => { draft.required = required.checked; };
+      const required = node('input'); required.type = 'checkbox'; required.checked = draft.required === true; required.disabled = disabled;
+      required.setAttribute('aria-label', '第' + (index + 1) + '个字段必填');
+      required.onchange = () => { draft.required = required.checked; saveDraft(); };
       requiredWrap.prepend(required); cell.append(requiredWrap);
+      const remove = node('button', '删除', 'quiet-button'); remove.type = 'button'; remove.disabled = disabled;
+      remove.setAttribute('aria-label', '删除第' + (index + 1) + '个提取字段');
+      remove.onclick = () => removeLiteratureField(mod, t, job, index); cell.append(remove);
       fields.append(cell);
     });
     box.append(fields);
     const actions = node('div', undefined, 'literature-confirm-actions');
-    const confirm = node('button', t.literatureBusy ? '提交中…' : '确认并继续提取', 'primary-button');
-    confirm.type = 'button'; confirm.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
-    confirm.onclick = () => confirmLiteratureFields(mod);
-    actions.append(confirm); box.append(actions);
+    const add = node('button', '新增提取字段', 'quiet-button'); add.type = 'button'; add.disabled = disabled || drafts.length >= 50;
+    add.onclick = () => addLiteratureField(mod, t, job); actions.append(add);
+    if (awaitingConfirm) {
+      const confirm = node('button', t.literatureBusy ? '提交中…' : '确认并继续提取', 'primary-button');
+      confirm.type = 'button'; confirm.disabled = disabled || !drafts.length || !!root.LiteratureUI?.isBusy();
+      confirm.onclick = () => confirmLiteratureFields(mod); actions.append(confirm);
+    }
+    box.append(actions, notice);
     return box;
   }
   function literatureHistory(mod, t) {
@@ -641,6 +753,11 @@
       advance.title = '继续原任务，运行到上方所选阶段；请先选择下一阶段或更后的目标。';
       advance.onclick = () => continueLiterature(mod); row.append(advance);
     }
+    if (job?.id) {
+      const editFields = node('button', '设置提取字段', 'quiet-button'); editFields.type = 'button';
+      editFields.disabled = t.literatureBusy || t.busy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
+      editFields.onclick = () => openLiteratureFields(mod); row.append(editFields);
+    }
     const untilWrap = node('label', '本次做到哪一步');
     const until = node('select'); until.setAttribute('aria-label', '本次运行到');
     LITERATURE_UNTIL_OPTIONS.forEach(([value, title]) => { const option = node('option', title); option.value = value; until.append(option); });
@@ -653,6 +770,7 @@
       box.append(node('p', '状态：' + (job.message || literatureStageLabel(job.stage) || job.status) + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
       const stages = literatureStageBar(job);
       if (stages) box.append(stages);
+      if (awaitingConfirm) box.append(node('p', '提取字段等待确认：点击“设置提取字段”，新增或核对表头后确认并继续提取。', 'codex-status'));
     }
     if (awaitingAccess) {
       const attention = node('section', undefined, 'literature-confirm'); attention.setAttribute('aria-live', 'polite');
@@ -750,7 +868,6 @@
     } else box.append(node('p', '先在本模块对话确认规则，再点“从对话整理规则”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
     if (!job) box.append(node('p', '已接入 Google Scholar、中国知网、万方、Web of Science 核心合集、Scopus 和 PubMed，按研究需要选择来源。PubMed 公开检索通常无需登录；其他来源需要登录、验证或机构权限时暂停，请在官方页面操作后继续。全文提取前需要你确认参数字段含义与单位。', 'codex-status'));
     if (job) {
-      if (awaitingConfirm) box.append(literatureConfirmForm(mod, t, job));
       const deliverables = literatureDeliverables(job);
       if (deliverables) box.append(deliverables);
       if (Array.isArray(job.events) && job.events.length > 1) {
