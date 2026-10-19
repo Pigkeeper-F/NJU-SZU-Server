@@ -1277,3 +1277,15 @@ PubMed 在任务内部 `pubmed-transport.json` 只保存query_hash与transport�
 草稿使用新localStorage键research_literature_field_drafts_v1，格式为按job.id索引的{fields:[…]}映射；兼容缺省/损坏数据，刷新和切任务时按原job恢复。草稿自动保存，也提供“保存草稿并关闭”；保存失败在弹窗明确提示。该键仅存未确认/最近编辑的字段，不作为服务器已确认的证据，不修改research_codex_tasks_v1、冻结run_config.json或检索配置。删除草稿行不删除已有候选、全文或提取成果。
 
 仅真实needs_attention/awaiting_confirmation关口提供“确认并继续提取”，沿用POST /api/literature/advance的{id:原job.id,until:原选择边界,confirmations:{fields}}。提交前确认until不早于extract；成功后由既有confirmations.json记录生效，失败保留草稿。检索完成后可提前编辑草稿，保存不调用/search或/advance，不自行下载全文、确认规则或启动提取。原来空字段关口改为可直接新增，不引导修改冻结检索设置。HTTP签名、全局导出与既有DOM id保持不变。
+
+## 2026-10-19 网页与后台版本核对、数据库登录续跑
+
+新增只读GET /api/literature/runtime：{protocolVersion:1,instanceId,startedAt,pid,port,workspaceId,loadedFingerprint,restartRequired,supportedSources:[key…],busy,browserSession:"persistent-research-browser"}。workspaceId为规范化工作区路径的摘要，不返回绝对路径。supportedSources必须来自当前进程已加载的来源注册表；加载时指纹只覆盖后端服务/连接器/来源模块和注册表等代码，不含.env、凭据、任务、浏览器资料或前端静态资源。GET比较磁盘指纹，发现后台代码更新即restartRequired=true，不把磁盘新来源冒充当前进程能力。busy涵盖当前服务正在执行的文献/本机Codex工作。该接口快速本地返回，不启动登录、浏览器或外部请求。
+
+前端在启动新检索、继续原阶段、确认字段并执行、打开任务检索窗口之前，通过同源runtime核对协议、已加载来源和restartRequired。无接口、协议不符、后台已过期时给出“当前端口后台需要更新”的清楚提示，不再向旧后台提交任务；已有任务的查看、轮询、下载、停止保持可用。按服务返回的能力判断来源，不单凭新版静态JS白名单宣称可执行。
+
+已有数据库登录复用范围明确为平台专用的持久检索浏览器；不读取或复制普通Edge/Chrome的cookie、密码、账户或浏览历史。可访问的结果页直接继续，不根据导航栏“登录”字样误判。真实login/verification/access_required等待时，网页自动请求打开原任务绑定的官方窗口，每轮同来源等待只尝试一次，刷新不重复弹；失败保留人工“打开登录/检索页面”按钮。unknown页面也保留手动打开与说明，不谎称已登录。完成个人/机构登录后点“检查并继续”，重新核验冻结的官方检索入口和共享会话；机构SSO另开标签页成功时，不能永远卡在旧登录标签。验证码未完成时不自动刷新或解决。页码/检索式/指纹证明与已保存成果沿用，不重新累计既有记录。
+
+npm start与两个Windows启动入口统一委托tools/start-workbench.js并使用绝对server.js路径；Windows入口保留原18125/8123端口。同工作区、同版本已运行时复用原网址；已识别的同工作区旧版本且后台与持久记录均无执行任务时，可核验进程命令行后受控重启。其他工作区、未知进程、旧接口缺失或无法排除正在执行工作时不得按端口盲目杀进程，提示关闭相应旧启动窗口后重试；不迁移浏览器端口、不清空localStorage或任务目录。启动器行为与运行信息接口均用隔离fixture验证。
+
+同一工作区两个端口使用单个后台执行器：另一端口由tools/workbench-proxy.js提供仅监听127.0.0.1的别名转发，保留浏览器原origin及localStorage，不再启动第二个会把另一进程running任务误判中断的LiteratureConnector。代理在重写Host/Origin前验证入站本机Host与同源Origin；仅转发到已确认同workspace的本机后台端口，不增加任意URL代理。GET/runtime在正常快照上追加proxy:{protocolVersion:1,workspaceId,pid,port,targetPort}；后台断开时返回503及相同proxy元数据，供启动器核验代理进程身份并恢复原后台端口。代理不读取.env、登录信息或任务状态，不创建任务；未知服务仍不得自动接管。

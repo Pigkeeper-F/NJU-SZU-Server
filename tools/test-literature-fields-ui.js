@@ -73,6 +73,7 @@ function createHarness(storage = new Map()) {
     },
     applyLiteratureJob: (mod, job) => { applied.push({ mod, job }); current.literatureJob = job; },
     watchLiterature: async (moduleId, jobId) => watches.push({ moduleId, jobId }),
+    checkLiteratureRuntime: async () => ({ protocolVersion: 1, restartRequired: false }),
     Store: { appendMessage: (...args) => messages.push(args) },
     CustomEvent: class {}, TextEncoder, setTimeout: callback => { callback(); return 1; }, clearTimeout() {}
   });

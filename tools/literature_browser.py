@@ -150,7 +150,7 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
     || /人机验证|滑动验证|请完成验证|访问验证|验证码|unusual traffic|verify you are human|are you a robot|access denied.*bot/i.test(head.slice(0,1600));
   const password = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
   const explicitAccess = /您所在的机构未订购|没有访问权限|无访问权限|不在授权范围|机构没有订购|your institution does not have|institutional access is required|not entitled|subscription required|access is not available|you do not have access|not authorized to access/i.test(head);
-  const loginPrompt = /请先登录|请登录后|登录后方可|sign in to access|sign in to search|log in to access|please sign in|please log in|access through your institution|institutional sign in|access web of science|选择机构|机构登录/i.test(head);
+  const loginPrompt = /请先登录|请登录后|登录后方可|请通过机构登录|需要机构登录|sign in to access|sign in to search|log in to access|please sign in|please log in|access through your institution|institutional sign in|access web of science/i.test(head);
   const querySelectors = source === 'google-scholar' ? '#gs_hdr_tsi,input[name="q"]' : source === 'cnki'
     ? '#txt_SearchText,#txt_search,input[name="kw"],input[name="txt_1_value1"],.search-input'
     : '[data-ta="search-criteria-input"],#search-option,textarea[placeholder],input[aria-label*="Search"],input[placeholder*="Search"]';
@@ -658,12 +658,18 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             bindings = _load_json(_binding_path(job_dir), {}) if job_dir is not None else {}
             binding = bindings.get(source_key, {}) if isinstance(bindings, dict) else {}
             proven_index = None
+            recheck_auth = False
             if scrape_current or page_index:
                 current = _snapshot(page, source_key, read_limit)
                 reason = _auth_reason(page, current)
-                if reason:
+                # Institution SSO can finish in another tab while this target
+                # still displays its old login form. Only an explicit resume
+                # may re-probe the frozen official search with the shared
+                # persistent session. Never refresh an unresolved CAPTCHA.
+                recheck_auth = bool(scrape_current and reason in ("login", "access_required"))
+                if reason and not recheck_auth:
                     return response("attention", reason=reason)
-                if (not created and binding.get("query_hash") == query_hash
+                if (not recheck_auth and not created and binding.get("query_hash") == query_hash
                         and isinstance(binding.get("page_index"), int)
                         and binding.get("result_fingerprint") == _row_fingerprint(current)
                         and _official_result_page(page, source_key)
@@ -676,7 +682,7 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             # Keep the legacy manual first-batch behavior. Formal runs without
             # proof re-submit from page one: an identical query can be on page N.
             manual_first = (scrape_current and not full_page and not created and page_index == 0
-                            and verified and binding.get("page_index", 0) == 0)
+                            and not recheck_auth and verified and binding.get("page_index", 0) == 0)
             if use_bound:
                 current_index = proven_index
             elif manual_first:

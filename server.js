@@ -14,6 +14,7 @@ const { fetchSource } = require('./tools/source-download');
 const { LiteratureFlow } = require('./tools/literature-flow');
 const { LiteratureConnector } = require('./tools/literature-connector');
 const { scholarSearch } = require('./tools/scholar-flow');
+const { createLiteratureRuntime } = require('./tools/literature-runtime');
 
 const ROOT = __dirname;
 const codex = new CodexBridge(ROOT);
@@ -97,6 +98,13 @@ const PORT = Number(process.env.PORT || 8123);
 // 【本地修复 · 2026-09-24】原来 listen(PORT) 会绑 0.0.0.0，同网段任何人都能访问
 // （配合 GET /.env 就等于把 API Key 公开）。默认只绑本机，需要局域网访问时设 HOST=0.0.0.0。
 const HOST = process.env.HOST || '127.0.0.1';
+const literatureRuntime = createLiteratureRuntime({
+  root: ROOT, port: PORT,
+  isBusy: () => [...scholar.jobs.values()].some(job => job.status === 'running' || job.browserOpening)
+    || [...codex.jobs.values()].some(job => job.status === 'running')
+    || codex.sourceBusy.size > 0 || codex.pending.size > 0 || !!codex.loginStarting || !!codex.loginAttempt
+    || literature.active.size > 0
+});
 
 // 【安全修复 · 2026-10-13】同源校验 + 限流，堵住「恶意网页借本机服务外发 .env 密钥」的攻击链：
 // 浏览器跨站 fetch/XHR 一定带 Origin 头，而 Content-Type: text/plain 的「简单请求」可以
@@ -256,6 +264,7 @@ async function handleCodex(req, res, url) {
 async function handleLiterature(req, res, url) {
   try {
     const route = url.pathname;
+    if (req.method === 'GET' && route === '/api/literature/runtime') return sendJson(res, 200, literatureRuntime.snapshot());
     if (req.method === 'POST' && route === '/api/literature/prepare') {
       const data = JSON.parse(await readBody(req, 128 * 1024));
       const messages = normalizeMessages(data.messages);

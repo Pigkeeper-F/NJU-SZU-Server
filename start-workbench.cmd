@@ -6,8 +6,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-set "PORT=18125"
-echo Open http://localhost:18125/ after the server starts.
-echo Keep this window open. Press Ctrl+C to stop.
-node server.js
+echo Checking the local workbench at http://localhost:18125/
+echo Existing workbench instances are reused; your browser address stays unchanged.
+node "%~dp0tools\start-workbench.js" --port 18125
 pause

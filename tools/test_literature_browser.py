@@ -234,6 +234,89 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertNotIn("secret-token", json.dumps(result))
         self.assertNotIn("passport", json.dumps(result))
 
+    def test_explicit_resume_rechecks_old_sso_target_with_shared_session(self):
+        page = self.context.new_page()
+        page.url = "https://passport.cnki.net/login?ticket=must-not-export"
+        page.dom = snapshot(password=True, queries=[])
+        adapter._save_binding(self.job, "cnki", page.target)
+
+        def shared_session_search(bound, source, query, year_from, year_to):
+            self.assertIs(bound, page)
+            self.assertEqual((source, query, year_from, year_to), ("cnki", QUERY, 2000, 2025))
+            bound.url = adapter.SOURCES[source][1]
+            bound.dom = snapshot(results=[ROW], resultContainer=True)
+            return True
+
+        with patch.object(adapter, "_navigate_search", side_effect=shared_session_search) as navigate:
+            result = self.call(resume=True, year_from=2000, year_to=2025)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(navigate.call_count, 1)
+        self.assertEqual(len(self.context.pages), 1)
+        binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["cnki"]
+        self.assertEqual(binding["target_id"], page.target)
+        self.assertNotIn("must-not-export", json.dumps(result))
+
+    def test_explicit_resume_still_requires_login_if_official_recheck_fails(self):
+        page = self.context.new_page()
+        page.url = "https://passport.cnki.net/login"
+        page.dom = snapshot(password=True, queries=[QUERY])
+        adapter._save_binding(self.job, "cnki", page.target)
+        with patch.object(adapter, "_navigate_search", return_value=False) as navigate:
+            result = self.call(resume=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "login"))
+        self.assertEqual(navigate.call_count, 1)
+        self.assertEqual(result["results"], [])
+
+    def test_explicit_resume_rechecks_stale_institution_access_page(self):
+        page = self.context.new_page()
+        page.url = adapter.SOURCES["cnki"][1]
+        page.dom = snapshot(accessRequired=True, queries=[QUERY])
+        adapter._save_binding(self.job, "cnki", page.target)
+
+        def shared_session_search(bound, *args):
+            bound.dom = snapshot(results=[ROW], resultContainer=True)
+            return True
+
+        with patch.object(adapter, "_navigate_search", side_effect=shared_session_search) as navigate:
+            result = self.call(resume=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(navigate.call_count, 1)
+
+    def test_unresolved_verification_is_not_refreshed_on_resume(self):
+        page = self.context.new_page()
+        page.url = "https://kns.cnki.net/verify"
+        page.dom = snapshot(captcha=True, password=True, queries=[])
+        adapter._save_binding(self.job, "cnki", page.target)
+        with patch.object(adapter, "_navigate_search", side_effect=AssertionError("preserve manual challenge")):
+            result = self.call(resume=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "verification"))
+        self.assertEqual(page.url, "https://kns.cnki.net/verify")
+
+    def test_non_resume_later_page_does_not_reprobe_login_target(self):
+        page = self.context.new_page()
+        page.url = "https://passport.cnki.net/login"
+        page.dom = snapshot(password=True, queries=[])
+        adapter._save_binding(self.job, "cnki", page.target)
+        with patch.object(adapter, "_navigate_search", side_effect=AssertionError("only explicit resume rechecks")):
+            result = self.call(page_index=1, full_page=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "login"))
+
+    def test_cnki_institution_navigation_label_does_not_require_login(self):
+        from test_literature_extra_sources import dom_snapshot
+        state = dom_snapshot("cnki", head="中国知网 登录 注册 机构登录 选择机构 高级检索", script=adapter._SNAPSHOT_JS)
+        page = Page("cnki", state)
+        page.url = adapter.SOURCES["cnki"][1]
+        self.assertFalse(state["loginPrompt"])
+        self.assertIsNone(adapter._auth_reason(page, state))
+
+    def test_cnki_explicit_login_requirement_remains_attention(self):
+        from test_literature_extra_sources import dom_snapshot
+        state = dom_snapshot("cnki", head="请先登录，登录后方可继续检索", script=adapter._SNAPSHOT_JS)
+        page = Page("cnki", state)
+        page.url = adapter.SOURCES["cnki"][1]
+        self.assertTrue(state["loginPrompt"])
+        self.assertEqual(adapter._auth_reason(page, state), "login")
+
     def test_captcha_and_missing_access_never_report_zero(self):
         for marker, reason in [("captcha", "verification"), ("accessRequired", "access_required")]:
             with self.subTest(reason=reason):
@@ -319,7 +402,10 @@ class BrowserAdapterTests(unittest.TestCase):
         page.url = "https://auth.example.edu/saml/login?ticket=secret-token"
         page.dom = snapshot(queries=[])
         adapter._save_binding(self.job, "web-of-science", page.target)
-        result = self.call("web-of-science", resume=True)
+        # The official recheck still redirects to this unresolved SSO page.
+        with patch.object(adapter, "_navigate_search", return_value=False) as navigate:
+            result = self.call("web-of-science", resume=True)
+        self.assertEqual(navigate.call_count, 1)
         self.assertEqual(result["reason"], "login")
         self.assertNotIn("secret-token", json.dumps(result))
         self.assertEqual(adapter.safe_url("https://example.org/oauth/callback?code=secret"), "")
@@ -363,7 +449,11 @@ class BrowserAdapterTests(unittest.TestCase):
             ("https://access.clarivate.com/?ticket=secret-token", "login"),
         ]:
             page.url, page.dom = url, snapshot(queries=[])
-            result = self.call("web-of-science", resume=True)
+            # Model the official entry point redirecting back to the same
+            # required login/access page after the explicit resume recheck.
+            with patch.object(adapter, "_navigate_search", return_value=False) as navigate:
+                result = self.call("web-of-science", resume=True)
+            self.assertEqual(navigate.call_count, 1)
             self.assertEqual((result["status"], result["reason"]), ("attention", reason))
             self.assertNotIn("secret-token", json.dumps(result))
 
@@ -493,6 +583,27 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("Page 1", result["results"][0]["title"])
         self.assertEqual(len(page.navigations), 2)
+
+    def test_sso_new_tab_completion_replays_to_formal_pending_page_without_skip(self):
+        page = self.paged(count=4, rows=20)
+        first = self.call(full_page=True)
+        second = self.call(page_index=1, full_page=True)
+        page.dom = snapshot(password=True, queries=[])
+        page.url = "https://passport.cnki.net/login"
+        waiting = self.call(page_index=2, full_page=True)
+        self.assertEqual(waiting["reason"], "login")
+        restored = self.call(resume=True, page_index=2, full_page=True)
+        self.assertEqual(restored["status"], "ok")
+        self.assertEqual(len(self.context.pages), 1)
+        self.assertEqual(len(page.navigations), 2)
+        self.assertEqual(page.next_clicks, 3)  # first 0->1, then replay 0->1->2
+        self.assertEqual(len(first["results"]), 20)
+        self.assertEqual(len(second["results"]), 20)
+        self.assertEqual(len(restored["results"]), 20)
+        self.assertIn("Page 2", restored["results"][0]["title"])
+        binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["cnki"]
+        self.assertEqual(binding["target_id"], page.target)
+        self.assertEqual(binding["page_index"], 2)
 
     def test_changed_manual_query_does_not_reuse_page_proof(self):
         page = self.paged()

@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "start": "node server.js",
+    "start": "node tools/start-workbench.js",
     "check": "node --check server.js && node --check js/chat.js && node --check js/api-keys.js"
   },
   "engines": { "node": ">=18" }

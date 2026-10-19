@@ -121,6 +121,7 @@ const context = vm.createContext({
   node: (tag, text, className) => new Element(tag, text, className), render() {}, persist() {},
   request: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return responseJob; },
   watchLiterature: async (id, jobId) => calls.push({ watch: jobId }), applyLiteratureJob() {},
+  checkLiteratureRuntime: async () => ({ protocolVersion: 1, restartRequired: false }),
   literatureSource: () => 'current-source', literatureStageLabel: stage => stage,
   literatureHistory: () => new Element('details'), literatureStageBar: () => null, literatureDeliverables: () => null,
   prepareLiterature() {}, manualLiterature() {}, startLiterature() {}, literatureConfirmForm: () => new Element('form'),
@@ -128,11 +129,27 @@ const context = vm.createContext({
 });
 const configCode = codex.slice(codex.indexOf('  const LITERATURE_CONFIG_KEYS'), codex.indexOf('  async function prepareLiterature'));
 const labelsCode = codex.slice(codex.indexOf('  const LITERATURE_STAGE_ORDER'), codex.indexOf('  function literatureFileLabel'));
-vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literaturePanel'].map(functionSource).join('\n')
-  + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, openLiteratureBrowser, literatureAttentionMessage, literaturePanel };', context);
+vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
+  + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, openLiteratureBrowser, literatureAttentionMessage, literatureStageLabel, literatureStageBar, literaturePanel };', context);
 const subject = context.subject;
 
 async function multiSourceTests() {
+  assert.equal(subject.literatureStageLabel('discover'), '检索候选', 'Discover stage should use its Chinese label');
+  const pausedStageJob = { status: 'needs_attention', resumeStage: 'discover', until: 'discover', stages: { discover: 'running' } };
+  const pausedStageBytes = JSON.stringify(pausedStageJob);
+  const pausedBar = subject.literatureStageBar(pausedStageJob);
+  assert.equal(pausedBar.children[0].className, 'literature-stage is-pending');
+  assert.equal(pausedBar.children[0].children[0].textContent, '检索候选');
+  assert.equal(pausedBar.children[0].children[1].textContent, '待人工处理', 'Human wait must not be shown as running');
+  assert.equal(JSON.stringify(pausedStageJob), pausedStageBytes, 'Stage rendering must not alter the saved task');
+  assert.equal(subject.literatureStageBar({ ...pausedStageJob, status: 'running' }).children[0].children[1].textContent, '进行中');
+  for (const ending of ['。', '.', '。...']) {
+    const punctuationMessage = subject.literatureAttentionMessage({ attention: { source: 'cnki' }, message: '请登录' + ending });
+    assert.ok(punctuationMessage.includes('请登录。请在平台专用'));
+    assert.ok(!punctuationMessage.includes('。。') && !punctuationMessage.includes('.。'));
+    const genericMessage = subject.literatureAttentionMessage({ message: '网络暂停' + ending });
+    assert.ok(genericMessage.startsWith('网络暂停。处理问题'));
+  }
   const config = subject.parseLiteratureConfig(JSON.stringify({ topic: '温度与肉鸡', query: 'broiler heat stress',
     sources: ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'],
     sourceQueries: { cnki: '肉鸡 热应激', wanfang: '肉鸡 高温', 'web-of-science': 'broiler AND heat',
