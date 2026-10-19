@@ -409,12 +409,14 @@ class CommonHelpersTest(unittest.TestCase):
 class SourcesRegistryTest(unittest.TestCase):
     def test_registry_contents(self) -> None:
         self.assertEqual(sources.all_keys(), ["google-scholar", "cnki", "wanfang", "web-of-science", "scopus", "pubmed"])
-        self.assertEqual(sources.executable_keys(), ["google-scholar", "cnki", "web-of-science"])
+        self.assertEqual(sources.executable_keys(), sources.all_keys())
         self.assertTrue(sources.is_known("pubmed"))
         self.assertFalse(sources.is_known("arxiv"))
         self.assertTrue(sources.is_executable("cnki"))
         self.assertTrue(sources.is_executable("web-of-science"))
-        self.assertFalse(sources.is_executable("scopus"))
+        self.assertTrue(sources.is_executable("wanfang"))
+        self.assertTrue(sources.is_executable("scopus"))
+        self.assertTrue(sources.is_executable("pubmed"))
         google = sources.get_source("google-scholar")
         self.assertEqual(google["state"], "executable")
         self.assertEqual(google["adapter"]["kind"], "soc-script")
@@ -422,16 +424,17 @@ class SourcesRegistryTest(unittest.TestCase):
         self.assertIsNone(sources.get_source("arxiv"))
 
     def test_reject_message_is_verbatim(self) -> None:
-        expected = "尚未接通以下检索来源：wanfang、pubmed；请选择已接通来源，或等待相应连接器。"
-        self.assertEqual(sources.unconnected_message(["wanfang", "pubmed"]), expected)
+        expected = "尚未接通以下检索来源：arxiv、unknown-source；请选择已接通来源，或等待相应连接器。"
+        self.assertEqual(sources.unconnected_message(["arxiv", "unknown-source"]), expected)
 
     def test_search_validate_config_reads_registry(self) -> None:
         import literature_search
 
         literature_search.validate_config({"query": "q", "limit": 10, "sources": ["google-scholar"]})
         literature_search.validate_config({"query": "q", "limit": 10, "sources": ["google-scholar", "cnki", "web-of-science"]})
-        with self.assertRaisesRegex(ValueError, "尚未接通以下检索来源：wanfang"):
-            literature_search.validate_config({"query": "q", "limit": 10, "sources": ["google-scholar", "wanfang"]})
+        literature_search.validate_config({"query": "q", "limit": 10, "sources": sources.all_keys()})
+        for source in sources.all_keys():
+            literature_search.validate_config({"query": "q", "limit": 10, "sources": [source]})
         with self.assertRaisesRegex(ValueError, "运行配置缺少检索式或包含未接通来源"):
             literature_search.validate_config({"query": "q", "limit": 10, "sources": ["arxiv"]})
         with self.assertRaisesRegex(ValueError, "运行配置缺少检索式或包含未接通来源"):

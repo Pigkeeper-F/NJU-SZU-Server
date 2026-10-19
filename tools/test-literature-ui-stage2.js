@@ -83,7 +83,7 @@ assert.ok(css.includes('文献挖掘 · 第二阶段'), '样式应以独立分�
 
 // 8) 第一阶段关键文案/行为零回归
 for (const text of ['从对话整理规则', '确认配置并检索', '手动填写', '打开登录/检索页面', '检查并继续',
-  '检索来源（已接通 Scholar、知网、WOS）', '请先从对话整理运行配置并核对', '对话或已批准文档有更新，请重新整理规则后再检索',
+  '检索来源（六个来源均可选择，按研究需要勾选）', '请先从对话整理运行配置并核对', '对话或已批准文档有更新，请重新整理规则后再检索',
   '首批候选检索已保存 ', '这不是已纳入文献，也未提取全文。可在文献检索区下载清单。']) {
   assert.ok(codex.includes(text), '第一阶段文案不得回归: ' + text);
 }
@@ -91,6 +91,8 @@ assert.ok(codex.includes('job.attention?.source') && codex.includes('job.message
 assert.ok(codex.includes("'/api/literature/prepare'") && codex.includes("'/api/literature/search'") && codex.includes("'/api/literature/cancel")
   && codex.includes("'/api/literature/download"), '既有路由与取消行为保持');
 assert.ok(codex.includes('t.busy || !t.literatureConfig'), '未配置时启动按钮保持禁用');
+assert.ok(codex.includes('PubMed 公开检索通常无需登录'), '公开接口与需人工登录来源应区分');
+assert.ok(!codex.includes('（未接通）') && !codex.includes('请取消万方、Scopus、PubMed'), '六来源不再展示预留未接通文案');
 
 // 9) 多来源前端行为：直接执行受检函数，模拟服务端；不启浏览器、不调用真实账户。
 function functionSource(name) {
@@ -128,9 +130,11 @@ const subject = context.subject;
 
 async function multiSourceTests() {
   const config = subject.parseLiteratureConfig(JSON.stringify({ topic: '温度与肉鸡', query: 'broiler heat stress',
-    sources: ['google-scholar', 'cnki', 'web-of-science'], sourceQueries: { cnki: '肉鸡 热应激', 'web-of-science': 'broiler AND heat' } }));
+    sources: ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'],
+    sourceQueries: { cnki: '肉鸡 热应激', wanfang: '肉鸡 高温', 'web-of-science': 'broiler AND heat',
+      scopus: '(broiler OR broilers) AND "heat stress"', pubmed: 'broiler[Title/Abstract] AND "heat stress"[Title/Abstract]' } }));
   assert.equal(config.sourceQueries.cnki, '肉鸡 热应激', 'AI整理结果不能丢来源检索式');
-  assert.equal(subject.sameLiteratureConfig(config, { ...config, sourceQueries: { 'web-of-science': 'broiler AND heat', cnki: '肉鸡 热应激' } }), true, '映射顺序不改变冻结配置');
+  assert.equal(subject.sameLiteratureConfig(config, { ...config, sourceQueries: Object.fromEntries(Object.entries(config.sourceQueries).reverse()) }), true, '映射顺序不改变冻结配置');
   assert.equal(subject.sameLiteratureConfig(config, { ...config, sourceQueries: { cnki: '肉鸡 高温' } }), false, '来源检索式变化须新建任务');
   assert.equal(subject.sameLiteratureConfig({ ...config, sourceQueries: undefined }, { ...config, sourceQueries: {} }), true, '旧任务缺省来源映射兼容');
   assert.throws(() => subject.parseLiteratureConfig(JSON.stringify({ ...config, sourceQueries: { cnki: [] } })), /格式无效/);
@@ -170,6 +174,24 @@ async function multiSourceTests() {
     attention: { source: 'web-of-science', reason: 'access_required' }, message: '机构访问权限不足' };
   subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
   const nodes = elements(container);
+  const sourceLabels = ['Google Scholar', '中国知网', '万方', 'Web of Science 核心合集', 'Scopus', 'PubMed'];
+  const checks = nodes.filter(item => item.tag === 'input' && item.type === 'checkbox');
+  assert.equal(checks.length, 6, '页面提供全部六来源');
+  assert.ok(checks.every(item => item.checked && !item.disabled), '六来源均可选择，不要求登录后才能勾选');
+  for (const label of sourceLabels) {
+    assert.ok(nodes.some(item => item.tag === 'label' && item.textContent === label && item.children[0]?.type === 'checkbox'), '来源标签完整：' + label);
+    const queryField = nodes.find(item => item.tag === 'label' && item.textContent === label + ' 检索式（留空沿用默认）')?.children[0];
+    assert.ok(queryField?.placeholder, '每个来源提供独立检索式示例：' + label);
+  }
+  const queryExample = label => nodes.find(item => item.tag === 'label' && item.textContent === label + ' 检索式（留空沿用默认）').children[0].placeholder;
+  assert.match(queryExample('万方'), /肉鸡 高温/);
+  assert.match(queryExample('Scopus'), /Documents：Title Abstract Keywords/);
+  assert.match(queryExample('PubMed'), /\[Title\/Abstract\]/);
+  const wanfangCheck = nodes.find(item => item.tag === 'label' && item.textContent === '万方').children[0];
+  wanfangCheck.checked = false; wanfangCheck.onchange();
+  assert.ok(!current.literatureConfig.sources.includes('wanfang'), '各来源可独立取消，非必须全选');
+  wanfangCheck.checked = true; wanfangCheck.onchange();
+  assert.ok(current.literatureConfig.sources.includes('wanfang'));
   assert.ok(nodes.some(item => item.tag === 'button' && item.textContent === '打开登录/检索页面'));
   assert.ok(nodes.some(item => item.tag === 'button' && item.textContent === '检查并继续'));
   assert.ok(nodes.some(item => item.textContent.includes('Web of Science 核心合集：机构访问权限不足')));

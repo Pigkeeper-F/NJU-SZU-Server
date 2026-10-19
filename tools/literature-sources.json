@@ -9,9 +9,9 @@
       "notes": "首批连接器（2026-10-15）"
     },
     { "key": "cnki", "label": "知网", "state": "executable", "adapter": { "kind": "browser-script", "script": "tools/literature_browser.py" }, "notes": "官方页面人工登录与权限核对后检索" },
-    { "key": "wanfang", "label": "万方", "state": "registered", "adapter": null, "notes": "" },
+    { "key": "wanfang", "label": "万方", "state": "executable", "adapter": { "kind": "browser-script", "script": "tools/literature_extra_sources.py" }, "notes": "官方页面人工登录、验证与访问权限核对后检索" },
     { "key": "web-of-science", "label": "Web of Science", "state": "executable", "adapter": { "kind": "browser-script", "script": "tools/literature_browser.py" }, "notes": "核心合集；官方页面人工登录与机构权限核对后检索" },
-    { "key": "scopus", "label": "Scopus", "state": "registered", "adapter": null, "notes": "" },
-    { "key": "pubmed", "label": "PubMed", "state": "registered", "adapter": null, "notes": "" }
+    { "key": "scopus", "label": "Scopus", "state": "executable", "adapter": { "kind": "browser-script", "script": "tools/literature_extra_sources.py" }, "notes": "Documents 的 Title Abstract Keywords 检索；官方页面人工登录与机构权限核对" },
+    { "key": "pubmed", "label": "PubMed", "state": "executable", "adapter": { "kind": "public-api", "script": "tools/literature_pubmed.py" }, "notes": "NCBI E-utilities 公开题录与摘要检索通常无需登录；必要时同来源官方网页续跑" }
   ]
 }

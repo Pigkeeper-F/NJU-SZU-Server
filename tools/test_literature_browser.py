@@ -334,6 +334,61 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual((result["status"], result["reason"]), ("attention", "login"))
         self.assertNotIn("secret-token", json.dumps(result))
 
+    def test_pubmed_api_success_does_not_open_browser(self):
+        published = {"status": "ok", "source_key": "pubmed", "results": [{**ROW, "pmid": "123"}],
+                     "transport": "ncbi_eutilities"}
+        with patch.object(adapter.literature_pubmed, "run", return_value=published) as api, \
+                patch.object(adapter, "_runtime", side_effect=AssertionError("must not launch")):
+            self.assertEqual(self.call("pubmed", year_from=2000), published)
+        api.assert_called_once_with(QUERY, limit=10, year_from=2000, year_to=None)
+
+    def test_pubmed_api_confirmed_zero_does_not_launch_browser(self):
+        with patch.object(adapter.literature_pubmed, "run", return_value={"status": "no_results", "results": []}), \
+                patch.object(adapter, "_runtime", side_effect=AssertionError("must not launch")):
+            self.assertEqual(self.call("pubmed")["status"], "no_results")
+
+    def test_pubmed_api_failure_stays_on_same_source_with_transport(self):
+        dom = snapshot(results=[{**ROW, "pmid": "123", "result_url": "https://pubmed.ncbi.nlm.nih.gov/123/"}])
+        with patch.object(adapter.literature_pubmed, "run", return_value={"status": "error"}), \
+                patch.object(adapter.extra_sources, "snapshot", return_value=dom), \
+                patch.object(adapter.extra_sources, "navigate", return_value=True) as navigate:
+            result = self.call("pubmed")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["source_key"], "pubmed")
+        self.assertEqual(result["transport"], "browser_after_api_error")
+        self.assertEqual(result["results"][0]["pmid"], "123")
+        self.assertEqual(navigate.call_args.args[1], "pubmed")
+
+    def test_pubmed_manual_resume_does_not_restart_api(self):
+        with patch.object(adapter.literature_pubmed, "run", side_effect=AssertionError("resume the tab")), \
+                patch.object(adapter.extra_sources, "snapshot", return_value=snapshot(captcha=True)), \
+                patch.object(adapter.extra_sources, "navigate", return_value=True):
+            result = self.call("pubmed", resume=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "verification"))
+
+    def test_wanfang_links_resolve_only_after_query_and_auth_checks(self):
+        row = {**ROW, "result_url": "", "doi": "", "_title_index": 0}
+        with patch.object(adapter.extra_sources, "snapshot", return_value=snapshot(results=[row])), \
+                patch.object(adapter.extra_sources, "navigate", return_value=True), \
+                patch.object(adapter.extra_sources, "resolve_result_links", return_value=[row]) as resolve:
+            self.assertEqual(self.call("wanfang")["reason"], "results_unrecognized")
+            self.assertEqual(resolve.call_count, 1)
+            with patch.object(adapter.extra_sources, "snapshot", return_value=snapshot(password=True, results=[row])):
+                self.assertEqual(self.call("wanfang")["reason"], "login")
+                self.assertEqual(resolve.call_count, 1)
+
+    def test_scopus_wrapped_query_matches_only_exact_inner_expression(self):
+        self.assertTrue(adapter._matches_query(snapshot(), "https://www.scopus.com", "scopus", f"TITLE-ABS-KEY({QUERY})"))
+        self.assertFalse(adapter._matches_query(snapshot(queries=[QUERY + " OR more"]), "https://www.scopus.com", "scopus", f"TITLE-ABS-KEY({QUERY})"))
+
+    def test_scopus_unverified_manual_field_requires_form_resubmission(self):
+        with patch.object(adapter.extra_sources, "snapshot", return_value=snapshot(results=[ROW])), \
+                patch.object(adapter.extra_sources, "navigate", return_value=False) as navigate, \
+                patch.object(adapter.extra_sources, "query_context_valid", return_value=False):
+            result = self.call("scopus", resume=True)
+        self.assertEqual(result["reason"], "results_unrecognized")
+        self.assertGreaterEqual(navigate.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

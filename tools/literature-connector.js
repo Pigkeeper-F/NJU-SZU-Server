@@ -34,7 +34,7 @@ const STAGE_SCRIPTS = {
   export: 'literature_export.py'
 };
 
-//: 各阶段默认超时（秒；§3.1 limits 缺省，discover 保持 180 与既有文案）
+//: 各阶段默认超时（秒；discover 每来源 180 秒，单来源保持既有文案）。
 const STAGE_TIMEOUTS = { discover: 180, dedupe: 120, fulltext: 3600, extract: 1800, validate: 300, export: 600 };
 
 const STAGE_LABELS = { discover: '候选检索', dedupe: '跨来源去重', fulltext: '全文获取', extract: '参数提取', validate: '校验', export: '导出' };
@@ -64,6 +64,8 @@ function pythonEnv() {
 
 function resolveLimits(config) {
   const limits = { ...STAGE_TIMEOUTS };
+  const sourceCount = Array.isArray(config?.sources) ? config.sources.length : 1;
+  limits.discover *= Math.min(6, Math.max(1, sourceCount));
   if (config && typeof config === 'object' && config.limits && typeof config.limits === 'object') {
     for (const stage of STAGES) {
       const value = config.limits[stage];
@@ -722,4 +724,4 @@ class LiteratureConnector {
   }
 }
 
-module.exports = { LiteratureConnector, STAGES, DELIVERABLE_PATTERNS, __internals: { preparePython, requirementsHash, detectStagedArtifacts, extractionCoverage } };
+module.exports = { LiteratureConnector, STAGES, DELIVERABLE_PATTERNS, __internals: { preparePython, requirementsHash, detectStagedArtifacts, extractionCoverage, resolveLimits } };

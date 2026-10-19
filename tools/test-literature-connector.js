@@ -244,7 +244,7 @@ async function main() {
     });
     assert.throws(() => connector.start({ ...config, topic: '' }), /研究主题/);
     assert.throws(() => connector.start({ ...config, limit: 11 }), /1–10/);
-    assert.throws(() => connector.start({ ...config, sources: ['google-scholar', 'scopus'] }), /尚未接通/);
+    assert.throws(() => connector.start({ ...config, sources: ['google-scholar', 'arxiv'] }), /检索来源/);
     assert.throws(() => normalizeConfig({ ...config, publicationYearFrom: 2026, publicationYearTo: 2000 }), /不能晚于/);
     const started = connector.start(config);
     const done = await waitDone(connector, started.id);

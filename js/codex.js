@@ -424,7 +424,7 @@
   const LITERATURE_STATUS_LABELS = { 'running': '进行中', 'completed': '已完成', 'needs_attention': '需要人工', 'failed': '失败', 'cancelled': '已停止' };
   const LITERATURE_SOURCE_LABELS = { 'google-scholar': 'Google Scholar', 'cnki': '中国知网', 'web-of-science': 'Web of Science 核心合集',
     'wanfang': '万方', 'scopus': 'Scopus', 'pubmed': 'PubMed' };
-  const LITERATURE_EXECUTABLE_SOURCES = ['google-scholar', 'cnki', 'web-of-science'];
+  const LITERATURE_EXECUTABLE_SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
   const LITERATURE_FILE_LABELS = { 'run_config.json': '运行配置（冻结）', 'candidates.json': '候选清单 JSON（累计）', 'candidates.csv': '候选清单 CSV（累计）',
     'dedupe/dedupe.json': '去重结果 JSON', 'dedupe/dedupe.csv': '去重结果 CSV', 'fulltext/status.json': '全文获取状态',
     'extraction/check_report.json': '提取校验报告', 'validation/validation.json': '校验结果 JSON', 'validation/validation.md': '待审核清单',
@@ -647,10 +647,8 @@
       }
       function persistConfig() { saved[mod.id] = { ...saved[mod.id], literatureConfig: config }; persist(); }
       input('研究主题', 'topic'); input('默认检索式（未单独填写的来源沿用）', 'query');
-      const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（已接通 Scholar、知网、WOS）'));
+      const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（六个来源均可选择，按研究需要勾选）'));
       Object.entries(LITERATURE_SOURCE_LABELS).forEach(([value, label]) => {
-        const executable = LITERATURE_EXECUTABLE_SOURCES.includes(value);
-        if (!executable) label += '（未接通）';
         const wrap = node('label', label); const check = node('input'); check.type = 'checkbox'; check.checked = config.sources.includes(value);
         check.disabled = t.literatureBusy || t.busy;
         check.onchange = () => { config.sources = check.checked ? [...new Set([...config.sources, value])] : config.sources.filter(source => source !== value); persistConfig(); render(); };
@@ -661,7 +659,15 @@
         const wrap = node('label', (LITERATURE_SOURCE_LABELS[source] || source) + ' 检索式（留空沿用默认）');
         const field = node('textarea'); field.rows = 2; field.maxLength = 2000;
         field.value = config.sourceQueries?.[source] || ''; field.disabled = t.literatureBusy || t.busy;
-        field.placeholder = source === 'cnki' ? '例如：肉鸡 热应激 增重' : source === 'web-of-science' ? '例如：(broiler OR broilers) AND ("heat stress" OR "high temperature") AND growth' : '例如：broiler "heat stress" "growth performance"';
+        const examples = {
+          'google-scholar': '例如：broiler "heat stress" "growth performance"',
+          cnki: '例如：肉鸡 热应激 增重',
+          wanfang: '例如：肉鸡 高温 生长性能',
+          'web-of-science': '例如：(broiler OR broilers) AND ("heat stress" OR "high temperature") AND growth',
+          scopus: '例如：(broiler OR broilers) AND ("heat stress" OR "high temperature") AND growth（Documents：Title Abstract Keywords）',
+          pubmed: '例如：(broiler[Title/Abstract] OR broilers[Title/Abstract]) AND "heat stress"[Title/Abstract]'
+        };
+        field.placeholder = examples[source] || '';
         field.oninput = () => {
           config.sourceQueries = { ...(config.sourceQueries || {}) };
           if (field.value.trim()) config.sourceQueries[source] = field.value;
@@ -675,10 +681,10 @@
       lines('研究类型（每行一项）', 'studyTypes'); lines('纳入规则（每行一项）', 'inclusion');
       lines('排除规则（每行一项）', 'exclusion'); lines('目标参数字段（每行一项）', 'targetFields');
       details.append(fields); box.append(details);
-      if (config.sources.some(source => !LITERATURE_EXECUTABLE_SOURCES.includes(source))) box.append(node('p', '配置含未接通来源：启动时会明确报错，请取消万方、Scopus、PubMed 等未接通来源后执行。', 'codex-error'));
+      if (config.sources.some(source => !LITERATURE_EXECUTABLE_SOURCES.includes(source))) box.append(node('p', '配置含无法识别的来源，请重新选择本次检索来源。', 'codex-error'));
       if (job && !sameConfig) box.append(node('p', '当前设置与已有任务的冻结配置不同。继续旧任务请从历史任务重新载入；确认新设置并检索会创建新任务，不混用旧结果。', 'codex-status'));
     } else box.append(node('p', '先在本模块对话确认规则，再点“从对话整理规则”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
-    if (!job) box.append(node('p', '已接通 Google Scholar、中国知网和 Web of Science 核心合集；需要登录、验证或机构权限时暂停，请在官方页面操作后继续。全文提取前需要你确认参数字段含义与单位。', 'codex-status'));
+    if (!job) box.append(node('p', '已接入 Google Scholar、中国知网、万方、Web of Science 核心合集、Scopus 和 PubMed，按研究需要选择来源。PubMed 公开检索通常无需登录；其他来源需要登录、验证或机构权限时暂停，请在官方页面操作后继续。全文提取前需要你确认参数字段含义与单位。', 'codex-status'));
     if (job) {
       box.append(node('p', '状态：' + (job.message || literatureStageLabel(job.stage) || job.status) + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
       const stages = literatureStageBar(job);

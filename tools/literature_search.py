@@ -37,9 +37,10 @@ safe_csv_cell = _common.safe_csv_cell
 CSV_FIELDS = [
     "candidate_id", "source", "query", "retrieved_at", "title", "byline", "snippet",
     "result_url", "fulltext_links", "screening_status", "evidence_level",
-    "doi", "year", "authors", "venue", "source_key", "batch_index",
+    "doi", "year", "authors", "venue", "source_key", "batch_index", "pmid", "transport",
 ]
-SOURCE_PREFIXES = {"google-scholar": "GSC", "cnki": "CNKI", "web-of-science": "WOS"}
+SOURCE_PREFIXES = {"google-scholar": "GSC", "cnki": "CNKI", "web-of-science": "WOS",
+                   "wanfang": "WF", "scopus": "SCOPUS", "pubmed": "PMID"}
 ATTENTION_REASONS = {"login", "verification", "access_required", "results_unrecognized"}
 
 
@@ -66,7 +67,7 @@ def parse_byline(byline: str) -> dict:
     if len(parts) >= 2:
         second = parts[1]
         years = re.findall(r"\b(19\d{2}|20\d{2})\b", second)
-        if years:
+        if len(set(years)) == 1 and not re.search(r"\b(?:19|20)\d{2}\s*[-/]\s*\d{1,4}(?!\d)", second):
             year = int(years[-1])
         venue = re.sub(r"[,\s]*\b(19\d{2}|20\d{2})\b.*$", "", second).strip(" ,")[:300]
     return {"authors": authors, "venue": venue, "year": year}
@@ -92,6 +93,17 @@ def metadata_text(value: object, maximum: int) -> str:
     return str(value or "").strip()[:maximum]
 
 
+def metadata_pmid(value: object) -> str:
+    """Preserve a reported numeric PMID; a candidate identifier is not a PMID."""
+    text = str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
+    return text if re.fullmatch(r"[1-9]\d{0,19}", text) else ""
+
+
+def metadata_transport(value: object) -> str:
+    """Only an adapter label may leave the process, never a URL or token."""
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value) else ""
+
+
 def normalize_candidates(
     raw: list[dict],
     query: str,
@@ -100,6 +112,7 @@ def normalize_candidates(
     batch_index: int = 1,
     source_key: str = "google-scholar",
     source_label: str = "Google Scholar",
+    transport: str = "",
 ) -> list[dict]:
     records: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -130,7 +143,7 @@ def normalize_candidates(
             "candidate_id": f"{prefix}-{counters[item_source_key]:03d}",
             "source": _sources.label_of(item_source_key) or source_label,
             "query": str(item.get("_query") or query),
-            "retrieved_at": retrieved_at,
+            "retrieved_at": item.get("_retrieved_at") or retrieved_at,
             "title": title,
             "byline": byline,
             "snippet": str(item.get("snippet") or "").strip()[:2000],
@@ -144,6 +157,8 @@ def normalize_candidates(
             "venue": metadata_text(item.get("venue"), 300) or parsed["venue"],
             "source_key": item_source_key,
             "batch_index": batch_index,
+            "pmid": metadata_pmid(item.get("pmid")),
+            "transport": metadata_transport(item.get("transport")) or metadata_transport(transport),
         })
     return records
 
@@ -176,6 +191,8 @@ def normalize_existing_record(record: dict) -> dict:
     record.setdefault("year", None)
     record.setdefault("authors", "")
     record.setdefault("venue", "")
+    record.setdefault("pmid", "")
+    record.setdefault("transport", "")
     if not record.get("source"):
         record["source"] = "Google Scholar"
     return record
@@ -235,7 +252,8 @@ def write_results(output_dir: Path, query: str, search: dict, config: dict | Non
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    records = normalize_candidates(search.get("results") or [], query, retrieved_at, batch_index=batch_index)
+    records = normalize_candidates(search.get("results") or [], query, retrieved_at,
+                                   batch_index=batch_index, transport=metadata_transport(search.get("transport")))
     source_status = search.get("source_status")
     if not isinstance(source_status, dict):
         source_status = {}
@@ -363,6 +381,7 @@ def config_fingerprint(config: dict) -> str:
 def filtered_source_results(search: dict, config: dict, source: str, query: str) -> dict:
     """Normalize metadata and honestly distinguish UI filters from post-filters."""
     low, high = config.get("publicationYearFrom"), config.get("publicationYearTo")
+    retrieved_at = datetime.now(timezone.utc).isoformat()
     raw = [item for item in search.get("results", []) if isinstance(item, dict)][:batch_size(config)]
     supplied_applied = search.get("applied_filters")
     if isinstance(supplied_applied, dict):
@@ -385,8 +404,10 @@ def filtered_source_results(search: dict, config: dict, source: str, query: str)
         if need_post_filter and publication_year is None:
             unknown += 1
         # Keep only the published metadata contract, never browser/debug state.
-        clean = {key: item.get(key) for key in ("title", "byline", "snippet", "result_url", "fulltext_links", "doi", "year", "authors", "venue") if key in item}
-        clean.update(source_key=source, _query=query)
+        clean = {key: item.get(key) for key in ("title", "byline", "snippet", "result_url", "fulltext_links", "doi", "year", "authors", "venue", "pmid", "transport") if key in item}
+        clean["pmid"] = metadata_pmid(clean.get("pmid"))
+        clean["transport"] = metadata_transport(clean.get("transport")) or metadata_transport(search.get("transport"))
+        clean.update(source_key=source, _query=query, _retrieved_at=retrieved_at)
         results.append(clean)
     if need_post_filter:
         if unknown:
@@ -396,6 +417,8 @@ def filtered_source_results(search: dict, config: dict, source: str, query: str)
             deferred = [name for name in deferred if name not in requested_years]
     return {
         "status": search["status"], "query": query, "url": safe_url(search.get("url")),
+        "transport": metadata_transport(search.get("transport")),
+        "retrieved_at": retrieved_at,
         "results": results, "count": len(results), "returned": len(raw),
         "applied_filters": applied, "deferred_rules": deferred,
         "year_filtering": {"mode": "post_filter_known_years" if need_post_filter else "source_ui" if requested_years else "not_requested",
@@ -470,6 +493,7 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
                 reason = "results_unrecognized"
             state["sources"][source] = {"status": "attention", "reason": reason, "query": query,
                                          "url": safe_url(search.get("url")), "results": [],
+                                         "transport": metadata_transport(search.get("transport")),
                                          "applied_filters": [], "deferred_rules": deferred_rules(config)}
             state["pending_reason"] = reason
             _common.atomic_write_json(checkpoint_path, state)
@@ -482,6 +506,7 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
             # A technical failure is retried normally, not as a verified page.
             state["pending_reason"] = None
             state["sources"][source] = {"status": "error", "query": query, "url": safe_url(search.get("url")),
+                                         "transport": metadata_transport(search.get("transport")),
                                          "results": [], "applied_filters": [], "deferred_rules": deferred_rules(config)}
             _common.atomic_write_json(checkpoint_path, state)
             result = checkpoint_report(output_dir, config, state)

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from literature_search import (  # noqa: E402
-    config_fingerprint, main, normalize_candidates, normalize_doi, parse_byline, resolve_batch_index,
+    config_fingerprint, filtered_source_results, main, normalize_candidates, normalize_doi, parse_byline, resolve_batch_index,
     run, safe_csv_cell, validate_config, write_results,
 )
 
@@ -119,7 +119,7 @@ class LiteratureSearchTest(unittest.TestCase):
             self.assertEqual(list(rows[0].keys()), [
                 "candidate_id", "source", "query", "retrieved_at", "title", "byline", "snippet",
                 "result_url", "fulltext_links", "screening_status", "evidence_level",
-                "doi", "year", "authors", "venue", "source_key", "batch_index",
+                "doi", "year", "authors", "venue", "source_key", "batch_index", "pmid", "transport",
             ])
 
     def test_same_batch_rerun_replaces_that_batch_only(self) -> None:
@@ -172,8 +172,8 @@ class LiteratureSearchTest(unittest.TestCase):
                 code = run(CONFIG, output, batch_index=0)
             self.assertEqual(code, 1)
 
-    def test_validate_config_rejects_still_unconnected_sources(self) -> None:
-        with tempfile.TemporaryDirectory() as temp, patch("sys.argv", ["literature_search.py", "--config", str(Path(temp) / "c.json"), "--output-dir", str(Path(temp) / "out")]):
+    def test_validate_config_rejects_a_registered_but_disabled_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch("literature_search._sources.is_executable", side_effect=lambda source: source != "scopus"), patch("sys.argv", ["literature_search.py", "--config", str(Path(temp) / "c.json"), "--output-dir", str(Path(temp) / "out")]):
             config_path = Path(temp) / "c.json"
             config_path.write_text(json.dumps({**CONFIG, "sources": ["google-scholar", "scopus"]}), encoding="utf-8")
             stdout = io.StringIO()
@@ -182,6 +182,9 @@ class LiteratureSearchTest(unittest.TestCase):
             self.assertEqual(code, 1)
             events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
             self.assertIn("尚未接通以下检索来源：scopus；请选择已接通来源，或等待相应连接器。", events[-1]["message"])
+
+    def test_all_six_sources_are_executable(self) -> None:
+        validate_config({**CONFIG, "sources": ["google-scholar", "cnki", "wanfang", "web-of-science", "scopus", "pubmed"]})
 
     def test_validate_config_keeps_stage1_generic_message(self) -> None:
         with self.assertRaisesRegex(ValueError, "运行配置缺少检索式或包含未接通来源"):
@@ -328,6 +331,108 @@ class LiteratureSearchTest(unittest.TestCase):
             report = read_report(output)
             self.assertEqual([record["candidate_id"] for record in report["records"]], ["CNKI-001", "WOS-001", "CNKI-B2-001", "WOS-B2-001"])
         self.assertEqual(calls, ["cnki", "web-of-science", "cnki", "web-of-science"])
+
+    def test_six_sources_keep_user_order_per_source_limit_pmid_and_transport(self) -> None:
+        sources = ["pubmed", "scopus", "wanfang", "web-of-science", "cnki", "google-scholar"]
+        calls = []
+        def browser_run(source, query, scrape_current, limit, year_from, year_to, **kwargs):
+            calls.append((source, query, limit))
+            transport = "ncbi_eutilities" if source == "pubmed" else "browser"
+            return {"status": "ok", "transport": transport,
+                    "applied_filters": ["query", "publicationYearFrom", "publicationYearTo"],
+                    "results": [{"title": f"{source} paper {index}", "year": 2020,
+                                 "pmid": str(30000 + index) if source == "pubmed" else "",
+                                 **({"transport": "pubmed_web"} if source == "pubmed" and index == 1 else {})}
+                                for index in range(15)]}
+        config = {**CONFIG, "sources": sources, "sourceQueries": {key: key + " confirmed terms" for key in sources}}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+            output = Path(temp)
+            self.assertEqual(run(config, output), 0)
+            report, rows = read_report(output), read_csv_rows(output)
+        self.assertEqual(calls, [(source, source + " confirmed terms", 10) for source in sources])
+        self.assertEqual(report["count"], 60)
+        self.assertEqual([record["candidate_id"] for record in report["records"]][::10],
+                         ["PMID-001", "SCOPUS-001", "WF-001", "WOS-001", "CNKI-001", "GSC-001"])
+        self.assertEqual([record["source_key"] for record in report["records"]][::10], sources)
+        self.assertEqual(report["records"][0]["pmid"], "30000")
+        self.assertNotEqual(report["records"][0]["candidate_id"], report["records"][0]["pmid"])
+        self.assertEqual(report["records"][0]["transport"], "ncbi_eutilities")
+        self.assertEqual(report["records"][1]["transport"], "pubmed_web")
+        self.assertEqual(report["source_status"]["pubmed"]["transport"], "ncbi_eutilities")
+        self.assertEqual(rows[0]["pmid"], "30000")
+        self.assertEqual(rows[0]["transport"], "ncbi_eutilities")
+        self.assertEqual(rows[10]["transport"], "browser")
+
+    def test_each_new_source_attention_resumes_original_batch_with_stable_ids(self) -> None:
+        sources = ["google-scholar", "cnki", "web-of-science", "wanfang", "scopus", "pubmed"]
+        prefixes = ["GSC", "CNKI", "WOS", "WF", "SCOPUS", "PMID"]
+        for pause_source in ("wanfang", "scopus", "pubmed"):
+            with self.subTest(source=pause_source):
+                calls, paused = [], False
+                def browser_run(source, query, scrape_current, limit, year_from, year_to, **kwargs):
+                    nonlocal paused
+                    calls.append((source, scrape_current))
+                    transport = "ncbi_eutilities" if source == "pubmed" and not scrape_current else "browser"
+                    if source == pause_source and not paused:
+                        paused = True
+                        return {"status": "attention", "reason": "login", "transport": "browser",
+                                "message": "需要在官方页面手动处理"}
+                    return {"status": "ok", "transport": transport, "results": [{"title": f"{source} heat study", "year": 2020,
+                                     "pmid": "123456" if source == "pubmed" else ""}]}
+                config = {**CONFIG, "sources": sources, "sourceQueries": {key: key + " frozen query" for key in sources}}
+                with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+                    output = Path(temp)
+                    self.assertEqual(run(config, output), 0)
+                    report = read_report(output)
+                    pause_index = sources.index(pause_source)
+                    before = [record["candidate_id"] for record in report["records"]]
+                    self.assertEqual(before, [prefix + "-001" for prefix in prefixes[:pause_index]])
+                    self.assertFalse(report["discovery_complete"])
+                    self.assertEqual(report["pending_source"], pause_source)
+                    self.assertEqual(report["source_status"][pause_source]["transport"], "browser")
+                    self.assertEqual(run(config, output, resume=True), 0)
+                    complete = read_report(output)
+                    self.assertTrue(complete["discovery_complete"])
+                    self.assertEqual([record["candidate_id"] for record in complete["records"]], [prefix + "-001" for prefix in prefixes])
+                    self.assertEqual(complete["records"][:pause_index], report["records"], "已完成来源元数据和编号保持不变")
+                    self.assertEqual(complete["records"][-1]["pmid"], "123456")
+                    self.assertEqual(read_csv_rows(output)[-1]["pmid"], "123456")
+                    self.assertEqual(complete["source_status"]["pubmed"]["transport"], "browser" if pause_source == "pubmed" else "ncbi_eutilities")
+                    self.assertEqual([call[0] for call in calls], sources[:pause_index + 1] + sources[pause_index:])
+                    self.assertEqual([call for call in calls if call[1]], [(pause_source, True)])
+                    count = len(calls)
+                    self.assertEqual(run(config, output, resume=True), 0)
+                    self.assertEqual(len(calls), count)
+
+    def test_new_sources_second_batch_ids_and_legacy_optional_fields(self) -> None:
+        raw = [{"title": source, "source_key": source, "pmid": "123" if source == "pubmed" else "",
+                "transport": "ncbi_eutilities" if source == "pubmed" else "browser"}
+               for source in ("wanfang", "scopus", "pubmed")]
+        records = normalize_candidates(raw, "q", "now", batch_index=2)
+        self.assertEqual([record["candidate_id"] for record in records], ["WF-B2-001", "SCOPUS-B2-001", "PMID-B2-001"])
+        self.assertEqual(records[-1]["pmid"], "123")
+        legacy = normalize_candidates([{"title": "old"}], "q", "now")[0]
+        self.assertEqual((legacy["pmid"], legacy["transport"]), ("", ""))
+
+    def test_new_source_date_postfilter_unknown_year_and_metadata_whitelist(self) -> None:
+        for source in ("wanfang", "scopus", "pubmed"):
+            with self.subTest(source=source):
+                search = {"status": "ok", "transport": "browser", "applied_filters": ["query"], "results": [
+                    {"title": "old", "year": 2014, "pmid": "111"},
+                    {"title": "known", "year": "2020-03-15", "pmid": "222", "cookies": "private", "browser_state": "private"},
+                    {"title": "unknown", "year": "2019-2021", "byline": "Author - Journal, 2019-2021", "pmid": "333"},
+                    {"title": "unsafe metadata", "pmid": "token=private", "transport": "https://user:private@proxy"},
+                ]}
+                filtered = filtered_source_results(search, CONFIG, source, "q")
+                records = normalize_candidates(filtered["results"], "q", "now", source_key=source)
+                self.assertEqual([record["title"] for record in records], ["known", "unknown", "unsafe metadata"])
+                self.assertIsNone(records[1]["year"])
+                self.assertEqual(records[0]["pmid"], "222")
+                self.assertEqual(records[2]["pmid"], "")
+                self.assertEqual(records[2]["transport"], "browser")
+                self.assertNotIn("private", json.dumps(filtered))
+                self.assertEqual(filtered["year_filtering"]["unknown_year_retained"], 2)
+                self.assertIn("unknown_publication_year_review", filtered["deferred_rules"])
 
 
 if __name__ == "__main__":

@@ -1227,3 +1227,17 @@ discover 的 attention 事件增加 `source` 和 `reason`（login/verification/a
 验证：新增 tools/test-literature-login.js（等待来源、部分成果、重启恢复、原 id/边界续跑、停止与打开页面守卫）；tools/test_literature_browser.py 用 DOM mock 验证登录/验证码/机构权限/明确零命中/未知布局/稳定标签/WOS Topic/敏感信息过滤；tools/test_literature_search.py 验证三源、独立查询、部分检查点及重启续跑。既有六阶段 HTTP 提取/校验/导出端到端测试及全部阶段 Python 回归通过。CUA 核对三来源选择、检索词输入和刷新保留。实际 WOS 站点重定向后在当前网络连接重置，尚未用研究者机构账号验证授权后搜索；知网亦未代用户完成认证，实际站点布局或权限失败保持显式等待/错误，不能以 mock 测试声称真实数据库已检索成功。
 
 浏览器 API 依据既有 SOC 实现以及 Playwright 官方 BrowserContext.new_cdp_session、BrowserType.connect_over_cdp、Page.bring_to_front 文档；浏览器与 context 不主动关闭，避免登录会话丢失。
+
+## 2026-10-19 补齐页面全部六个来源
+
+在上述三来源基础上，万方（wanfang）、Scopus（scopus）、PubMed（pubmed）均提供实际检索适配，注册表六项 executable。来源选择、sourceQueries、冻结配置、来源内编号、跨来源去重、部分成果和原任务续跑沿用既有接口，编号增加 WF-/SCOPUS-/PMID-（PubMed 的真实 PMID 另保存在结果元数据，候选 id 仍为批次内稳定编号）。每源每批最多10条不变。
+
+万方和 Scopus 从固定官方检索页面经可见表单提交该来源的检索式，按实际 DOM 读取候选、作者、发表年、来源及 DOI/链接。需要登录、验证码、机构权限或不能识别布局时沿用 attention 与“打开登录/检索页面”“检查并继续”；未知页不得当作零命中。持久任务标签和凭据不出本机的要求不变。`tools/literature_extra_sources.py` 为新增来源网页适配的内部模块，不新增任意 URL/脚本执行接口。
+
+PubMed 优先使用 NCBI 官方 E-utilities 的 ESearch(pubmed) 与 EFetch(pubmed,xml)，无需研究者登录即可获取公开书目/摘要元数据，不使用账号凭据。固定HTTPS端点、限制返回条数与大小、请求超时、默认无Key限速和明确网络/解析错误；零命中必须由合法空结果确认。保留 PMID、DOI、作者、发表年、期刊与公开全文链接，摘要仅用于候选筛选，不能当作全文提取证据。`tools/literature_pubmed.py` 仅查询固定PubMed接口；失败可在同一PubMed来源内改走官方网页（记录transport），不静默更换数据库。选择手动页面继续后读取同任务PubMed标签。
+
+discover 增加 transport 及 PMID 的可选元数据并保留到候选 JSON/CSV；旧字段及旧成果保持兼容。年份过滤必须按实际查询或已知发表年后筛记录；未知年标记待核查。六源串行时缺省discover运行预算按来源数扩展（每源180秒，最大1080秒），显式较大预算保留，避免单源预算误杀后续来源；单请求仍有限超时，登录等待立即退出进程。
+
+页面和模型提示不再显示“未接通”预留项，分别为六来源保存检索词。新增来源须有候选解析、人工关口/公开接口、来源聚合、断点续跑和既有三源回归测试；实际受限账户站点的验证情况如实说明，不以测试fixture冒充真实命中。
+
+本次验证：PubMed 官方公开接口实际返回两条题录与真实 PMID；CUA 在万方和 Scopus 官方页面提交小批例词，确认实际题录、万方标题弹页和 Scopus 新版 Documents/Title Abstract Keywords 表单结构。适配器按这些可见 DOM 补齐并加入回归 fixture，尚未以研究者账号逐库验证完整的全文获取。六来源配置与独立检索式经页面勾选、刷新保留检查；契约检查、来源/登录/断点续跑测试及六阶段 HTTP 提取—校验—导出测试通过。检索结果仍待人工筛选，第一批只代表实际返回页。

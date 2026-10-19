@@ -55,7 +55,7 @@ async function main() {
     assert.equal(response.status, 403, 'browser write header is required');
     response = await post('/api/literature/search', { query: '' }, { 'X-Workbench': '1' });
     assert.equal(response.status, 400, 'missing config cannot start a job');
-    response = await post('/api/literature/search', { config: { topic: 'test', query: 'test', sources: ['google-scholar', 'scopus'] } }, { 'X-Workbench': '1' });
+    response = await post('/api/literature/search', { config: { topic: 'test', query: 'test', sources: ['google-scholar', 'arxiv'] } }, { 'X-Workbench': '1' });
     assert.equal(response.status, 400, 'unsupported source must not silently run Scholar only');
     response = await fetch(BASE + '/api/literature/job?id=bad');
     assert.equal(response.status, 400, 'invalid job id must be rejected');
@@ -66,6 +66,13 @@ async function main() {
     response = await post('/api/literature/search', { config: { topic: 't', query: 'q', sources: ['google-scholar'] }, until: 'bogus' }, { 'X-Workbench': '1' });
     assert.equal(response.status, 400, 'invalid until must be rejected');
     assert.match((await response.json()).error, /阶段边界/);
+
+    // 六来源各 2000 字的中文检索式应进入配置校验，不被原 16KiB 请求体上限截断；非法阶段确保不启动任何真实搜索。
+    const sixSources = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
+    response = await post('/api/literature/search', { config: { topic: '六来源请求体', query: 'q', sources: sixSources,
+      sourceQueries: Object.fromEntries(sixSources.map(source => [source, '温'.repeat(2000)])) }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /阶段边界/, '36KB 来源配置应通过请求体读取和配置检查');
 
     // ---- 新增：advance 路由 ----
     response = await post('/api/literature/advance', { id: FAKE_ID });

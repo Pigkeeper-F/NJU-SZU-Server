@@ -114,9 +114,10 @@ function extractionConfig(raw) {
   return { maxCharsPerPaper, model };
 }
 
-function limitsConfig(raw) {
+function limitsConfig(raw, sourceCount = 1) {
   const value = object(raw, '阶段超时');
   const result = { ...DEFAULT_LIMITS };
+  result.discover *= Math.min(6, Math.max(1, Number.isInteger(sourceCount) ? sourceCount : 1));
   for (const stage of Object.keys(DEFAULT_LIMITS)) {
     if (value[stage] == null) continue;
     result[stage] = integer(value[stage], `${stage} 阶段超时`, 1, 86400);
@@ -154,7 +155,7 @@ function normalizeConfig(raw, options = {}) {
     templates: { literature: templatePath(templates.literature, '文献模板'), parameters: templatePath(templates.parameters, '参数模板') },
     fulltext: fulltextConfig(raw.fulltext),
     extraction: extractionConfig(raw.extraction),
-    limits: limitsConfig(raw.limits)
+    limits: limitsConfig(raw.limits, sources.length)
   };
 }
 

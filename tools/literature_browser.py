@@ -18,6 +18,9 @@ import sys
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
+import literature_extra_sources as extra_sources
+import literature_pubmed
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOC_SCRIPTS = ROOT / "SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/scripts"
@@ -25,6 +28,7 @@ SOURCES = {
     "google-scholar": ("Google Scholar", "https://scholar.google.com/scholar"),
     "cnki": ("中国知网", "https://kns.cnki.net/kns8s/defaultresult/index"),
     "web-of-science": ("Web of Science 核心合集", "https://www.webofscience.com/wos/woscc/basic-search"),
+    **extra_sources.SOURCE_INFO,
 }
 _AUTH_KEYS = re.compile(r"token|ticket|session|password|passwd|authorization|saml|signature|auth|^code$|^state$|^key$|^v$", re.I)
 _AUTH_PATH = re.compile(r"(?:^|[/_.-])(?:login|signin|sign-in|authorize|oauth|saml|sso|callback)(?:$|[/_.-])", re.I)
@@ -196,6 +200,8 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
 
 
 def _snapshot(page, source, limit):
+    if source in extra_sources.SOURCE_INFO:
+        return extra_sources.snapshot(page, source, limit)
     return page.evaluate(_SNAPSHOT_JS, {"source": source, "limit": limit})
 
 
@@ -204,23 +210,34 @@ def _normalized(text):
 
 
 def _matches_query(snapshot, page_url, source, query):
-    expected = _normalized(query)
+    def comparable(value):
+        normalized = _normalized(value)
+        wrapper = re.fullmatch(r"title-abs-key\s*\((.*)\)", normalized, re.S) if source == "scopus" else None
+        if wrapper:
+            return wrapper.group(1).strip()
+        return normalized
+
+    expected = comparable(query)
     if not expected:
         return False
     observed = list(snapshot.get("queries") or [])
     if observed:
         # A stale URL parameter must not overrule a newer query typed by the
         # researcher into an AJAX result page.
-        return any(expected == _normalized(value) for value in observed)
+        return any(expected == comparable(value) for value in observed)
     try:
         parsed = urlsplit(page_url)
         if source == "cnki" and parsed.hostname and parsed.hostname.endswith("cnki.net"):
             observed.extend(parse_qs(parsed.query).get("kw", []))
         if source == "google-scholar" and parsed.hostname == "scholar.google.com":
             observed.extend(parse_qs(parsed.query).get("q", []))
+        if source == "pubmed" and parsed.hostname == "pubmed.ncbi.nlm.nih.gov":
+            observed.extend(parse_qs(parsed.query).get("term", []))
+        if source == "wanfang" and parsed.hostname == "s.wanfangdata.com.cn":
+            observed.extend(parse_qs(parsed.query).get("q", []))
     except ValueError:
         pass
-    return any(expected == _normalized(value) for value in observed)
+    return any(expected == comparable(value) for value in observed)
 
 
 def _auth_reason(page, snapshot):
@@ -252,7 +269,7 @@ _MESSAGES = {
 }
 
 
-def _envelope(source, status, *, results=None, reason=None, year_from=None, year_to=None):
+def _envelope(source, status, *, results=None, reason=None, year_from=None, year_to=None, transport="browser"):
     applied = {}
     deferred = []
     if source == "google-scholar" and status in ("ok", "no_results"):
@@ -264,7 +281,7 @@ def _envelope(source, status, *, results=None, reason=None, year_from=None, year
         deferred.append("发表年份范围由结果后筛执行；未在数据库 UI 中设置年份过滤。")
     return {"status": status, "reason": reason, "message": _MESSAGES.get(reason, ""),
             "source_key": source, "url": SOURCES[source][1], "results": results or [],
-            "applied_filters": applied, "deferred_rules": deferred}
+            "applied_filters": applied, "deferred_rules": deferred, "transport": transport}
 
 
 def _first_visible(page, selectors):
@@ -345,6 +362,8 @@ def _submit_wos(page, query):
 
 
 def _navigate_search(page, source, query, year_from, year_to):
+    if source in extra_sources.SOURCE_INFO:
+        return extra_sources.navigate(page, source, query, year_from, year_to)
     if source == "google-scholar":
         common, _ = _dependencies()
         del common
@@ -372,6 +391,8 @@ def _clean_results(rows, limit):
             continue
         item = {key: str(row.get(key) or "").strip()[:5000] for key in
                 ("title", "authors", "byline", "venue", "year", "doi", "snippet")}
+        if re.fullmatch(r"[0-9]+", str(row.get("pmid") or "")):
+            item["pmid"] = str(row["pmid"])
         item["result_url"] = safe_url(row.get("result_url"))
         item["fulltext_links"] = [{"label": str(link.get("label") or "")[:300], "url": safe_url(link.get("url"))}
                                   for link in row.get("fulltext_links", []) if isinstance(link, dict) and safe_url(link.get("url"))]
@@ -391,7 +412,15 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
     if not isinstance(query, str) or not query.strip() or len(query) > 2000:
         return {**_envelope(source_key, "error"), "message": "检索式无效。"}
     limit = max(1, min(int(limit), 10))
+    api_failed = False
+    if source_key == "pubmed" and not scrape_current:
+        result = literature_pubmed.run(query, limit=limit, year_from=year_from, year_to=year_to)
+        if result.get("status") in ("ok", "no_results"):
+            return result
+        api_failed = True
     options = {"year_from": year_from, "year_to": year_to}
+    if api_failed:
+        options["transport"] = "browser_after_api_error"
     page = None
     try:
         with _runtime() as context:
@@ -405,6 +434,8 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             if reason:
                 return _envelope(source_key, "attention", reason=reason, **options)
             verified = _matches_query(snapshot, page.url, source_key, query)
+            if source_key == "scopus":
+                verified = verified and extra_sources.query_context_valid(page, source_key)
             if scrape_current and not created and not verified:
                 # SSO often returns to basic search. Re-submit the frozen query
                 # through that UI; do not scrape a different manually-run query.
@@ -414,13 +445,23 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 if reason:
                     return _envelope(source_key, "attention", reason=reason, **options)
                 verified = _matches_query(snapshot, page.url, source_key, query)
-            if not verified and not (source_key == "web-of-science" and submitted):
+                if source_key == "scopus":
+                    verified = verified and extra_sources.query_context_valid(page, source_key)
+            if not verified and not (source_key in ("web-of-science", "scopus") and submitted):
                 return _envelope(source_key, "attention", reason="results_unrecognized", **options)
-            rows = _clean_results(snapshot.get("results") or [], limit)
+            raw_rows = snapshot.get("results") or []
+            if source_key == "wanfang" and raw_rows:
+                raw_rows = extra_sources.resolve_result_links(page, source_key, raw_rows, limit)
+                if any(not safe_url(row.get("result_url")) and not row.get("doi") for row in raw_rows):
+                    return _envelope(source_key, "attention", reason="results_unrecognized", **options)
+            rows = _clean_results(raw_rows, limit)
             if rows:
                 fingerprint = hashlib.sha256(query.encode("utf-8")).hexdigest()
                 _save_binding(job_dir, source_key, _target_id(context, page), fingerprint)
-                return _envelope(source_key, "ok", results=rows, **options)
+                result = _envelope(source_key, "ok", results=rows, **options)
+                if api_failed:
+                    result["deferred_rules"].append("公开 API 暂不可用，已改用同一 PubMed 官方网页；结果范围以网页实际返回为准。")
+                return result
             if snapshot.get("noResults"):
                 return _envelope(source_key, "no_results", **options)
             return _envelope(source_key, "attention", reason="results_unrecognized", **options)
