@@ -427,7 +427,7 @@
       field.appendChild(el('div', 'spec-label', '目标期刊'));
       var input = el('input', 'spec-input');
       input.type = 'text';
-      input.placeholder = '例如：IEEE Transactions on Sustainable Systems（留空则按通用结构起草并标注未按期刊约束）';
+      input.placeholder = 'AAAI（默认）；也可填 NeurIPS、ICML 或其它刊名（留空则按通用结构起草并标注未按期刊约束）';
       input.value = params.journal || '';
       input.addEventListener('change', function () {
         var Store = getStore();
@@ -437,6 +437,146 @@
       card.appendChild(field);
     }
     return card;
+  }
+
+  /**
+   * 【文献调研 · 2026-10-20】环节①的调研面板：一个紧凑区块——主题、检索式、一个按钮。
+   * 流程：检索（/api/literature/search）→ 轮询作业 → 要点抽取与空白归纳（/api/literature/research）。
+   * 产物落在检索作业目录的 research/ 下（notes.csv / synthesis.md / gaps.md），可从作业面板下载。
+   */
+  function buildResearchPanel(mod) {
+    if (!mod || mod.type !== 'literature-research') return null;
+    var state = uiOf(mod.id).research || (uiOf(mod.id).research = { topic: '', query: '', busy: false, message: '', result: null });
+    var box = el('div', 'research-panel');
+
+    var topicRow = el('label', 'research-field');
+    topicRow.appendChild(el('span', 'research-label', '主题'));
+    var topicInput = el('input', 'research-input');
+    topicInput.type = 'text';
+    topicInput.placeholder = '研究主题（用于检索式与后续归纳）';
+    topicInput.value = state.topic || '';
+    topicInput.addEventListener('input', function () { state.topic = topicInput.value; });
+    topicRow.appendChild(topicInput);
+    box.appendChild(topicRow);
+
+    var queryRow = el('label', 'research-field');
+    queryRow.appendChild(el('span', 'research-label', '检索式'));
+    var queryInput = el('input', 'research-input');
+    queryInput.type = 'text';
+    queryInput.placeholder = 'Google Scholar 检索式，如 ("long-term fertilization") "soil organic carbon"';
+    queryInput.value = state.query || '';
+    queryInput.addEventListener('input', function () { state.query = queryInput.value; });
+    queryRow.appendChild(queryInput);
+    box.appendChild(queryRow);
+
+    var actions = el('div', 'research-actions');
+    var runBtn = el('button', 'status-btn status-btn-primary', state.busy ? '调研中…' : '检索并生成要点');
+    runBtn.type = 'button';
+    runBtn.disabled = state.busy === true;
+    runBtn.addEventListener('click', function () {
+      state.topic = topicInput.value.trim();
+      state.query = queryInput.value.trim();
+      runResearch(mod);
+      render();
+    });
+    actions.appendChild(runBtn);
+    if (state.message) actions.appendChild(el('span', 'research-status', state.message));
+    box.appendChild(actions);
+
+    if (state.result) {
+      var sum = el('div', 'research-summary');
+      var meta = state.result.meta || {};
+      sum.appendChild(el('div', 'research-summary-line',
+        '文献 ' + (meta.candidate_count || 0) + ' 篇（有全文 ' + (meta.with_fulltext || 0) + ' 篇）'
+        + '｜要点 ' + ((state.result.notes || []).length) + ' 条'
+        + '｜空白 ' + ((state.result.gaps || []).length) + ' 条'));
+      var files = (state.result.files || []).join('、');
+      if (files) sum.appendChild(el('div', 'research-summary-line research-files', '产物：' + files));
+      box.appendChild(sum);
+    }
+    return box;
+  }
+
+  function researchPost(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Workbench': '1' },
+      body: JSON.stringify(body)
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error((data && data.error) || ('服务返回 HTTP ' + response.status));
+        return data;
+      });
+    });
+  }
+
+  function researchGet(url) {
+    return fetch(url, { headers: { 'X-Workbench': '1' } }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error((data && data.error) || ('服务返回 HTTP ' + response.status));
+        return data;
+      });
+    });
+  }
+
+  /** 环节①一键调研：检索 → 等作业完成 → 抽要点与空白。 */
+  function runResearch(mod) {
+    var state = uiOf(mod.id).research;
+    if (!state || state.busy) return;
+    if (!state.topic || !state.query) {
+      state.message = '请先填主题与检索式';
+      render();
+      return;
+    }
+    state.busy = true;
+    state.message = '检索中…';
+    state.result = null;
+    render();
+
+    var jobId = '';
+    researchPost('/api/literature/search', {
+      config: { topic: state.topic, query: state.query, sources: ['google-scholar'], limit: 10 }
+    }).then(function (started) {
+      jobId = started && started.id ? started.id : '';
+      if (!jobId) throw new Error('检索作业没有返回标识');
+      state.message = '检索中（作业 ' + jobId.slice(0, 8) + '…）…';
+      render();
+      // 轮询作业状态：检索阶段完成后才做要点抽取
+      var waited = 0;
+      function poll() {
+        return researchGet('/api/literature/job?id=' + encodeURIComponent(jobId)).then(function (job) {
+          waited += 1500;
+          if (job.status === 'running' || job.status === 'queued') {
+            if (waited > 240000) throw new Error('检索超时（超过 4 分钟）');
+            state.message = '检索中（作业 ' + jobId.slice(0, 8) + '…）…';
+            render();
+            return new Promise(function (resolve) { setTimeout(resolve, 1500); }).then(poll);
+          }
+          if (job.status === 'failed') throw new Error(job.error || '检索失败');
+          return job;
+        });
+      }
+      return poll();
+    }).then(function () {
+      state.message = '抽取要点与研究空白中…';
+      render();
+      return researchPost('/api/literature/research', { jobId: jobId, settings: readLlmSettings() || {} });
+    }).then(function (result) {
+      state.busy = false;
+      state.result = result;
+      state.message = result && result.ok
+        ? '完成：' + ((result.notes || []).length) + ' 篇要点、' + ((result.gaps || []).length) + ' 条研究空白'
+        : ('部分完成：' + ((result && result.error) || '模型返回异常'));
+      var Store = getStore();
+      if (Store && Store.appendMessage) {
+        Store.appendMessage(mod.id, '文献调研产物：' + state.message + '。产物在检索作业 ' + jobId.slice(0, 8) + ' 的 research/ 目录下。', 'system');
+      }
+      render();
+    }).catch(function (error) {
+      state.busy = false;
+      state.message = '失败：' + ((error && error.message) || '未知错误');
+      render();
+    });
   }
 
   /**
@@ -1539,6 +1679,8 @@
       spaceEl.appendChild(buildStatusBar(active, modules));
       var specCard = buildSpecCard(active);
       if (specCard) spaceEl.appendChild(specCard);
+      var researchPanel = buildResearchPanel(active);
+      if (researchPanel) spaceEl.appendChild(researchPanel);
       spaceEl.appendChild(buildDocCard(active));
 
       var list = el('div', 'msg-list');

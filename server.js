@@ -266,6 +266,32 @@ async function handleLiterature(req, res, url) {
       const data = JSON.parse(await readBody(req, 16 * 1024));
       return sendJson(res, 202, literature.start(data.config, data.resumeCurrent === true, data.until));
     }
+    // 【文献调研 · 2026-10-20】POST /api/literature/research：环节①的要点抽取与研究空白归纳。
+    // 与 /api/literature/search 的分工：search 只做首批检索（产 candidates.json），
+    // research 在这批候选（及已有全文）上做「逐篇要点 + 共识分歧 + 研究空白」，
+    // 走服务端已有的模型通道（resolveModelConfig + callModel），不依赖本机 Codex 登录。
+    if (req.method === 'POST' && route === '/api/literature/research') {
+      const data = JSON.parse(await readBody(req, 64 * 1024));
+      const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
+      if (!jobId) return sendJson(res, 400, { error: '缺少 jobId。' });
+      const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
+      if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
+      let job;
+      try { job = literature.loadPersisted(jobId); }
+      catch (error) { return sendJson(res, 404, { error: '检索任务不存在。' }); }
+      try {
+        const result = await require('./tools/literature-research').runResearchStage({ job, modelCfg: cfg, callModel });
+        literature.registerFiles(job, result.files);
+        literature.persist(job);
+        return sendJson(res, 200, {
+          ok: result.ok, meta: result.meta, files: result.files,
+          notes: result.notes, synthesis: result.synthesis, gaps: result.gaps, error: result.error
+        });
+      } catch (error) {
+        console.error('[server] literature research failed:', error);
+        return sendJson(res, 500, { error: '文献调研失败：' + ((error && error.message) || '未知错误') });
+      }
+    }
     // 【stage2】POST /advance：从 resumeStage 续跑（缺省 until=export），支持字段确认关口（§21.2.2）。
     if (req.method === 'POST' && route === '/api/literature/advance') {
       const data = JSON.parse(await readBody(req, 64 * 1024));

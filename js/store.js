@@ -934,7 +934,8 @@
         messages: [],
         doc: null,
         run: null,
-        params: {}
+        // 文章撰写环节默认目标期刊为 AAAI（主人 2026-10-20 指定）；可随时改。
+        params: typeId === 'writing' ? { journal: 'AAAI' } : {}
       };
       state.modules.push(mod);
       created.push(deepClone(mod));

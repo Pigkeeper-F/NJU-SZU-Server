@@ -1238,3 +1238,65 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
    `references.bib` / `build_report.md`；上游有图时 `figures/` 里有图。
 5. 上游有产物目录时，响应 `upstream.copied` 非空，且执行目录里存在 `upstream/<模块名>/` 与
    `upstream_manifest.json`；传入不在允许根内的目录 → `upstreamDropped` 里有记录且未复制。
+
+---
+
+## 23. 文献调研环节（①）· 目标期刊规范（2026-10-20 · 补齐第一阶段）
+
+### 23.1 环节①与「文献挖掘」的关系
+
+按主人口径**拆成两个独立环节**：
+
+| | 文献调研（环节①） | 文献挖掘（能力节点） |
+|---|---|---|
+| 目标 | 为研究决策服务 | 为计算模块服务 |
+| 产出 | 逐篇要点、共识分歧、研究空白清单 | 参数表（供计算用） |
+| 字段口径 | 这篇研究了什么、结论是什么、局限在哪 | 这个参数多少、什么单位 |
+| 底层 | 共用检索 / 去重 / 全文的产物（`candidates.json`、`fulltext/files/*.txt`） | 同左 |
+
+### 23.2 新端点 `POST /api/literature/research`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `jobId` | string | 是 | 已完成首批检索的文献作业 id |
+| `settings` | object | 否 | 模型设置（前端齿轮里的分组），留空回落服务端 `.env` |
+| `credential` | object | 否 | 「添加 API」的活跃凭证 |
+
+**流程**：读 `candidates.json` → 读 `fulltext/files/*.txt` 并按 candidate_id / 标题匹配回候选 →
+分批调模型抽要点 → 调模型做横向归纳 → 产物落盘。
+
+**出参**：`{ ok, meta, files[], notes[], synthesis{consensus,disagreements,gaps}, gaps[], error }`。
+
+**产物**（写在作业目录 `research/` 下，已加入 `DELIVERABLE_PATTERNS`，可从作业面板下载）：
+
+| 文件 | 内容 |
+|---|---|
+| `research/notes.json` / `notes.csv` | 逐篇要点：研究问题 / 数据来源 / 方法 / 结论 / 局限 + 题录 + `evidence`（全文 / 仅题录） |
+| `research/synthesis.json` / `synthesis.md` | 共识、分歧（每条带出处 id） |
+| `research/gaps.json` / `gaps.md` | 研究空白清单：空白描述 + 支撑依据（哪篇的什么结论）+ 可检验方向 |
+
+**诚实性约束**：只有题录（无全文）的文献，`evidence` 标「仅题录」，提示词明令不得推断方法细节与结论；
+模型没给出的字段一律落「文中未说明」；模型输出不合法时不崩，如实记 `error` 并仍留下过程产物。
+
+### 23.3 目标期刊规范（`tools/writing_build.py` 的 `JOURNAL_GUIDES`）
+
+目标期刊在文章撰写环节手填，模块参数 `params.journal`（新建时默认 **AAAI**）。命中规范表时：
+
+- 换用该刊模板：`\documentclass{aaai26}` + `natbib/times/helvet/courier/balance`，参考文献样式 `aaai26.bst`；
+- 双盲期刊的 `\author` 写匿名占位，并在注释里写明作者/单位/基金/致谢不得出现；
+- 硬约束（页数、摘要词数、关键词数、图表分辨率、禁改行距等）写进 `manuscript.tex` 头部注释
+  与 `build_report.md` 的「写作约束清单」，并提示模板文件需自行从当届 Author Kit 下载；
+- 未命中时按通用 `article` 结构生成，并在注释与报告里**标明未按任何期刊约束**。
+
+已收录：AAAI（aaai26）、NeurIPS、ICML。页数/词数等每年可能微调的数值均标注「以当年 Author Kit 为准」。
+
+### 23.4 前端（保持简洁）
+
+环节①在模块空间里只有一个紧凑面板：主题输入 + 检索式输入 + 一个「检索并生成要点」按钮 + 一行状态。
+跑完把要点数/空白数/产物文件名显示在面板下方，并往模块对话里追加一条系统消息。目标期刊是
+说明卡底部的一行输入框，不另起面板。
+
+### 23.5 回归
+
+`node tools/test-literature-research.js`（mock 模型，不联网）：24 项断言全通过，覆盖
+正常路径、产物落盘、诚实性兜底、脏 JSON 不崩、无候选报错、提示词含「仅题录不得推断」的硬要求。

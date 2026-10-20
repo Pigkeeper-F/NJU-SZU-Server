@@ -40,6 +40,71 @@ SECTIONS = [
     ("discussion", "Discussion"),
     ("conclusion", "Conclusion and Future Work"),
 ]
+
+# ---------------------------------------------------------------------------
+# 目标期刊规范表
+# ---------------------------------------------------------------------------
+# 每条记录的是"该刊的硬约束"。页数、摘要词数这类每年可能微调的数值，
+# 都标注了"以当年 Author Kit 为准"——规范表是助手，不是最终依据。
+JOURNAL_GUIDES = [
+    {
+        "match": ["aaai"],
+        "name": "AAAI（AAAI Conference on Artificial Intelligence）",
+        "documentclass": "aaai26",
+        "packages": ["natbib", "times", "helvet", "courier", "balance"],
+        "bibstyle": "aaai26.bst",
+        "anonymous": True,
+        "notes": [
+            "双盲评审：作者、单位、基金、致谢在匿名版中一律不出现，\\author 只留匿名占位。",
+            "不要改动模板的字号、行距、页边距（AAAI 明令禁止调整这三项）。",
+            "参考文献用 aaai26.bst（natbib），正文用 \\citep / \\citet 引用。",
+            "摘要 150–250 词；关键词 3–5 个。",
+            "篇幅：正文 7 页 + 参考文献最多 2 页（以当年 Author Kit 为准）。",
+            "图表：矢量优先（PDF / PS / EPS）；位图不低于 300 dpi，坐标轴与图注须可读。",
+            "模板文件 aaai26.sty / aaai26.bst 需从当届 Author Kit 另行下载放入项目目录。",
+        ],
+    },
+    {
+        "match": ["neurips", "nips"],
+        "name": "NeurIPS",
+        "documentclass": "article",
+        "packages": ["natbib", "times", "helvet", "courier", "balance", "microtype"],
+        "bibstyle": "plainnat",
+        "anonymous": True,
+        "notes": [
+            "双盲评审：匿名版不含作者与致谢。",
+            "正文 9 页 + 参考文献最多 1 页（以当年 Author Kit 为准）。",
+            "摘要建议一段、不超过 150 词。",
+            "不得使用 LaTeX 宏包改动行距与页面布局。",
+        ],
+    },
+    {
+        "match": ["icml"],
+        "name": "ICML",
+        "documentclass": "icml2026",
+        "packages": ["natbib", "times", "helvet", "courier", "balance"],
+        "bibstyle": "icml2026.bst",
+        "anonymous": True,
+        "notes": [
+            "双盲评审：匿名版不含作者与致谢。",
+            "正文 8 页 + 参考文献最多 2 页（以当年 Author Kit 为准）。",
+            "摘要不超过 150 词。",
+        ],
+    },
+]
+
+
+def resolve_guide(journal: str):
+    """按刊名（不区分大小写）匹配已知期刊规范；匹配不到返回 None。"""
+    text = (journal or "").strip().lower()
+    if not text:
+        return None
+    for guide in JOURNAL_GUIDES:
+        for keyword in guide["match"]:
+            if keyword in text:
+                return guide
+    return None
+
 FIGURE_CAPTION_FILES = {"caption.md", "captions.md", "figure_notes.md", "figures.md"}
 
 
@@ -250,20 +315,36 @@ def build_tex(journal: str, draft_path, draft_source: str, grouped: dict,
     body_md = read_text(draft_path) if draft_path else ""
     sections = split_sections(body_md)
     abstract = find_abstract(sections)
+    guide = resolve_guide(journal)
 
     lines: list = []
     lines.append(r"% 由 tools/writing_build.py 生成（九步研究流程 · 环节⑥ 文章撰写）")
     lines.append(r"% 目标期刊：" + latex_escape(journal or "（未填写）"))
-    lines.append(r"\documentclass[11pt]{article}")
+    if guide:
+        lines.append(r"% 期刊规范：" + guide["name"])
+        for note in guide["notes"]:
+            # 注释里是给人看的原文，不做 LaTeX 转义（\author、\citep 之类要保持原样可读）
+            lines.append("% 规范：" + note.replace("\n", " "))
+    else:
+        lines.append("% 规范：未匹配到已知期刊规范——按通用结构生成，投稿前请对照该刊 Author Kit 自行调整。")
+    lines.append(r"\documentclass[11pt]{%s}" % (guide["documentclass"] if guide else "article"))
     lines.append(r"\usepackage[utf8]{inputenc}")
     lines.append(r"\usepackage{graphicx}")
     lines.append(r"\usepackage{booktabs}")
     lines.append(r"\usepackage{amsmath}")
     lines.append(r"\usepackage{hyperref}")
-    lines.append(r"\usepackage{geometry}")
-    lines.append(r"\geometry{a4paper,margin=2.5cm}")
+    if guide:
+        for package in guide["packages"]:
+            lines.append(r"\usepackage{%s}" % package)
+    else:
+        lines.append(r"\usepackage{geometry}")
+        lines.append(r"\geometry{a4paper,margin=2.5cm}")
     lines.append(r"\title{%s}" % latex_escape(title))
-    lines.append(r"\author{Author Name \thanks{Institution, Country}}")
+    if guide and guide.get("anonymous"):
+        lines.append(r"\author{Anonymous Authors}")
+        lines.append("% 双盲评审：提交匿名版时作者、单位、基金、致谢都不得出现。")
+    else:
+        lines.append(r"\author{Author Name \thanks{Institution, Country}}")
     lines.append(r"\date{\today}")
     lines.append(r"\begin{document}")
     lines.append(r"\maketitle")
@@ -301,7 +382,7 @@ def build_tex(journal: str, draft_path, draft_source: str, grouped: dict,
             lines.append(r"\end{figure}")
             lines.append("")
 
-    lines.append(r"\bibliographystyle{plain}")
+    lines.append(r"\bibliographystyle{%s}" % (guide["bibstyle"] if guide else "plain"))
     lines.append(r"\bibliography{references}")
     lines.append(r"\end{document}")
     return "\n".join(lines) + "\n"
@@ -383,6 +464,21 @@ def main() -> int:
             report.append("- {}：{}".format(module, "、".join(kinds) if kinds else "无可识别产物"))
     else:
         report.append("- 无上游产物")
+    report.append("")
+    report.append("## 写作约束清单")
+    guide = resolve_guide(journal)
+    if guide:
+        report.append("- 目标期刊：**{}**".format(guide["name"]))
+        report.append("- 模板：`{}.sty`（需自行从当届 Author Kit 下载放入项目目录）".format(guide["documentclass"]))
+        report.append("- 引用样式：`{}`".format(guide["bibstyle"]))
+        report.append("- 匿名评审：{}".format("是（作者/单位/基金/致谢均不出现）" if guide.get("anonymous") else "否"))
+        for note in guide["notes"]:
+            report.append("  - {}".format(note))
+        if not (RUN_DIR / (guide["documentclass"] + ".sty")).is_file():
+            report.append("  - ⚠ 当前目录没有 `{}.sty`——编译前需把模板文件放进来".format(guide["documentclass"]))
+    else:
+        report.append("- 未匹配到已知期刊规范（当前目标期刊：`{}`）".format(journal or "未填写"))
+        report.append("- 本次按通用 article 结构生成；投稿前请对照该刊 Author Kit 调整模板、篇幅与引用样式。")
     report.append("")
     report.append("## 待补清单（人工）")
     todos: list = []
