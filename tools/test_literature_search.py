@@ -318,6 +318,95 @@ class LiteratureSearchTest(unittest.TestCase):
             self.assertEqual(read_report(output)["count"], 2)
         self.assertEqual(calls, [("google-scholar", False), ("cnki", False), ("cnki", False)])
 
+    def test_six_source_wos_error_attention_resume_keeps_thirty_frozen_candidates(self) -> None:
+        sources = ["pubmed", "scopus", "wanfang", "web-of-science", "cnki", "google-scholar"]
+        queries = {source: source + " frozen broiler heat query" for source in sources}
+        config = {**CONFIG, "query": 'broiler "heat stress"', "sources": sources, "sourceQueries": queries,
+                  "searchMode": "test", "stopMode": "count", "perSourceLimit": 10,
+                  "batch": {"size": 10, "maxBatches": 1}}
+        frozen = (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        fingerprint = config_fingerprint(config)
+        calls, wos_attempts = [], 0
+
+        def browser_run(source, query, scrape_current, limit, year_from, year_to, *, job_dir):
+            nonlocal wos_attempts
+            calls.append((source, query, scrape_current))
+            self.assertEqual(job_dir, output)
+            self.assertEqual(query, queries[source], "重试必须使用冻结的分来源检索式")
+            self.assertEqual((limit, year_from, year_to), (10, 2015, 2023))
+            if source == "web-of-science":
+                wos_attempts += 1
+                if wos_attempts == 1:
+                    return {"status": "error", "message": "浏览器操作暂时失败"}
+                if wos_attempts == 2:
+                    return {"status": "attention", "reason": "login", "message": "请在本任务的WOS页面登录"}
+            return {"status": "ok", "transport": "ncbi_eutilities" if source == "pubmed" else "browser",
+                    "results": [{"title": f"{source} broiler heat study {index}", "year": 2020,
+                                 "result_url": f"https://example.org/{source}/{index}"} for index in range(10)]}
+
+        with tempfile.TemporaryDirectory(prefix="literature-six-source-retry-") as temp, patch.dict(
+                sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}):
+            output = Path(temp)
+            config_path = output / "run_config.json"
+            config_path.write_bytes(frozen)
+
+            def attempt(**options):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    code = run(config, output, **options)
+                events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+                report = read_report(output)
+                state = json.loads((output / "discovery-state.json").read_text(encoding="utf-8"))
+                self.assertEqual(config_path.read_bytes(), frozen, "续跑不得改写原运行配置")
+                self.assertEqual((json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), frozen)
+                self.assertEqual(state["config_fingerprint"], fingerprint)
+                self.assertEqual(state["batch_index"], 1)
+                self.assertEqual([batch["batch_index"] for batch in report["batches"]], [1])
+                self.assertEqual(report["run_config"], config)
+                self.assertEqual(len(read_csv_rows(output)), report["count"])
+                return code, events[-1], report, state
+
+            code, event, first, state = attempt()
+            self.assertEqual(code, 1)
+            self.assertEqual((event["type"], event["source"], event["count"]), ("error", "web-of-science", 30))
+            self.assertEqual((state["pending_source"], state["pending_reason"]), ("web-of-science", None))
+            self.assertEqual(state["sources"]["web-of-science"]["status"], "error")
+            self.assertFalse(first["discovery_complete"])
+            self.assertEqual(first["count"], 30)
+            first_thirty = first["records"]
+            first_ids = [record["candidate_id"] for record in first_thirty]
+            self.assertEqual([record["source_key"] for record in first_thirty][::10], sources[:3])
+            self.assertTrue(all(state["sources"][source]["status"] == "ok" for source in sources[:3]))
+
+            code, event, attention, state = attempt(resume=True)
+            self.assertEqual(code, 0)
+            self.assertEqual((event["type"], event["source"], event["reason"], event["count"]),
+                             ("attention", "web-of-science", "login", 30))
+            self.assertEqual(event["files"], ["candidates.json", "candidates.csv"])
+            self.assertEqual((state["pending_source"], state["pending_reason"]), ("web-of-science", "login"))
+            self.assertFalse(attention["discovery_complete"])
+            self.assertEqual(attention["records"], first_thirty)
+            self.assertEqual([row["candidate_id"] for row in read_csv_rows(output)], first_ids)
+
+            code, event, complete, state = attempt(resume=True, scrape_current=True)
+            self.assertEqual(code, 0)
+            self.assertEqual((event["type"], event["count"]), ("result", 60))
+            self.assertTrue(complete["discovery_complete"])
+            self.assertIsNone(state["pending_source"])
+            self.assertEqual(complete["records"][:30], first_thirty)
+            self.assertEqual([record["candidate_id"] for record in complete["records"]][::10],
+                             ["PMID-001", "SCOPUS-001", "WF-001", "WOS-001", "CNKI-001", "GSC-001"])
+            self.assertEqual(len({record["candidate_id"] for record in complete["records"]}), 60)
+            self.assertTrue(all(len(state["sources"][source]["results"]) == 10 for source in sources))
+            self.assertEqual([call[0] for call in calls], sources[:4] + ["web-of-science", "web-of-science"] + sources[4:])
+            self.assertEqual([call for call in calls if call[2]], [("web-of-science", queries["web-of-science"], True)])
+
+            previous_calls = list(calls)
+            code, event, repeated, _state = attempt(resume=True)
+            self.assertEqual((code, event["count"]), (0, 60))
+            self.assertEqual(calls, previous_calls, "重复继续不能再次检索已完成来源")
+            self.assertEqual(repeated["records"], complete["records"], "同批次不得重复累计或换编号")
+
     def test_new_batch_has_new_checkpoint_and_preserves_old_batch(self) -> None:
         calls = []
         def browser_run(source, query, scrape_current, limit, year_from, year_to, **kwargs):

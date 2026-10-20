@@ -77,6 +77,14 @@ function harness(savedSnapshot) {
 }
 
 async function main() {
+  const wosTimeout = 'Web of Science 服务端响应超时（524），已有结果保留。无需反复登录，请稍后在原任务中点击“检查并继续”。';
+  const timeoutText = harness().subject.literatureAttentionMessage(job({
+    attention: { source: 'web-of-science', reason: 'results_unrecognized' }, message: wosTimeout }));
+  assert.equal(timeoutText, 'Web of Science 核心合集：' + wosTimeout, 'Known WOS 524 needs only its original timeout/resume guidance');
+  assert.ok(!timeoutText.includes('平台专用检索浏览器') && !timeoutText.includes('普通 Edge/Chrome'), 'A server timeout must not append login instructions');
+  const wosLoginText = harness().subject.literatureAttentionMessage(job({
+    attention: { source: 'web-of-science', reason: 'login' }, message: '请完成机构登录。' }));
+  assert.ok(wosLoginText.includes('请在平台专用检索浏览器') && wosLoginText.includes('普通 Edge/Chrome'), 'Actual WOS login keeps the existing browser instructions');
   for (const message of ['请完成登录。', '请完成登录.', '请完成登录。...']) {
     const text = harness().subject.literatureAttentionMessage(job({ message }));
     assert.ok(text.includes('请完成登录。请在平台专用'));

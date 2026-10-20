@@ -317,6 +317,10 @@
       return message + '。处理问题后点击“检查并继续”，从原任务保存的位置恢复。';
     }
     const label = LITERATURE_SOURCE_LABELS[source] || source || '当前来源';
+    if (source === 'web-of-science' && job.attention?.reason === 'results_unrecognized'
+      && job.message === 'Web of Science 服务端响应超时（524），已有结果保留。无需反复登录，请稍后在原任务中点击“检查并继续”。') {
+      return label + '：' + job.message;
+    }
     return label + '：' + message + '。请在平台专用检索浏览器的官方页面处理后，点击“检查并继续”；普通 Edge/Chrome 的登录不会自动共享。';
   }
   async function openLiteratureBrowser(mod) {

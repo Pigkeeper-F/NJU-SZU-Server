@@ -460,6 +460,252 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual(page.search_field, "Topic")
         self.assertEqual(page.filled, QUERY)
 
+    def test_wos_official_china_host_is_allowed_without_allowing_similar_hosts(self):
+        page = Page("regional-wos", snapshot())
+        page.url = "https://webofscience.clarivate.cn/wos/woscc/basic-search"
+        self.assertTrue(adapter._official_result_page(page, "web-of-science"))
+        for host in ("webofscience.clarivate.cn.evil.test", "proxy.webofscience.clarivate.cn",
+                     "evilwebofscience.clarivate.cn", "clarivate.cn", "webofscience.example"):
+            page.url = "https://" + host + "/wos/"
+            self.assertFalse(adapter._official_result_page(page, "web-of-science"), host)
+
+    def test_wos_bound_failed_task_can_use_visible_form_without_scrape_current_flag(self):
+        page = self.context.new_page()
+        page.url = "https://webofscience.clarivate.cn/wos/woscc/basic-search"
+        page.dom = snapshot(queries=[], results=[])
+        page.has_form = True
+        page.search_field = "Author"
+        adapter._save_binding(self.job, "web-of-science", page.target)
+        with patch.object(adapter, "_navigate_search", side_effect=AssertionError("do not reopen the global transfer")):
+            result = self.call("web-of-science")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(page.filled, QUERY)
+        self.assertEqual(page.search_field, "Topic")
+        self.assertEqual(page.clicked, 1)
+        self.assertEqual(page.navigations, [])
+        self.assertEqual(len(self.context.pages), 1)
+
+    def test_wos_navigation_timeout_can_use_actual_official_form_in_same_tab(self):
+        page = self.context.new_page()
+        page.has_form = True
+        adapter._save_binding(self.job, "web-of-science", page.target)
+
+        def regional_timeout(*args, **kwargs):
+            page.url = "https://webofscience.clarivate.cn/wos/"
+            page.dom = snapshot(queries=[], results=[])
+            raise TimeoutError("unexportable transfer diagnostic")
+
+        with patch.object(page, "goto", side_effect=regional_timeout) as navigate:
+            result = self.call("web-of-science")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(page.filled, QUERY)
+        self.assertEqual(page.clicked, 1)
+        self.assertEqual(navigate.call_count, 1)
+        self.assertNotIn("unexportable", json.dumps(result))
+
+    def test_wos_empty_official_transfer_timeout_is_recoverable_not_failed(self):
+        page = self.context.new_page()
+        adapter._save_binding(self.job, "web-of-science", page.target)
+
+        def regional_timeout(*args, **kwargs):
+            page.url = "https://webofscience.clarivate.cn/wos/"
+            page.dom = snapshot(queries=[], results=[])
+            raise TimeoutError("unexportable transfer diagnostic")
+
+        with patch.object(page, "goto", side_effect=regional_timeout):
+            result = self.call("web-of-science")
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertIn("Web of Science", result["message"])
+        self.assertIn("检查并继续", result["message"])
+        self.assertEqual(page.clicked, 0)
+        self.assertEqual(result["results"], [])
+        self.assertNotIn("unexportable", json.dumps(result))
+
+    def test_wos_timeout_auth_and_challenge_are_not_submitted_automatically(self):
+        for marker, reason, url in (
+            ("password", "login", "https://access.clarivate.com/login"),
+            ("captcha", "verification", "https://webofscience.clarivate.cn/wos/"),
+            ("accessRequired", "access_required", "https://webofscience.clarivate.cn/wos/"),
+        ):
+            with self.subTest(reason=reason):
+                self.context = Context(snapshot())
+                page = self.context.new_page()
+                page.has_form = True
+                adapter._save_binding(self.job, "web-of-science", page.target)
+
+                def gated_timeout(*args, **kwargs):
+                    page.url = url
+                    page.dom = snapshot(queries=[], **{marker: True})
+                    raise TimeoutError("private diagnostic")
+
+                with patch.object(page, "goto", side_effect=gated_timeout):
+                    result = self.call("web-of-science")
+                self.assertEqual((result["status"], result["reason"]), ("attention", reason))
+                self.assertEqual(page.clicked, 0)
+                self.assertEqual(page.url, url)
+                self.assertNotIn("private diagnostic", json.dumps(result))
+
+    def test_wos_official_control_exception_is_recoverable_and_sanitized(self):
+        page = self.context.new_page()
+        page.url = "https://webofscience.clarivate.cn/wos/woscc/basic-search"
+        page.dom = snapshot(queries=[], results=[])
+        page.has_form = True
+        adapter._save_binding(self.job, "web-of-science", page.target)
+        with patch.object(Control, "click", side_effect=TimeoutError("private overlay diagnostic")):
+            result = self.call("web-of-science", resume=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertIn("原任务窗口", result["message"])
+        self.assertNotIn("private overlay", json.dumps(result))
+
+    def test_wos_unavailable_browser_or_closed_page_is_still_environment_error(self):
+        with patch.object(adapter, "_runtime", side_effect=RuntimeError("private unavailable browser")):
+            result = self.call("web-of-science")
+        self.assertEqual(result["status"], "error")
+        page = self.context.new_page()
+        page.url = "https://webofscience.clarivate.cn/wos/"
+        page.is_closed = lambda: True
+        adapter._save_binding(self.job, "web-of-science", page.target)
+        with patch.object(adapter, "_snapshot", side_effect=RuntimeError("private disconnected DOM")):
+            result = self.call("web-of-science", resume=True)
+        self.assertEqual(result["status"], "error")
+        self.assertNotIn("private disconnected", json.dumps(result))
+
+    def test_wos_navigation_destroyed_dom_on_live_official_tab_is_recoverable(self):
+        page = self.context.new_page()
+        page.url = "https://webofscience.clarivate.cn/wos/"
+        adapter._save_binding(self.job, "web-of-science", page.target)
+        with patch.object(adapter, "_snapshot", side_effect=RuntimeError("private execution context destroyed")):
+            result = self.call("web-of-science", resume=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertNotIn("private execution context", json.dumps(result))
+
+    def test_wos_auth_exception_is_classified_while_runtime_is_still_connected(self):
+        page = self.context.new_page()
+        page.url = "https://webofscience.clarivate.cn/wos/woscc/basic-search"
+        page.dom = snapshot(queries=[], results=[])
+        page.has_form = True
+        adapter._save_binding(self.job, "web-of-science", page.target)
+        active = False
+        reads = []
+        actual_snapshot = adapter._snapshot
+
+        @contextmanager
+        def live_runtime():
+            nonlocal active
+            active = True
+            try:
+                yield self.context
+            finally:
+                active = False
+
+        def read_live(*args):
+            reads.append(active)
+            if not active:
+                raise RuntimeError("transport already disconnected")
+            return actual_snapshot(*args)
+
+        def redirected_control(*args):
+            page.url = "https://access.clarivate.com/login"
+            page.dom = snapshot(password=True, queries=[])
+            raise TimeoutError("private redirect diagnostic")
+
+        with patch.object(adapter, "_runtime", live_runtime), \
+                patch.object(adapter, "_snapshot", side_effect=read_live), \
+                patch.object(Control, "click", side_effect=redirected_control):
+            result = self.call("web-of-science")
+        self.assertEqual((result["status"], result["reason"]), ("attention", "login"))
+        self.assertGreaterEqual(len(reads), 2)
+        self.assertTrue(all(reads), "all recovery reads must precede runtime disconnect")
+        self.assertFalse(active)
+        self.assertNotIn("private redirect", json.dumps(result))
+
+    def test_wos_bound_challenge_is_not_refreshed_when_failed_task_omits_resume_flag(self):
+        page = self.context.new_page()
+        page.url = "https://webofscience.clarivate.cn/wos/"
+        page.dom = snapshot(captcha=True, queries=[])
+        page.has_form = True
+        adapter._save_binding(self.job, "web-of-science", page.target)
+        with patch.object(adapter, "_navigate_search", side_effect=AssertionError("preserve human challenge")):
+            result = self.call("web-of-science")
+        self.assertEqual((result["status"], result["reason"]), ("attention", "verification"))
+        self.assertEqual(page.clicked, 0)
+
+    def test_wos_sid_bearing_links_are_never_exported(self):
+        for key in ("SID", "sid", "SiD"):
+            url = "https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:123?" + key + "=fixture-sensitive"
+            self.assertEqual(adapter.safe_url(url), "")
+        self.assertEqual(adapter.safe_url("https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:123"),
+                         "https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:123")
+
+    def test_actual_wos_cloudflare_524_dom_is_service_timeout_not_auth_or_zero(self):
+        from test_literature_extra_sources import dom_snapshot
+        state = dom_snapshot("web-of-science", {"header": {"text": "A timeout occurred Error code 524"}},
+            {"h1": ["header"]}, head="A timeout occurred Error code 524 Browser Working Cloudflare Working Host Error Sign In Register",
+            script=adapter._SNAPSHOT_JS)
+        self.assertEqual(state["service_error"], "wos_timeout_524")
+        self.assertFalse(state["captcha"])
+        self.assertFalse(state["password"])
+        self.assertFalse(state["loginPrompt"])
+        self.assertFalse(state["noResults"])
+        page = Page("wos-524", state)
+        page.url = "https://webofscience.clarivate.cn/wos/woscc/basic-search"
+        self.assertIsNone(adapter._auth_reason(page, state))
+        self.context.pages.append(page)
+        adapter._save_binding(self.job, "web-of-science", page.target)
+        with patch.object(adapter, "_navigate_search", side_effect=AssertionError("initial error detection must pause")):
+            result = self.call("web-of-science")
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertIn("524", result["message"])
+        self.assertIn("无需反复登录", result["message"])
+        self.assertEqual(result["results"], [])
+
+    def test_wos_524_only_uses_visible_error_evidence(self):
+        from test_literature_extra_sources import dom_snapshot
+        for nodes, mapping in (
+            ({"header": {"text": "Error code 524", "hidden": True}}, {"h1": ["header"]}),
+            ({"paper": {"text": "An article mentioning Error code 524"}}, {".summary-record": ["paper"]}),
+        ):
+            state = dom_snapshot("web-of-science", nodes, mapping, head="Reference text mentions Error code 524", script=adapter._SNAPSHOT_JS)
+            self.assertIsNone(state["service_error"])
+
+    def test_wos_old_524_retries_official_entry_once_on_explicit_continue(self):
+        page = self.context.new_page()
+        page.url = "https://webofscience.clarivate.cn/wos/woscc/basic-search"
+        page.dom = snapshot(queries=[], service_error="wos_timeout_524")
+        adapter._save_binding(self.job, "web-of-science", page.target)
+
+        def recovered_official_entry(url, **kwargs):
+            self.assertEqual(url, adapter.SOURCES["web-of-science"][1])
+            page.url = "https://webofscience.clarivate.cn/wos/woscc/basic-search"
+            page.dom = snapshot(queries=[], results=[])
+            page.has_form = True
+
+        with patch.object(page, "goto", side_effect=recovered_official_entry) as navigate:
+            result = self.call("web-of-science", resume=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(navigate.call_count, 1)
+        self.assertEqual(page.clicked, 1)
+        self.assertEqual(page.filled, QUERY)
+        self.assertEqual(len(self.context.pages), 1)
+
+    def test_wos_524_after_a_page_exception_keeps_its_specific_message(self):
+        page = self.context.new_page()
+        page.url = "https://webofscience.clarivate.cn/wos/"
+        adapter._save_binding(self.job, "web-of-science", page.target)
+        reads = [0]
+
+        def changing_dom(*args):
+            reads[0] += 1
+            if reads[0] == 1:
+                raise RuntimeError("private navigation context destroyed")
+            return snapshot(queries=[], service_error="wos_timeout_524")
+
+        with patch.object(adapter, "_snapshot", side_effect=changing_dom):
+            result = self.call("web-of-science", resume=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertIn("524", result["message"])
+        self.assertNotIn("private navigation", json.dumps(result))
+
     def test_wos_login_redirect_and_result_auth_links_are_redacted(self):
         page = self.context.new_page()
         page.url = "https://auth.example.edu/saml/login?ticket=secret-token"

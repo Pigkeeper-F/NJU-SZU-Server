@@ -31,7 +31,7 @@ SOURCES = {
     "web-of-science": ("Web of Science 核心合集", "https://www.webofscience.com/wos/woscc/basic-search"),
     **extra_sources.SOURCE_INFO,
 }
-_AUTH_KEYS = re.compile(r"token|ticket|session|password|passwd|authorization|saml|signature|auth|^code$|^state$|^key$|^v$", re.I)
+_AUTH_KEYS = re.compile(r"token|ticket|session|password|passwd|authorization|saml|signature|auth|^sid$|^code$|^state$|^key$|^v$", re.I)
 _AUTH_PATH = re.compile(r"(?:^|[/_.-])(?:login|signin|sign-in|authorize|oauth|saml|sso|callback)(?:$|[/_.-])", re.I)
 
 
@@ -146,6 +146,8 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
   const visibleText = selectors => Array.from(document.querySelectorAll(selectors)).filter(visible).map(text).join(' ');
   const head = (document.body?.innerText || '').slice(0, 4500);
   const low = head.toLowerCase();
+  const wosTimeout524 = source === 'web-of-science' && Array.from(document.querySelectorAll('#cf-error-details,.cf-error-details,h1'))
+    .some(el => visible(el) && /\berror\s+code\s*:?\s*524\b/i.test(text(el)));
   const captcha = Array.from(document.querySelectorAll('iframe[src*="recaptcha"],iframe[src*="captcha"],.geetest_panel,.verifybox,#captcha,.captcha')).some(visible)
     || /人机验证|滑动验证|请完成验证|访问验证|验证码|unusual traffic|verify you are human|are you a robot|access denied.*bot/i.test(head.slice(0,1600));
   const password = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
@@ -203,6 +205,7 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
       doi:doiAnchor ? doiAnchor.href.replace(/^https?:\/\/(?:dx\.)?doi\.org\//i,'') : (doiMatch?.[0] || '')});
   }
   return {captcha:!!captcha,password,loginPrompt,accessRequired:explicitAccess,queries,results,resultContainer,noResults,
+    service_error:wosTimeout524 ? 'wos_timeout_524' : null,
     visible_result_count:rows.filter(visible).length};
 }"""
 
@@ -251,6 +254,8 @@ def _matches_query(snapshot, page_url, source, query):
 
 
 def _auth_reason(page, snapshot):
+    if snapshot.get("service_error") == "wos_timeout_524":
+        return None  # An explicit upstream timeout is not a login/challenge.
     if snapshot.get("captcha"):
         return "verification"
     if snapshot.get("accessRequired"):
@@ -277,6 +282,25 @@ _MESSAGES = {
     "access_required": "当前会话没有所需数据库访问权限。请使用学校机构授权或授权网络登录后，回工作台检查并继续。",
     "results_unrecognized": "尚不能确认本次检索的结果页面。请查看该任务的官方页面，确认检索式和结果已加载后再继续。",
 }
+_WOS_REVIEW_MESSAGE = "Web of Science 官方页面尚不能确认可用检索会话、表单或结果。请在原任务窗口核对机构访问和页面提示，再点“检查并继续”；已有结果保留。"
+_WOS_TIMEOUT_MESSAGE = "Web of Science 服务端响应超时（524），已有结果保留。无需反复登录，请稍后在原任务中点击“检查并继续”。"
+
+_WOS_PICKER_SELECTORS = (
+    '[data-ta="search-field-dropdown"]', '[data-ta="search-field"]',
+    'mat-select[aria-label*="Search field"]', 'button[aria-label*="Search field"]',
+)
+_WOS_FIELD_SELECTORS = (
+    'textarea[data-ta="search-criteria-input"]', 'input[data-ta="search-criteria-input"]',
+    '[data-ta="search-criteria-input"] textarea', '[data-ta="search-criteria-input"] input',
+    'textarea#search-option', 'input#search-option',
+    'textarea[aria-label*="Search"]', 'textarea[placeholder*="Search"]',
+    'textarea[placeholder*="search"]', 'input[aria-label*="Search"]', 'input[placeholder*="Search"]',
+)
+_WOS_BUTTON_SELECTORS = (
+    'button[data-ta="run-search"]', 'button[data-ta="search-button"]',
+    'button[data-ta="submit-search"]', 'button[type="submit"]',
+    'button:has-text("Search")', 'button:has-text("检索")',
+)
 
 
 def _envelope(source, status, *, results=None, reason=None, year_from=None, year_to=None, transport="browser"):
@@ -317,16 +341,20 @@ def _wait_results(page, source):
         pass
 
 
+def _wos_form_ready(page):
+    """Only the existing visible fielded-search controls prove readiness."""
+    return (_first_visible(page, _WOS_PICKER_SELECTORS) is not None
+            and _first_visible(page, _WOS_FIELD_SELECTORS) is not None
+            and _first_visible(page, _WOS_BUTTON_SELECTORS) is not None)
+
+
 def _submit_wos(page, query):
     # The official Core Collection basic-search URL is fixed.  No fabricated
     # undocumented URL search parameters or copied session identifiers are used.
     topic = re.fullmatch(r"\s*TS\s*=\s*\((.*)\)\s*", query, re.I | re.S)
     # A persistent profile may remember Author/Title from a previous search.
     # Confirm Topic for every query, including ordinary unprefixed expressions.
-    picker = _first_visible(page, [
-        '[data-ta="search-field-dropdown"]', '[data-ta="search-field"]',
-        'mat-select[aria-label*="Search field"]', 'button[aria-label*="Search field"]',
-    ])
+    picker = _first_visible(page, _WOS_PICKER_SELECTORS)
     if picker is None:
         return False
 
@@ -346,24 +374,13 @@ def _submit_wos(page, query):
     if topic:
         # Basic search uses a field picker, unlike advanced-search TS= syntax.
         query = topic.group(1).strip()
-    field = _first_visible(page, [
-        'textarea[data-ta="search-criteria-input"]', 'input[data-ta="search-criteria-input"]',
-        '[data-ta="search-criteria-input"] textarea', '[data-ta="search-criteria-input"] input',
-        'textarea#search-option', 'input#search-option',
-        'textarea[aria-label*="Search"]', 'textarea[placeholder*="Search"]',
-        'textarea[placeholder*="search"]', 'input[aria-label*="Search"]',
-        'input[placeholder*="Search"]',
-    ])
+    field = _first_visible(page, _WOS_FIELD_SELECTORS)
     if field is None:
         return False
     field.fill(query)
     if _normalized(field.input_value()) != _normalized(query):
         return False
-    button = _first_visible(page, [
-        'button[data-ta="run-search"]', 'button[data-ta="search-button"]',
-        'button[data-ta="submit-search"]', 'button[type="submit"]',
-        'button:has-text("Search")', 'button:has-text("检索")',
-    ])
+    button = _first_visible(page, _WOS_BUTTON_SELECTORS)
     if button is None:
         return False
     button.click()
@@ -383,8 +400,22 @@ def _navigate_search(page, source, query, year_from, year_to):
         url = SOURCES[source][1] + "?" + urlencode({"kw": query, "korder": "SU"})
     else:
         url = SOURCES[source][1]
-    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    except Exception:
+        if source != "web-of-science" or not _official_result_page(page, source):
+            raise
+        # A global-to-regional transfer can time out while its official page
+        # already has usable controls. Read foreground evidence once; unknown
+        # sessions remain recoverable and no guessed transfer/API is called.
+        current = _snapshot(page, source, 10)
+        if current.get("service_error") or _auth_reason(page, current) or not _wos_form_ready(page):
+            return False
+        return _submit_wos(page, query)
     if source == "web-of-science":
+        current = _snapshot(page, source, 10)
+        if current.get("service_error") or _auth_reason(page, current):
+            return False
         try:
             page.wait_for_selector('textarea,input[type="password"],input[data-ta="search-criteria-input"]', timeout=15_000)
         except Exception:
@@ -536,12 +567,62 @@ def _official_result_page(page, source):
     try:
         parsed = urlsplit(page.url)
         host = (parsed.hostname or "").lower()
+        if parsed.scheme not in ("https", "http") or parsed.username or parsed.password:
+            return False
+        if source == "web-of-science" and host == "webofscience.clarivate.cn":
+            return True
         domain = {"google-scholar": "scholar.google.com", "cnki": "cnki.net",
                   "web-of-science": "webofscience.com", "wanfang": "wanfangdata.com.cn",
                   "scopus": "scopus.com", "pubmed": "pubmed.ncbi.nlm.nih.gov"}[source]
-        return parsed.scheme in ("https", "http") and (host == domain or host.endswith("." + domain))
+        return host == domain or host.endswith("." + domain)
     except ValueError:
         return False
+
+
+class _WosRecovery(Exception):
+    def __init__(self, output):
+        super().__init__("WOS official page needs review")
+        self.output = output
+
+
+def _wos_page_alive(page):
+    if page is None:
+        return False
+    try:
+        if getattr(page, "is_closed", lambda: False)():
+            return False
+        context = getattr(page, "context", None)
+        browser = getattr(context, "browser", None) if context is not None else None
+        return browser is None or browser.is_connected()
+    except Exception:
+        return False
+
+
+@contextmanager
+def _wos_recovery(source, bound_page, response):
+    """Classify WOS exceptions before the Playwright runtime disconnects.
+
+    A navigation can replace its JS execution context while the official tab
+    remains alive. That is reviewable; a closed tab/disconnected browser is an
+    environment error. Neither exception text nor transfer URLs are exported.
+    """
+    try:
+        yield
+    except Exception:
+        page = bound_page()
+        if source != "web-of-science" or not _wos_page_alive(page):
+            raise
+        try:
+            current = _snapshot(page, source, 10)
+            reason = _auth_reason(page, current)
+        except Exception:
+            current = {}
+            reason = None
+        if reason:
+            raise _WosRecovery(response("attention", reason=reason)) from None
+        if _official_result_page(page, source):
+            raise _WosRecovery(response("attention", reason="results_unrecognized", service_error=current.get("service_error"))) from None
+        raise
 
 
 def _query_consistent(snapshot, page, source, query, *, submitted=False, trusted=False):
@@ -562,7 +643,7 @@ def _advance_page(page, source, previous, limit):
     deadline = time.monotonic() + 15
     while True:
         current = _snapshot(page, source, limit)
-        if (_auth_reason(page, current) or current.get("noResults")
+        if (_auth_reason(page, current) or current.get("service_error") or current.get("noResults")
                 or (current.get("results") and _row_fingerprint(current) != before)):
             return current
         if time.monotonic() >= deadline:
@@ -643,15 +724,18 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
     page = None
     current = None
 
-    def response(status, *, results=None, reason=None, pagination=None):
+    def response(status, *, results=None, reason=None, pagination=None, service_error=None):
         output = _envelope(source_key, status, results=results, reason=reason, **options)
+        if source_key == "web-of-science" and status == "attention" and reason == "results_unrecognized":
+            error = service_error or (current or {}).get("service_error")
+            output["message"] = _WOS_TIMEOUT_MESSAGE if error == "wos_timeout_524" else _WOS_REVIEW_MESSAGE
         output.update(page_index=page_index, has_next=None, total_count=None)
         if pagination:
             output.update(pagination)
         return output
 
     try:
-        with _runtime() as context:
+        with _runtime() as context, _wos_recovery(source_key, lambda: page, response):
             page, created = _pick_page(context, source_key, job_dir)
             page.bring_to_front()
             query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
@@ -659,8 +743,13 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             binding = bindings.get(source_key, {}) if isinstance(bindings, dict) else {}
             proven_index = None
             recheck_auth = False
-            if scrape_current or page_index:
+            inspect_bound_wos = source_key == "web-of-science" and not created
+            if scrape_current or page_index or inspect_bound_wos:
                 current = _snapshot(page, source_key, read_limit)
+                recheck_service = bool(source_key == "web-of-science" and scrape_current
+                                       and current.get("service_error") == "wos_timeout_524")
+                if source_key == "web-of-science" and current.get("service_error") and not recheck_service:
+                    return response("attention", reason="results_unrecognized")
                 reason = _auth_reason(page, current)
                 # Institution SSO can finish in another tab while this target
                 # still displays its old login form. Only an explicit resume
@@ -669,7 +758,7 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 recheck_auth = bool(scrape_current and reason in ("login", "access_required"))
                 if reason and not recheck_auth:
                     return response("attention", reason=reason)
-                if (not recheck_auth and not created and binding.get("query_hash") == query_hash
+                if (not recheck_auth and not current.get("service_error") and not created and binding.get("query_hash") == query_hash
                         and isinstance(binding.get("page_index"), int)
                         and binding.get("result_fingerprint") == _row_fingerprint(current)
                         and _official_result_page(page, source_key)
@@ -684,7 +773,7 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             # A homepage search box can still contain the frozen query after a
             # failed click. Only actual bibliographic rows or an explicit zero
             # result on the official source can be read without re-submitting.
-            manual_result_page = bool(current and (current.get("results") or current.get("noResults"))
+            manual_result_page = bool(current and not current.get("service_error") and (current.get("results") or current.get("noResults"))
                                       and _official_result_page(page, source_key))
             manual_first = (scrape_current and not full_page and not created and page_index == 0
                             and not recheck_auth and manual_result_page and verified
@@ -694,8 +783,17 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             elif manual_first:
                 current_index = 0
             else:
-                submitted = _navigate_search(page, source_key, query, year_from, year_to)
+                if (source_key == "web-of-science" and not created and current is not None
+                        and not recheck_auth and not current.get("service_error") and _official_result_page(page, source_key)
+                        and _wos_form_ready(page)):
+                    # A regional official form already reached in this task is
+                    # preferable to restarting its failing global transfer.
+                    submitted = _submit_wos(page, query)
+                else:
+                    submitted = _navigate_search(page, source_key, query, year_from, year_to)
                 current = _snapshot(page, source_key, read_limit)
+                if source_key == "web-of-science" and current.get("service_error"):
+                    return response("attention", reason="results_unrecognized")
                 reason = _auth_reason(page, current)
                 if reason:
                     return response("attention", reason=reason)
@@ -719,6 +817,8 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 if advanced is None:
                     return response("attention", reason="results_unrecognized", pagination=pagination)
                 current = advanced
+                if source_key == "web-of-science" and current.get("service_error"):
+                    return response("attention", reason="results_unrecognized")
                 reason = _auth_reason(page, current)
                 if reason:
                     return response("attention", reason=reason)
@@ -751,8 +851,10 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             if current.get("noResults"):
                 return response("no_results" if page_index == 0 else "ok", pagination={**pagination, "has_next": False})
             return response("attention", reason="results_unrecognized", pagination=pagination)
+    except _WosRecovery as paused:
+        return paused.output
     except Exception:
-        if page is not None:
+        if page is not None and source_key != "web-of-science":
             try:
                 reason = _auth_reason(page, _snapshot(page, source_key, read_limit))
                 if reason:
