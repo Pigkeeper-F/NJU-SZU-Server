@@ -70,7 +70,7 @@ state = {
 module = {
   id: "mod_xxxxx",            // 唯一字符串
   name: "模块1",
-  dependsOn: null,            // 上游模块 id；由 addModule 追加时 = 前一个模块 id；首模块为 null
+  dependsOn: null,            // 单上游 id；并列准备与计算汇合点为 null，使用 getUpstreamModules 查询
   createdAt: "2026-09-22T02:00:00.000Z",   // ISO 字符串
   messages: [ message ]
 }
@@ -83,11 +83,11 @@ message = {
 }
 ```
 
-**依赖链语义**：模块只能按「下载数据 → 数据清洗 → 计算 → 文献挖掘 → 人工审核 → 绘图」固定顺序追加，
-计算方式可选「直接计算」「参数更新」「活动数据更新」；后两者在计算后插入对应子模块。模块名不可任意设置。
-校验层保证 `dependsOn` 只能指向数组中**更靠前**的模块 id ⇒ 不可能出现环。
+**流程关系（2026-10-20 更新）**：下载数据、数据清洗、文献挖掘为并列准备环节，均可向「模型调整与计算」提供材料；不要求依次完成或三个全部通过。计算后的展示顺序为「绘图 → 结果核查与定位 → 人工审核」。计算模块名称固定为「模型调整与计算」，direct / modify 等方式保留为子选项；参数更新、活动数据更新作为既有计算子环节保留。
 
-**删除规则**：若存在任何模块的 `dependsOn === 目标 id`，删除被拒。配合链式结构，即"只有链尾可删"。
+数组只表示展示顺序。`dependsOn` 保留原字符串或 null 结构，记录单上游；并列准备及计算汇合点为 null。`Store.getUpstreamModules(id)` 返回当前任务中实际存在的直接上游模块深拷贝：计算返回三条准备路径；后续环节返回其前置阶段；历史写作流程继续沿原 dependsOn。读取旧任务时按 type 调整展示顺序与单上游关系，未标 type 的旧数据按旧序映射；保留 ID、对话、文档、运行记录、状态与当前选择，规则和文件会话仍按原 ID 关联，不移动或自动混合文件。
+
+**添加、审核与删除**：`addModule(name?)` 可按固定名称直接建立任一准备环节或计算入口（兼容旧名称「计算」「直接计算」「修改计算」）；省略名称时补下一个缺失环节。准备环节审核通过后进入计算，不自动串到另一个准备环节；其余阶段进入自己的下游。删除判定使用真实上游关系，不把并列准备互相锁住。历史任务不因未选计算方式而丢弃下游记录，切换计算方式不删除模块。
 
 ---
 
@@ -100,10 +100,11 @@ Store.subscribe(fn)                         // -> unsubscribe()；fn(evt)，evt 
                                             //    注册时不立即回调，只在变更后回调
 
 // —— 模块链 ——
-Store.addModule(name?)                      // -> module 深拷贝（追加到链尾；name 省略时自动「模块N」；
+Store.addModule(name?)                      // -> module 深拷贝（按固定名称建立；省略 name 补缺失环节；
                                             //    同时把 activeModuleId 指向新模块）
 Store.selectModule(id)                      // -> true | false（id 不存在 -> false；
                                             //    已选中同一个 -> true 且不触发事件）
+Store.getUpstreamModules(id)                // -> 直接上游模块深拷贝数组；非法 id 返回 []，不修改状态
 Store.removeModule(id)                      // -> { ok: true } | { ok: false, reason: "有下游模块依赖，不能删除" }
                                             //    另：id 不存在 -> { ok:false, reason:"模块不存在" }
 Store.renameModule(id, name)                // -> true | false（name 空 / 模块不存在 -> false）
@@ -147,7 +148,7 @@ Store.LIMITS = {
 |---|---|---|
 | `module:add` | `{ module, index, activeModuleId }` | `addModule()` 成功后 |
 | `module:select` | `{ id }` | 切换到不同模块 |
-| `module:remove` | `{ id, module, activeModuleId }` | 删除链尾模块成功后 |
+| `module:remove` | `{ id, module, activeModuleId }` | 删除没有下游使用的模块成功后 |
 | `module:rename` | `{ id, name }` | 改名成功且名字有变化 |
 | `message:append` | `{ moduleId, message, role }` | 追加消息成功后 |
 | `sidebar:change` | `{ collapsed, width, changed: ['collapsed','width'] }` | 折叠态或宽度真正变化后 |
@@ -1423,3 +1424,9 @@ Windows虚拟环境启动器可能产生不同于实际脚本的PID；Node阶段
 新增 `GET /api/codex/plots?session=...` 返回 `{runs:[{id,status,createdAt,finishedAt,planVersion,planHash,model,previousRunId,inputFiles,files,error}]}`，按新到旧排列，从磁盘记录恢复，停止和失败也保留。新增 `GET /api/codex/preview?session=...&name=...` 仅以核对过的 PNG/JPEG/WebP 类型内联提供本会话输出，沿用下载的路径边界校验；SVG/PDF 与代码仍通过附件下载，不能以内联 HTML 执行。
 
 绘图区域显示当前版本、预览、图片/代码/绘图数据下载及修改意见。讨论修改时明确所选历史版本且不执行；核对修订方案后生成新版本，刷新后仍可找回。`research_codex_tasks_v1` 兼容扩展绘图视图选择与反馈草稿，不改变旧字段。TaskManager 新增 `openPlan()` 供绘图区域打开同一方案弹窗，不建立第二份文本或确认状态。新增 CSS 类 `.plotting-results`、`.plotting-preview`、`.plotting-feedback`、`.plotting-downloads`、`.plotting-meta`。不新增脚本或 Store API。
+
+## 2026-10-20 并列准备与模型汇合
+
+侧栏按“准备资料 · 三条并列路径”和“汇入模型 · 计算与结果”分组，新增 `.workflow-group-title`、`.workflow-preparation-actions` 样式。缺少的准备环节可独立添加，也可直接建立计算入口。新建任务的 start=download/clean/literature/calculation 仅建立所选入口，不虚构已完成的准备工作。计算讨论可以读取三条准备路径中已确认的规则作为来源上下文，仍须确认本次计算方案；不自动复制文件，也不把来源规则当作计算执行授权。
+
+兼容沿用 fa_state_v1 与各任务快照键；未增加持久化依赖字段。旧任务恢复时按旧 type 或旧固定顺序识别模块，再排序，保留所有有效环节，不因计算方式为空删除下游。切换 direct/modify/历史子方式不删除历史环节与文件。

@@ -7,13 +7,13 @@
  *   sidebar: { collapsed: false, width: 240 },   // collapsed 布尔；width 数字，夹取 180~520
  *   tabs:    [ { id:"flow", name:"流程" } ],      // 左侧栏选项卡（当前仅 flow，逻辑通用）
  *   activeTabId: "flow",
- *   modules: [ module ],                          // 模块链，靠后的模块依赖紧邻的前一个（强依赖 A→B→C）
+ *   modules: [ module ],                          // 展示顺序；真实上游由 getUpstreamModules 查询
  *   activeModuleId: null                          // 当前模块 id 或 null
  * }
  * module = {
  *   id: "mod_xxx",           // 唯一字符串 id
  *   name: "模块1",
- *   dependsOn: null,         // 上游模块 id；链尾新增时 = 前一个模块 id；首模块为 null
+ *   dependsOn: null,         // 单上游 id；并列准备与汇合点为 null（使用 getUpstreamModules）
  *   createdAt: "ISO 字符串",
  *   messages: [ message ],
  *   doc: null,               // 环节文档；无文档时为 null（见下方 doc 结构）
@@ -37,7 +37,8 @@
  * 以下方法全部同步：
  *   getState()                             -> state 的深拷贝（只读快照；不要修改它，改状态请用下面的方法）
  *   subscribe(fn)                          -> unsubscribe()；fn 在每次变更时收到 { type, payload }
- *   addModule(name?)                       -> module 深拷贝（追加到链尾，dependsOn=前一个模块 id）
+ *   addModule(name?)                       -> module 深拷贝（按固定名称建立，按展示顺序插入）
+ *   getUpstreamModules(id)                  -> 直接上游模块深拷贝数组
  *   selectModule(id)                       -> boolean
  *   removeModule(id)                       -> { ok:true } | { ok:false, reason:"..." }
  *   renameModule(id, name)                 -> boolean
@@ -71,15 +72,49 @@
   var FIXED_MODULES = [
     { id: 'download-data', name: '下载数据', mode: null },
     { id: 'clean-data', name: '数据清洗', mode: null },
-    { id: 'calculation', name: '计算', mode: null },
+    { id: 'literature-mining', name: '文献挖掘', mode: null },
+    { id: 'calculation', name: '模型调整与计算', mode: null },
     { id: 'parameter-update', name: '参数更新', mode: null, conditional: true },
     { id: 'activity-data-update', name: '活动数据更新', mode: null, conditional: true },
+    { id: 'plotting', name: '绘图', mode: null },
     { id: 'result-audit', name: '结果核查与定位', mode: null },
-    { id: 'literature-mining', name: '文献挖掘', mode: null },
-    { id: 'manual-review', name: '人工审核', mode: null },
-    { id: 'plotting', name: '绘图', mode: null }
+    { id: 'manual-review', name: '人工审核', mode: null }
   ];
-  var REQUIRED_MODULES = FIXED_MODULES.filter(function (item) { return !item.conditional; });
+  var LEGACY_MODULE_TYPES = ['download-data', 'clean-data', 'calculation', 'result-audit', 'literature-mining', 'manual-review', 'plotting'];
+  var PREPARATION_TYPES = ['download-data', 'clean-data', 'literature-mining'];
+
+  // 业务拓扑由 type 推导，不给旧存储添加第二份依赖列表。
+  function upstreamModules(mod, modules) {
+    if (!mod) return [];
+    if (mod.step || mod.type === 'legacy-writing') return modules.filter(function (item) { return item.id === mod.dependsOn; });
+    var types = [];
+    if (mod.type === 'calculation') types = PREPARATION_TYPES;
+    else if (mod.type === 'parameter-update' || mod.type === 'activity-data-update') types = ['calculation'];
+    else if (mod.type === 'plotting') {
+      var calc = modules.filter(function (item) { return item.type === 'calculation'; })[0];
+      var children = modules.filter(function (item) { return calc && item.type === calc.mode && (item.type === 'parameter-update' || item.type === 'activity-data-update'); });
+      return children.length ? children : modules.filter(function (item) { return item.type === 'calculation'; });
+    } else if (mod.type === 'result-audit') types = modules.some(function (item) { return item.type === 'plotting'; }) ? ['plotting'] : ['calculation'];
+    else if (mod.type === 'manual-review') types = ['result-audit'];
+    return modules.filter(function (item) { return types.indexOf(item.type) >= 0; });
+  }
+
+  function arrangeModules(modules) {
+    var fixed = modules.filter(function (item) { return !item.step && item.type !== 'legacy-writing'; });
+    var ranks = FIXED_MODULES.map(function (item) { return item.id; });
+    fixed.sort(function (a, b) { return ranks.indexOf(a.type) - ranks.indexOf(b.type); });
+    // 写作流程保留自己的位置与依赖，固定数据环节只在原有固定环节的位置重排。
+    var cursor = 0;
+    var arranged = modules.map(function (item) { return item.step || item.type === 'legacy-writing' ? item : fixed[cursor++]; });
+    arranged.forEach(function (mod) {
+      if (mod.step || mod.type === 'legacy-writing') return;
+      var definition = FIXED_MODULES.filter(function (item) { return item.id === mod.type; })[0];
+      if (definition) mod.name = definition.name;
+      var upstream = upstreamModules(mod, arranged);
+      mod.dependsOn = upstream.length === 1 && mod.type !== 'calculation' ? upstream[0].id : null;
+    });
+    return arranged;
+  }
   var CALCULATION_SUBMODULES = [
     { id: 'parameter-update', name: '参数更新' },
     { id: 'activity-data-update', name: '活动数据更新' }
@@ -286,24 +321,19 @@
           }
           // 旧版模块没有 type；按固定流程顺序补齐类型，非流程外模块不再恢复。
           if (!mod.type) {
-            var legacyFixed = REQUIRED_MODULES[modules.length];
-            if (legacyFixed) { mod.type = legacyFixed.id; mod.name = legacyFixed.name; }
+            var legacyType = LEGACY_MODULE_TYPES[modules.filter(function (item) { return !item.step; }).length];
+            if (legacyType) mod.type = legacyType;
           }
           if (!FIXED_MODULES.some(function (item) { return item.id === mod.type; })) continue;
           var fixed = FIXED_MODULES.filter(function (item) { return item.id === mod.type; })[0];
-          if (fixed.conditional && !modules.some(function (item) { return item.type === 'calculation'; })) continue;
-          mod.name = fixed.id === 'calculation' && mod.mode === 'direct' ? '直接计算'
-            : fixed.id === 'calculation' && mod.mode === 'modify' ? '修改计算' : fixed.name;
+          mod.name = fixed.name;
           if (fixed.id !== 'calculation') mod.mode = null;
-          var existingCalculation = modules.filter(function (item) { return item.type === 'calculation'; })[0];
-          if (!fixed.conditional && existingCalculation && !existingCalculation.mode) continue;
-          if (!fixed.conditional && existingCalculation && CALCULATION_SUBMODULES.some(function (item) { return item.id === existingCalculation.mode; }) && !modules.some(function (item) { return item.type === existingCalculation.mode; })) continue;
           modules.push(mod);
           seen[mod.id] = true;
         }
       }
     }
-    st.modules = modules;
+    st.modules = arrangeModules(modules);
 
     st.activeTabId = pickTabId(st, raw.activeTabId);
     st.activeModuleId = pickModuleId(st, raw.activeModuleId);
@@ -372,6 +402,10 @@
   function findModule(id) {
     var idx = indexOfModule(id);
     return idx < 0 ? null : state.modules[idx];
+  }
+
+  function getUpstreamModules(id) {
+    return deepClone(upstreamModules(findModule(id), state.modules));
   }
 
   // -------------------------------------------------------------- API
@@ -814,14 +848,21 @@
     if (!mod) return { ok: false, reason: '模块不存在' };
     if (mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed')) return { ok: false, reason: '下载文件尚未确认，不能跳过下载进入下游' };
     var idx = indexOfModule(id);
-    var next = (idx >= 0 && idx + 1 < state.modules.length) ? state.modules[idx + 1] : null;
+    var next = null;
+    var targetType = PREPARATION_TYPES.indexOf(mod.type) >= 0 ? 'calculation'
+      : mod.type === 'calculation' ? (CALCULATION_SUBMODULES.some(function (item) { return item.id === mod.mode; }) ? mod.mode : 'plotting')
+      : mod.type === 'parameter-update' || mod.type === 'activity-data-update' ? 'plotting'
+      : mod.type === 'plotting' ? 'result-audit' : mod.type === 'result-audit' ? 'manual-review' : null;
+    if (targetType) next = state.modules.filter(function (item) { return item.type === targetType; })[0] || null;
+    else if (mod.step) next = (idx >= 0 && idx + 1 < state.modules.length) ? state.modules[idx + 1] : null;
     var created = null;
     mod.status = 'approved';
     mod.approvedAt = nowISO();
     if (!next) {
       // 【本地修复 · 2026-09-24】按步解锁：链上还没有下一个模块时，
       // 若还有后续步骤就现场建一个（名字与说明取自 FLOW_STEPS），再跳过去。
-      created = mod.type ? addModule() : buildNextFlowModule(mod);
+      var target = FIXED_MODULES.filter(function (item) { return item.id === targetType; })[0];
+      created = mod.step ? buildNextFlowModule(mod) : target ? addModule(target.name) : null;
       next = created;
     }
     if (next) state.activeModuleId = next.id;
@@ -883,12 +924,18 @@
     return true;
   }
 
-  /** 追加模块到链尾：dependsOn = 当前最后一个模块 id（保证强依赖 A→B→C）；同时选中新模块 */
+  /** 建立指定环节或下一个缺失环节；并列准备可独立进入，不按展示序强制解锁。 */
   function addModule(name) {
     var list = state.modules;
     var nextFixed = null;
     var calc = list.filter(function (item) { return item.type === 'calculation'; })[0];
-    if (calc && CALCULATION_SUBMODULES.some(function (item) { return item.id === calc.mode; })) {
+    var requested = typeof name === 'string' ? name.trim() : '';
+    if (['计算', '直接计算', '修改计算'].indexOf(requested) >= 0) requested = '模型调整与计算';
+    if (requested) {
+      nextFixed = FIXED_MODULES.filter(function (item) { return item.name === requested; })[0];
+      if (!nextFixed || list.some(function (item) { return item.type === nextFixed.id; })) return null;
+      if (nextFixed.conditional && (!calc || calc.mode !== nextFixed.id)) return null;
+    } else if (calc && CALCULATION_SUBMODULES.some(function (item) { return item.id === calc.mode; }) && !list.some(function (item) { return item.type === calc.mode; })) {
       var calculationChild = CALCULATION_SUBMODULES.filter(function (item) { return item.id === calc.mode; })[0];
       if (!list.some(function (item) { return item.type === calc.mode; })) nextFixed = calculationChild;
     } else {
@@ -901,10 +948,8 @@
     }
     if (nextFixed) {
       var calculation = calc;
-      var calcIndex = list.findIndex(function (item) { return item.type === 'calculation'; });
-      if (calculation && !calculation.mode) return null;
-      if (calculation && CALCULATION_SUBMODULES.some(function (item) { return item.id === calculation.mode; }) && list.some(function (item) { return item.type === calculation.mode; }) && calcIndex === list.length - 1) return null;
-      if (typeof name === 'string' && name.trim() && name.trim() !== nextFixed.name) return null;
+      var isDownstream = ['plotting', 'result-audit', 'manual-review'].indexOf(nextFixed.id) >= 0;
+      if (isDownstream && (!calculation || !calculation.mode)) return null;
       name = nextFixed.name;
     } else {
       return null; // 流程模块固定，不创建列表以外的额外模块
@@ -931,10 +976,11 @@
       run: null
     };
     list.push(mod);
+    state.modules = arrangeModules(list);
     state.activeModuleId = mod.id;
     emit('module:add', {
       module: deepClone(mod),
-      index: list.length - 1,
+      index: state.modules.indexOf(mod),
       activeModuleId: mod.id
     });
     return deepClone(mod);
@@ -946,18 +992,9 @@
     if (!mod || mod.type !== 'calculation') return false;
     if (['direct', 'modify', 'parameter-update', 'activity-data-update'].indexOf(mode) < 0) return false;
     if (mod.mode === mode) return true;
-    var isCurrentMainPath = ['direct', 'modify'].indexOf(mod.mode) >= 0;
-    var isNextMainPath = ['direct', 'modify'].indexOf(mode) >= 0;
-    if (!(isCurrentMainPath && isNextMainPath)) {
-      var calcIndex = state.modules.indexOf(mod);
-      while (state.modules.length > calcIndex + 1) {
-        var removed = state.modules.pop();
-        emit('module:remove', { id: removed.id, module: deepClone(removed), activeModuleId: state.activeModuleId });
-      }
-      state.activeModuleId = id;
-    }
     mod.mode = mode;
-    mod.name = mode === 'direct' ? '直接计算' : mode === 'modify' ? '修改计算' : '计算';
+    mod.name = '模型调整与计算';
+    state.modules = arrangeModules(state.modules);
     emit('module:mode', { id: id, mode: mode });
     return true;
   }
@@ -976,7 +1013,7 @@
     var idx = indexOfModule(id);
     if (idx < 0) return { ok: false, reason: '模块不存在' };
     for (var i = 0; i < state.modules.length; i++) {
-      if (state.modules[i].dependsOn === id) {
+      if (upstreamModules(state.modules[i], state.modules).some(function (item) { return item.id === id; })) {
         return { ok: false, reason: '有下游模块依赖，不能删除' };
       }
     }
@@ -1362,6 +1399,7 @@
     subscribe: subscribe,
     // —— 模块链
     addModule: addModule,
+    getUpstreamModules: getUpstreamModules,
     selectModule: selectModule,
     removeModule: removeModule,
     renameModule: renameModule,

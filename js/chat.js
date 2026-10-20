@@ -78,6 +78,8 @@
 
   /** 依赖来源文案：首模块「起点」，其余「← 上游模块名」 */
   function depLabel(list, module) {
+    if (['download-data', 'clean-data', 'literature-mining'].indexOf(module.type) >= 0) return '并列准备 → 模型调整与计算';
+    if (module.type === 'calculation') return '下载数据 / 数据清洗 / 文献挖掘按需汇入';
     if (!module.dependsOn) return '起点';
     var up = findModule(list, module.dependsOn);
     return up ? '← ' + up.name : '起点';
@@ -329,15 +331,17 @@
 
     var upstream = [];
     var visited = {};
-    var cursor = mod.dependsOn;
-    while (cursor && !visited[cursor]) {
-      visited[cursor] = true;
-      var up = findModule(modules, cursor);
-      if (!up) break;
-      if (up.doc && up.doc.status === 'approved' && typeof up.doc.content === 'string') {
-        upstream.push({ name: up.name, doc: up.doc.content.slice(0, 400) });
+    var queue = Store.getUpstreamModules(mod.id);
+    while (queue.length) {
+      var up = queue.shift();
+      if (visited[up.id]) continue;
+      visited[up.id] = true;
+      var rules = root.TaskManager && root.TaskManager.rulesForModule(up.id);
+      var approvedText = rules && rules.text || (up.doc && up.doc.status === 'approved' && up.doc.content);
+      if (approvedText) {
+        upstream.push({ name: up.name, doc: approvedText.slice(0, 400) });
       }
-      cursor = up.dependsOn;
+      queue = queue.concat(Store.getUpstreamModules(up.id));
     }
     return { name: mod.name, spec: specOf(mod), upstream: upstream };
   }
@@ -460,9 +464,9 @@
         getStore().rejectModule(mod.id, '需要补充后再提交');
       }));
     } else if (st === 'approved') {
-      var idx = -1;
-      for (var i = 0; i < modules.length; i++) if (modules[i].id === mod.id) { idx = i; break; }
-      var next = (idx >= 0 && idx + 1 < modules.length) ? modules[idx + 1] : null;
+      var next = modules.filter(function (candidate) {
+        return getStore().getUpstreamModules(candidate.id).some(function (up) { return up.id === mod.id; });
+      })[0] || null;
       if (next) {
         actions.appendChild(actionButton('进入下一模块：' + next.name + ' →', 'primary', function () {
           getStore().selectModule(next.id);

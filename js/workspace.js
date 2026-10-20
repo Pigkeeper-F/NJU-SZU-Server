@@ -165,13 +165,13 @@
     for (const item of [
       { type: 'download-data', name: '下载数据' },
       { type: 'clean-data', name: '数据清洗' },
-      { type: 'calculation', name: '计算' },
+      { type: 'literature-mining', name: '文献挖掘' },
+      { type: 'calculation', name: '模型调整与计算' },
       { type: 'parameter-update', name: '参数更新', conditional: true },
       { type: 'activity-data-update', name: '活动数据更新', conditional: true },
+      { type: 'plotting', name: '绘图' },
       { type: 'result-audit', name: '结果核查与定位' },
-      { type: 'literature-mining', name: '文献挖掘' },
-      { type: 'manual-review', name: '人工审核' },
-      { type: 'plotting', name: '绘图' }
+      { type: 'manual-review', name: '人工审核' }
     ]) {
       if (!item.conditional && !modules.some(mod => mod.type === item.type)) { next = item; break; }
     }

@@ -1161,6 +1161,14 @@
     try {
       const sid = await session(module.id);
       const batch = saved[module.id]?.inputBatch;
+      if (module.type === 'calculation') {
+        const sources = Store.getUpstreamModules(module.id).map(up => {
+          const rules = root.TaskManager?.rulesForModule(up.id);
+          const text = rules?.text || (up.doc?.status === 'approved' ? up.doc.content : '');
+          return text ? {name:up.name, text, version:rules?.text ? rules.version : null} : null;
+        }).filter(Boolean);
+        if (sources.length) messages = [{role:'user', text:'三条并列准备路径中已有的已确认来源说明（仅作为来源上下文；不代表输入文件已导入或允许直接执行，计算仍依据本模块确认的方案）：\n' + sources.map(up => up.name + (up.version ? ' · 规则 v' + up.version : '') + '\n' + up.text.slice(0, 4000)).join('\n\n')}, ...messages];
+      }
       if (module.type === 'clean-data' && batch) messages = [{ role: 'user', text: '当前下载交接批次（来源信息，不替代本模块的清洗规则）：\n仅处理以下当前输入文件，其他 input 文件为历史保留，不自动合并：\n' + batch.names.join('\n') + '\n获取依据：' + batch.label + '\n' + batch.text.slice(0, 1500) }, ...messages];
       const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, mode: module.mode }, messages, execute: executeRequested, model: t.model || null, ...(plotPlan ? {plotPlan} : {}) }) });
       if (plotPlan) { t.plotSelectedRunId = job.id; saved[module.id].plotSelectedRunId = job.id; Store.setModuleStatus(module.id,'doing'); }
@@ -1385,6 +1393,7 @@
     if (panel.hidden) return;
     const t = task(mod.id);
     panel.replaceChildren();
+    if (mod.type === 'calculation') panel.append(node('p', '输入可来自下载数据、数据清洗、文献挖掘中的一条或多条路径。将本次需要的成果文件上传到此处，再确定计算方式与方案。', 'codex-status'));
     const row = node('div', undefined, 'codex-toolbar');
     if (t.backend === 'codex') {
       if (mod.type === 'calculation') {

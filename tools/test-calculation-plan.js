@@ -43,7 +43,7 @@ const edit = text => { get('task-summary-draft').value = text; get('task-summary
 (async () => {
   load('store.js');
   const store = browser.Store;
-  store.addModule(); store.addModule();
+  store.addModule(); store.addModule(); store.addModule();
   const calc = store.addModule();
   store.setModuleMode(calc.id, 'modify');
   store.saveDoc(calc.id, '以前在文档卡审核的方案'); store.approveDoc(calc.id);
@@ -91,8 +91,7 @@ const edit = text => { get('task-summary-draft').value = text; get('task-summary
   assert.equal(rules.versions.length, 2);
   assert.equal(rules.confirmed, rules.draft);
   // Plotting uses the same single-plan approval gate and keeps its own versions.
-  store.addModule(); store.addModule(); store.addModule();
-  const drawing = store.addModule();
+  const drawing = store.addModule('绘图');
   assert.equal(drawing.type, 'plotting');
   assert.equal(get('task-summary').firstElementChild.textContent, '绘图方案');
   assert.equal(browser.TaskManager.confirmedRules(), '');
@@ -106,5 +105,10 @@ const edit = text => { get('task-summary-draft').value = text; get('task-summary
   assert.equal(get('task-rules-execute').disabled, true);
   await click('task-rules-execute');
   assert.equal(sent.length, 2);
+  assert.equal(browser.TaskManager.createTask('独立文献任务','literature'),true);
+  assert.deepEqual(JSON.parse(JSON.stringify(store.getState().modules.map(mod=>mod.type))),['literature-mining']);
+  assert.equal(browser.TaskManager.switchTask(saved.activeTaskId),true);
+  assert.equal(browser.TaskManager.rulesForModule(calc.id).version,2);
+  assert.equal(browser.TaskManager.rulesForModule(drawing.id).version,1);
   console.log('CALCULATION_PLAN_TESTS_PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; });

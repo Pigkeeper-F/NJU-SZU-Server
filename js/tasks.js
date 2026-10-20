@@ -211,9 +211,7 @@
     var task = { id: id(), name: name.slice(0, 80), createdAt: new Date().toISOString(), rulesByModule: {} };
     switching = true;
     root.Store.resetAll();
-    root.Store.addModule('下载数据');
-    if (start === 'clean' || start === 'calculation') root.Store.addModule('数据清洗');
-    if (start === 'calculation') root.Store.addModule('计算');
+    root.Store.addModule(({clean:'数据清洗', literature:'文献挖掘', calculation:'模型调整与计算'})[start] || '下载数据');
     index.tasks.push(task);
     index.activeTaskId = task.id;
     saveIndex();
