@@ -1362,3 +1362,16 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 `node tools/test-research-question.js`（mock 模型）：22 项断言全通过，覆盖冷启动解析、候选生成的
 依据硬过滤、材料不足返回空数组、说明书固定小节、人工初筛过滤与留档、初筛记录被要点抽取读取。
 `node tools/test-literature-research.js`：24 项断言全通过。
+
+### 24.8 上游重试与错误映射（2026-10-20 实测后补）
+
+真链路连跑发现免费通道会间歇性回 `Upstream model provider is temporarily unavailable`
+（候选问题那一步 4 次里失败 3 次、第 4 次才成功）。据此补两件事：
+
+- **服务端退避重试** `callModelWithRetry(cfg, messages, timeoutMs, attempts=4)`：只对
+  「临时不可用 / 额度不足 / 限流 / 网络失败 / 超时」这类瞬时错误重试（2s、4s、6s 退避），
+  输入类错误直接抛出，不做无谓重试。四个模型调用点（选题拆解、要点抽取、候选问题、问题说明书）
+  全部走这个包装。
+- **错误状态码区分** `researchErrorStatus(message)`：上游类问题 → **502**（前端提示"稍后重试"），
+  输入/前置条件类问题 → **400**（前端提示"先做 XX"）。不区分的话，上游抖一下会被前端
+  当成"你填错了"，误导使用者。

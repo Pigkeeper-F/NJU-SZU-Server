@@ -249,6 +249,40 @@ async function handleCodex(req, res, url) {
 // 上游产物由服务端自己读（upstreamJobIds → .workbench/literature/<id>/research/），
 // 前端不需要也不应该把文件内容原样回传。
 // ==================================================================
+/**
+ * 上游临时不可用时自动重试。
+ * 实测：免费通道会间歇性回 "temporarily unavailable"（2026-10-20 真链路连跑，
+ * 候选问题那步 4 次里失败 3 次、第 4 次才成功），让前端重试成本高，
+ * 所以在服务端这一层做退避重试。
+ */
+async function callModelWithRetry(cfg, messages, timeoutMs, attempts = 4) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await callModel(cfg, messages, timeoutMs);
+    } catch (error) {
+      lastError = error;
+      const text = String((error && error.message) || '');
+      const transient = /temporarily unavailable|insufficient credits|无法连接|Invalid input|overload|rate|too many|timeout|超时|服务不可用/i.test(text);
+      if (!transient || attempt === attempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2000 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * 把模型/上游报的错映射成合适的 HTTP 状态：
+ * 上游临时不可用、额度不足、限流 → 502（前端会提示"稍后重试"）；
+ * 输入/数据不满足前置条件 → 400（前端提示"先做 XX"）。
+ * 不区分的话，上游抖一下会被前端当成"你填错了"，误导使用者。
+ */
+function researchErrorStatus(message) {
+  const text = String(message || '');
+  if (/temporarily unavailable|insufficient credits|无法连接|Invalid input|overload|rate limit|too many|timeout|超时|服务不可用|余额|额度/i.test(text)) return 502;
+  return 400;
+}
+
 async function handleResearch(req, res, url) {
   const route = url.pathname;
   if (req.method === 'POST' && route === '/api/research/questions') {
@@ -274,14 +308,15 @@ async function handleResearch(req, res, url) {
     try {
       if (data.action === 'specify') {
         const spec = await rq.buildSpecification({
-          idea, candidate: data.choice, gaps, notes, modelCfg: cfg, callModel
+          idea, candidate: data.choice, gaps, notes, modelCfg: cfg, callModel: callModelWithRetry
         });
         return sendJson(res, 200, { ok: true, ...spec });
       }
-      const result = await rq.buildCandidates({ idea, gaps, notes, modelCfg: cfg, callModel });
+      const result = await rq.buildCandidates({ idea, gaps, notes, modelCfg: cfg, callModel: callModelWithRetry });
       return sendJson(res, 200, { ok: true, ...result });
     } catch (error) {
-      return sendJson(res, 400, { error: (error && error.message) || '问题凝练失败' });
+      const message = (error && error.message) || '问题凝练失败';
+      return sendJson(res, researchErrorStatus(message), { error: message });
     }
   }
   res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -327,7 +362,7 @@ async function handleLiterature(req, res, url) {
       try { job = literature.loadPersisted(jobId); }
       catch (error) { return sendJson(res, 404, { error: '检索任务不存在。' }); }
       try {
-        const result = await require('./tools/literature-research').runResearchStage({ job, modelCfg: cfg, callModel });
+        const result = await require('./tools/literature-research').runResearchStage({ job, modelCfg: cfg, callModel: callModelWithRetry });
         literature.registerFiles(job, result.files);
         literature.persist(job);
         return sendJson(res, 200, {
@@ -336,7 +371,8 @@ async function handleLiterature(req, res, url) {
         });
       } catch (error) {
         console.error('[server] literature research failed:', error);
-        return sendJson(res, 500, { error: '文献调研失败：' + ((error && error.message) || '未知错误') });
+        const message = (error && error.message) || '未知错误';
+        return sendJson(res, researchErrorStatus(message), { error: '文献调研失败：' + message });
       }
     }
     // 【选题冷启动 · 2026-10-20】POST /api/literature/research-plan：模糊想法 → 检索维度 + 候选检索式。
@@ -346,10 +382,11 @@ async function handleLiterature(req, res, url) {
       const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
       if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
       try {
-        const plan = await require('./tools/research-question').planQueries({ idea: data.idea, modelCfg: cfg, callModel });
+        const plan = await require('./tools/research-question').planQueries({ idea: data.idea, modelCfg: cfg, callModel: callModelWithRetry });
         return sendJson(res, 200, plan);
       } catch (error) {
-        return sendJson(res, 400, { error: (error && error.message) || '选题拆解失败' });
+        const message = (error && error.message) || '选题拆解失败';
+        return sendJson(res, researchErrorStatus(message), { error: message });
       }
     }
     // 【人工初筛 · 2026-10-20】POST /api/literature/research-screen：把人的初筛结果写进作业目录。
