@@ -637,6 +637,133 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.safe_url("https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:123"),
                          "https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:123")
 
+    def wos_summary(self, state, page_number=1):
+        page = self.context.new_page()
+        page.url = f"https://webofscience.clarivate.cn/wos/woscc/summary/fixture/relevance/{page_number}"
+        page.dom, page.has_form = copy.deepcopy(state), True
+        adapter._save_binding(self.job, "web-of-science", page.target)
+        return page
+
+    def test_actual_wos_empty_record_shell_is_not_title_readiness(self):
+        from test_literature_extra_sources import dom_snapshot
+        nodes = {"container": {}, "row1": {}, "row2": {"map": {'a.summary-title': ["title"]}},
+                 "title": {"text": ROW["title"], "href": ROW["result_url"]}}
+        mapping = {"app-record": ["row1", "row2"], "app-records-list": ["container"]}
+        state = dom_snapshot("web-of-science", nodes, mapping, script=adapter._SNAPSHOT_JS)
+        self.assertEqual((state["visible_result_count"], state["loaded_title_count"]), (2, 1))
+        self.assertFalse(adapter._wos_records_ready(state, 200, full_page=True))
+        state = dom_snapshot("web-of-science", nodes, mapping, limit=1, script=adapter._SNAPSHOT_JS)
+        self.assertTrue(adapter._wos_records_ready(state, 1))
+        nodes["title"]["hidden"] = True
+        state = dom_snapshot("web-of-science", nodes, mapping, script=adapter._SNAPSHOT_JS)
+        self.assertEqual(state["loaded_title_count"], 0)
+        self.assertEqual(state["results"], [])
+
+    def test_wos_wait_selector_requires_title_not_empty_component(self):
+        page = Page("fixture", snapshot())
+        with patch.object(page, "wait_for_selector") as wait:
+            adapter._wait_results(page, "web-of-science")
+        selector = wait.call_args.args[0]
+        self.assertIn('[data-ta="summary-record"]) :is(a', selector)
+        self.assertIn('a[data-ta="summary-record-title-link"]', selector)
+
+    def test_wos_bound_empty_summary_waits_then_reads_delayed_titles_same_page(self):
+        empty = snapshot(resultContainer=True, visible_result_count=50, loaded_title_count=0)
+        page = self.wos_summary(empty)
+        loaded = snapshot(results=[{**ROW, "title": f"Paper {i}"} for i in range(10)],
+                          resultContainer=True, visible_result_count=50, loaded_title_count=10)
+        original = page.url
+        with patch.object(adapter, "_snapshot", side_effect=[empty, loaded]), \
+                patch.object(adapter.time, "sleep"), \
+                patch.object(adapter, "_navigate_search", side_effect=AssertionError("preserve summary")), \
+                patch.object(adapter, "_submit_wos", side_effect=AssertionError("preserve summary")):
+            result = self.call("web-of-science", resume=True)
+        self.assertEqual((result["status"], len(result["results"])), ("ok", 10))
+        self.assertEqual(page.url, original)
+        self.assertEqual(page.navigations, [])
+        self.assertEqual(page.clicked, 0)
+
+    def test_wos_empty_summary_timeout_keeps_original_page_and_binding(self):
+        empty = snapshot(resultContainer=True, visible_result_count=50, loaded_title_count=0)
+        page = self.wos_summary(empty, page_number=2)
+        original, binding = page.url, (self.job / "browser-tabs.json").read_bytes()
+        with patch.object(adapter.time, "monotonic", side_effect=[0, 16]), \
+                patch.object(adapter, "_navigate_search", side_effect=AssertionError("preserve summary")), \
+                patch.object(adapter, "_submit_wos", side_effect=AssertionError("preserve summary")), \
+                patch.object(adapter, "_advance_page", side_effect=AssertionError("empty page never advances")):
+            result = self.call("web-of-science", resume=True)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertEqual(result["message"], adapter._WOS_LOADING_MESSAGE)
+        self.assertEqual(result["results"], [])
+        self.assertEqual(page.url, original)
+        self.assertEqual((self.job / "browser-tabs.json").read_bytes(), binding)
+
+    def test_wos_page_two_delayed_titles_never_become_first_page_or_restart(self):
+        empty = snapshot(resultContainer=True, visible_result_count=1, loaded_title_count=0)
+        page = self.wos_summary(empty, page_number=2)
+        loaded = snapshot(results=[ROW], resultContainer=True, visible_result_count=1, loaded_title_count=1)
+        with patch.object(adapter, "_snapshot", side_effect=[empty, loaded]), patch.object(adapter.time, "sleep"), \
+                patch.object(adapter, "_navigate_search", side_effect=AssertionError("preserve page two")), \
+                patch.object(adapter, "_submit_wos", side_effect=AssertionError("preserve page two")):
+            result = self.call("web-of-science", resume=True)
+        self.assertEqual(result["status"], "attention")
+        self.assertEqual(result["message"], adapter._WOS_PROOF_MESSAGE)
+        self.assertTrue(page.url.endswith("/2"))
+        self.assertEqual(result["results"], [])
+
+    def test_wos_bound_loaded_summary_missing_or_changed_query_never_restarts(self):
+        for queries in ([], ["different scientific query"]):
+            with self.subTest(queries=queries):
+                self.context = Context(snapshot())
+                page = self.wos_summary(snapshot(queries=queries, results=[ROW], resultContainer=True))
+                with patch.object(adapter, "_navigate_search", side_effect=AssertionError("preserve summary")), \
+                        patch.object(adapter, "_submit_wos", side_effect=AssertionError("preserve summary")):
+                    result = self.call("web-of-science", resume=True)
+                self.assertEqual(result["message"], adapter._WOS_PROOF_MESSAGE)
+                self.assertTrue(page.url.endswith("/1"))
+
+    def test_wos_auth_or_524_during_title_wait_keeps_real_classification(self):
+        for changes, reason in (({"captcha": True}, "verification"), ({"password": True}, "login"),
+                                ({"accessRequired": True}, "access_required"),
+                                ({"service_error": "wos_timeout_524"}, "results_unrecognized")):
+            with self.subTest(reason=reason, changes=changes):
+                self.context = Context(snapshot())
+                empty = snapshot(resultContainer=True, visible_result_count=1, loaded_title_count=0)
+                self.wos_summary(empty)
+                interrupted = {**empty, **changes}
+                with patch.object(adapter, "_snapshot", side_effect=[empty, interrupted]), \
+                        patch.object(adapter.time, "sleep"), \
+                        patch.object(adapter, "_navigate_search", side_effect=AssertionError("no auth refresh")):
+                    result = self.call("web-of-science", resume=True)
+                self.assertEqual(result["reason"], reason)
+                self.assertNotEqual(result["message"], adapter._WOS_LOADING_MESSAGE)
+                if "service_error" in changes:
+                    self.assertEqual(result["message"], adapter._WOS_TIMEOUT_MESSAGE)
+
+    def test_wos_formal_partial_titles_wait_before_accepting_whole_page(self):
+        partial = snapshot(results=[ROW], resultContainer=True, visible_result_count=2, loaded_title_count=1)
+        page = self.wos_summary(partial)
+        complete = {**partial, "results": [ROW, {**ROW, "title": "Second paper"}], "loaded_title_count": 2}
+        with patch.object(adapter, "_snapshot", side_effect=[partial, complete]), patch.object(adapter.time, "sleep"), \
+                patch.object(adapter, "_submit_wos", side_effect=AssertionError("keep current page")):
+            result = self.call("web-of-science", resume=True, full_page=True)
+        self.assertEqual((result["status"], len(result["results"])), ("ok", 2))
+        self.assertTrue(page.url.endswith("/1"))
+
+    def test_wos_formal_partial_titles_timeout_returns_no_partial_page(self):
+        partial = snapshot(results=[ROW], resultContainer=True, visible_result_count=2, loaded_title_count=1)
+        self.wos_summary(partial)
+        with patch.object(adapter.time, "monotonic", side_effect=[0, 16]):
+            result = self.call("web-of-science", resume=True, full_page=True)
+        self.assertEqual(result["message"], adapter._WOS_LOADING_MESSAGE)
+        self.assertEqual(result["results"], [])
+
+    def test_wos_empty_or_partial_current_page_cannot_click_next(self):
+        page = Page("fixture", snapshot())
+        for previous in (snapshot(), snapshot(results=[ROW], visible_result_count=2, loaded_title_count=1)):
+            with patch.object(adapter, "_next_control", side_effect=AssertionError("no Next lookup")):
+                self.assertIsNone(adapter._advance_page(page, "web-of-science", previous, 200))
+
     def test_actual_wos_cloudflare_524_dom_is_service_timeout_not_auth_or_zero(self):
         from test_literature_extra_sources import dom_snapshot
         state = dom_snapshot("web-of-science", {"header": {"text": "A timeout occurred Error code 524"}},

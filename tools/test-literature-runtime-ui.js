@@ -82,6 +82,23 @@ async function main() {
     attention: { source: 'web-of-science', reason: 'results_unrecognized' }, message: wosTimeout }));
   assert.equal(timeoutText, 'Web of Science 核心合集：' + wosTimeout, 'Known WOS 524 needs only its original timeout/resume guidance');
   assert.ok(!timeoutText.includes('平台专用检索浏览器') && !timeoutText.includes('普通 Edge/Chrome'), 'A server timeout must not append login instructions');
+  const wosListPending = 'WOS结果页面已打开，但文献列表尚未加载。请在原页面确认文献题名出现后再检查并继续；已有候选保留。';
+  const listPendingText = harness().subject.literatureAttentionMessage(job({
+    attention: { source: 'web-of-science', reason: 'results_unrecognized' }, message: wosListPending }));
+  assert.equal(listPendingText, 'Web of Science 核心合集：' + wosListPending, 'A pending WOS result list must show its precise page-check instruction');
+  assert.ok(!listPendingText.includes('平台专用检索浏览器') && !listPendingText.includes('普通 Edge/Chrome'), 'Pending titles must not be described as another login problem');
+  for (const [sourceKey, label, message] of [
+    ['cnki', '中国知网', '尚不能确认本次检索的结果页面。请查看该任务的官方页面，确认检索式和结果已加载后再继续。'],
+    ['web-of-science', 'Web of Science 核心合集', 'WOS原结果页面的检索式或页码尚不能与本任务待处理页对应。请在原页面核对检索式和页码后检查并继续；原页面与已有候选保留。']
+  ]) {
+    const text = harness().subject.literatureAttentionMessage(job({ attention: { source: sourceKey, reason: 'results_unrecognized' }, message }));
+    assert.equal(text, label + '：' + message, 'Unverified result pages retain the exact backend explanation');
+    assert.ok(!text.includes('普通 Edge/Chrome') && !text.includes('请在平台专用检索浏览器'), 'Result-page consistency is not evidence of a login problem');
+  }
+  for (const reason of ['login', 'verification', 'access_required']) {
+    const text = harness().subject.literatureAttentionMessage(job({ attention: { source: 'cnki', reason }, message: '请处理实际访问问题。' }));
+    assert.ok(text.includes('请在平台专用检索浏览器') && text.includes('普通 Edge/Chrome'), 'Real authentication waits keep manual access instructions: ' + reason);
+  }
   const wosLoginText = harness().subject.literatureAttentionMessage(job({
     attention: { source: 'web-of-science', reason: 'login' }, message: '请完成机构登录。' }));
   assert.ok(wosLoginText.includes('请在平台专用检索浏览器') && wosLoginText.includes('普通 Edge/Chrome'), 'Actual WOS login keeps the existing browser instructions');

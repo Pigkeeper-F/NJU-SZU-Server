@@ -17,7 +17,7 @@ import re
 import sys
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import literature_extra_sources as extra_sources
 import literature_pubmed
@@ -177,6 +177,9 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
     resultContainer = !!document.querySelector('app-records-list,app-record-list,app-search-results,.records-list,[data-ta="search-results"]');
     noResults = /no records found|no results found|did not return any results|your search found no records|未找到记录|没有找到记录|检索结果为\s*0/i.test(visibleText('.no-results,app-no-results,[data-ta="no-results"],.no-records,.search-results-error,.empty-results'));
   }
+  const wosTitle = row => first(row,['a[data-ta="summary-record-title-link"]','a.summary-title','h3 a','.title a','a[href*="/full-record/"]']);
+  const loadedTitleCount = source === 'web-of-science'
+    ? rows.filter(row => visible(row) && visible(wosTitle(row)) && text(wosTitle(row))).length : null;
   const results=[];
   for (const row of rows) {
     if (results.length >= limit || !visible(row)) continue;
@@ -190,7 +193,7 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
       authors=text(row.querySelector('.author') || cells[2]); venue=text(row.querySelector('.source') || cells[3]);
       year=text(row.querySelector('.date') || cells[4]); snippet=text(row.querySelector('.abstract,.snippet'));
     } else {
-      a=first(row,['a[data-ta="summary-record-title-link"]','a.summary-title','h3 a','.title a','a[href*="/full-record/"]']); title=text(a);
+      a=wosTitle(row); title=visible(a) ? text(a) : '';
       authors=text(first(row,['[data-ta="summary-record-authors"]','.summary-authors','.authors']));
       venue=text(first(row,['[data-ta="summary-record-source"]','.summary-source','.source-title','.publication-title']));
       year=text(first(row,['[data-ta="summary-record-pubdate"]','.published-info','.summary-pubdata','.summary-record-pub-data','.publication-date']));
@@ -206,7 +209,7 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
   }
   return {captcha:!!captcha,password,loginPrompt,accessRequired:explicitAccess,queries,results,resultContainer,noResults,
     service_error:wosTimeout524 ? 'wos_timeout_524' : null,
-    visible_result_count:rows.filter(visible).length};
+    visible_result_count:rows.filter(visible).length,loaded_title_count:loadedTitleCount};
 }"""
 
 
@@ -284,6 +287,8 @@ _MESSAGES = {
 }
 _WOS_REVIEW_MESSAGE = "Web of Science 官方页面尚不能确认可用检索会话、表单或结果。请在原任务窗口核对机构访问和页面提示，再点“检查并继续”；已有结果保留。"
 _WOS_TIMEOUT_MESSAGE = "Web of Science 服务端响应超时（524），已有结果保留。无需反复登录，请稍后在原任务中点击“检查并继续”。"
+_WOS_LOADING_MESSAGE = "WOS结果页面已打开，但文献列表尚未加载。请在原页面确认文献题名出现后再检查并继续；已有候选保留。"
+_WOS_PROOF_MESSAGE = "WOS原结果页面的检索式或页码尚不能与本任务待处理页对应。请在原页面核对检索式和页码后检查并继续；原页面与已有候选保留。"
 
 _WOS_PICKER_SELECTORS = (
     '[data-ta="search-field-dropdown"]', '[data-ta="search-field"]',
@@ -332,7 +337,7 @@ def _wait_results(page, source):
     selectors = {
         "google-scholar": '.gs_r,#gs_res_ccl_mid,#gs_captcha_ccl',
         "cnki": '.result-table-list,.search-table,.no-result,.no-data,input[type="password"]',
-        "web-of-science": 'app-record,app-summary-record,.summary-record,app-no-results,[data-ta="no-results"],input[type="password"]',
+        "web-of-science": ':is(app-record,app-summary-record,.summary-record,[data-ta="summary-record"]) :is(a[data-ta="summary-record-title-link"],a.summary-title,h3 a,.title a,a[href*="/full-record/"]),app-no-results,[data-ta="no-results"],input[type="password"]',
     }
     try:
         page.wait_for_selector(selectors[source], timeout=15_000)
@@ -397,7 +402,10 @@ def _navigate_search(page, source, query, year_from, year_to):
         scholar = importlib.import_module("google_scholar_search")
         url = scholar.build_search_url(query, year_from, year_to)
     elif source == "cnki":
-        url = SOURCES[source][1] + "?" + urlencode({"kw": query, "korder": "SU"})
+        # CNKI's visible input preserves form-encoded '+' as literal text.
+        # Percent-encode spaces and actual plus signs distinctly so the page's
+        # displayed query remains identical to the researcher's frozen rule.
+        url = SOURCES[source][1] + "?" + urlencode({"kw": query, "korder": "SU"}, quote_via=quote)
     else:
         url = SOURCES[source][1]
     try:
@@ -632,7 +640,50 @@ def _query_consistent(snapshot, page, source, query, *, submitted=False, trusted
     return _matches_query(snapshot, page.url, source, query) or submitted or trusted
 
 
+def _wos_summary_index(page):
+    """Read only the observed official summary URL's one-based page number."""
+    if not _official_result_page(page, "web-of-science"):
+        return None
+    match = re.fullmatch(r"/wos/woscc/summary/[^/]+/[^/]+/([1-9][0-9]*)/?", urlsplit(page.url).path)
+    return int(match.group(1)) - 1 if match else None
+
+
+def _wos_result_context(page, current):
+    return (_official_result_page(page, "web-of-science")
+            and (current.get("resultContainer") or _wos_summary_index(page) is not None))
+
+
+def _wos_records_ready(current, limit, *, full_page=False):
+    rows = current.get("results") or []
+    if not rows:
+        return False
+    visible = current.get("visible_result_count", len(rows))
+    loaded = current.get("loaded_title_count", len(rows))
+    if not isinstance(visible, int) or not isinstance(loaded, int):
+        return False
+    # A sample can stop after ten titles on a native fifty-record page. Formal
+    # collection must not advance past any still-empty visible record component.
+    needed = visible if full_page else min(limit, visible)
+    return needed > 0 and loaded >= needed and len(rows) >= needed
+
+
+def _wait_wos_records(page, current, limit, *, full_page=False):
+    """Wait on this exact tab without navigating, submitting, or paging it."""
+    deadline = time.monotonic() + 15
+    while True:
+        if (_auth_reason(page, current) or current.get("service_error") or current.get("noResults")
+                or _wos_records_ready(current, limit, full_page=full_page)
+                or (full_page and current.get("visible_result_count", 0) > limit)):
+            return current
+        if time.monotonic() >= deadline:
+            return {**current, "_wos_loading_pending": True}
+        time.sleep(0.2)
+        current = _snapshot(page, "web-of-science", limit)
+
+
 def _advance_page(page, source, previous, limit):
+    if source == "web-of-science" and not _wos_records_ready(previous, limit, full_page=limit > 10):
+        return None
     control = _next_control(page, source)
     if control is None or _control_disabled(control) is not False:
         return None
@@ -644,9 +695,12 @@ def _advance_page(page, source, previous, limit):
     while True:
         current = _snapshot(page, source, limit)
         if (_auth_reason(page, current) or current.get("service_error") or current.get("noResults")
-                or (current.get("results") and _row_fingerprint(current) != before)):
+                or (current.get("results") and _row_fingerprint(current) != before
+                    and (source != "web-of-science" or _wos_records_ready(current, limit, full_page=limit > 10)))):
             return current
         if time.monotonic() >= deadline:
+            if source == "web-of-science" and not _wos_records_ready(current, limit, full_page=limit > 10):
+                return {**current, "_wos_loading_pending": True}
             return None
         time.sleep(0.2)
 
@@ -728,7 +782,8 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
         output = _envelope(source_key, status, results=results, reason=reason, **options)
         if source_key == "web-of-science" and status == "attention" and reason == "results_unrecognized":
             error = service_error or (current or {}).get("service_error")
-            output["message"] = _WOS_TIMEOUT_MESSAGE if error == "wos_timeout_524" else _WOS_REVIEW_MESSAGE
+            output["message"] = (_WOS_TIMEOUT_MESSAGE if error == "wos_timeout_524" else
+                                 _WOS_LOADING_MESSAGE if (current or {}).get("_wos_loading_pending") else _WOS_REVIEW_MESSAGE)
         output.update(page_index=page_index, has_next=None, total_count=None)
         if pagination:
             output.update(pagination)
@@ -751,6 +806,17 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 if source_key == "web-of-science" and current.get("service_error") and not recheck_service:
                     return response("attention", reason="results_unrecognized")
                 reason = _auth_reason(page, current)
+                if inspect_bound_wos and not current.get("service_error") and _wos_result_context(page, current):
+                    # An existing summary is user state, even if its search
+                    # form is also visible. Never restart it to cure empty rows.
+                    if reason:
+                        return response("attention", reason=reason)
+                    current = _wait_wos_records(page, current, read_limit, full_page=full_page)
+                    reason = _auth_reason(page, current)
+                    if reason:
+                        return response("attention", reason=reason)
+                    if current.get("service_error") or current.get("_wos_loading_pending"):
+                        return response("attention", reason="results_unrecognized")
                 # Institution SSO can finish in another tab while this target
                 # still displays its old login form. Only an explicit resume
                 # may re-probe the frozen official search with the shared
@@ -764,6 +830,15 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                         and _official_result_page(page, source_key)
                         and _query_consistent(current, page, source_key, query, trusted=True)):
                     proven_index = binding["page_index"]
+                if inspect_bound_wos and not recheck_auth and not current.get("service_error") and _wos_result_context(page, current):
+                    observed_index = _wos_summary_index(page)
+                    if observed_index is not None:
+                        proven_index = observed_index
+                    allowed = (page_index, page_index - 1) if page_index else (0,)
+                    if not _matches_query(current, page.url, source_key, query) or proven_index not in allowed:
+                        result = response("attention", reason="results_unrecognized")
+                        result["message"] = _WOS_PROOF_MESSAGE
+                        return result
             use_bound = proven_index in (page_index, page_index - 1) if page_index else proven_index == 0
             verified = bool(current and _matches_query(current, page.url, source_key, query))
             if source_key == "scopus" and verified:
@@ -792,11 +867,15 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 else:
                     submitted = _navigate_search(page, source_key, query, year_from, year_to)
                 current = _snapshot(page, source_key, read_limit)
+                if source_key == "web-of-science" and _wos_result_context(page, current):
+                    current = _wait_wos_records(page, current, read_limit, full_page=full_page)
                 if source_key == "web-of-science" and current.get("service_error"):
                     return response("attention", reason="results_unrecognized")
                 reason = _auth_reason(page, current)
                 if reason:
                     return response("attention", reason=reason)
+                if current.get("_wos_loading_pending"):
+                    return response("attention", reason="results_unrecognized")
                 verified = _matches_query(current, page.url, source_key, query)
                 if source_key == "scopus":
                     verified = verified and extra_sources.query_context_valid(page, source_key)
@@ -817,7 +896,7 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 if advanced is None:
                     return response("attention", reason="results_unrecognized", pagination=pagination)
                 current = advanced
-                if source_key == "web-of-science" and current.get("service_error"):
+                if source_key == "web-of-science" and (current.get("service_error") or current.get("_wos_loading_pending")):
                     return response("attention", reason="results_unrecognized")
                 reason = _auth_reason(page, current)
                 if reason:
