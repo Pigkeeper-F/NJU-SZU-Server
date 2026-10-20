@@ -971,3 +971,20 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 .doc-plan-version .doc-content{max-height:240px;overflow:auto;margin:7px 0}
 
 .codex-panel .primary-button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+
+/* ---- 文件下载：地址校验与数据库导出说明（2026-10-20） ---- */
+#download-dialog{box-sizing:border-box;width:min(780px,calc(100% - 32px));max-height:90vh;overflow:auto;padding:22px 28px}
+#download-dialog h2{margin:10px 0 8px}
+#download-dialog>p{margin:8px 0;line-height:1.7}
+#download-dialog label{display:block;margin-top:14px;font-size:14px;font-weight:600}
+#download-dialog #download-basis{max-height:80px;overflow:auto;white-space:pre-wrap;font-size:12px;line-height:1.7}
+#download-dialog #download-site-help{margin-top:12px;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:#f7f9fb;font-size:13px;line-height:1.7}
+#download-site-help p{margin:5px 0}
+#download-site-help a{color:var(--accent);text-decoration:underline}
+#download-dialog #download-sources{box-sizing:border-box;width:100%;min-height:90px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;resize:vertical;font:inherit;font-size:13px;line-height:1.7}
+#download-dialog #download-sources:focus{outline:2px solid var(--accent-line);outline-offset:1px}
+#download-dialog #download-sources-hint{margin:6px 0 10px;font-size:12px}
+#download-dialog #download-status{margin:10px 0;min-height:24px;color:var(--accent);font-size:13px}
+#download-dialog .dialog-actions{margin-top:8px}
+#download-dialog .primary-button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+@media(max-width:680px){#download-dialog{padding:18px}}

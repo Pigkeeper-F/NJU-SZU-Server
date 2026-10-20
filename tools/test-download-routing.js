@@ -28,7 +28,7 @@ async function main(){
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../js/store.js'),'utf8'),{window:browser});
   const store=browser.Store, mod=store.addModule('下载数据');
   const task={busy:false}; const files=[{name:'fixture-TM_2024.csv',group:'input',size:42}];
-  const context=vm.createContext({root:{TaskManager:{rulesForModule:()=>({text:'历史规则',version:1})}},Store:store,
+  const context=vm.createContext({URL,root:{TaskManager:{rulesForModule:()=>({text:'历史规则',version:1})}},Store:store,
     task:()=>task, saved,document:{getElementById:get},render(){},persist(){},ModuleSpace:{render(){}},
     session:async id=>{saved[id]=saved[id]||{};return 'fixture-session';},
     request:async(url,options)=>{calls.push({url,body:options?JSON.parse(options.body):null});return url.includes('fetch-source')
@@ -36,20 +36,41 @@ async function main(){
   });
   const start=source.indexOf("  document.getElementById('download-start').onclick = async () => {");
   const end=source.indexOf('  async function handoffDownload(',start);
-  vm.runInContext('let downloadModuleId=null,downloadBasis=null;\n'+fn(source,'basisForDownload')+'\n'+fn(source,'openDownload')+'\n'+source.slice(start,end)+'\nthis.subject={openDownload,basisForDownload};',context);
-  store.saveDoc(mod.id,'FAOSTAT TM 2024；https://data.example.org/TM_2024.csv');
+  vm.runInContext('let downloadModuleId=null,downloadBasis=null;\n'+['basisForDownload','parseDownloadSources','updateDownloadForm','openDownload'].map(name=>fn(source,name)).join('\n')+'\n'+source.slice(start,end)+'\nthis.subject={openDownload,basisForDownload,parseDownloadSources,updateDownloadForm};',context);
+  store.saveDoc(mod.id,'FAOSTAT TM 2024；https://files.fixture.org/TM_2024.csv');
   assert.equal(context.subject.openDownload(store.getState().modules[0]),false,'未审核方案不能用旧规则授权');
   store.approveDoc(mod.id);
   assert.equal(context.subject.openDownload(store.getState().modules[0]),true);
   assert.equal(get('download-dialog').open,true);
   assert.match(get('download-basis').textContent,/TM 2024/);
-  assert.equal(get('download-sources').value,'https://data.example.org/TM_2024.csv');
+  assert.equal(get('download-sources').value,'https://files.fixture.org/TM_2024.csv');
+  assert.equal(get('download-start').disabled,false);
+  assert.equal(get('download-site-help').hidden,false);
+  // Neither an empty list nor placeholder/database-page links may start a run or change approval.
+  const approvedBytes=JSON.stringify(store.getState().modules[0].doc);
+  for(const invalid of ['', 'https://example.org/data.csv | data.csv', 'https://www.fao.org/faostat/en/#data/TM',
+    'not-a-url','file:///C:/data.csv','https://user:password@files.fixture.org/a.csv',Array(6).fill('https://files.fixture.org/a.csv').join('\n')]) {
+    get('download-sources').value=invalid;
+    context.subject.updateDownloadForm();
+    assert.equal(get('download-start').disabled,true,invalid);
+    await get('download-start').onclick();
+    assert.equal(calls.length,0,'无效地址不能联网或创建运行');
+    assert.equal(saved[mod.id],undefined,'无效地址不能覆盖下载历史');
+    assert.equal(JSON.stringify(store.getState().modules[0].doc),approvedBytes);
+  }
+  store.saveDoc(mod.id,'FAOSTAT TM 2024；来源页面 https://www.fao.org/faostat/en/#data/TM');store.approveDoc(mod.id);
+  context.subject.openDownload(store.getState().modules[0]);
+  assert.equal(get('download-sources').value,'','方案的数据库查询页不能预填成文件');
+  assert.equal(get('download-start').disabled,true);
+  assert.match(get('download-status').textContent,/尚未填写/);
+  store.saveDoc(mod.id,'FAOSTAT TM 2024；https://files.fixture.org/TM_2024.csv');store.approveDoc(mod.id);
+  context.subject.openDownload(store.getState().modules[0]);
   // Freeze approval at actual execution too: editing while the dialog is open must block.
   store.saveDoc(mod.id,'修改后的下载范围');
   await get('download-start').onclick();
   assert.equal(calls.length,0);
   assert.match(get('download-status').textContent,/重新审核/);
-  store.saveDoc(mod.id,'FAOSTAT TM 2024；https://data.example.org/TM_2024.csv');store.approveDoc(mod.id);
+  store.saveDoc(mod.id,'FAOSTAT TM 2024；https://files.fixture.org/TM_2024.csv');store.approveDoc(mod.id);
   context.subject.openDownload(store.getState().modules[0]);
   await get('download-start').onclick();
   assert.equal(calls[0].url,'/api/codex/fetch-source');

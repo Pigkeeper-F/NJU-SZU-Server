@@ -152,9 +152,11 @@ for (const f of JS_FILES.concat(["index.html"])) {
   // XML 命名空间（http://www.w3.org/2000/svg）被误判；JS 只认非 data: 的字符串字面量。
   let ext = null;
   if (f.slice(-5) === ".html") {
-    ext = noData.match(/(?:src|href)\s*=\s*["']https?:\/\//) ||
-          noData.match(/url\(\s*["']?https?:\/\//) ||
-          noData.match(/fetch\(\s*["']https?:\/\//);
+    // Fixed user-clicked official help navigation; it neither embeds a resource nor calls an external API.
+    const resources = f === "index.html" ? noData.replace('<a id="download-faostat-link" href="https://www.fao.org/faostat/en/#data/TM" target="_blank" rel="noopener noreferrer">打开 FAOSTAT 贸易矩阵官方页面 ↗</a>', '') : noData;
+    ext = resources.match(/(?:src|href)\s*=\s*["']https?:\/\//) ||
+          resources.match(/url\(\s*["']?https?:\/\//) ||
+          resources.match(/fetch\(\s*["']https?:\/\//);
   } else {
     for (const m of noData.matchAll(/["'`]([^"'`\n]{0,200})["'`]/g)) {
       if (m[1].indexOf("data:") === -1 && /https?:\/\//.test(m[1])) {

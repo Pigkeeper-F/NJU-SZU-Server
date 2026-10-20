@@ -1446,3 +1446,11 @@ workflowPrompt 按模块分别描述实际工具：下载对话帮助确定数�
 AI 返回前若当前方案已被编辑/审核/替换或模块不再存在，拒绝覆盖；错误、空或超限响应不改变原方案。修订成功调用 saveDoc 后状态回 draft，执行入口继续依审核状态控制。ModuleSpace.isBusy 增加方案生成中的状态，避免切换任务或同时开始下载/计算。输入框中未发送的文字保持原样并提示先发送。
 
 新增独立存储键 fa_doc_history_v1（不改变 fa_state_v1 或 module.doc 结构）：{[moduleId]:[{content,status,updatedAt,approvedAt,archivedAt}]}。saveDoc 覆盖已有有效文档前归档原版本；已审核文档打回前同样归档。归档失败时不覆盖原文档。Store 新增 getDocHistory(moduleId)->历史版本深拷贝数组；同一版本不重复归档。方案卡片的折叠历史可查看并恢复为草稿，恢复仍通过 saveDoc，当前版本先归档，恢复不自动审核或执行。浏览器备份/恢复包含新键，旧备份无此键仍可读取。新增 CSS 类 .doc-plan-history、.doc-plan-version。
+
+## 2026-10-20 实际文件地址与下载提示
+
+下载窗口明确区分已审核方案和实际文件地址；文字方案不会自动变成数据库导出请求。新增静态节点 #download-site-help（按方案内容显示 FAOSTAT 贸易矩阵官方入口与手动导出/上传路径）、#download-sources-hint（地址格式及大小限制）。#download-sources 全宽显示，空清单、超过5项、非 HTTP(S)、带登录凭据、示例域名以及 FAOSTAT 查询页地址均在浏览器明确提示并禁用开始按钮；仍在提交时复核，服务端安全检查保持。
+
+官方帮助链接 #download-faostat-link 仅为用户点击后在新标签打开的普通导航（固定 https://www.fao.org/faostat/en/#data/TM，target=_blank、rel=noopener noreferrer），不加载资源或发起前端第三方请求。check-contract 仅豁免这一个完整静态导航标签，其余外部 URL 检查不变。
+
+方案中的普通网页链接不自动填入清单；只预填带已支持文件扩展名的候选地址，用户仍须核对。已有手填清单保留。FAOSTAT 全库包不冒充2024年单年文件；本次不增加数据库连接器、不提高20MB限制、不执行真实下载，也不改变用户方案、审核状态或历史文件。

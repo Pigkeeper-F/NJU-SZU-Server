@@ -1279,6 +1279,29 @@
     if (mod.doc?.status === 'approved') return { text: mod.doc.content, label: '已审核下载方案', sourceType: 'doc' };
     return null;
   }
+  function parseDownloadSources(text) {
+    const lines = String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (!lines.length) return { sources: [], error: '尚未填写实际文件地址。灰色文字只是提示，审核方案后仍需取得下载地址。' };
+    if (lines.length > 5) return { sources: [], error: '一次最多下载 5 个文件，请分批填写。' };
+    const sources = [];
+    for (let i = 0; i < lines.length; i++) {
+      const parts = lines[i].split('|'), source = { url: parts[0].trim(), name: parts.slice(1).join('|').trim() };
+      let url;
+      try { url = new URL(source.url); } catch (_) { return { sources: [], error: '第 ' + (i + 1) + ' 行不是有效地址，请粘贴完整的 HTTP(S) 文件链接。' }; }
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return { sources: [], error: '第 ' + (i + 1) + ' 行须使用不含登录凭据的 HTTP(S) 文件地址。' };
+      if (/(^|\.)example\.(org|com|net)$/i.test(url.hostname)) return { sources: [], error: '第 ' + (i + 1) + ' 行是示例地址，请替换为真实文件下载地址。' };
+      if (/(^|\.)fao\.org$/i.test(url.hostname) && /\/faostat(?:\/|$)/i.test(url.pathname) && url.hash) return { sources: [], error: '第 ' + (i + 1) + ' 行是 FAOSTAT 查询页面，需先导出文件；页面地址不能作为数据文件下载。' };
+      sources.push(source);
+    }
+    return { sources, error: '' };
+  }
+  function updateDownloadForm() {
+    const parsed = parseDownloadSources(document.getElementById('download-sources').value);
+    const busy = downloadModuleId && task(downloadModuleId).busy;
+    document.getElementById('download-start').disabled = !!busy || !!parsed.error;
+    if (!busy) document.getElementById('download-status').textContent = parsed.error || '已填写 ' + parsed.sources.length + ' 个地址。开始前请核对其年份、范围和文件名；查询页面可能无法直接下载。';
+    return parsed;
+  }
   function openDownload(mod, basis) {
     if (mod?.type !== 'download-data') return false;
     const t = task(mod.id);
@@ -1288,14 +1311,16 @@
     downloadModuleId = mod.id; downloadBasis = basis;
     document.getElementById('download-basis').textContent = basis.label + '\n' + basis.text;
     const previous = saved[mod.id]?.download?.sources;
-    const urls = basis.text.match(/https?:\/\/[^\s<>"\]\)]+/g) || [];
+    const urls = (basis.text.match(/https?:\/\/[^\s<>"\]]+/g) || []).map(url => url.replace(/[，。；）]+$/, ''))
+      .filter(url => /\.(csv|tsv|xlsx|xls|json|txt|zip|pdf|xml|md)$/i.test(url.split(/[?#]/)[0]));
     document.getElementById('download-sources').value = previous ? previous.map(source => source.url + (source.name ? ' | ' + source.name : '')).join('\n') : urls.slice(0, 5).join('\n');
-    document.getElementById('download-status').textContent = '请核对地址与文件名。下载得到原始文件后，仍需确认它符合规则。';
-    document.getElementById('download-start').disabled = false;
+    document.getElementById('download-site-help').hidden = !/FAOSTAT|fao\.org/i.test(basis.text) || !/贸易矩阵|Detailed\s*trade\s*matrix|\bTM\b/i.test(basis.text);
+    updateDownloadForm();
     document.getElementById('download-dialog').showModal();
     return true;
   }
   document.getElementById('download-close').onclick = () => document.getElementById('download-dialog').close();
+  document.getElementById('download-sources').oninput = updateDownloadForm;
   document.getElementById('download-start').onclick = async () => {
     if (!downloadModuleId || !downloadBasis) return;
     const id = downloadModuleId, basis = downloadBasis, t = task(id);
@@ -1304,10 +1329,11 @@
     const current = Store.getState().modules.find(mod => mod.id === id);
     const approved = current && basisForDownload(current, basis.sourceType);
     if (!approved || approved.text !== basis.text) { status.textContent = '下载方案已变化，请重新审核并打开下载窗口。'; return; }
-    const lines = document.getElementById('download-sources').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-    if (!lines.length || lines.length > 5) { status.textContent = '请填写 1 到 5 个文件地址。'; return; }
-    const sources = lines.map(line => { const parts = line.split('|'); return { url: parts[0].trim(), name: parts.slice(1).join('|').trim() }; });
+    const parsed = updateDownloadForm();
+    if (parsed.error) return;
+    const sources = parsed.sources;
     t.busy = true; t.error = ''; t.job = null; document.getElementById('download-start').disabled = true; render();
+    document.getElementById('download-sources').disabled = true;
     const run = { ...basis, sources, files: [], failures: [], confirmed: false };
     try {
       const sid = await session(id);
@@ -1329,7 +1355,7 @@
       if (count) Store.markRun(id, { dir: '.workbench/' + sid + '/input', artifacts: run.files.map(file => ({ name: file.storedName, size: file.size })) });
       t.filesOpen = true;
     } catch (error) { status.textContent = error.message; t.error = error.message; }
-    finally { t.busy = false; document.getElementById('download-start').disabled = false; render(); ModuleSpace.render(); }
+    finally { t.busy = false; document.getElementById('download-start').disabled = !!parseDownloadSources(document.getElementById('download-sources').value).error; document.getElementById('download-sources').disabled = false; render(); ModuleSpace.render(); }
   };
   async function handoffDownload(mod) {
     const t = task(mod.id), run = saved[mod.id]?.download;
