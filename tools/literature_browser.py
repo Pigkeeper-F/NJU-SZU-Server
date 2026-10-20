@@ -681,8 +681,14 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 verified = extra_sources.query_context_valid(page, source_key)
             # Keep the legacy manual first-batch behavior. Formal runs without
             # proof re-submit from page one: an identical query can be on page N.
+            # A homepage search box can still contain the frozen query after a
+            # failed click. Only actual bibliographic rows or an explicit zero
+            # result on the official source can be read without re-submitting.
+            manual_result_page = bool(current and (current.get("results") or current.get("noResults"))
+                                      and _official_result_page(page, source_key))
             manual_first = (scrape_current and not full_page and not created and page_index == 0
-                            and not recheck_auth and verified and binding.get("page_index", 0) == 0)
+                            and not recheck_auth and manual_result_page and verified
+                            and binding.get("page_index", 0) == 0)
             if use_bound:
                 current_index = proven_index
             elif manual_first:

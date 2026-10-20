@@ -6,8 +6,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
+const { spawnSync } = require('node:child_process');
 const { workspaceIdFor, backendFingerprint } = require('./literature-runtime');
-const { validPort, probeRuntime, hasPersistedWork, commandOwnsScript, planStartup, acquireStartupLock, executeStartup } = require('./start-workbench');
+const { validPort, probeRuntime, hasPersistedWork, commandOwnsScript, ownedProcess, windowsProcessQuery, planStartup, acquireStartupLock, executeStartup } = require('./start-workbench');
 const ID = '01234567-89ab-cdef-0123-456789abcdef';
 const free = () => ({ listening: false, runtime: null });
 const write = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
@@ -208,6 +209,40 @@ function persistedAndOwnershipTests(root) {
   assert.equal(commandOwnsScript(`powershell.exe "${script}"`, 'powershell.exe', root, 'server.js'), false);
 }
 
+function windowsEncodingTests(root) {
+  const chineseRoot = path.join(root, '流程智能体');
+  const commandLine = `"C:\\Program Files\\nodejs\\node.exe" ${path.join(chineseRoot, 'server.js')}`;
+  const payload = JSON.stringify({ Name: 'node.exe', CommandLine: commandLine });
+  let calls = 0;
+  const run = (command, args, options) => {
+    calls++;
+    assert.equal(command, 'powershell.exe');
+    assert.equal(options.encoding, 'utf8');
+    assert.equal(options.windowsHide, true);
+    const query = args[args.indexOf('-Command') + 1];
+    assert.ok(query.startsWith('[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);'));
+    assert.ok(query.includes('$OutputEncoding = [Console]::OutputEncoding;'));
+    assert.ok(query.includes("-Filter 'ProcessId=45001'"));
+    return { status: 0, stdout: Buffer.from(payload, 'utf8').toString(options.encoding) };
+  };
+  assert.equal(ownedProcess(45001, chineseRoot, 'server.js', { platform: 'win32', run }), true, 'Chinese unquoted absolute path survives PowerShell UTF-8 output');
+  assert.equal(ownedProcess(45001, path.join(chineseRoot, '另一个项目'), 'server.js', { platform: 'win32', run }), false, 'Unicode fix cannot relax the workspace identity');
+  assert.equal(calls, 2);
+  const garbled = Buffer.from(payload, 'utf8').toString('latin1');
+  assert.equal(ownedProcess(45001, chineseRoot, 'server.js', { platform: 'win32', run: () => ({ status: 0, stdout: garbled }) }), false, 'A garbled path remains untrusted');
+
+  if (process.platform === 'win32') {
+    // Run only a fixed stdout fixture, never Get-CimInstance or a live service.
+    const prefix = windowsProcessQuery(45001).split('(Get-CimInstance')[0];
+    const literal = commandLine.replace(/'/g, "''");
+    const expression = `[PSCustomObject]@{Name='node.exe';CommandLine='${literal}'} | ConvertTo-Json -Compress`;
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', prefix + expression],
+      { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+    assert.equal(result.status, 0, 'The Windows PowerShell stdout fixture must execute');
+    assert.equal(JSON.parse(result.stdout).CommandLine, commandLine, 'Real PowerShell UTF-8 pipe preserves Chinese path characters');
+  }
+}
+
 async function main() {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'yanxu-startup-test-'));
   try {
@@ -216,6 +251,7 @@ async function main() {
     await lockTests(temporary);
     await probeTests(temporary);
     persistedAndOwnershipTests(temporary);
+    windowsEncodingTests(temporary);
     console.log('START_WORKBENCH_TESTS_PASS');
   } finally {
     const target = path.resolve(temporary);

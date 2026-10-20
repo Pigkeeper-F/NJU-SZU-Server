@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import unittest
 from urllib.parse import parse_qs, urlsplit
+import xml.etree.ElementTree as ET
 
 import literature_extra_sources as adapter
 
@@ -87,6 +88,12 @@ class Page:
         if selector == picker:
             return Control(self, "picker")
         return Empty()
+
+    def get_by_role(self, role, *, name, exact):
+        if self.source != "wanfang":
+            raise AssertionError("Scopus submission must keep its existing controls")
+        assert role == "button" and exact is True
+        return Control(self, "button") if self.form and name == "检索" else Empty()
 
 
 # This small DOM implements only the selector/visibility APIs consumed by the
@@ -175,6 +182,125 @@ class SourceNavigationTests(unittest.TestCase):
         page.fill_applies = False
         self.assertFalse(adapter.navigate(page, "wanfang", QUERY))
         self.assertEqual(page.clicked, 1)
+
+    def test_wanfang_placeholder_only_homepage_wait_fill_and_read_use_same_fields(self):
+        class PlaceholderPage(Page):
+            def __init__(self, selector):
+                super().__init__("wanfang")
+                self.selector, self.waited = selector, []
+
+            def locator(self, selector):
+                if selector == self.selector:
+                    return Control(self, "input")
+                if selector == 'button:text-is("检索")':
+                    return Control(self, "button")
+                return Empty()
+
+            def wait_for_selector(self, selector, **kwargs):
+                self.waited.append(selector)
+
+        for selector in ('input[placeholder="海量资源, 等你发现"]',
+                         'input[placeholder="海量资源，等你发现"]', 'input[placeholder^="海量资源"]'):
+            with self.subTest(selector=selector):
+                page = PlaceholderPage(selector)
+                self.assertTrue(adapter.navigate(page, "wanfang", QUERY))
+                self.assertEqual(page.filled, QUERY)
+                self.assertEqual(page.clicked, 1)
+                self.assertIn(selector, page.waited[0])
+                state = dom_snapshot("wanfang", {"field": {"value": page.filled}},
+                    {','.join(adapter.WANFANG_SEARCH_FIELDS): ["field"]},
+                    head="南京大学图书馆 登录 / 注册")
+                self.assertEqual(state["queries"], [QUERY])
+                self.assertFalse(state["password"])
+                self.assertFalse(state["loginPrompt"])
+                self.assertFalse(state["accessRequired"])
+                self.assertEqual(state["results"], [])
+                self.assertFalse(state["noResults"])
+
+    def test_actual_wanfang_nested_span_markup_is_submitted_by_exact_button_name(self):
+        # This is the observed markup shape: no button class, an icon span and
+        # a label span. The old direct-text CSS has zero matches on this DOM;
+        # an accessible-name query sees the complete descendant label.
+        markup = '''<main>
+          <input id="search-input" placeholder="海量资源, 等你发现" />
+          <button class="search-btn" type="button"><span>AI增强检索</span></button>
+          <button type="button"><span aria-hidden="true"><svg /></span><span>检索</span></button>
+        </main>'''
+
+        class Button:
+            def __init__(self, page, node):
+                self.page, self.node = page, node
+
+            def is_visible(self):
+                return "hidden" not in self.node.attrib
+
+            def inner_text(self):
+                return "".join(self.node.itertext())
+
+            def name(self):
+                def visible_text(node):
+                    if node.get("aria-hidden") == "true":
+                        return ""
+                    return (node.text or "") + "".join(visible_text(child) + (child.tail or "") for child in node)
+                return " ".join(visible_text(self.node).split())
+
+            def click(self):
+                self.page.clicked_names.append(self.name())
+
+        class Matches:
+            def __init__(self, values):
+                self.values = values
+
+            def count(self):
+                return len(self.values)
+
+            def nth(self, index):
+                return self.values[index]
+
+        class MarkupPage(Page):
+            def __init__(self):
+                super().__init__("wanfang")
+                self.tree = ET.fromstring(markup)
+                self.buttons = [Button(self, node) for node in self.tree.findall("button")]
+                self.clicked_names, self.waited = [], []
+
+            def locator(self, selector):
+                if selector == "input#search-input":
+                    return Control(self, "input")
+                if selector == "button.search-btn":
+                    return Matches([button for button in self.buttons if "search-btn" in button.node.get("class", "").split()])
+                if selector == 'button:text-is("检索")':
+                    # Playwright text-is matches immediate text nodes, not the
+                    # nested label's text. See installed textIsEngine.
+                    return Matches([button for button in self.buttons if any(
+                        " ".join(text.split()) == "检索"
+                        for text in [button.node.text or "", *(child.tail or "" for child in button.node)])])
+                return Empty()
+
+            def get_by_role(self, role, *, name, exact):
+                assert role == "button" and exact is True
+                return Matches([button for button in self.buttons if button.name() == name])
+
+            def wait_for_selector(self, selector, **kwargs):
+                self.waited.append(selector)
+
+        page = MarkupPage()
+        self.assertEqual(page.locator('button:text-is("检索")').count(), 0)
+        self.assertEqual(page.get_by_role("button", name="检索", exact=True).count(), 1)
+        self.assertTrue(adapter.navigate(page, "wanfang", QUERY))
+        self.assertEqual(page.filled, QUERY)
+        self.assertEqual(page.clicked_names, ["检索"])
+        result_wait = page.waited[-1].split(",")
+        self.assertNotIn(".normal-list", result_wait)
+        self.assertNotIn(".result-list", result_wait)
+        self.assertIn("div.normal-list.periodical-list", result_wait)
+
+        # Neither a hidden plain button nor a visible longer action is a valid
+        # substitute when the exact search control is unavailable.
+        page = MarkupPage()
+        page.buttons[1].node.set("hidden", "hidden")
+        self.assertFalse(adapter.navigate(page, "wanfang", QUERY))
+        self.assertEqual(page.clicked_names, [])
 
     def test_unknown_forms_do_not_claim_submission(self):
         for source in ("wanfang", "scopus"):

@@ -317,6 +317,69 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertTrue(state["loginPrompt"])
         self.assertEqual(adapter._auth_reason(page, state), "login")
 
+    def test_wanfang_homepage_with_frozen_query_resubmits_instead_of_reading_home(self):
+        page = self.context.new_page()
+        page.url = adapter.SOURCES["wanfang"][1]
+        page.dom = snapshot(queries=[QUERY], results=[], resultContainer=False)
+        adapter._save_binding(self.job, "wanfang", page.target)
+        row = {**ROW, "result_url": "https://d.wanfangdata.com.cn/periodical/example202401"}
+
+        def submit_homepage(bound, source, query, year_from, year_to):
+            self.assertIs(bound, page)
+            self.assertEqual((source, query, year_from, year_to), ("wanfang", QUERY, None, None))
+            bound.url = "https://s.wanfangdata.com.cn/paper?q=broiler"
+            bound.dom = snapshot(results=[row], resultContainer=True)
+            return True
+
+        with patch.object(adapter.extra_sources, "snapshot", side_effect=lambda bound, *args: copy.deepcopy(bound.dom)), \
+                patch.object(adapter, "_navigate_search", side_effect=submit_homepage) as navigate:
+            result = self.call("wanfang", resume=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["results"][0]["title"], row["title"])
+        self.assertEqual(navigate.call_count, 1)
+        self.assertEqual(len(self.context.pages), 1)
+        binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["wanfang"]
+        self.assertEqual(binding["target_id"], page.target)
+        self.assertEqual(binding["page_index"], 0)
+        self.assertTrue(binding["query_hash"])
+
+    def test_wanfang_homepage_without_working_form_stays_unrecognized_not_login(self):
+        page = self.context.new_page()
+        page.url = adapter.SOURCES["wanfang"][1]
+        page.dom = snapshot(queries=[QUERY], results=[], resultContainer=False)
+        adapter._save_binding(self.job, "wanfang", page.target)
+        with patch.object(adapter.extra_sources, "snapshot", side_effect=lambda bound, *args: copy.deepcopy(bound.dom)), \
+                patch.object(adapter, "_navigate_search", return_value=False) as navigate:
+            result = self.call("wanfang", resume=True)
+        self.assertEqual(navigate.call_count, 1)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertEqual(result["results"], [])
+
+    def test_manual_official_result_page_and_explicit_zero_can_still_be_read(self):
+        for source in ("wanfang", "scopus"):
+            for zero in (False, True):
+                with self.subTest(source=source, zero=zero):
+                    self.context = Context(snapshot())
+                    page = self.context.new_page()
+                    page.url = adapter.SOURCES[source][1]
+                    row = {**ROW, "result_url": "https://d.wanfangdata.com.cn/periodical/example202401"}
+                    page.dom = snapshot(results=[] if zero else [row], resultContainer=True, noResults=zero)
+                    adapter._save_binding(self.job, source, page.target)
+                    with patch.object(adapter.extra_sources, "snapshot", side_effect=lambda bound, *args: copy.deepcopy(bound.dom)), \
+                            patch.object(adapter.extra_sources, "query_context_valid", return_value=True), \
+                            patch.object(adapter, "_navigate_search", side_effect=AssertionError("manual actual result should be read")):
+                        result = self.call(source, resume=True)
+                    self.assertEqual(result["status"], "no_results" if zero else "ok")
+
+    def test_manual_result_on_nonofficial_domain_cannot_skip_resubmission(self):
+        page = self.context.new_page()
+        page.url = "https://unrelated.example/search"
+        page.dom = snapshot(results=[ROW], resultContainer=True)
+        adapter._save_binding(self.job, "cnki", page.target)
+        with patch.object(adapter, "_navigate_search", return_value=True) as navigate:
+            self.call(resume=True)
+        self.assertEqual(navigate.call_count, 1)
+
     def test_captcha_and_missing_access_never_report_zero(self):
         for marker, reason in [("captcha", "verification"), ("accessRequired", "access_required")]:
             with self.subTest(reason=reason):

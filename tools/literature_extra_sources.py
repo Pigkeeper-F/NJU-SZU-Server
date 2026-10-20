@@ -11,6 +11,7 @@ Official search semantics:
 """
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import urlencode, urlsplit
 
@@ -20,6 +21,16 @@ SOURCE_INFO = {
     "scopus": ("Scopus", "https://www.scopus.com/pages/home?display=basic#basic"),
     "pubmed": ("PubMed", "https://pubmed.ncbi.nlm.nih.gov/"),
 }
+
+# The observed homepage and results search box vary in placeholder punctuation
+# and spacing. Use the same visible input selectors for waiting, filling and
+# reading the submitted query; a filled homepage field is not a results page.
+WANFANG_SEARCH_FIELDS = (
+    'input#search-input', 'input#searchInput', 'input.search-input', '.search-input input',
+    '.search-box input', '.searchBox input', 'input[placeholder="海量资源, 等你发现"]',
+    'input[placeholder="海量资源，等你发现"]', 'input[placeholder^="海量资源"]',
+    'input[placeholder*="检索"]', 'textarea[placeholder*="检索"]', 'input[placeholder*="搜索"]',
+)
 
 
 _SNAPSHOT_JS = r"""/* literature_extra_snapshot */ ({source,limit}) => {
@@ -42,7 +53,7 @@ _SNAPSHOT_JS = r"""/* literature_extra_snapshot */ ({source,limit}) => {
     ? 'input#id_term,textarea#id_term,input[name="term"],textarea[name="term"]'
     : source==='scopus'
     ? '#basic-panel input[id^="autosuggest-"],input[id^="autosuggest-"],#searchterm1,input[name="searchterm1"],textarea[name="searchterm1"],input[data-testid="search-input"],input[aria-label="Search documents"],textarea[aria-label="Search documents"]'
-    : 'input#search-input,input#searchInput,input.search-input,.search-input input,.search-box input,.searchBox input,input[placeholder="海量资源, 等你发现"],input[placeholder="海量资源，等你发现"],input[placeholder*="检索"],textarea[placeholder*="检索"],input[placeholder*="搜索"]';
+    : __WANFANG_SEARCH_FIELDS__;
   const queries=Array.from(document.querySelectorAll(querySelectors)).filter(visible)
     .map(el=>el.value || text(el)).filter(Boolean);
   const summary=texts(source==='scopus' ? '.search-query,.query-text,[data-testid="search-query"]' : '.search-condition,.search-query,.query-text');
@@ -140,7 +151,7 @@ _SNAPSHOT_JS = r"""/* literature_extra_snapshot */ ({source,limit}) => {
   }
   return {captcha,password,loginPrompt,accessRequired,queries,results,resultContainer,noResults,
     visible_result_count:rows.filter(visible).length};
-}"""
+}""".replace('__WANFANG_SEARCH_FIELDS__', json.dumps(','.join(WANFANG_SEARCH_FIELDS), ensure_ascii=False))
 
 
 def snapshot(page, source, limit):
@@ -243,10 +254,31 @@ def _wait(page, selector):
         pass
 
 
-def _submit(page, field, query, buttons):
+def _named_button(page, selectors, names):
+    # CSS :text-is checks direct text nodes, unlike a button's accessible name.
+    # Wanfang's observed button wraps both its icon and label in child spans.
+    for name in names:
+        locator = page.get_by_role("button", name=name, exact=True)
+        for index in range(min(locator.count(), 10)):
+            button = locator.nth(index)
+            if button.is_visible():
+                return button
+    # Preserve compatible older markup, but never select a longer action such
+    # as "AI增强检索" merely because it contains the word "检索".
+    allowed = {_normalized(name) for name in names}
+    for selector in selectors:
+        locator = page.locator(selector)
+        for index in range(min(locator.count(), 10)):
+            button = locator.nth(index)
+            if button.is_visible() and _normalized(button.inner_text()) in allowed:
+                return button
+    return None
+
+
+def _submit(page, field, query, buttons, *, button_names=()):
     if field is None:
         return False
-    button = _first_visible(page, buttons)
+    button = _named_button(page, buttons, button_names) if button_names else _first_visible(page, buttons)
     if button is None:
         return False
     field.fill(query)
@@ -388,17 +420,19 @@ def navigate(page, source, query, year_from=None, year_to=None):
     if source == "scopus":
         _wait(page, '#basic-panel input[id^="autosuggest-"],#searchterm1,[data-testid="search-input"],input[type="password"]')
         return _submit_scopus(page, query)
-    _wait(page, '#search-input,.search-box input,.search-input,input[placeholder*="检索"],input[type="password"]')
-    field = _first_visible(page, [
-        'input#search-input', 'input#searchInput', 'input.search-input', '.search-input input',
-        '.search-box input', '.searchBox input', 'input[placeholder*="检索"]',
-        'textarea[placeholder*="检索"]', 'input[placeholder*="搜索"]',
-    ])
+    _wait(page, ','.join((*WANFANG_SEARCH_FIELDS, 'input[type="password"]')))
+    field = _first_visible(page, WANFANG_SEARCH_FIELDS)
     submitted = _submit(page, field, query, [
         'button.search-btn', 'button.search-button', '.search-box button[type="submit"]',
         'button:text-is("检索")', 'button:text-is("搜索")', '.search-btn:text-is("检索")',
         '.search-btn:text-is("搜索")',
-    ])
+    ], button_names=("检索", "搜索"))
     if submitted:
-        _wait(page, '.normal-list,.search-result-list,.result-list,.no-result,.no-results,input[type="password"]')
+        # Generic homepage recommendation containers are not search results.
+        # Wait for the same visible paper cards used by snapshot(), or an
+        # explicit empty/auth page, instead of any .result-list container.
+        _wait(page, 'div.normal-list.periodical-list,div.normal-list.thesis-list,div.normal-list.conference-list,'
+                    '.normal-list .normal-list-item,.normal-list .list-item,.search-result-list .search-result-item,'
+                    '.result-list .result-item,.search-result-item,.record-item,'
+                    '.no-result,.no-results,input[type="password"]')
     return submitted

@@ -59,24 +59,28 @@ function commandOwnsScript(command, executable, root, relative, platform = proce
   return args.length >= 2 && normalize(unquote(args[1])) === normalize(path.join(path.resolve(root), relative));
 }
 
-function ownedProcess(pid, root, relative) {
+function windowsProcessQuery(pid) {
+  return '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; '
+    + `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' | Select-Object Name,CommandLine | ConvertTo-Json -Compress)`;
+}
+
+function ownedProcess(pid, root, relative, { platform = process.platform, run = spawnSync } = {}) {
   if (!Number.isSafeInteger(pid) || pid < 1 || pid === process.pid) return false;
   let command = '', executable = '';
-  if (process.platform === 'win32') {
-    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' | Select-Object Name,CommandLine | ConvertTo-Json -Compress)`],
+  if (platform === 'win32') {
+    const result = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', windowsProcessQuery(pid)],
     { encoding: 'utf8', windowsHide: true, timeout: 10000 });
     if (result.status !== 0) return false;
     try { const value = JSON.parse(String(result.stdout || '')); command = value.CommandLine; executable = value.Name; } catch (_) { return false; }
   } else {
-    const result = spawnSync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8', timeout: 5000 });
+    const result = run('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8', timeout: 5000 });
     if (result.status !== 0) return false;
     command = String(result.stdout || '');
-    const name = spawnSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8', timeout: 5000 });
+    const name = run('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8', timeout: 5000 });
     if (name.status !== 0) return false;
     executable = String(name.stdout || '').trim();
   }
-  return commandOwnsScript(command, executable, root, relative);
+  return commandOwnsScript(command, executable, root, relative, platform);
 }
 
 const ownedServerProcess = (pid, root) => ownedProcess(pid, root, 'server.js');
@@ -282,4 +286,4 @@ async function main(args = process.argv.slice(2)) {
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
 module.exports = { validPort, probeRuntime, hasPersistedWork, commandOwnsScript, ownedServerProcess,
-  ownedProxyProcess, inspectService, planStartup, acquireStartupLock, executeStartup };
+  ownedProxyProcess, ownedProcess, windowsProcessQuery, inspectService, planStartup, acquireStartupLock, executeStartup };
