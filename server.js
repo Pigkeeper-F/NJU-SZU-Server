@@ -307,6 +307,15 @@ async function handleLiterature(req, res, url) {
       }
       return sendJson(res, 202, scholar.reviewFulltext(data.id));
     }
+    if (req.method === 'POST' && route === '/api/literature/retry-cnki') {
+      const data = JSON.parse(await readBody(req, 4 * 1024));
+      if (!data || typeof data !== 'object' || Array.isArray(data)
+          || Object.keys(data).length !== 2 || !Object.hasOwn(data, 'id') || !Object.hasOwn(data, 'paperId')
+          || Object.keys(data).some(key => !['id', 'paperId'].includes(key))) {
+        throw new Error('只需提供当前全文任务标识和单篇文献标识');
+      }
+      return sendJson(res, 202, scholar.retryCnki(data.id, data.paperId));
+    }
     if (req.method === 'POST' && route === '/api/literature/browser') {
       const data = JSON.parse(await readBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Object.keys(data).some(key => key !== 'id')) throw new Error('只需提供当前检索任务标识');

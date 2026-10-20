@@ -293,7 +293,7 @@ def _target_from_candidate(record: dict) -> dict | None:
     paper_id = str(record.get("canonical_id") or record.get("candidate_id") or "").strip()
     if not paper_id:
         return None
-    return _target(
+    target = _target(
         paper_id,
         record.get("title"),
         record.get("doi"),
@@ -301,6 +301,9 @@ def _target_from_candidate(record: dict) -> dict | None:
         _collect_links(record),
         record.get("snippet"),
     )
+    target.update(source_key=str(record.get("source_key") or ""),
+                  source_candidate_id=str(record.get("candidate_id") or ""))
+    return target
 
 
 def _target_from_group(group: dict) -> dict | None:
@@ -311,7 +314,7 @@ def _target_from_group(group: dict) -> dict | None:
     source = next((r for r in records if str(r.get("candidate_id") or "") == canonical_id), records[0] if records else {})
     title = group.get("title") or source.get("title")
     doi = group.get("doi") or source.get("doi")
-    return _target(
+    target = _target(
         canonical_id,
         title,
         doi,
@@ -319,6 +322,9 @@ def _target_from_group(group: dict) -> dict | None:
         _collect_links(source),
         source.get("snippet"),
     )
+    target.update(source_key=str(source.get("source_key") or ""),
+                  source_candidate_id=str(source.get("candidate_id") or ""))
+    return target
 
 
 def _read_json(path: Path):
@@ -444,6 +450,32 @@ def _settle_html(item, job_dir, text, url, verdict, reason, evidence):
     return item
 
 
+def _settle_cnki_result(result, record, job_dir, item):
+    """Use the same PDF/body evidence gate after normal official navigation."""
+    _raise_page_attention(result, item["paper_id"], "")
+    page_url = safe_url(result.get("url") or "")
+    if result.get("status") == "pdf_page":
+        blob = result.get("bytes") or b""
+        valid, why, size = validate_pdf_bytes(blob)
+        if not valid:
+            raise FulltextPause(item["paper_id"], page_url, reason="page_error",
+                                message="知网下载文件未通过PDF校验，已暂停；请在原页面核对文件格式。")
+        relative = f"fulltext/files/{_sanitize_stem(item['paper_id'])}.pdf"
+        path = job_dir / relative
+        atomic_write_bytes(path, blob)
+        return _settle_pdf(item, path, relative, page_url, size)
+    if result.get("status") == "ok":
+        proof = result.get("html_evidence") if isinstance(result.get("html_evidence"), dict) else {}
+        text = str(result.get("text") or "")
+        verdict, reason = assess_html_text(text, page_url, proof, record.get("title") or "", record.get("doi") or "")
+        if verdict == "fulltext":
+            return _settle_html(item, job_dir, str(proof.get("article_text") or text), page_url, verdict, reason, proof)
+        raise FulltextPause(item["paper_id"], page_url, reason="page_error",
+                            message="知网已打开页面，但尚未取得可确认的全文，已暂停；请核对下载入口和正文。")
+    raise FulltextPause(item["paper_id"], page_url, reason="page_error",
+                        message=str(result.get("message") or "知网单篇下载未完成，已暂停；请查看原任务页面。"))
+
+
 def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     """Fetch one paper, following only its observed legal entry links.
 
@@ -455,6 +487,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     files_dir.mkdir(parents=True, exist_ok=True)
     paper_id = str(record.get("paper_id") or "")
     stem, item = _sanitize_stem(paper_id), _item_skeleton(record)
+    if record.get("source_key") == "cnki" and callable(getattr(fetcher, "fetch_cnki", None)):
+        return _settle_cnki_result(fetcher.fetch_cnki(record, opts), record, job_dir, item)
     attempts = candidate_urls(record)
     if not attempts:
         if any(_cnki_transfer_url(link["url"]) for link in _collect_links(record)) or _cnki_transfer_url(_record_result_url(record)):
@@ -741,7 +775,10 @@ def _run_fulltext(
 
     status_path = job_dir / "fulltext" / "status.json"
     previous = _load_previous_items(status_path)
-    items = [_carry_previous(target, previous.get(target["paper_id"]), job_dir) for target in targets]
+    only_set = set(only_ids) if only_ids is not None else None
+    items = [dict(previous[target["paper_id"]])
+             if only_set is not None and target["paper_id"] not in only_set and target["paper_id"] in previous
+             else _carry_previous(target, previous.get(target["paper_id"]), job_dir) for target in targets]
     target_by_id = {target["paper_id"]: target for target in targets}
     position = {item["paper_id"]: index for index, item in enumerate(items)}
 
@@ -905,6 +942,9 @@ def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailab
             saved = json.loads(status_path.read_text(encoding="utf-8"))
             if any(item.get("status") == "fetched_html" and item.get("evidence_version") != EVIDENCE_VERSION
                    for item in saved.get("items", []) if isinstance(item, dict)):
+                if only is not None:
+                    emit("error", stage="fulltext", message="旧全文缓存尚未复核，请先点击“复核已保存全文”后再重试单篇。")
+                    return 1
                 review_saved_fulltext(job_dir, emit_result=False)
         except (OSError, ValueError) as error:
             emit("error", stage="fulltext", message=f"全文缓存需复核，已暂停：{error}")

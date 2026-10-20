@@ -166,6 +166,61 @@ function fulltextReviewEligible(job, dir) {
   return true;
 }
 
+const PAPER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const CNKI_RETRY_STATUSES = new Set(['pending', 'needs_attention', 'unavailable', 'abstract_only']);
+
+function hasCnkiRetryScope(job) {
+  return typeof job?.cnkiRetryPaperId === 'string' && PAPER_ID.test(job.cnkiRetryPaperId);
+}
+
+function restoreCnkiRetryScope(job, interrupted = false) {
+  if (!hasCnkiRetryScope(job)) return;
+  // Saved material completeness cannot promote a scoped single-paper action
+  // into extraction. Only an explicit finished retry or offline review may
+  // release this marker, including a crash after its result was persisted.
+  job.resumeStage = 'fulltext'; job.until = 'fulltext'; job.activeStage = null;
+  job.stages = { ...(job.stages || {}), fulltext: 'pending' };
+  if (interrupted) {
+    job.status = 'failed'; job.stage = 'interrupted'; job.attention = null;
+    job.error = '本地服务已重启，单篇知网全文获取已暂停；已保存材料保留。';
+    job.message = '单篇知网全文获取中断，范围仍限这一篇；若文件已保存请先复核全文，否则继续这篇知网文献，不会进入提取。';
+  }
+}
+
+function cnkiRetryItems(job, dir) {
+  if (!['needs_attention', 'failed', 'completed'].includes(job?.status) || !fulltextReviewEligible(job, dir)) return [];
+  const report = loadJsonFile(path.join(dir, 'candidates.json'));
+  const records = candidateRecords(report);
+  const dedupe = loadJsonFile(path.join(dir, 'dedupe', 'dedupe.json'));
+  const status = loadJsonFile(path.join(dir, 'fulltext', 'status.json'));
+  if (!records || !Array.isArray(dedupe?.groups) || !Array.isArray(status?.items)) return [];
+  const items = [], seen = new Set(), normalizeTitle = value => String(value || '').trim().replace(/\s+/g, ' ');
+  for (const group of dedupe.groups) {
+    const id = group?.canonical_id;
+    if (typeof id !== 'string' || !PAPER_ID.test(id) || seen.has(id)
+        || dedupe.groups.filter(other => other?.canonical_id === id).length !== 1) continue;
+    seen.add(id);
+    // Match exactly the canonical target chosen by fulltext.load_targets. Do
+    // not convert another source's merged group into a CNKI download target.
+    const members = Array.isArray(group.records) ? group.records.filter(record => record?.candidate_id === id) : [];
+    const originals = records.filter(record => record.candidate_id === id);
+    const states = status.items.filter(item => item?.paper_id === id);
+    if (members.length !== 1 || originals.length !== 1 || states.length !== 1) continue;
+    const member = members[0], original = originals[0], state = states[0];
+    const title = normalizeTitle(group.title || member.title);
+    if (member.source_key !== 'cnki' || original.source_key !== 'cnki' || !title || title.length > 500
+        || normalizeTitle(member.title) !== normalizeTitle(original.title) || title !== normalizeTitle(original.title)
+        || !CNKI_RETRY_STATUSES.has(state.status) || normalizeTitle(state.title) !== title) continue;
+    // Reasons are fixed UI explanations, never persisted URLs or session data.
+    const reason = state.status === 'abstract_only' ? '目前仅有摘要，尚未取得全文'
+      : state.status === 'needs_attention' ? '原全文页面需要处理或核对'
+        : state.status === 'pending' ? '尚未处理这篇文献' : '尚未取得可确认的全文，需要补充官方入口';
+    items.push({ id, title, status: state.status, reason });
+    if (items.length >= 100) break;
+  }
+  return items;
+}
+
 function existingPython(root, job) {
   const python = job.python || path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   if (!fs.existsSync(python)) throw new Error('本地 Python 环境尚未准备；全文缓存复核不会联网安装依赖。');
@@ -488,7 +543,8 @@ class LiteratureConnector {
       stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters, activeStage: job.activeStage || null,
       attention: sourceAttention(job.attention), deferredSources: queue, deferredOnly: checkpointDeferredOnly(job.dir, job.config),
       executionOrder: executionOrder(job.config, queue), processingBasis: job.processingBasis || null, deletedAt: job.deletedAt || null,
-      canReviewFulltext: fulltextReviewEligible(job, job.dir) };
+      canReviewFulltext: fulltextReviewEligible(job, job.dir), cnkiRetryItems: cnkiRetryItems(job, job.dir),
+      cnkiRetryPaperId: typeof job.cnkiRetryPaperId === 'string' && PAPER_ID.test(job.cnkiRetryPaperId) ? job.cnkiRetryPaperId : null };
   }
 
   persist(job) {
@@ -819,8 +875,9 @@ class LiteratureConnector {
       throw new Error('已有文献任务正在运行，请先停止或等待结束后复核');
     }
     const dir = path.join(this.base, id);
-    const saved = this.jobs.get(id) || loadJsonFile(path.join(dir, 'job.json'));
+    let saved = this.jobs.get(id) || loadJsonFile(path.join(dir, 'job.json'));
     if (!saved) throw new Error('检索任务不存在');
+    if (!this.jobs.has(id) && saved.status === 'running' && hasCnkiRetryScope(saved)) saved = this.loadPersisted(id);
     if (!fulltextReviewEligible(saved, dir)) throw new Error('只能复核已停止的全文任务；需有全文状态和去重输入，且尚未生成提取、校验或导出成果');
     const job = this.jobs.get(id) || this.loadPersisted(id);
     job.status = 'running'; job.error = null; job.activeStage = 'fulltext'; job.resumeStage = 'fulltext';
@@ -850,6 +907,14 @@ class LiteratureConnector {
       if (job.runId !== runId || job.status === 'cancelled') return;
       if (reviewError) throw new Error(reviewError);
       if (!reviewed) throw new Error('全文缓存复核未返回有效结果');
+      if (job.cnkiRetryPaperId) {
+        const status = loadJsonFile(path.join(job.dir, 'fulltext', 'status.json'));
+        const item = status?.items?.find(item => item?.paper_id === job.cnkiRetryPaperId);
+        // The researcher may stop just after the verified file and status were
+        // saved but before the worker's result event. The offline review is the
+        // gate that confirms that completed artifact and releases its scope.
+        if (['fetched_pdf', 'fetched_html'].includes(item?.status)) job.cnkiRetryPaperId = null;
+      }
       job.status = 'needs_attention'; job.resumeStage = 'fulltext'; job.activeStage = null; job.attention = null;
       job.stages = { ...(job.stages || {}), fulltext: 'pending' };
       this.update(job, 'fulltext_review', '缓存已复核，尚未继续获取全文。请核对复核报告，点击“继续获取全文”才会按原任务获取缺少材料；不会自动进入提取。');
@@ -857,6 +922,58 @@ class LiteratureConnector {
       if (job.runId !== runId || job.status === 'cancelled') return;
       job.status = 'failed'; job.resumeStage = 'fulltext'; job.activeStage = null; job.error = String(error.message || '全文缓存复核失败');
       this.update(job, 'fulltext_review', job.error);
+    }
+  }
+
+  retryCnki(id, paperId) {
+    if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    if (typeof paperId !== 'string' || !PAPER_ID.test(paperId)) throw new Error('无效的单篇文献标识');
+    if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) {
+      throw new Error('已有文献任务正在运行，请先停止或等待结束后重试单篇');
+    }
+    const dir = path.join(this.base, id);
+    let saved = this.jobs.get(id) || loadJsonFile(path.join(dir, 'job.json'));
+    if (!saved) throw new Error('检索任务不存在');
+    if (!this.jobs.has(id) && saved.status === 'running' && hasCnkiRetryScope(saved)) saved = this.loadPersisted(id);
+    if (saved.status === 'cancelled') throw new Error('任务已停止，请先复核已保存全文，再重试指定文献');
+    const target = cnkiRetryItems(saved, dir).find(item => item.id === paperId);
+    if (!target) throw new Error('只能重试已暂停全文任务中尚未取得的知网单篇；请核对原候选、去重及全文状态，已有下游成果时不可重试');
+    if (saved.cnkiRetryPaperId && saved.cnkiRetryPaperId !== paperId) throw new Error('上一篇知网全文尚未处理完成，请先继续原单篇任务');
+    const job = this.jobs.get(id) || this.loadPersisted(id);
+    job.status = 'running'; job.error = null; job.attention = null; job.activeStage = 'fulltext'; job.resumeStage = 'fulltext';
+    job.stages = { ...(job.stages || {}), fulltext: 'running' };
+    job.cnkiRetryPaperId = paperId; job.until = 'fulltext';
+    const runId = (Number.isInteger(job.runId) ? job.runId : 0) + 1; job.runId = runId;
+    this.update(job, 'fulltext', '仅重试这篇知网文献：' + target.title + '；不重新检索或进入提取。');
+    void this.runCnkiRetry(job, runId, paperId);
+    return this.public(job);
+  }
+
+  async runCnkiRetry(job, runId, paperId) {
+    let receivedResult = false;
+    try {
+      const python = await this.prepare(job, (stage, message) => this.update(job, stage, message));
+      if (job.runId !== runId || job.status !== 'running') return;
+      job.python = python;
+      await this.runStage(STAGE_SCRIPTS.fulltext, ['--resume', '--only', paperId, '--retry-unavailable', '--limit', '1'], job, event => {
+        if (job.runId !== runId || job.status === 'cancelled') return;
+        if (event?.type === 'result' && event.stage === 'fulltext') receivedResult = true;
+        this.onStageEvent(job, runId, 'fulltext', event);
+      });
+      if (job.runId !== runId || job.status === 'cancelled') return;
+      if (['needs_attention', 'failed'].includes(job.status)) { this.persist(job); return; }
+      if (!receivedResult) throw new Error('单篇全文获取未返回有效结果，已有材料保留');
+      job.status = 'needs_attention'; job.resumeStage = 'fulltext'; job.attention = null;
+      job.cnkiRetryPaperId = null;
+      job.stages.fulltext = 'pending';
+      this.update(job, 'fulltext_ready', '本篇已处理，请核查全文状态；其他材料仍待处理或补充。仅执行了指定的这一篇，不重新检索或进入提取。');
+    } catch (error) {
+      if (job.runId !== runId || job.status === 'cancelled') return;
+      job.status = 'failed'; job.resumeStage = 'fulltext'; job.stages.fulltext = 'failed';
+      job.error = String(error.message || '单篇知网全文重试失败');
+      this.update(job, 'failed', job.error);
+    } finally {
+      if (job.runId === runId) { job.activeStage = null; this.persist(job); }
     }
   }
 
@@ -884,6 +1001,7 @@ class LiteratureConnector {
       deferredSources: checkpointDeferredSources(dir, config), deferSource: null, deletedAt: saved.deletedAt || null,
       processingBasis: processingBasisFor(dir, config)
     };
+    job.cnkiRetryPaperId = typeof saved.cnkiRetryPaperId === 'string' && PAPER_ID.test(saved.cnkiRetryPaperId) ? saved.cnkiRetryPaperId : null;
     const detected = detectStagedArtifacts(dir);
     if (saved.status === 'running') {
       // 服务重启遗留 running → interrupted 改写（§4.3），按产物重建 stages/resumeStage 以便续跑。
@@ -904,6 +1022,7 @@ class LiteratureConnector {
       if (!job.stages) job.stages = detected.stages;
       if (!Object.prototype.hasOwnProperty.call(saved, 'resumeStage')) job.resumeStage = detected.resumeStage;
     }
+    restoreCnkiRetryScope(job, saved.status === 'running');
     this.jobs.set(id, job);
     return job;
   }
@@ -914,6 +1033,7 @@ class LiteratureConnector {
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const stored = this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json'));
     if (stored?.deletedAt) throw new Error('该任务已删除，请先恢复后再执行');
+    if (hasCnkiRetryScope(stored)) throw new Error('请使用“继续这篇知网文献”处理原单篇，不能扩大到其他文献');
     let until = requested.until == null || requested.until === '' ? 'export' : String(requested.until);
     if (!STAGES.includes(until)) throw new Error('阶段边界必须是 discover–export 的有效阶段名');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening)) throw new Error('已有文献检索正在运行，请等待或停止后重试');
@@ -1022,7 +1142,7 @@ class LiteratureConnector {
     saved.deferredOnly = checkpointDeferredOnly(dir, frozenConfig);
     saved.processingBasis = processingBasisFor(dir, frozenConfig);
     saved.executionOrder = executionOrder(frozenConfig, saved.deferredSources);
-    saved.canReviewFulltext = fulltextReviewEligible(saved, dir);
+    const interrupted = saved.status === 'running';
     if (saved.status === 'running') {
       saved.status = 'failed'; saved.stage = 'interrupted';
       saved.error = '本地服务已重启，检索中断；已保存的文件仍可下载。';
@@ -1038,6 +1158,9 @@ class LiteratureConnector {
         saved.message = '本地服务已重启，检索已暂停；已有分页结果保留，尚未确认末页。请点击“检查并继续”恢复原任务。';
       }
     }
+    restoreCnkiRetryScope(saved, interrupted);
+    saved.canReviewFulltext = fulltextReviewEligible(saved, dir);
+    saved.cnkiRetryItems = cnkiRetryItems(saved, dir);
     return saved;
   }
 
@@ -1052,16 +1175,18 @@ class LiteratureConnector {
       let stat;
       try { stat = fs.statSync(file); } catch (_) { continue; }
       if (!stat.isFile()) continue;
-      const saved = loadJsonFile(file);
+      let saved = loadJsonFile(file);
       if (!saved || typeof saved !== 'object' || Array.isArray(saved)) continue;
       saved.deletedAt = saved.deletedAt || null;
       if (saved.deletedAt && options.includeDeleted !== true) continue;
+      if (!this.jobs.has(name) && saved.status === 'running' && hasCnkiRetryScope(saved)) saved = this.snapshot(name);
       const config = saved.config || loadJsonFile(path.join(this.base, name, 'run_config.json'));
       saved.deferredSources = checkpointDeferredSources(path.join(this.base, name), config);
       saved.deferredOnly = checkpointDeferredOnly(path.join(this.base, name), config);
       saved.processingBasis = processingBasisFor(path.join(this.base, name), config);
       saved.executionOrder = executionOrder(config, saved.deferredSources);
       saved.canReviewFulltext = fulltextReviewEligible(saved, path.join(this.base, name));
+      saved.cnkiRetryItems = cnkiRetryItems(saved, path.join(this.base, name));
       entries.push({ mtime: stat.mtimeMs, job: saved });
     }
     entries.sort((a, b) => b.mtime - a.mtime);

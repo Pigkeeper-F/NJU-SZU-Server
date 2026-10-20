@@ -28,6 +28,7 @@ const BACKEND_FILES = [
   'tools/literature_fulltext.py',
   'tools/literature_fulltext_browser.py',
   'tools/literature_fulltext_evidence.py',
+  'tools/literature_cnki_fulltext.py',
   'tools/literature_extract.py',
   'tools/scholar-flow.js',
   'tools/source-download.js'

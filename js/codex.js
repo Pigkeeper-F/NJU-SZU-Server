@@ -381,6 +381,23 @@
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
+  async function retryLiteratureCnki(mod, paperId) {
+    const t = task(mod.id), job = t.literatureJob;
+    if (t.busy || t.literatureBusy || root.LiteratureUI?.isBusy() || !job?.id || job.deletedAt || job.status === 'running') return;
+    if (!Array.isArray(job.cnkiRetryItems) || !job.cnkiRetryItems.some(item => item.id === paperId)) {
+      t.literatureError = '这篇文献不在当前可重试的知网清单中，请刷新任务状态后再操作。'; render(); return;
+    }
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      await checkLiteratureRuntime(job.config?.sources || []);
+      const next = await request('/api/literature/retry-cnki', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: job.id, paperId }) });
+      if (next?.id !== job.id) throw new Error('单篇全文任务标识不符，请刷新原任务核对。');
+      applyLiteratureJob(mod, next);
+      await watchLiterature(mod.id, job.id);
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
   function literatureAttentionMessage(job) {
     const source = job.attention?.source;
     if (job.resumeStage === 'fulltext') return String(job.message || job.error || '全文获取已暂停，已有材料保留。');
@@ -919,7 +936,7 @@
     }
     const canAdvance = !!job && !!job.resumeStage && ['completed', 'failed', 'needs_attention'].includes(job.status)
       && job.status !== 'needs_attention';
-    if (canAdvance) {
+    if (canAdvance && !job.cnkiRetryPaperId) {
       const label = job.status === 'completed' ? '继续下一阶段' : job.status === 'failed' ? (job.stage === 'interrupted' ? '继续中断的任务' : '重试当前阶段') : '继续';
       const advance = node('button', label, 'quiet-button'); advance.type = 'button'; advance.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
       advance.title = '继续原任务，运行到上方所选阶段；请先选择下一阶段或更后的目标。';
@@ -962,6 +979,20 @@
       if (stages) box.append(stages);
       if (awaitingConfirm) box.append(node('p', '提取字段等待确认：点击“设置提取字段”，新增或核对表头后确认并继续提取。', 'codex-status'));
     }
+    if (job?.status !== 'running' && !job?.deletedAt && Array.isArray(job?.cnkiRetryItems) && job.cnkiRetryItems.length) {
+      const retry = node('details', undefined, 'literature-deliverable-group');
+      retry.append(node('summary', '逐篇重试知网全文 · ' + job.cnkiRetryItems.length + ' 篇'));
+      retry.append(node('p', '选择一篇，按完整题名进入知网正常检索与详情页，再获取全文。每次只处理这一篇；不会重新检索候选、批量重试其他文献或进入数据提取。', 'codex-status'));
+      job.cnkiRetryItems.slice(0, 100).forEach(item => {
+        const entry = node('div', undefined, 'literature-confirm');
+        entry.append(node('p', item.title)); entry.append(node('p', item.reason, 'codex-status'));
+        const button = node('button', job.cnkiRetryPaperId === item.id ? '继续这篇知网文献' : '重试这篇知网文献', 'quiet-button'); button.type = 'button';
+        button.setAttribute('aria-label', button.textContent + '：' + item.title);
+        button.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || (!!job.cnkiRetryPaperId && job.cnkiRetryPaperId !== item.id);
+        button.onclick = () => retryLiteratureCnki(mod, item.id); entry.append(button); retry.append(entry);
+      });
+      box.append(retry);
+    }
     if (awaitingAccess) {
       const attention = node('section', undefined, 'literature-confirm'); attention.setAttribute('aria-live', 'polite');
       if (job.deferredOnly !== true && ((job.resumeStage === 'discover' && job.attention?.reason === 'results_unrecognized'
@@ -979,9 +1010,10 @@
         open.onclick = () => openLiteratureBrowser(mod);
         actions.append(open);
       }
-      const resume = node('button', fulltextPaused ? '继续获取全文' : job.resumeStage === 'extract' ? '继续提取' : job.deferredOnly === true ? '补检该来源' : '检查并继续', 'primary-button'); resume.type = 'button';
+      const resume = node('button', fulltextPaused ? (job.cnkiRetryPaperId ? '继续这篇知网文献' : '继续获取全文') : job.resumeStage === 'extract' ? '继续提取' : job.deferredOnly === true ? '补检该来源' : '检查并继续', 'primary-button'); resume.type = 'button';
       resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
-      resume.onclick = () => continueLiterature(mod, fulltextPaused ? { until: 'fulltext' } : {});
+      resume.onclick = () => job.cnkiRetryPaperId && fulltextPaused ? retryLiteratureCnki(mod, job.cnkiRetryPaperId)
+        : continueLiterature(mod, fulltextPaused ? { until: 'fulltext' } : {});
       actions.append(resume);
       if (job.deferredOnly === true && Number.isSafeInteger(job.count) && job.count > 0 && !job.deletedAt) {
         const target = LITERATURE_STAGE_ORDER.indexOf(t.literatureUntil) >= LITERATURE_STAGE_ORDER.indexOf('dedupe') ? t.literatureUntil : 'dedupe';

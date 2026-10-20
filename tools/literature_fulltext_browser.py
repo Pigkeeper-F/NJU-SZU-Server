@@ -196,6 +196,7 @@ class FulltextBrowserFetcher:
             self._binding.update(version=1, target_id=literature_browser._target_id(self._context, self._page))
             self._binding.pop("pending_url_hash", None)
             self._binding.pop("attention_reason", None)
+            self._binding.pop("cnki_flow", None)
             self._write_binding()
         return self._page
 
@@ -244,6 +245,7 @@ class FulltextBrowserFetcher:
             self._binding.pop("target_id", None)
             self._binding.pop("pending_url_hash", None)
             self._binding.pop("attention_reason", None)
+            self._binding.pop("cnki_flow", None)
             self._write_binding()
             self._progress("全文获取：文件已完成并保存，已关闭本任务的文献页面。")
             return {"closed": True}
@@ -434,6 +436,12 @@ class FulltextBrowserFetcher:
 
     def fetch_page(self, url, opts):
         return self._visit(url, opts)
+
+    def fetch_cnki(self, record, opts):
+        # The source flow clicks actual official controls; it never replays a
+        # cached transfer URL or alters the original candidate/search snapshot.
+        from literature_cnki_fulltext import run_cnki
+        return run_cnki(self, record, opts)
 
     def fetch_pdf(self, url, out_path, opts):
         result = self._visit(url, opts, out_path=out_path)
