@@ -1454,3 +1454,17 @@ AI 返回前若当前方案已被编辑/审核/替换或模块不再存在，拒
 官方帮助链接 #download-faostat-link 仅为用户点击后在新标签打开的普通导航（固定 https://www.fao.org/faostat/en/#data/TM，target=_blank、rel=noopener noreferrer），不加载资源或发起前端第三方请求。check-contract 仅豁免这一个完整静态导航标签，其余外部 URL 检查不变。
 
 方案中的普通网页链接不自动填入清单；只预填带已支持文件扩展名的候选地址，用户仍须核对。已有手填清单保留。FAOSTAT 全库包不冒充2024年单年文件；本次不增加数据库连接器、不提高20MB限制、不执行真实下载，也不改变用户方案、审核状态或历史文件。
+
+## 2026-10-20 FAOSTAT 官方整包下载与按年交付
+
+本节更新前述通用20MB下载器的能力边界。download-data 已审核方案包含 FAOSTAT TM/详细贸易矩阵时，“按方案开始下载”直接启动官方获取任务，无需填写文件地址。服务端从固定官方目录 datasets_E.json 定位 TM 的 FileLocation，仅允许 bulks-faostat.fao.org/production/ HTTPS ZIP；不使用模型生成的下载地址。方案解释只读已审核文字，提取年份及明确代码/指标限制，无法确定或不支持的限定应在执行前报错，不忽略限制。原方案与SHA256冻结到任务记录。
+
+新增 API（沿用同源和 X-Workbench 保护）：POST /api/codex/source/start {sessionId,rules,confirm:true,backend?,model?,settings?,credential?} ->202；GET /api/codex/source/status?session=...&id=...；POST /api/codex/source/cancel {sessionId,id}；POST /api/codex/source/resume {sessionId,id,confirm:true,rules}。返回持久化作业 {id,sessionId,kind:'faostat-tm',status,stage,message,progress,config,archive,deliverables,error,createdAt,updatedAt}。状态 running/completed/failed/cancelled/interrupted。进程重启后的旧 running 记录标 interrupted；不自动重新下载，用户可按同一方案继续。刷新网页仅恢复查看原任务，不新建重复下载。每个会话及本进程同一时刻仅允许一个官方整包任务。
+
+新增 tools/source-transfer.js 流式下载（官方 ZIP 上限2GiB），沿用公网DNS校验、IP固定、TLS证书与代理配置；重定向仍限官方主机。记录真实字节、Content-Length、最终地址、ETag/Last-Modified、SHA256。支持带验证器的Range续传，响应不支持续传时从头重下；不把中断文件当作成功。整包缓存仅在大小和SHA复核通过后复用；筛选失败仍保留完整原包。缓存与半成品位于未公开的 .workbench/source-cache、会话 .source-staging 中。
+
+新增 tools/faostat-download.js 与标准库脚本 tools/faostat_filter.py：流式读取ZIP内主CSV，验证安全成员、CRC、字段、年份与行长度，仅筛选所选年份和已明确限制，原列顺序、文本代码、数值、单位、Flag保留；不补零、去重、换算或合并。全库包保留在本次 output/<id>，按年CSV在 input/<id>，来源/配置/行数/哈希报告及筛选脚本在 output/<id>。交接仅交付筛选CSV，不把整库原包自动当作单年输入。CodexBridge.importInput 本地复制上限提升到2GiB，原上传/手动通用小文件下载接口仍为20MB，界面分别说明。
+
+浏览器现有 research_codex_tasks_v1 条目新增可选 sourceJobId、sourceBasis（冻结方案）；不改变旧 download 字段。可见 .source-download-progress 显示实际下载字节与筛选行数，支持停止、同方案继续、下载原包和结果；首次点击及继续均核对当前审核方案。结果仍待人工检查后交接，不自动通过研究验收。新增 source-job 的 run-state.json 供启动器识别运行状态，后台运行时不重启服务。后端版本指纹纳入新增执行文件。
+
+同一API也支持kind='files'：方案已含公开文件链接时自动建任务，每批最多5个、每个2GiB；不含可执行数据源的方案保留兼容手动入口，不宣称已接入任意数据库。通用文件任务与FAO任务共用进度、停止、持久化、继续、文件下载和清洗交接语义。CodexUI.openDownload(mod,basis?,options?)新增可选options.manual=true供旧手动入口兼容；默认优先自动执行已接入的数据源。

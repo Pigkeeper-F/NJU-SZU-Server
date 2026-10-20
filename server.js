@@ -12,6 +12,7 @@ const { spawn } = require('node:child_process');
 const { CodexBridge } = require('./tools/codex-bridge');
 const plotting = require('./tools/plotting');
 const { fetchSource } = require('./tools/source-download');
+const { SourceDownloads } = require('./tools/faostat-download');
 const { LiteratureFlow } = require('./tools/literature-flow');
 const { LiteratureConnector } = require('./tools/literature-connector');
 const { scholarSearch } = require('./tools/scholar-flow');
@@ -19,6 +20,7 @@ const { createLiteratureRuntime } = require('./tools/literature-runtime');
 
 const ROOT = __dirname;
 const codex = new CodexBridge(ROOT);
+const sourceDownloads = new SourceDownloads(ROOT, codex, { recover: require.main === module });
 const scholar = new LiteratureConnector(ROOT, {
   extract: (job, python, onEvent) => require('./tools/literature-extract').runExtractStage({
     bridge: codex, jobDir: job.dir, config: job.config, python, onEvent
@@ -59,7 +61,7 @@ function workflowPrompt(module, executor = 'api') {
     executor === 'api' ? '当前系统只提供文字对话，没有文件读取、下载、代码执行、浏览、数据库或模块操作工具。不能声称已经下载数据、读取未提供的文件、运行计算或生成实际附件。需要外部操作时提供可执行步骤或代码，并让用户提供结果后继续检查。API 接入不等于拥有这些工具。' : ['clean-data', 'calculation', 'result-audit', 'plotting'].includes(module.type) ? '本次是 Codex 本地文件任务。按任务模式读取已上传数据、代码与计算结果；只在允许执行的模块与模式下写入输出目录。只有实际执行成功时才报告完成。' : '本次是本机 Codex 模块对话。当前模块仅提供方案、规则和结果检查的文字指导；没有上传文件、联网浏览、下载或写入执行功能。不要声称已访问网站、读取未上传的文件、运行计算或生成实际附件。',
     '人工审核模块中，AI 只能提供审核建议和证据整理，最终人工决定由用户给出。SOC 是可替换示例，仅在主题适用时采用。',
     module.type === 'literature-mining' ? '网页文献执行面板支持：审核通过获取方案后点击“按审核方案开始执行”，按方案检索 Europe PMC/Crossref/Google Scholar、筛选首批最多3篇、获取开放全文、读取全文或上传材料、提取数据与原文证据；问题会暂停并列出，研究者答复并点击继续后续跑。此普通对话只讨论和补充方案，不自行执行上述工具；材料与进度以面板真实记录为准，不说已完成未发生的操作。方案应明确检索范围、筛选条件、提取字段/单位、验收；复杂来源登录、OCR、图中数值不自动执行。' : '',
-    module.type === 'download-data' ? '数据下载使用上方“按方案下载数据”区域：审核下载方案后点击“按方案开始下载”，核对实际HTTP(S)文件地址与文件名再下载。每次最多5个文件、每个20MB；下载器保留原始文件和下载记录，人工核对后可交给清洗。当前没有数据库网页自动操作、按年查询或分页API连接器。以FAOSTAT为例，应核对数据库域、年份、报告国/伙伴国、商品、指标及单位，并取得来源提供的实际导出文件地址；查询页面不能冒充文件地址。复杂筛选、需登录或超限文件应如实说明待补操作，不转交给文献检索或询问论文纳排、文献检索式和原文提取字段。旧文献批次记录仅作历史参考，不构成下载任务的待办。' : '',
+    module.type === 'download-data' ? '数据下载使用上方“按方案下载数据”区域：用户直接讨论并形成方案，审核后点击“按方案开始下载”才真正执行。FAOSTAT详细贸易矩阵TM已经接入官方整包目录，执行器自动查找官方压缩包、流式下载全量原包，再按方案年份和明确条件筛选CSV；不要求用户查找FAO下载链接或填写配置。方案中写明FAOSTAT TM及年份，未限定的国家/商品/指标保留官方全部记录并明确未筛选。明确限定须遵守，国家/商品代码未能确定时应讨论清楚，不能猜代码或忽略限制。每个原包/结果支持至2GiB，保留整包、来源、SHA256、CRC及行数检查记录，允许停止、刷新找回和继续原任务。方案已有公开HTTP(S)文件地址的数据源通过同一大文件下载任务获取；其他数据库的自动定位或认证接口仍需单独接入，不能声称所有网站都已支持。旧手动文件地址弹窗仍限每个20MB，仅作兼容入口；FAO任务不经过该弹窗。只报告执行面板实际完成的进度，普通AI对话本身不会开始下载；下载成功仍须人工检查后交给清洗。旧文献批次记录仅作历史参考，不构成下载任务待办。' : '',
     '区分用户提供的信息、假设、建议、待确认事项与已验证结果；不编造来源、数值、文献、运行结果或审核结论。保持当前模块职责，交接时说明下游需要的成果及版本。',
     module.type === 'calculation' ? '当前计算方式：' + ({ direct: '直接运行已有代码，不修改计算方法', modify: '按研究者确认的规则修改代码后计算', 'parameter-update': '参数更新后计算', 'activity-data-update': '活动数据更新后计算' }[module.mode] || '尚未选择，请结合用户需求对齐') : '',
     '当前模块工作流：\n' + workflow,
@@ -214,6 +216,22 @@ async function handleCodex(req, res, url) {
     }
     if (req.method === 'GET' && route === '/api/codex/status') return sendJson(res, 200, await codex.status());
     if (req.method === 'POST' && route === '/api/codex/login') return sendJson(res, 200, await codex.login());
+    if (req.method === 'GET' && route === '/api/codex/source/status') return sendJson(res, 200, sourceDownloads.snapshot(url.searchParams.get('session'), url.searchParams.get('id')));
+    if (req.method === 'POST' && ['/api/codex/source/start', '/api/codex/source/resume', '/api/codex/source/cancel'].includes(route)) {
+      const data = JSON.parse(await readBody(req));
+      if (!data || typeof data !== 'object') throw new Error('请求体无效');
+      codex.session(data.sessionId);
+      if (route.endsWith('/cancel')) return sendJson(res, 200, sourceDownloads.cancel(data.sessionId, data.id));
+      if (data.confirm !== true) throw new Error('请先审核并确认开始下载');
+      let generate;
+      if (data.backend === 'codex') generate = (prompt, signal) => codex.compose(prompt, typeof data.model === 'string' ? data.model : null, { signal });
+      else if (data.backend === 'api') {
+        const config = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
+        if (!config.apiKey) throw new Error('请先连接本模块的AI助手以读取方案');
+        generate = (prompt, signal) => callModel(config, [{ role: 'user', content: prompt }], 300000, signal);
+      }
+      return sendJson(res, 202, route.endsWith('/resume') ? sourceDownloads.resume(data.sessionId, data.id, data.rules, generate) : sourceDownloads.start(data.sessionId, data.rules, generate));
+    }
     if (req.method === 'POST' && route === '/api/codex/fetch-source') {
       const data = JSON.parse(await readBody(req));
       if (!data || data.confirm !== true || typeof data.rules !== 'string' || !data.rules.trim() || data.rules.length > 20000) throw new Error('请先确认下载规则');
@@ -1427,7 +1445,7 @@ if (require.main === module) {
     if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
     res.writeHead(405, { Allow: 'GET, HEAD, POST' }); res.end();
   }).listen(PORT, HOST, () => console.log('Flow Agent server started: http://localhost:' + PORT));
-  function shutdown() { codex.close(); server.close(); }
+  function shutdown() { sourceDownloads.close(); codex.close(); server.close(); }
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }

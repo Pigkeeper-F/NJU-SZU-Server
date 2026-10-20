@@ -28,7 +28,8 @@ async function main(){
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../js/store.js'),'utf8'),{window:browser});
   const store=browser.Store, mod=store.addModule('下载数据');
   const task={busy:false}; const files=[{name:'fixture-TM_2024.csv',group:'input',size:42}];
-  const context=vm.createContext({URL,root:{TaskManager:{rulesForModule:()=>({text:'历史规则',version:1})}},Store:store,
+  const auto=[];
+  const context=vm.createContext({URL,startSourceDownload:(...args)=>auto.push(args),root:{TaskManager:{rulesForModule:()=>({text:'历史规则',version:1})}},Store:store,
     task:()=>task, saved,document:{getElementById:get},render(){},persist(){},ModuleSpace:{render(){}},
     session:async id=>{saved[id]=saved[id]||{};return 'fixture-session';},
     request:async(url,options)=>{calls.push({url,body:options?JSON.parse(options.body):null});return url.includes('fetch-source')
@@ -41,6 +42,9 @@ async function main(){
   assert.equal(context.subject.openDownload(store.getState().modules[0]),false,'未审核方案不能用旧规则授权');
   store.approveDoc(mod.id);
   assert.equal(context.subject.openDownload(store.getState().modules[0]),true);
+  assert.equal(auto.length,1,'FAOSTAT方案直接走自动下载，不要求用户填地址');
+  assert.equal(get('download-dialog').open,false);
+  assert.equal(context.subject.openDownload(store.getState().modules[0],null,{manual:true}),true);
   assert.equal(get('download-dialog').open,true);
   assert.match(get('download-basis').textContent,/TM 2024/);
   assert.equal(get('download-sources').value,'https://files.fixture.org/TM_2024.csv');
@@ -59,19 +63,19 @@ async function main(){
     assert.equal(JSON.stringify(store.getState().modules[0].doc),approvedBytes);
   }
   store.saveDoc(mod.id,'FAOSTAT TM 2024；来源页面 https://www.fao.org/faostat/en/#data/TM');store.approveDoc(mod.id);
-  context.subject.openDownload(store.getState().modules[0]);
+  context.subject.openDownload(store.getState().modules[0],null,{manual:true});
   assert.equal(get('download-sources').value,'','方案的数据库查询页不能预填成文件');
   assert.equal(get('download-start').disabled,true);
   assert.match(get('download-status').textContent,/尚未填写/);
   store.saveDoc(mod.id,'FAOSTAT TM 2024；https://files.fixture.org/TM_2024.csv');store.approveDoc(mod.id);
-  context.subject.openDownload(store.getState().modules[0]);
+  context.subject.openDownload(store.getState().modules[0],null,{manual:true});
   // Freeze approval at actual execution too: editing while the dialog is open must block.
   store.saveDoc(mod.id,'修改后的下载范围');
   await get('download-start').onclick();
   assert.equal(calls.length,0);
   assert.match(get('download-status').textContent,/重新审核/);
   store.saveDoc(mod.id,'FAOSTAT TM 2024；https://files.fixture.org/TM_2024.csv');store.approveDoc(mod.id);
-  context.subject.openDownload(store.getState().modules[0]);
+  context.subject.openDownload(store.getState().modules[0],null,{manual:true});
   await get('download-start').onclick();
   assert.equal(calls[0].url,'/api/codex/fetch-source');
   assert.equal(calls[0].body.confirm,true);
@@ -81,9 +85,9 @@ async function main(){
   assert.equal(saved[mod.id].download.files.length,1);
   assert.equal(context.subject.openDownload({id:'literature',type:'literature-mining'}),false);
   const prompt=workflowPrompt({type:'download-data'},'codex');
-  assert.match(prompt,/实际HTTP\(S\)文件地址/);
+  assert.match(prompt,/无需|不要求用户查找FAO下载链接/);
   assert.doesNotMatch(prompt,/网页文献执行面板支持|首批最多3篇/);
-  assert.match(prompt,/当前没有数据库网页自动操作、按年查询或分页API连接器/);
+  assert.match(prompt,/自动查找官方压缩包/);
   assert.match(workflowPrompt({type:'literature-mining'},'codex'),/网页文献执行面板支持/);
   // The obsolete executor must reject a download module before any network operation.
   const legacyContext=vm.createContext({});

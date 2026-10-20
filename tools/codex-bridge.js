@@ -209,7 +209,7 @@ class CodexBridge {
     for (const name of [...new Set(names)]) {
       if (typeof name !== 'string') throw new Error('无效文件名');
       const original = this.download(sourceId, sourceGroup, name);
-      if (fs.statSync(original).size > 20 * 1024 * 1024) throw new Error('文件超过 20MB');
+      if (fs.statSync(original).size > 2 * 1024 ** 3) throw new Error('交接文件超过2GiB上限');
       if (targetId === sourceId && sourceGroup === 'input') { imported.push(name); continue; }
       const storedName = randomUUID().slice(0, 8) + '-' + path.basename(name).replace(/^[0-9a-f]{8}-/, '');
       fs.copyFileSync(original, path.join(dir, 'input', storedName), fs.constants.COPYFILE_EXCL);

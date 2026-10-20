@@ -1302,12 +1302,104 @@
     if (!busy) document.getElementById('download-status').textContent = parsed.error || '已填写 ' + parsed.sources.length + ' 个地址。开始前请核对其年份、范围和文件名；查询页面可能无法直接下载。';
     return parsed;
   }
-  function openDownload(mod, basis) {
+  function sourceRequestBody(mod, basis) {
+    const t = task(mod.id), body = { sessionId: saved[mod.id]?.sessionId, rules: basis.text, confirm: true, backend: t.backend, model: t.model || null };
+    if (t.backend === 'api') {
+      try { body.settings = Store.llmSettings.resolve(Store.llmSettings.read()); } catch (_) { body.settings = null; }
+      body.credential = root.ApiKeys?.getActiveCredential?.() || null;
+    }
+    return body;
+  }
+  async function startSourceDownload(mod, basis, resume = false) {
+    const t = task(mod.id);
+    if (t.busy || root.ModuleSpace?.isBusy()) return false;
+    t.busy = true; t.error = ''; t.job = null; render();
+    try {
+      const sid = await session(mod.id);
+      const current = Store.getState().modules.find(item => item.id === mod.id);
+      const approved = current && basisForDownload(current, basis.sourceType);
+      if (!approved || approved.text !== basis.text) throw new Error('方案已变化，请重新审核后再执行');
+      const body = sourceRequestBody(mod, basis); body.sessionId = sid;
+      if (resume) body.id = saved[mod.id]?.sourceJobId;
+      const job = await request('/api/codex/source/' + (resume ? 'resume' : 'start'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      saved[mod.id] = { ...saved[mod.id], sourceJobId: job.id, sourceBasis: { ...basis } }; persist();
+      t.sourceJob = job;
+      Store.rejectRun(mod.id, 'data', '已按当前方案启动下载，新的交付须重新检查'); Store.setModuleStatus(mod.id, 'doing');
+      await watchSourceDownload(mod.id, job.id);
+    } catch (error) { t.error = error.message; }
+    finally { if (!t.sourceJob || t.sourceJob.status !== 'running') t.busy = false; render(); ModuleSpace.render(); }
+    return true;
+  }
+  async function watchSourceDownload(id, jobId) {
+    const t = task(id);
+    if (t.sourceWatching) return;
+    t.sourceWatching = true; t.busy = true; t.sourceWatchError = ''; render();
+    try {
+      while (true) {
+        const job = await request('/api/codex/source/status?session=' + encodeURIComponent(saved[id]?.sessionId || '') + '&id=' + encodeURIComponent(jobId));
+        t.sourceJob = job; t.files = job.files || t.files; render();
+        if (job.status !== 'running') {
+          const stamp = job.id + ':' + job.status;
+          if (saved[id]?.sourceDelivered !== stamp) {
+            const basis = saved[id]?.sourceBasis;
+            if (job.status === 'completed' && basis) {
+              saved[id].download = { ...basis, sources: job.kind === 'faostat-tm' ? [{ url: job.archive?.finalUrl || '' }] : [], files: job.deliverables || [], failures: [], confirmed: false, sourceJobId: job.id };
+              Store.markRun(id, { dir: '.workbench/' + saved[id].sessionId + '/input', artifacts: job.deliverables.map(file => ({ name: file.storedName, size: file.size })) });
+              Store.appendMessage(id, job.kind === 'faostat-tm' ? '官方贸易矩阵原包已完整保存；已按方案筛选 ' + (job.config?.years || []).join('、') + ' 年，共 ' + (job.result?.rowsSelected || 0).toLocaleString() + ' 行。原包、按年CSV、来源与筛选报告可在下载任务中保存。尚未通过人工验收，请检查后再交给清洗。' : '已按审核方案下载 ' + job.deliverables.length + ' 个文件，原始文件和来源记录已保存。请检查后再交给清洗。', 'system');
+              t.filesOpen = true;
+            } else Store.appendMessage(id, '下载任务' + ({ failed: '未完成', cancelled: '已停止', interrupted: '被中断' }[job.status] || job.status) + '：' + (job.error || job.message) + '。已有原件和断点保留，可在同一方案下继续。', 'system');
+            saved[id].sourceDelivered = stamp; persist();
+          }
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1200));
+      }
+    } catch (error) { t.sourceWatchError = '暂时无法读取下载进度：' + error.message + '。点击“刷新下载状态”找回原任务。'; }
+    finally { t.sourceWatching = false; t.busy = t.sourceJob?.status === 'running'; render(); ModuleSpace.render(); }
+  }
+  function sourceDownloadPanel(mod, t) {
+    const job = t.sourceJob;
+    if (!job && !saved[mod.id]?.sourceJobId) return;
+    const box = node('section', undefined, 'source-download-progress');
+    box.append(node('h3', job?.kind === 'faostat-tm' ? 'FAOSTAT 官方贸易矩阵下载' : '按方案下载任务'));
+    const labels = { running: '进行中', completed: '已完成 · 待人工检查', failed: '未完成', cancelled: '已停止', interrupted: '已中断' };
+    box.append(node('p', (labels[job?.status] || '正在找回任务') + ' · ' + (job?.message || '正在读取进度')));
+    if (job?.config) box.append(node('p', '年份：' + job.config.years.join('、') + '；' + job.config.scopeNote, 'codex-status'));
+    const p = job?.progress || {};
+    if (p.bytes !== undefined) {
+      const mib = value => (value / 1024 ** 2).toFixed(1) + ' MiB';
+      box.append(node('p', '已接收 ' + mib(p.bytes) + (p.totalBytes ? ' / ' + mib(p.totalBytes) : '') + (p.resumedBytes ? '（从断点继续）' : ''), 'codex-status'));
+      if (p.totalBytes) { const bar = node('progress'); bar.max = p.totalBytes; bar.value = p.bytes; bar.setAttribute('aria-label', '原始文件下载进度'); box.append(bar); }
+    }
+    if (p.rowsRead !== undefined) box.append(node('p', '已扫描 ' + p.rowsRead.toLocaleString() + ' 行，保留 ' + (p.rowsSelected || 0).toLocaleString() + ' 行。原始列、代码、单位、数值与标记保留。', 'codex-status'));
+    const actions = node('div', undefined, 'codex-toolbar');
+    const refresh = node('button', '刷新下载状态', 'quiet-button'); refresh.type = 'button'; refresh.disabled = t.sourceWatching;
+    refresh.onclick = () => watchSourceDownload(mod.id, saved[mod.id].sourceJobId); actions.append(refresh);
+    if (job?.status === 'running') {
+      const stop = node('button', '停止下载任务', 'quiet-button'); stop.type = 'button'; stop.onclick = async () => {
+        stop.disabled = true;
+        try { await request('/api/codex/source/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: saved[mod.id].sessionId, id: job.id }) }); }
+        catch (error) { t.sourceWatchError = error.message; render(); }
+      }; actions.append(stop);
+    } else if (job && job.status !== 'completed') {
+      const resume = node('button', '按原方案继续', 'primary-button'); resume.type = 'button'; resume.disabled = t.busy;
+      resume.onclick = () => { const basis = basisForDownload(mod, saved[mod.id]?.sourceBasis?.sourceType); if (!basis || basis.text !== saved[mod.id]?.sourceBasis?.text) { t.error = '方案已变化，请审核后开始新任务，原下载文件保留'; render(); return; } startSourceDownload(mod, basis, true); }; actions.append(resume);
+    }
+    const addDownload = (label, group, name) => { const link = node('a', label, 'quiet-button'); link.href = '/api/codex/download?session=' + encodeURIComponent(saved[mod.id].sessionId) + '&group=' + group + '&name=' + encodeURIComponent(name); actions.append(link); };
+    if (job?.archive) addDownload('下载官方完整原包', 'output', job.archive.name);
+    (job?.deliverables || []).forEach(file => addDownload('下载 ' + file.name, 'input', file.storedName));
+    if (job?.status === 'completed') addDownload('下载来源与检查报告', 'output', job.id + (job.kind === 'faostat-tm' ? '/source-and-filter-report.json' : '/source-report.json'));
+    box.append(actions);
+    if (job?.error || t.sourceWatchError) box.append(node('p', t.sourceWatchError || job.error, 'codex-error'));
+    panel.append(box);
+  }
+  function openDownload(mod, basis, options = {}) {
     if (mod?.type !== 'download-data') return false;
     const t = task(mod.id);
     if (t.busy || root.ModuleSpace?.isBusy()) return false;
     basis = basis || basisForDownload(mod);
     if (!basis?.text) { t.error = '请先确认上方下载规则，或审核下载方案，再开始下载。'; render(); return false; }
+    if (!options.manual && ((/FAOSTAT|fao\.org/i.test(basis.text) && /贸易矩阵|Detailed\s*trade\s*matrix|\bTM\b/i.test(basis.text)) || /https?:\/\/[^\s]+\.(csv|tsv|xlsx|xls|json|txt|zip|pdf|xml|md)(?:[?\s]|$)/i.test(basis.text))) { startSourceDownload(mod, basis); return true; }
     downloadModuleId = mod.id; downloadBasis = basis;
     document.getElementById('download-basis').textContent = basis.label + '\n' + basis.text;
     const previous = saved[mod.id]?.download?.sources;
@@ -1360,6 +1452,7 @@
   async function handoffDownload(mod) {
     const t = task(mod.id), run = saved[mod.id]?.download;
     if (t.busy || !run?.files.length) return;
+    if (saved[mod.id]?.sourceJobId && (run.sourceJobId !== saved[mod.id].sourceJobId || t.sourceJob?.status !== 'completed')) { t.error = '当前下载任务尚未完成，请检查当前结果后再交接'; render(); return; }
     if (run.failures.length) { t.error = '仍有下载失败，请补齐清单后再交给清洗。成功文件已保留。'; render(); return; }
     const basis = basisForDownload(mod, run.sourceType);
     if (!basis || basis.text !== run.text) { t.error = '下载规则已变化，请先按当前规则重新核查或下载文件。'; render(); return; }
@@ -1426,7 +1519,7 @@
     panel.replaceChildren();
     if (mod.type === 'download-data') {
       panel.append(node('h3', '按方案下载数据'));
-      panel.append(node('p', '讨论并审核下载方案 → 核对实际文件地址 → 开始下载 → 检查文件与来源。每次最多5个公开文件，每个20MB；数据库查询页面需先取得实际导出文件地址。', 'codex-status'));
+      panel.append(node('p', '直接讨论 → 形成并审核方案 → 点击开始下载。FAOSTAT贸易矩阵自动定位官方整包并按年份筛选；方案已有文件地址的数据源也通过同一任务下载。大文件流式保存，每个文件支持至2GiB，无需手动找FAO链接。', 'codex-status'));
     }
     if (mod.type === 'calculation') panel.append(node('p', '输入可来自下载数据、数据清洗、文献挖掘中的一条或多条路径。将本次需要的成果文件上传到此处，再确定计算方式与方案。', 'codex-status'));
     const row = node('div', undefined, 'codex-toolbar');
@@ -1486,7 +1579,7 @@
     const refreshButton = node('button', '刷新文件', 'quiet-button'); refreshButton.type = 'button'; refreshButton.disabled = t.busy; refreshButton.onclick = () => refresh(mod.id); fileRow.append(refreshButton);
     if (mod.type === 'download-data') {
       const start = node('button', '按方案开始下载', 'primary-button'); start.type = 'button'; start.disabled = t.busy || !basisForDownload(mod) || !!root.ModuleSpace?.isBusy(); start.onclick = () => openDownload(mod); fileRow.append(start);
-      const handoff = node('button', saved[mod.id]?.download?.confirmed ? '查看已交接的清洗模块' : '确认文件并进入清洗', 'quiet-button'); handoff.type = 'button'; handoff.disabled = t.busy || !saved[mod.id]?.download?.files.length || !!saved[mod.id]?.download?.failures.length; handoff.onclick = () => handoffDownload(mod); fileRow.append(handoff);
+      const handoff = node('button', saved[mod.id]?.download?.confirmed ? '查看已交接的清洗模块' : '确认文件并进入清洗', 'quiet-button'); handoff.type = 'button'; handoff.disabled = t.busy || !saved[mod.id]?.download?.files.length || !!saved[mod.id]?.download?.failures.length || !!t.sourceJob && (t.sourceJob.status !== 'completed' || saved[mod.id]?.download?.sourceJobId !== t.sourceJob.id); handoff.onclick = () => handoffDownload(mod); fileRow.append(handoff);
       const run = saved[mod.id]?.download;
       fileRow.append(node('span', run ? '下载成功 ' + run.files.length + ' 个，失败 ' + run.failures.length + ' 个；' + (run.confirmed ? '已确认交给清洗' : '待人工核查') : '先确认规则，下载后检查文件，再交给清洗。', 'codex-status'));
     }
@@ -1510,6 +1603,7 @@
       row.append(stop);
     }
     panel.append(fileRow);
+    if (mod.type === 'download-data') sourceDownloadPanel(mod, t);
     if (mod.type === 'plotting') plotPanel(mod,t);
     if (mod.type === 'result-audit') panel.append(node('p', '先讨论并在上方确认核查原则，或直接上传已有标准；再核查结果、讨论定位。每个标准文件上限 20MB。', 'codex-status'));
     if (mod.type === 'clean-data' && saved[mod.id]?.inputBatch) panel.append(node('p', '当前交接输入 ' + saved[mod.id].inputBatch.names.length + ' 个；历史原始文件保留，不自动合并到本次清洗。', 'codex-status'));
@@ -1525,7 +1619,7 @@
       link.href = '/api/codex/download?session=' + saved[mod.id]?.sessionId + '&group=' + file.group + '&name=' + encodeURIComponent(file.name); list.append(link);
     });
     files.append(list); fileRow.append(files);
-    if (t.busy) panel.append(node('p', t.job ? 'Codex 正在处理…' : '上传或启动中…', 'codex-status'));
+    if (t.busy && !t.sourceJob) panel.append(node('p', t.job ? 'Codex 正在处理…' : '上传或启动中…', 'codex-status'));
     if (t.job?.events.length) { const log = node('details'); log.open = t.logOpen; log.ontoggle = () => { t.logOpen = log.open; }; log.append(node('summary', '执行进度')); log.append(node('pre', t.job.events.join('\n'))); panel.append(log); }
     if (t.error) panel.append(node('p', t.error, 'codex-error'));
   }
@@ -1557,5 +1651,6 @@
     if (saved[id].sessionId) refresh(id);
     if (saved[id].jobId) watch(id, saved[id].jobId).catch(() => {});
     if (saved[id].literatureJobId) watchLiterature(id, saved[id].literatureJobId).catch(() => {});
+    if (saved[id].sourceJobId) watchSourceDownload(id, saved[id].sourceJobId).catch(() => {});
   });
 })(window);

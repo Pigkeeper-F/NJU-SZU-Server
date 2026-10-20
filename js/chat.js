@@ -446,7 +446,7 @@
     chip.setAttribute('data-status', st);
     bar.appendChild(chip);
     var downloadPending = mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed');
-    bar.appendChild(el('span', 'status-hint', downloadPending ? '审核下载方案 → 核对文件地址并下载 → 核查成果后交接' : STATUS_HINT[st] || ''));
+    bar.appendChild(el('span', 'status-hint', downloadPending ? '审核下载方案 → 平台自动获取 → 核查成果后交接' : STATUS_HINT[st] || ''));
     if (mod.type === 'manual-review') bar.appendChild(el('span', 'status-hint', '这是成果审核：由你查看结果和核查报告，在对话中记录审核对象、通过或退回理由，再提交并选择通过或打回。退回上游修改需手动切换对应模块。'));
 
     var actions = el('div', 'status-actions');

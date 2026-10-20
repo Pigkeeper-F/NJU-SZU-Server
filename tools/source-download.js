@@ -90,7 +90,8 @@ async function publicFetch(raw, options, lookup) {
   const proxy = proxyFor(target.protocol);
   return new Promise((resolve, reject) => {
     const client = target.protocol === 'https:' ? https : http;
-    const request = client.get(target, {
+    const request = client.request(target, {
+      method: options.method || 'GET', headers: { 'User-Agent': 'Mozilla/5.0 ResearchWorkbench/1.0', Accept: '*/*', ...(options.headers || {}) },
       signal: options.signal,
       ...(proxy ? { agent: proxyAgent(target, proxy, options.signal) } : {}),
       // Pin the validated DNS answer, including when Node requests all addresses.
@@ -105,6 +106,7 @@ async function publicFetch(raw, options, lookup) {
         headers: { get: name => response.headers[name.toLowerCase()] || null }, body: response });
     });
     request.once('error', reject);
+    request.end();
   });
 }
 async function fetchSource(source, options = {}) {
@@ -144,4 +146,4 @@ async function fetchSource(source, options = {}) {
   return { name, size, data, finalUrl: url.href, sha256: createHash('sha256').update(data).digest('hex') };
   } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); }
 }
-module.exports = { fetchSource, validateSource, privateAddress, MAX_BYTES, proxyFor };
+module.exports = { fetchSource, validateSource, privateAddress, MAX_BYTES, proxyFor, publicFetch };

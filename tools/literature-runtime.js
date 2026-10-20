@@ -33,7 +33,10 @@ const BACKEND_FILES = [
   'tools/literature_cnki_fulltext.py',
   'tools/literature_extract.py',
   'tools/scholar-flow.js',
-  'tools/source-download.js'
+  'tools/source-download.js',
+  'tools/source-transfer.js',
+  'tools/faostat-download.js',
+  'tools/faostat_filter.py'
 ];
 
 function normalizedRoot(root) {

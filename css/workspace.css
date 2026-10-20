@@ -988,3 +988,11 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 #download-dialog .dialog-actions{margin-top:8px}
 #download-dialog .primary-button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
 @media(max-width:680px){#download-dialog{padding:18px}}
+
+/* 官方数据源与通用大文件任务共用结果区。 */
+.source-download-progress{margin:14px 0;padding:16px 18px;border:1px solid var(--border);border-radius:10px;background:#f8fafb}
+.source-download-progress h3{margin:0 0 8px;font-size:15px}
+.source-download-progress p{margin:7px 0;line-height:1.7}
+.source-download-progress progress{display:block;width:100%;height:12px;margin:10px 0;accent-color:var(--accent)}
+.source-download-progress .codex-toolbar{margin-top:12px;flex-wrap:wrap}
+.source-download-progress a{text-decoration:none;display:inline-block}
