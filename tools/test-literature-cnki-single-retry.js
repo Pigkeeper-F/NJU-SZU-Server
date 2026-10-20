@@ -90,6 +90,32 @@ async function main() {
   assert.equal(attention.cnkiRetryPaperId, 'CNKI-001'); assert.equal(attention.resumeStage, 'fulltext');
   assert.throws(() => connector.advance(paused.id, { until: 'export' }), /继续这篇知网文献/);
   assert.throws(() => connector.retryCnki(paused.id, 'CNKI-002'), /上一篇/);
+
+  // A broken legacy popup witness is recoverable only via an explicit restart
+  // of the already-bound single paper. Normal retry never gets this flag.
+  const reposition = fixture(connector, { cnkiRetryPaperId: 'CNKI-001' });
+  let restartArgs;
+  connector.runStage = async (_script, args, _job, event) => {
+    restartArgs = args; event({ type: 'attention', stage: 'verification', message: '等待人工核对入口' });
+  };
+  connector.restartCnki(reposition.id, 'CNKI-001'); await finish(connector, reposition.id);
+  assert.deepEqual(restartArgs, ['--resume', '--only', 'CNKI-001', '--retry-unavailable', '--limit', '1', '--restart-cnki']);
+  assert.equal(connector.snapshot(reposition.id).cnkiRetryPaperId, 'CNKI-001');
+  assert.throws(() => connector.advance(reposition.id, { until: 'export' }), /继续这篇知网文献/);
+  connector.retryCnki(reposition.id, 'CNKI-001'); await finish(connector, reposition.id);
+  assert.deepEqual(restartArgs, ['--resume', '--only', 'CNKI-001', '--retry-unavailable', '--limit', '1'], 'ordinary continue never restarts the title lookup');
+  const unbound = fixture(connector);
+  assert.throws(() => connector.restartCnki(unbound.id, 'CNKI-001'), /只能重新定位/);
+  assert.throws(() => connector.restartCnki(reposition.id, 'CNKI-002'), /只能重新定位/);
+  const completedBound = fixture(connector, { status: 'completed', cnkiRetryPaperId: 'CNKI-001' });
+  assert.throws(() => connector.restartCnki(completedBound.id, 'CNKI-001'), /只能重新定位/);
+  const fetchedBound = fixture(connector, { status: 'failed', cnkiRetryPaperId: 'CNKI-001' });
+  const fetchedState = JSON.parse(fs.readFileSync(path.join(fetchedBound.dir, 'fulltext', 'status.json')));
+  fetchedState.items[0].status = 'fetched_pdf'; write(path.join(fetchedBound.dir, 'fulltext', 'status.json'), fetchedState);
+  assert.throws(() => connector.restartCnki(fetchedBound.id, 'CNKI-001'), /只能重试/);
+  const downstreamRestart = fixture(connector, { cnkiRetryPaperId: 'CNKI-001' });
+  write(path.join(downstreamRestart.dir, 'extraction', 'saved.json'), {});
+  assert.throws(() => connector.restartCnki(downstreamRestart.id, 'CNKI-001'), /只能重试/);
   const restarted = new LiteratureConnector(root, { prepare: async () => 'fixture-python' });
   assert.equal(restarted.snapshot(paused.id).cnkiRetryPaperId, 'CNKI-001');
   assert.throws(() => restarted.advance(paused.id, { until: 'fulltext' }), /继续这篇知网文献/);

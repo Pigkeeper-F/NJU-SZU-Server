@@ -381,16 +381,19 @@
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
-  async function retryLiteratureCnki(mod, paperId) {
+  async function retryLiteratureCnki(mod, paperId, restart = false) {
     const t = task(mod.id), job = t.literatureJob;
     if (t.busy || t.literatureBusy || root.LiteratureUI?.isBusy() || !job?.id || job.deletedAt || job.status === 'running') return;
     if (!Array.isArray(job.cnkiRetryItems) || !job.cnkiRetryItems.some(item => item.id === paperId)) {
       t.literatureError = '这篇文献不在当前可重试的知网清单中，请刷新任务状态后再操作。'; render(); return;
     }
+    if (restart === true && (job.cnkiRetryPaperId !== paperId || !['needs_attention', 'failed'].includes(job.status))) {
+      t.literatureError = '只能重新定位当前已暂停的这篇知网文献，请刷新任务状态后再操作。'; render(); return;
+    }
     t.literatureBusy = true; t.literatureError = ''; render();
     try {
       await checkLiteratureRuntime(job.config?.sources || []);
-      const next = await request('/api/literature/retry-cnki', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const next = await request(restart === true ? '/api/literature/restart-cnki' : '/api/literature/retry-cnki', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: job.id, paperId }) });
       if (next?.id !== job.id) throw new Error('单篇全文任务标识不符，请刷新原任务核对。');
       applyLiteratureJob(mod, next);
@@ -990,6 +993,12 @@
         button.setAttribute('aria-label', button.textContent + '：' + item.title);
         button.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || (!!job.cnkiRetryPaperId && job.cnkiRetryPaperId !== item.id);
         button.onclick = () => retryLiteratureCnki(mod, item.id); entry.append(button); retry.append(entry);
+        if (job.status === 'failed' && job.cnkiRetryPaperId === item.id) {
+          const restart = node('button', '重新定位这篇知网文献', 'quiet-button'); restart.type = 'button';
+          restart.title = '从本篇的正常知网检索页重新执行一次；保留原窗口，不重跑其他文献。';
+          restart.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+          restart.onclick = () => retryLiteratureCnki(mod, item.id, true); entry.append(restart);
+        }
       });
       box.append(retry);
     }
@@ -1015,6 +1024,12 @@
       resume.onclick = () => job.cnkiRetryPaperId && fulltextPaused ? retryLiteratureCnki(mod, job.cnkiRetryPaperId)
         : continueLiterature(mod, fulltextPaused ? { until: 'fulltext' } : {});
       actions.append(resume);
+      if (fulltextPaused && job.cnkiRetryPaperId && job.cnkiRetryItems?.some(item => item.id === job.cnkiRetryPaperId)) {
+        const restart = node('button', '重新定位这篇知网文献', 'quiet-button'); restart.type = 'button';
+        restart.title = '从本篇的正常知网检索页重新执行一次；保留原窗口，不重跑其他文献。';
+        restart.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+        restart.onclick = () => retryLiteratureCnki(mod, job.cnkiRetryPaperId, true); actions.append(restart);
+      }
       if (job.deferredOnly === true && Number.isSafeInteger(job.count) && job.count > 0 && !job.deletedAt) {
         const target = LITERATURE_STAGE_ORDER.indexOf(t.literatureUntil) >= LITERATURE_STAGE_ORDER.indexOf('dedupe') ? t.literatureUntil : 'dedupe';
         const targets = { dedupe: '去重', fulltext: '获取全文', extract: '提取', validate: '校验', export: '导出' };

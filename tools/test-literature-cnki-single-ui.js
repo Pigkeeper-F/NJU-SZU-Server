@@ -32,10 +32,21 @@ async function main() {
   const invalid = harness(); await invalid.subject({ id: 'module-fixture' }, 'CNKI-013'); assert.equal(invalid.calls.length, 0);
   assert.match(invalid.state.literatureError, /不在当前可重试/);
   const busy = harness({ literatureBusy: true }); await busy.subject({ id: 'module-fixture' }, 'CNKI-007'); assert.equal(busy.calls.length, 0);
+  const restart = harness(); restart.state.literatureJob.cnkiRetryPaperId = 'CNKI-007';
+  await restart.subject({ id: 'module-fixture' }, 'CNKI-007', true);
+  assert.deepEqual(restart.calls[1], { url: '/api/literature/restart-cnki', body: { id: 'original-job', paperId: 'CNKI-007' } });
+  assert.equal(restart.watched[0][1], 'original-job');
+  for (const patch of [{ cnkiRetryPaperId: null }, { cnkiRetryPaperId: 'CNKI-008' }, { status: 'completed', cnkiRetryPaperId: 'CNKI-007' }]) {
+    const blocked = harness(); Object.assign(blocked.state.literatureJob, patch);
+    await blocked.subject({ id: 'module-fixture' }, 'CNKI-007', true); assert.equal(blocked.calls.length, 0);
+    assert.match(blocked.state.literatureError, /只能重新定位/);
+  }
   assert.ok(source.includes("'重试这篇知网文献'") && source.includes("'继续这篇知网文献'"));
   assert.ok(source.includes('job.cnkiRetryItems.slice(0, 100)'));
   assert.ok(source.includes('canAdvance && !job.cnkiRetryPaperId'), 'failed single-paper run must not offer a broad stage retry');
   assert.ok(source.includes('retryLiteratureCnki(mod, job.cnkiRetryPaperId)'), 'attention resume preserves the bound single-paper scope');
+  assert.ok(source.includes('重新定位这篇知网文献') && source.includes('retryLiteratureCnki(mod, job.cnkiRetryPaperId, true)'));
+  assert.ok(source.includes('保留原窗口，不重跑其他文献'));
   console.log('LITERATURE_CNKI_SINGLE_UI_TESTS_PASS');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

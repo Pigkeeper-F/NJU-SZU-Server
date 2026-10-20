@@ -172,8 +172,11 @@ class FulltextBrowserFetcher:
         return self._context
 
     def _find_bound_page(self):
+        return self._find_target_page(self._binding.get("target_id"))
+
+    def _find_target_page(self, wanted):
+        """Locate only an exact target already recorded as task owned."""
         context = self._connect()
-        wanted = self._binding.get("target_id")
         if wanted:
             for page in context.pages:
                 try:
@@ -242,6 +245,16 @@ class FulltextBrowserFetcher:
                 return {"closed": False}
             page.close(run_before_unload=False)
             self._page = None
+            flow = self._binding.get("cnki_flow") or {}
+            cleanup_id = flow.get("cleanup_target_id") if isinstance(flow, dict) else None
+            if cleanup_id and cleanup_id != self._binding.get("target_id"):
+                cleanup = self._find_target_page(cleanup_id)
+                if cleanup is not None and not cleanup.is_closed():
+                    try:
+                        cleanup.close(run_before_unload=False)
+                    except Exception:
+                        self._progress("全文获取：文件已保存，任务的旧定位页未能关闭，请手动关闭该旧页。")
+                        return {"closed": False}
             self._binding.pop("target_id", None)
             self._binding.pop("pending_url_hash", None)
             self._binding.pop("attention_reason", None)

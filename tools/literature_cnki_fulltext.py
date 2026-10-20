@@ -7,6 +7,7 @@ caller owns artifact validation/status persistence and closing a successful tab.
 from __future__ import annotations
 
 import hashlib
+import copy
 import re
 import unicodedata
 from urllib.parse import quote, urlsplit
@@ -20,6 +21,12 @@ CONTROLS = "a,button,input[type=button],input[type=submit]"
 WAIT_SECONDS = 60.0
 _CONTROL_LABEL_JS = "e => [e.getAttribute('aria-label'), e.innerText, e.value, e.getAttribute('title'), e.querySelector('img')?.alt].map(v => String(v || '').trim()).find(Boolean) || ''"
 _CONTROL_READY_JS = "e => e.isConnected && !e.disabled && e.getAttribute('aria-disabled') !== 'true'"
+_POPUP_MESSAGES = {
+    "extra": "知网本次点击打开了多个待确认窗口，已暂停；请核对任务页面和下载窗口，避免重复下载。",
+    "origin": "知网下载窗口的来源或PDF文件尚未通过官方校验，已暂停；请保留该窗口核对，不会重复点击下载。",
+    "owner": "知网下载窗口与本次任务的打开关系无法核对，已暂停；请保留窗口核对。",
+    "handoff_error": "知网下载窗口已出现，但任务绑定交接未完成，已暂停；请保留窗口后继续核对。",
+}
 
 # Returns positions in the same exact selector used by a subsequent locator.
 # It does not evaluate onclick handlers, fetch hidden endpoints, or expose hrefs.
@@ -38,7 +45,10 @@ _CNKI_UI_JS = r"""/* literature_cnki_fulltext_ui */ () => {
   const label = e => [e.getAttribute('aria-label'),e.innerText,e.value,e.getAttribute('title'),e.querySelector('img')?.alt].map(v=>String(v||'').trim()).find(Boolean)||'';
   const controls=Array.from(document.querySelectorAll('a,button,input[type=button],input[type=submit]')).map((e,index)=>({index,text:label(e),visible:visible(e),enabled:!e.disabled&&e.getAttribute('aria-disabled')!=='true'})).filter(e=>e.visible);
   const head=(document.body?.innerText||'').slice(0,8000);
+  const paymentDialog=Array.from(document.querySelectorAll('[role="dialog"],.modal,.layui-layer-dialog,.pay-dialog,.purchase-dialog')).filter(visible)
+    .some(e=>/购买|付费|支付|充值|订阅|purchase|payment|buy access|subscribe/i.test(text(e)));
   return {queries,rowSelector,rows,titles,controls,
+    purchase_required:paymentDialog || /请购买全文|需付费|购买后(?:下载|阅读)|支付后(?:下载|阅读)|需支付|purchase (?:this article|access) to/i.test(head),
     generating:/正在(?:生成|准备|下载)|文件(?:生成|准备)中|下载准备中|generating (?:the )?(?:file|pdf)|preparing (?:the )?download/i.test(head)};
 }"""
 
@@ -148,6 +158,19 @@ def _download_element(page):
                     pass
 
 
+def _click_targets(flow):
+    names = ("download_click_target_ids", "download_click_target_id", "download_click_count")
+    if not any(name in flow for name in names):
+        return []
+    values = flow.get("download_click_target_ids")
+    if (not isinstance(values, list) or not 1 <= len(values) <= 2
+        or any(not isinstance(value, str) or not value or len(value) > 200 for value in values)
+        or len(set(values)) != len(values) or flow.get("download_click_target_id") != values[-1]
+        or type(flow.get("download_click_count")) is not int or flow["download_click_count"] != len(values)):
+        return None
+    return list(values)
+
+
 def run_cnki(fetcher, record, opts):
     """Return existing fetcher result shapes without navigating cached hrefs.
 
@@ -171,7 +194,8 @@ def run_cnki(fetcher, record, opts):
     downloads, pdf_responses, popups = [], [], []
     response_status = {}
     action = None
-    popup_error = False
+    popup_error = None
+    attached = set()
 
     def pause(reason, message=None, snapshot=None):
         result = fetcher._attention(reason, getattr(fetcher._page, "url", lookup), snapshot=snapshot)
@@ -180,12 +204,97 @@ def run_cnki(fetcher, record, opts):
             fetcher._blocked = dict(result)
         return result
 
-    def flow_write(step):
-        fetcher._binding["cnki_flow"] = {"paper_hash": paper_hash, "title_hash": title_hash,
-            "target_id": fetcher._binding.get("target_id"), "step": step}
-        fetcher._write_binding()
+    def commit_binding(updated):
+        previous = fetcher._binding
+        fetcher._binding = updated
+        try:
+            fetcher._write_binding()
+        except Exception:
+            fetcher._binding = previous
+            raise
+
+    def flow_write(step, *, preserve_popup=True, download_target=None):
+        updated = copy.deepcopy(fetcher._binding)
+        previous = updated.get("cnki_flow", {})
+        flow = {"paper_hash": paper_hash, "title_hash": title_hash,
+                "target_id": updated.get("target_id"), "step": step}
+        if preserve_popup and isinstance(previous, dict) and previous.get("paper_hash") == paper_hash and previous.get("title_hash") == title_hash:
+            for key in ("pending_popup", "cleanup_target_id", "diagnostic", "download_click_target_ids", "download_click_target_id", "download_click_count"):
+                if key in previous:
+                    flow[key] = previous[key]
+        if download_target is not None:
+            clicked = _click_targets(flow)
+            if clicked is None or download_target in clicked or len(clicked) >= 2:
+                raise ValueError("CNKI download click limit")
+            clicked.append(download_target)
+            flow.update(download_click_target_ids=clicked, download_click_target_id=download_target,
+                        download_click_count=len(clicked))
+        updated["cnki_flow"] = flow
+        commit_binding(updated)
+
+    def diagnostic(code):
+        nonlocal popup_error
+        popup_error = code
+        try:
+            updated = copy.deepcopy(fetcher._binding)
+            updated.setdefault("cnki_flow", {})["diagnostic"] = code
+            commit_binding(updated)
+        except Exception:
+            popup_error = "handoff_error"
+        return False
+
+    def popup_pause(code=None):
+        code = code or popup_error or "handoff_error"
+        diagnostic(code)
+        result = pause("page_error", _POPUP_MESSAGES[code])
+        result["diagnostic"] = code
+        fetcher._blocked = dict(result)
+        return result
+
+    def register_popup(owner, popup):
+        """Persist this click's opener witness before any origin decision."""
+        if any(candidate is popup for _, candidate in popups):
+            return True
+        if action is None or owner is not fetcher._page or popup.opener() is not owner:
+            return diagnostic("owner")
+        try:
+            owner_id = literature_browser._target_id(fetcher._context, owner)
+            popup_id = literature_browser._target_id(fetcher._context, popup)
+            existing = fetcher._binding.get("cnki_flow", {}).get("pending_popup", {})
+            if (isinstance(existing, dict) and existing.get("opener_verified") is True
+                and existing.get("target_id") == popup_id and existing.get("owner_target_id") == owner_id
+                and any(literature_browser._target_id(fetcher._context, child) == popup_id for _, child in popups)):
+                return True
+        except Exception:
+            return diagnostic("handoff_error")
+        if any(not candidate.is_closed() and candidate is not fetcher._page for _, candidate in popups):
+            # Extra windows are created by our own observed click, but cannot
+            # become an unbounded set of document tasks.
+            try:
+                popup.close(run_before_unload=False)
+            except Exception:
+                pass
+            return diagnostic("extra")
+        try:
+            if owner_id != fetcher._binding.get("target_id") or popup_id == owner_id:
+                return diagnostic("owner")
+            updated = copy.deepcopy(fetcher._binding)
+            flow = updated.get("cnki_flow", {})
+            if flow.get("paper_hash") != paper_hash or flow.get("title_hash") != title_hash:
+                return diagnostic("owner")
+            flow["pending_popup"] = {"target_id": popup_id, "owner_target_id": owner_id,
+                "opener_verified": True, "action": action, "adopted": False}
+            commit_binding(updated)
+            popups.append((owner, popup))
+            attach(popup)
+            return True
+        except Exception:
+            return diagnostic("handoff_error")
 
     def attach(target):
+        if id(target) in attached:
+            return
+        attached.add(id(target))
         def on_download(download):
             if action is not None:
                 downloads.append(download)
@@ -195,56 +304,121 @@ def run_cnki(fetcher, record, opts):
                 if not main_navigation:
                     return
                 response_status[id(target)] = int(response.status or 0)
-                if action is not None and "application/pdf" in str(response.headers.get("content-type", "")).lower() and _official(response.url):
-                    pdf_responses.append(response)
+                if action is not None and "application/pdf" in str(response.headers.get("content-type", "")).lower() and _artifact_origin(response.url):
+                    if len(pdf_responses) < 4:
+                        pdf_responses.append(response)
             except Exception:
                 pass
         def on_popup(popup):
-            nonlocal popup_error
             # Only a Page event emitted by the page we own qualifies.  Verify
             # opener too; context-wide pages are deliberately never enumerated.
             try:
                 if action is not None and target is fetcher._page and popup.opener() is target:
-                    if any(not candidate.is_closed() and candidate is not fetcher._page for _, candidate in popups):
-                        # An extra popup from our single click is ours, but is
-                        # not another document to process. Keep at most two
-                        # transient pages and pause rather than fan out.
-                        popup.close(run_before_unload=False)
-                        popup_error = True
-                        return
-                    popups.append((target, popup))
-                    attach(popup)
+                    register_popup(target, popup)
             except Exception:
                 pass
         for event, callback in (("download", on_download), ("response", on_response), ("popup", on_popup)):
             target.on(event, callback)
             listeners.append((target, event, callback))
 
+    def context_response(response):
+        # Popup's first navigation response may precede its Page popup event.
+        # Inspect only a current owned click's direct main-frame child. Never
+        # choose a context page by title/domain or inspect unrelated responses.
+        try:
+            if action is None or not response.request.is_navigation_request():
+                return
+            frame = response.request.frame
+            child = frame.page
+            owner = fetcher._page
+            if child is owner or frame != child.main_frame or child.opener() is not owner:
+                return
+            if not register_popup(owner, child):
+                return
+            response_status[id(child)] = int(response.status or 0)
+            if _artifact_origin(response.url) and "application/pdf" in str(response.headers.get("content-type", "")).lower() and len(pdf_responses) < 4:
+                pdf_responses.append(response)
+        except Exception:
+            # No broad response fallback: an unprovable early event remains
+            # pending for the normal Page event or explicit human review.
+            return
+
+    def promote(owner, popup, *, verified_artifact=False):
+        """Commit new ownership before changing memory or closing old owner."""
+        try:
+            if popup.is_closed():
+                return True
+            witness = fetcher._binding.get("cnki_flow", {}).get("pending_popup", {})
+            popup_id = literature_browser._target_id(fetcher._context, popup)
+            if not witness.get("opener_verified") or witness.get("target_id") != popup_id:
+                return diagnostic("owner")
+            if fetcher._page is popup:
+                return True
+            if fetcher._page is not owner or (owner is not None and not owner.is_closed() and popup.opener() is not owner):
+                return diagnostic("owner")
+            if not _official(popup.url):
+                artifact_popup = popup.url == "about:blank" or (str(popup.url).startswith("blob:") and _artifact_origin(popup.url))
+                if not (verified_artifact and artifact_popup):
+                    return diagnostic("origin")
+            updated = copy.deepcopy(fetcher._binding)
+            updated["target_id"] = popup_id
+            flow = updated["cnki_flow"]
+            outstanding = flow.get("cleanup_target_id")
+            if outstanding and outstanding not in {witness.get("owner_target_id"), popup_id}:
+                return diagnostic("handoff_error")
+            flow["target_id"] = popup_id
+            flow["pending_popup"]["adopted"] = True
+            flow.pop("diagnostic", None)
+            if owner is not None and owner is not popup and not owner.is_closed():
+                flow["cleanup_target_id"] = witness["owner_target_id"]
+            commit_binding(updated)
+            fetcher._page = popup
+            if owner is not None and owner is not popup and not owner.is_closed():
+                try:
+                    owner.close(run_before_unload=False)
+                    updated = copy.deepcopy(fetcher._binding)
+                    updated["cnki_flow"].pop("cleanup_target_id", None)
+                    commit_binding(updated)
+                except Exception:
+                    # Ownership is already committed. A cleanup failure is not
+                    # a failure to prove who opened the popup. The driver can
+                    # close this exact recorded owned target after status saves.
+                    fetcher._progress("全文获取：下载窗口已绑定；旧任务页稍后在文件保存后清理。")
+            return True
+        except Exception:
+            return diagnostic("handoff_error")
+
     def adopt_popup():
         if popup_error:
             return False
         for owner, popup in list(popups):
             try:
-                if popup.opener() is not owner or popup.is_closed():
-                    continue
-                if not _official(popup.url):
-                    if popup.url != "about:blank":
-                        return False
+                if popup.is_closed():
                     continue
                 if fetcher._page is popup:
                     continue
-                if fetcher._page is not owner:
+                if owner is not None and not owner.is_closed() and popup.opener() is not owner:
+                    return diagnostic("owner")
+                if not _official(popup.url):
+                    if popup.url != "about:blank" and not (str(popup.url).startswith("blob:") and _artifact_origin(popup.url)):
+                        return diagnostic("origin")
+                    # Official blob / empty attachment windows are not
+                    # accepted as documents on URL alone. Await actual bytes.
+                    continue
+                if not promote(owner, popup):
                     return False
-                old = fetcher._page
-                fetcher._page = popup
-                fetcher._binding["target_id"] = literature_browser._target_id(fetcher._context, popup)
-                current = fetcher._binding.get("cnki_flow", {}).get("step", "detail_pending")
-                flow_write(current)
-                # Persist the new ownership before closing our old locator tab.
-                old.close(run_before_unload=False)
             except Exception:
-                return False
+                return diagnostic("handoff_error")
         return True
+
+    def finish_artifact(blob):
+        for owner, popup in list(popups):
+            if not popup.is_closed() and popup is not fetcher._page:
+                if not promote(owner, popup, verified_artifact=True):
+                    return popup_pause()
+        fetcher._clear_pending()
+        return {"status": "pdf_page", "bytes": blob, "size": len(blob),
+                "url": literature_browser.safe_url(fetcher._page.url) or ENTRY}
 
     def read():
         current = fetcher._page
@@ -254,8 +428,28 @@ def run_cnki(fetcher, record, opts):
             raise ValueError("Unrecognized CNKI page")
         return snap, ui
 
+    def bound_blob_witness():
+        """A blob address alone is never proof of task ownership or a PDF."""
+        try:
+            current = fetcher._page
+            if not str(current.url).startswith("blob:") or not _artifact_origin(current.url):
+                return False
+            flow = fetcher._binding.get("cnki_flow", {})
+            witness = flow.get("pending_popup", {})
+            target_id = fetcher._binding.get("target_id")
+            if (flow.get("paper_hash") != paper_hash or flow.get("title_hash") != title_hash
+                or not isinstance(witness, dict) or witness.get("opener_verified") is not True
+                or witness.get("adopted") is not True or witness.get("target_id") != target_id
+                or witness.get("owner_target_id") == target_id or witness.get("action") not in {"title", "download"}
+                or literature_browser._target_id(fetcher._context, current) != target_id):
+                return False
+            opener = current.opener()
+            return opener is None or literature_browser._target_id(fetcher._context, opener) == witness.get("owner_target_id")
+        except Exception:
+            return False
+
     def artifact():
-        if (downloads or pdf_responses) and not _official(fetcher._page.url):
+        if (downloads or pdf_responses) and not (_official(fetcher._page.url) or bound_blob_witness()):
             return pause("page_error", "知网下载跳转后的页面不是可核对的官方来源，已暂停；请核对原页面。")
         if downloads or pdf_responses:
             try:
@@ -273,9 +467,7 @@ def run_cnki(fetcher, record, opts):
             blob = fetcher._read_download(download)
             if blob is None:
                 return pause("page_error", "知网下载返回的文件未通过PDF校验（可能为CAJ或错误文件），已暂停；请在原页面核对。")
-            fetcher._clear_pending()
-            return {"status": "pdf_page", "bytes": blob, "size": len(blob),
-                    "url": literature_browser.safe_url(fetcher._page.url) or ENTRY}
+            return finish_artifact(blob)
         for response in list(pdf_responses):
             pdf_responses.remove(response)
             fetcher._progress("全文获取：文件正在生成或下载，等待实际传输完成后再保存。")
@@ -286,9 +478,108 @@ def run_cnki(fetcher, record, opts):
                     raise ValueError("Invalid PDF")
             except Exception:
                 return pause("page_error", "知网页面响应未通过PDF内容校验，已暂停；请在原页面核对。")
-            fetcher._clear_pending()
-            return {"status": "pdf_page", "bytes": blob, "size": len(blob),
-                    "url": literature_browser.safe_url(fetcher._page.url) or ENTRY}
+            return finish_artifact(blob)
+        return None
+
+    def find_target(context, target_id, *, strict=False):
+        if not isinstance(target_id, str) or not target_id or len(target_id) > 200:
+            return None
+        # Only the previously witnessed exact ID is eligible. Domain/title/
+        # recency of unrelated pages never influences the selection.
+        unverified = False
+        for candidate in context.pages:
+            try:
+                if candidate.is_closed():
+                    continue
+                if literature_browser._target_id(context, candidate) == target_id:
+                    return candidate
+            except Exception:
+                unverified = True
+                continue
+        if strict and unverified:
+            raise RuntimeError("Cannot verify recorded target absence")
+        return None
+
+    def guard_restart():
+        if not opts.get("cnki_restart"):
+            return None
+        flow = fetcher._binding.get("cnki_flow", {})
+        if not isinstance(flow, dict):
+            return None
+        pending, cleanup = flow.get("pending_popup"), flow.get("cleanup_target_id")
+        if pending is None and cleanup is None:
+            return None
+        if flow.get("paper_hash") != paper_hash or flow.get("title_hash") != title_hash:
+            return popup_pause("owner")
+        targets = []
+        if pending is not None:
+            if (not isinstance(pending, dict) or pending.get("opener_verified") is not True
+                or pending.get("action") not in {"title", "download"}
+                or not isinstance(pending.get("target_id"), str) or not pending["target_id"]
+                or len(pending["target_id"]) > 200
+                or not isinstance(pending.get("owner_target_id"), str) or not pending["owner_target_id"]
+                or pending["owner_target_id"] == pending["target_id"]
+                or fetcher._binding.get("target_id") not in {pending["owner_target_id"], pending["target_id"]}):
+                return popup_pause("owner")
+            targets.append(("pending_popup", pending["target_id"]))
+        if cleanup is not None:
+            if not isinstance(cleanup, str) or not cleanup or len(cleanup) > 200 or cleanup == fetcher._binding.get("target_id"):
+                return popup_pause("owner")
+            targets.append(("cleanup_target_id", cleanup))
+        try:
+            context = fetcher._connect()
+            for _, target_id in targets:
+                if find_target(context, target_id, strict=True) is not None:
+                    return pause("page_error", "已有任务下载窗口或旧任务页清理记录，请先点击“继续这篇”处理原窗口；若窗口不再需要，请手动关闭后再重新定位。不会另开或重复下载。")
+            # Every recorded target was conclusively closed or absent. Only
+            # those stale references are removed; no replacement is borrowed.
+            updated = copy.deepcopy(fetcher._binding)
+            for key, _ in targets:
+                updated["cnki_flow"].pop(key, None)
+            commit_binding(updated)
+            return None
+        except Exception:
+            return popup_pause("handoff_error")
+
+    def restore_popup():
+        flow = fetcher._binding.get("cnki_flow", {})
+        if opts.get("cnki_restart") or not isinstance(flow, dict) or flow.get("paper_hash") != paper_hash or flow.get("title_hash") != title_hash:
+            return None
+        witness = flow.get("pending_popup")
+        if not isinstance(witness, dict):
+            return None
+        owner_id, popup_id = witness.get("owner_target_id"), witness.get("target_id")
+        if (witness.get("opener_verified") is not True or witness.get("action") not in {"title", "download"}
+            or not isinstance(owner_id, str) or not isinstance(popup_id, str) or owner_id == popup_id
+            or fetcher._binding.get("target_id") not in {owner_id, popup_id}):
+            return popup_pause("owner")
+        context = fetcher._connect()
+        owner, popup = find_target(context, owner_id), find_target(context, popup_id)
+        if popup is None:
+            # Do not manufacture a replacement or repeat the previous click.
+            fetcher._page = owner
+            return popup_pause("owner")
+        if owner is not None and popup.opener() is not owner:
+            fetcher._page = owner
+            return popup_pause("owner")
+        if owner is None and popup.opener() is not None:
+            return popup_pause("owner")
+        if fetcher._binding.get("target_id") == popup_id:
+            if witness.get("adopted") is not True:
+                return popup_pause("owner")
+            fetcher._page = popup
+        else:
+            fetcher._page = owner
+        popups.append((owner, popup))
+        attach(popup)
+        if fetcher._page is None:
+            if _official(popup.url):
+                if not promote(None, popup):
+                    return popup_pause()
+            else:
+                # The opener witness proves this is our window, but a blob or
+                # empty page without an actual file event cannot prove a PDF.
+                return popup_pause("origin")
         return None
 
     def tick():
@@ -298,18 +589,27 @@ def run_cnki(fetcher, record, opts):
         fetcher._page.wait_for_timeout(200)
 
     try:
+        restart_guard = guard_restart()
+        if restart_guard:
+            return restart_guard
+        restored = restore_popup()
+        if restored:
+            return restored
         page = fetcher._get_page()
         target = fetcher._binding.get("target_id")
         flow = fetcher._binding.get("cnki_flow")
-        resuming = (isinstance(flow, dict) and flow.get("paper_hash") == paper_hash
+        resuming = (not opts.get("cnki_restart") and isinstance(flow, dict) and flow.get("paper_hash") == paper_hash
                     and flow.get("title_hash") == title_hash and flow.get("target_id") == target
                     and flow.get("step") in {"lookup", "detail_pending", "detail", "download_clicked"})
         step = flow["step"] if resuming else "lookup"
         action = "title" if step == "detail_pending" else "download" if step == "download_clicked" else None
         attach(page)
+        fetcher._context.on("response", context_response)
+        listeners.append((fetcher._context, "response", context_response))
         start = fetcher._clock()
+        blob_wait_reported = False
         if not resuming:
-            flow_write("lookup")
+            flow_write("lookup", preserve_popup=False)
             fetcher._pace(lookup)
             start = fetcher._clock()
             fetcher._progress("全文获取：在知网官方页面按完整题名单篇定位，核对后进入详情。")
@@ -326,17 +626,44 @@ def run_cnki(fetcher, record, opts):
             fetcher._record_destination(page.url)
         while True:
             if not adopt_popup():
-                return pause("page_error", "知网打开的页面无法确认属于本次官方单篇操作，已暂停；请核对原页面。")
+                return popup_pause()
             saved = artifact()
             if saved:
                 return saved
             current = fetcher._page
             if not _official(current.url):
+                if str(current.url).startswith("blob:") and _artifact_origin(current.url):
+                    if bound_blob_witness() and fetcher._clock() - start < WAIT_SECONDS:
+                        if not blob_wait_reported:
+                            fetcher._progress("全文获取：已核对本任务的官方文件窗口，等待真实下载事件校验；不会再次点击下载。")
+                            blob_wait_reported = True
+                        tick()
+                        continue
+                    return popup_pause("origin")
                 return pause("page_error", "知网当前页面不是可核对的官方入口，已暂停；请核对原页面。")
             snap, ui = read()
             reason = fetcher._reason(snap, response_status.get(id(current), 0))
             if reason:
                 return pause(reason, snapshot=snap)
+            if ui.get("purchase_required"):
+                return pause("access_required", "知网当前页面需要购买或付费，已暂停；不会确认购买或支付。")
+            if step == "download_clicked" and not ui.get("generating"):
+                # Some official downloads open one more same-paper detail or
+                # confirmation page. A different URL alone proves nothing:
+                # only the direct witnessed new target can receive one more
+                # click, with a hard two-target ceiling across process resumes.
+                flow = fetcher._binding.get("cnki_flow", {})
+                clicked = _click_targets(flow)
+                current_id = fetcher._binding.get("target_id")
+                witness = flow.get("pending_popup", {})
+                if clicked and current_id not in clicked and _identity(snap, ui, record):
+                    if len(clicked) >= 2:
+                        return pause("page_error", "知网下载已到达两次确认上限，尚未取得可核验文件，已暂停；请在当前页面人工核对，不会循环点击。")
+                    if (not isinstance(witness, dict) or witness.get("opener_verified") is not True
+                        or witness.get("adopted") is not True or witness.get("target_id") != current_id
+                        or witness.get("owner_target_id") != clicked[-1] or witness.get("action") != "download"):
+                        return popup_pause("owner")
+                    step = "detail"
             if step == "lookup":
                 if _lookup_page(current.url):
                     matches = _exact_result(ui, title)
@@ -389,6 +716,13 @@ def run_cnki(fetcher, record, opts):
                     if ambiguous:
                         return pause("page_error", "知网详情有多个无法唯一核对的下载控件，已暂停；请在原页面选择目标。")
                     if control:
+                        flow = fetcher._binding.get("cnki_flow", {})
+                        clicked = _click_targets(flow)
+                        current_id = fetcher._binding.get("target_id")
+                        if clicked is None or current_id in clicked or len(clicked) >= 2:
+                            return pause("page_error", "知网当前页面已经点击过下载或已到两次确认上限，已暂停；不会在同页重复点击下载。")
+                        if flow.get("cleanup_target_id"):
+                            return popup_pause("handoff_error")
                         fetcher._pace(current.url)
                         latest_snap, latest_ui = read()
                         latest_reason = fetcher._reason(latest_snap)
@@ -406,6 +740,8 @@ def run_cnki(fetcher, record, opts):
                             final_control, _, final_ambiguous = _download_control(final_ui)
                             if final_reason:
                                 return pause(final_reason, snapshot=final_snap)
+                            if final_ui.get("purchase_required"):
+                                return pause("access_required", "知网当前页面需要购买或付费，已暂停；不会确认购买或支付。")
                             if (not _official(current.url) or not _identity(final_snap, final_ui, record)
                                 or final_ambiguous or not final_control
                                 or _norm(current_control["text"]) != _norm(latest_control["text"])
@@ -416,7 +752,7 @@ def run_cnki(fetcher, record, opts):
                                 return pause("page_error", "知网下载控件发生变化，已暂停；未点击其他控件。")
                             # Record before clicking: resuming cannot duplicate a
                             # click that already reached the publisher.
-                            flow_write("download_clicked")
+                            flow_write("download_clicked", download_target=current_id)
                             step = "download_clicked"
                             action = "download"
                             fetcher._progress("全文获取：已点击当前知网详情页的下载控件，等待文件生成或真实下载；不会重复点击。")
@@ -440,6 +776,8 @@ def run_cnki(fetcher, record, opts):
                 if step == "lookup":
                     return pause("load_timeout", "知网单篇定位超过1分钟，未能核对完整题名、检索词及唯一结果，已暂停；请在原页面核对。")
                 if step == "download_clicked":
+                    if any(not child.is_closed() and child is not fetcher._page for _, child in popups):
+                        return popup_pause("origin")
                     return pause("load_timeout", "知网下载操作尚未返回可核验文件或生成状态，已暂停；请在原页面核对，不会重复点击下载。")
                 return pause("load_timeout", "知网详情超过1分钟未能核对目标文献或下载入口，已暂停；请在原页面核对。")
             tick()

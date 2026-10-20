@@ -925,7 +925,9 @@ class LiteratureConnector {
     }
   }
 
-  retryCnki(id, paperId) {
+  restartCnki(id, paperId) { return this.retryCnki(id, paperId, true); }
+
+  retryCnki(id, paperId, restart = false) {
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     if (typeof paperId !== 'string' || !PAPER_ID.test(paperId)) throw new Error('无效的单篇文献标识');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) {
@@ -936,6 +938,9 @@ class LiteratureConnector {
     if (!saved) throw new Error('检索任务不存在');
     if (!this.jobs.has(id) && saved.status === 'running' && hasCnkiRetryScope(saved)) saved = this.loadPersisted(id);
     if (saved.status === 'cancelled') throw new Error('任务已停止，请先复核已保存全文，再重试指定文献');
+    if (restart === true && (!['needs_attention', 'failed'].includes(saved.status) || saved.cnkiRetryPaperId !== paperId)) {
+      throw new Error('只能重新定位当前已暂停的这篇知网文献，请先核对原单篇任务');
+    }
     const target = cnkiRetryItems(saved, dir).find(item => item.id === paperId);
     if (!target) throw new Error('只能重试已暂停全文任务中尚未取得的知网单篇；请核对原候选、去重及全文状态，已有下游成果时不可重试');
     if (saved.cnkiRetryPaperId && saved.cnkiRetryPaperId !== paperId) throw new Error('上一篇知网全文尚未处理完成，请先继续原单篇任务');
@@ -944,18 +949,20 @@ class LiteratureConnector {
     job.stages = { ...(job.stages || {}), fulltext: 'running' };
     job.cnkiRetryPaperId = paperId; job.until = 'fulltext';
     const runId = (Number.isInteger(job.runId) ? job.runId : 0) + 1; job.runId = runId;
-    this.update(job, 'fulltext', '仅重试这篇知网文献：' + target.title + '；不重新检索或进入提取。');
-    void this.runCnkiRetry(job, runId, paperId);
+    this.update(job, 'fulltext', (restart === true ? '仅重新定位这篇知网文献：' : '仅重试这篇知网文献：') + target.title + '；不重新检索候选或进入提取。');
+    void this.runCnkiRetry(job, runId, paperId, restart === true);
     return this.public(job);
   }
 
-  async runCnkiRetry(job, runId, paperId) {
+  async runCnkiRetry(job, runId, paperId, restart = false) {
     let receivedResult = false;
     try {
       const python = await this.prepare(job, (stage, message) => this.update(job, stage, message));
       if (job.runId !== runId || job.status !== 'running') return;
       job.python = python;
-      await this.runStage(STAGE_SCRIPTS.fulltext, ['--resume', '--only', paperId, '--retry-unavailable', '--limit', '1'], job, event => {
+      const args = ['--resume', '--only', paperId, '--retry-unavailable', '--limit', '1'];
+      if (restart === true) args.push('--restart-cnki');
+      await this.runStage(STAGE_SCRIPTS.fulltext, args, job, event => {
         if (job.runId !== runId || job.status === 'cancelled') return;
         if (event?.type === 'result' && event.stage === 'fulltext') receivedResult = true;
         this.onStageEvent(job, runId, 'fulltext', event);

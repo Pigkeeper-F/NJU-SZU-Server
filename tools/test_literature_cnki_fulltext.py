@@ -150,7 +150,7 @@ class Page:
         self.fronts += 1
 
     def opener(self):
-        return self._opener
+        return None if self._opener is not None and self._opener.closed else self._opener
 
     def on(self, event, callback):
         self.listeners.setdefault(event, []).append(callback)
@@ -188,10 +188,13 @@ class Page:
     def wait_for_timeout(self, milliseconds):
         assert milliseconds == 200
         self.context.clock.sleep(milliseconds / 1000)
-        for when, event, value in list(self.scheduled):
-            if when <= self.context.clock.now:
-                self.scheduled.remove((when, event, value))
-                self.emit(event, value)
+        # A Playwright wait pumps the context event loop, including events on
+        # a still-pending popup while its opener remains the bound page.
+        for page in self.context.pages:
+            for when, event, value in list(page.scheduled):
+                if when <= self.context.clock.now:
+                    page.scheduled.remove((when, event, value))
+                    page.emit(event, value)
 
     def detail(self, page):
         page.url = "https://kns.cnki.net/kcms2/article/abstract?paper=fixture"
@@ -207,6 +210,7 @@ class Context:
         self.clock, self.pages, self.initial_ui = clock, [], ui()
         self.creates = 0
         self.next_setup = None
+        self.listeners = {}
         self.pages.append(Page(self, "researcher-existing"))
 
     def new_page(self, opener=None):
@@ -220,6 +224,16 @@ class Context:
 
     def new_cdp_session(self, page):
         return CDP(page)
+
+    def on(self, event, callback):
+        self.listeners.setdefault(event, []).append(callback)
+
+    def remove_listener(self, event, callback):
+        self.listeners[event].remove(callback)
+
+    def emit(self, event, value):
+        for callback in list(self.listeners.get(event, [])):
+            callback(value)
 
     @contextmanager
     def runtime(self):
@@ -484,6 +498,469 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "attention")
         self.assertEqual(fetcher._page.download_clicks, 0)
 
+    def test_official_blob_popup_requires_actual_pdf_download_then_binds_for_cleanup(self):
+        def setup(page):
+            def downloaded(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "blob:https://kns.cnki.net/fixture-blob"
+                owner.emit("popup", child)
+                download = Download()
+                download.url = child.url
+                child.emit("download", download)
+            page.on_download = downloaded
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(result["bytes"], PDF)
+        self.assertEqual(fetcher._page.target, "owned-2")
+        self.assertTrue(self.context.pages[1].closed)
+        self.assertFalse(fetcher._page.closed, "driver closes only after saved status")
+        witness = fetcher._binding["cnki_flow"]["pending_popup"]
+        self.assertTrue(witness["opener_verified"])
+        self.assertTrue(witness["adopted"])
+        self.assertEqual(witness["action"], "download")
+        self.assertNotIn("fixture-blob", json.dumps(fetcher._binding))
+
+    def test_empty_attachment_popup_handoff_after_valid_download_does_not_orphan_it(self):
+        def setup(page):
+            def downloaded(owner):
+                child = self.context.new_page(opener=owner)
+                owner.emit("popup", child)
+                child.emit("download", Download())
+            page.on_download = downloaded
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(fetcher._page.url, "about:blank")
+        self.assertEqual(fetcher._binding["target_id"], "owned-2")
+        self.assertTrue(self.context.pages[1].closed)
+
+    def test_blob_address_alone_never_counts_as_pdf(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "blob:https://kns.cnki.net/not-proven-pdf"
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "attention")
+        self.assertEqual(result["diagnostic"], "origin")
+        self.assertNotIn("bytes", result)
+        self.assertEqual(fetcher._binding["target_id"], "owned-1")
+        self.assertEqual(fetcher._binding["cnki_flow"]["pending_popup"]["target_id"], "owned-2")
+
+    def test_initial_mainframe_pdf_response_before_popup_event_is_captured_once(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "blob:https://kns.cnki.net/early-pdf"
+                child.main_frame = type("Frame", (), {"page": child})()
+                request = type("Request", (), {"frame": child.main_frame,
+                    "is_navigation_request": lambda self: True})()
+                response = type("Response", (), {"url": child.url, "status": 200,
+                    "headers": {"content-type": "application/pdf"}, "request": request,
+                    "body": lambda self: PDF})()
+                self.context.emit("response", response)
+                # Must be idempotent with the earlier context response witness.
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(fetcher._page.target, "owned-2")
+        self.assertNotEqual(fetcher._binding["cnki_flow"].get("diagnostic"), "extra")
+        self.assertEqual(self.context.pages[1].download_clicks, 1)
+
+    def test_recorded_pending_popup_survives_driver_restart_without_reclick(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "https://unverified.test/needs-human-review"
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        first = self.fetcher()
+        result = mod.run_cnki(first, RECORD, {})
+        self.assertEqual(result["diagnostic"], "origin")
+        parent, child = self.context.pages[1], self.context.pages[2]
+        self.assertEqual(first._binding["cnki_flow"]["pending_popup"]["target_id"], child.target)
+        first.close()
+        # Researcher completes normal website operation in that exact window.
+        child.detail(child)
+        child.ui["generating"] = True
+        child.scheduled.append((self.clock.now + 1, "download", Download()))
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(second._binding["target_id"], child.target)
+        self.assertEqual(parent.download_clicks, 1)
+        self.assertEqual(parent.title_clicks, 1)
+        self.assertFalse(child.gotos)
+        self.assertEqual(child.download_clicks, 0)
+
+    def test_legacy_unrecorded_popup_is_never_borrowed_on_resume(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.detail(child)
+                # Simulate an old process which never persisted a popup event.
+            page.on_download = opened
+        self.context.next_setup = setup
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["status"], "attention")
+        parent, child = self.context.pages[1], self.context.pages[2]
+        self.assertNotIn("pending_popup", first._binding["cnki_flow"])
+        first.close()
+        second = self.fetcher()
+        self.assertEqual(mod.run_cnki(second, RECORD, {})["status"], "attention")
+        self.assertEqual(second._page, parent)
+        self.assertEqual(parent.download_clicks, 1)
+        self.assertEqual(child.download_clicks, 0)
+        self.assertFalse(child.gotos)
+
+    def test_pending_popup_with_wrong_live_opener_is_owner_diagnostic(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "https://unverified.test/pending"
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["diagnostic"], "origin")
+        first.close()
+        self.context.pages[2]._opener = self.context.pages[0]
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {})
+        self.assertEqual(result["diagnostic"], "owner")
+        self.assertEqual(second._binding["target_id"], "owned-1")
+
+    def test_handoff_write_failure_does_not_switch_memory_or_disk_binding(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.detail(child)
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        original_write = fetcher._write_binding
+        def write():
+            if fetcher._binding.get("target_id") == "owned-2":
+                raise OSError("fixture commit failure")
+            original_write()
+        fetcher._write_binding = write
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["diagnostic"], "handoff_error")
+        self.assertEqual(fetcher._page.target, "owned-1")
+        self.assertEqual(fetcher._binding["target_id"], "owned-1")
+        self.assertEqual(json.loads(fetcher.binding_path.read_text(encoding="utf-8"))["target_id"], "owned-1")
+        self.assertFalse(self.context.pages[1].closed)
+        self.assertFalse(self.context.pages[2].closed)
+
+    def test_failed_old_page_close_is_cleanup_not_failed_ownership(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.detail(child)
+                owner.emit("popup", child)
+                child.emit("download", Download())
+                def close(**options):
+                    raise OSError("fixture close failure")
+                owner.close = close
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(fetcher._page.target, "owned-2")
+        self.assertEqual(fetcher._binding["cnki_flow"]["cleanup_target_id"], "owned-1")
+
+    def test_two_pending_popups_are_extra_diagnostic_with_bounded_windows(self):
+        def setup(page):
+            def opened(owner):
+                for _ in range(2):
+                    child = self.context.new_page(opener=owner)
+                    owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["diagnostic"], "extra")
+        self.assertTrue(self.context.pages[3].closed)
+        self.assertFalse(self.context.pages[2].closed)
+
+    def test_explicit_single_paper_restart_ignores_old_clicked_step(self):
+        def setup(page):
+            page.on_download = lambda p: p.snap.update(verification=True)
+        self.context.next_setup = setup
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["reason"], "verification")
+        original = first._page
+        first.close()
+        original.on_download = original.begin_download
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {"cnki_restart": True})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertIs(second._page, original)
+        self.assertEqual(len(original.gotos), 2)
+        self.assertEqual(original.title_clicks, 2)
+        self.assertEqual(original.download_clicks, 2)
+
+    def test_normal_new_official_detail_gets_one_additional_pdf_click(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.detail(child)
+                child.on_download = lambda p: p.emit("download", Download())
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        parent, child = self.context.pages[1], self.context.pages[2]
+        self.assertEqual((parent.download_clicks, child.download_clicks), (1, 1))
+        flow = fetcher._binding["cnki_flow"]
+        self.assertEqual(flow["download_click_target_ids"], [parent.target, child.target])
+        self.assertEqual(flow["download_click_target_id"], child.target)
+        self.assertEqual(flow["download_click_count"], 2)
+
+    def test_additional_detail_click_pause_resume_never_repeats_it(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.detail(child)
+                child.on_download = lambda p: p.snap.update(verification=True)
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["reason"], "verification")
+        parent, child = self.context.pages[1], self.context.pages[2]
+        self.assertEqual((parent.download_clicks, child.download_clicks), (1, 1))
+        first.close()
+        child.snap["verification"] = False
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {})
+        self.assertEqual(result["status"], "attention")
+        self.assertEqual((parent.download_clicks, child.download_clicks), (1, 1))
+        self.assertEqual(second._binding["cnki_flow"]["download_click_count"], 2)
+
+    def test_third_detail_page_stops_at_two_click_limit(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.detail(child)
+                child.on_download = opened
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "attention")
+        self.assertIn("两次确认上限", result["message"])
+        self.assertEqual([p.download_clicks for p in self.context.pages[1:]], [1, 1, 0])
+        self.assertEqual(fetcher._binding["cnki_flow"]["download_click_count"], 2)
+        self.assertEqual(sum(not p.closed for p in self.context.pages[1:]), 1)
+
+    def test_new_detail_with_purchase_dialog_never_gets_additional_click(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.detail(child)
+                child.ui["purchase_required"] = True
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["reason"], "access_required")
+        self.assertIn("不会确认购买", result["message"])
+        self.assertEqual(self.context.pages[2].download_clicks, 0)
+
+    def test_early_context_response_from_unrelated_page_is_ignored(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=self.context.pages[0])
+                child.url = "https://kns.cnki.net/unrelated.pdf"
+                child.main_frame = type("Frame", (), {"page": child})()
+                request = type("Request", (), {"frame": child.main_frame,
+                    "is_navigation_request": lambda self: True})()
+                response = type("Response", (), {"url": child.url, "status": 200,
+                    "headers": {"content-type": "application/pdf"}, "request": request,
+                    "body": lambda self: PDF})()
+                self.context.emit("response", response)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "attention")
+        self.assertNotIn("bytes", result)
+        self.assertNotIn("pending_popup", fetcher._binding["cnki_flow"])
+
+    def test_restart_rejects_live_recorded_popup_without_losing_witness(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "https://unverified.test/keep-for-human"
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["diagnostic"], "origin")
+        witness = copy.deepcopy(first._binding["cnki_flow"]["pending_popup"])
+        first.close()
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {"cnki_restart": True})
+        self.assertEqual(result["status"], "attention")
+        self.assertIn("已有任务下载窗口", result["message"])
+        self.assertEqual(second._binding["cnki_flow"]["pending_popup"], witness)
+        self.assertEqual(self.context.creates, 2)
+        self.assertEqual(len(self.context.pages[1].gotos), 1)
+        self.assertEqual(self.context.pages[1].download_clicks, 1)
+        self.assertFalse(self.context.pages[2].closed)
+
+    def test_restart_clears_only_conclusively_closed_popup_then_reuses_owner(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "https://unverified.test/old-window"
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["diagnostic"], "origin")
+        parent, child = self.context.pages[1], self.context.pages[2]
+        child.close()
+        parent.on_download = parent.begin_download
+        first.close()
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {"cnki_restart": True})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertIs(second._page, parent)
+        self.assertEqual(self.context.creates, 2)
+        self.assertEqual(len(parent.gotos), 2)
+        self.assertNotIn("pending_popup", second._binding["cnki_flow"])
+
+    def test_restart_keeps_witness_when_target_absence_cannot_be_verified(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "https://unverified.test/old-window"
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["diagnostic"], "origin")
+        self.context.pages[2].close()
+        witness = copy.deepcopy(first._binding["cnki_flow"]["pending_popup"])
+        first.close()
+        original_cdp = self.context.new_cdp_session
+        def uncertain(page):
+            if page.target == "researcher-existing":
+                raise RuntimeError("Cannot inspect an open target")
+            return original_cdp(page)
+        self.context.new_cdp_session = uncertain
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {"cnki_restart": True})
+        self.assertEqual(result["diagnostic"], "handoff_error")
+        self.assertEqual(second._binding["cnki_flow"]["pending_popup"], witness)
+        self.assertEqual(len(self.context.pages[1].gotos), 1)
+        self.assertEqual(self.context.creates, 2)
+
+    def test_restart_live_cleanup_rejected_missing_cleanup_can_reset(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.detail(child)
+                owner.emit("popup", child)
+                child.emit("download", Download())
+                owner.close = lambda **kwargs: (_ for _ in ()).throw(OSError("fixture close failure"))
+            page.on_download = opened
+        self.context.next_setup = setup
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["status"], "pdf_page")
+        parent, child = self.context.pages[1], self.context.pages[2]
+        # A cleanup-only historical state is also protected, even without a
+        # pending-popup record. No close or replacement target is guessed.
+        first._binding["cnki_flow"].pop("pending_popup")
+        first._write_binding()
+        first.close()
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {"cnki_restart": True})
+        self.assertEqual(result["status"], "attention")
+        self.assertEqual(second._binding["cnki_flow"]["cleanup_target_id"], parent.target)
+        self.assertFalse(child.gotos)
+        second.close()
+        parent.closed = True
+        third = self.fetcher()
+        result = mod.run_cnki(third, RECORD, {"cnki_restart": True})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertIs(third._page, child)
+        self.assertNotIn("cleanup_target_id", third._binding["cnki_flow"])
+        self.assertEqual(len(child.gotos), 1)
+        self.assertEqual(self.context.creates, 2)
+
+    def _bound_blob_after_verified_file(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "blob:https://kns.cnki.net/verified-window"
+                owner.emit("popup", child)
+                child.emit("download", Download())
+            page.on_download = opened
+        self.context.next_setup = setup
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["status"], "pdf_page")
+        child = first._page
+        first.close()
+        return child
+
+    def test_bound_official_blob_resume_accepts_new_actual_download_event(self):
+        child = self._bound_blob_after_verified_file()
+        child.scheduled.append((self.clock.now + 1, "download", Download()))
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(result["bytes"], PDF)
+        self.assertIs(second._page, child)
+        self.assertEqual(self.context.pages[1].download_clicks, 1)
+        self.assertEqual(child.download_clicks, 0)
+        self.assertFalse(child.gotos)
+
+    def test_bound_blob_url_without_new_file_event_still_pauses(self):
+        child = self._bound_blob_after_verified_file()
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {})
+        self.assertEqual(result["status"], "attention")
+        self.assertEqual(result["diagnostic"], "origin")
+        self.assertNotIn("bytes", result)
+        self.assertEqual(child.download_clicks, 0)
+        self.assertFalse(child.gotos)
+
+    def test_bound_blob_without_witness_rejects_even_fresh_file_event(self):
+        child = self._bound_blob_after_verified_file()
+        second = self.fetcher()
+        second._binding["cnki_flow"].pop("pending_popup")
+        second._write_binding()
+        original_on = child.on
+        def fresh_event(event, callback):
+            original_on(event, callback)
+            if event == "download":
+                callback(Download())
+        child.on = fresh_event
+        result = mod.run_cnki(second, RECORD, {})
+        self.assertEqual(result["status"], "attention")
+        self.assertNotIn("bytes", result)
+        self.assertEqual(child.download_clicks, 0)
+        self.assertFalse(child.gotos)
+
 
 class LocalDOMTests(unittest.TestCase):
     @classmethod
@@ -556,6 +1033,12 @@ class LocalDOMTests(unittest.TestCase):
         self.assertEqual([item.evaluate(mod._CONTROL_LABEL_JS) for item in elements], ["PDF下载", "下载全文", "CAJ下载"])
         for element in elements:
             element.dispose()
+
+    def test_actual_dom_payment_confirmation_is_explicitly_flagged(self):
+        self.page.set_content('<h1>' + TITLE + '</h1><div role="dialog">请购买全文，支付后下载<button>下载</button></div>')
+        self.assertTrue(self.page.evaluate(mod._CNKI_UI_JS)["purchase_required"])
+        self.page.set_content('<nav><a>充值</a><a>订阅</a></nav><h1>' + TITLE + '</h1><button>PDF下载</button>')
+        self.assertFalse(self.page.evaluate(mod._CNKI_UI_JS)["purchase_required"])
 
 
 if __name__ == "__main__":

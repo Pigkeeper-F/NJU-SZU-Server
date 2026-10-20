@@ -753,6 +753,7 @@ def _run_fulltext(
     limit: int | None = None,
     only: list[str] | str | None = None,
     retry_unavailable: bool = False,
+    restart_cnki: bool = False,
     fetcher=None,
 ) -> int:
     """Execute the fulltext stage; returns the process exit code (0/1)."""
@@ -876,7 +877,8 @@ def _run_fulltext(
         emit("error", stage="fulltext", message=str((ready or {}).get("message") or "浏览器启动失败"))
         return 1
 
-    opts = {"fetcher": fetcher, "per_paper_timeout_sec": options["per_paper_timeout_sec"]}
+    opts = {"fetcher": fetcher, "per_paper_timeout_sec": options["per_paper_timeout_sec"],
+            "cnki_restart": restart_cnki}
     for index, item in enumerate(eligible_items, start=1):
         target = target_by_id[item["paper_id"]]
         emit(
@@ -932,8 +934,20 @@ def _run_fulltext(
     return 0
 
 
-def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, fetcher=None):
+def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, fetcher=None):
     job_dir = Path(job_dir)
+    if restart_cnki:
+        try:
+            ids = _parse_only(only)
+            if not resume or not retry_unavailable or limit != 1 or not ids or len(ids) != 1:
+                raise ValueError("重新定位仅适用于明确选择的一篇知网文献，须同时使用 --resume --only <id> --retry-unavailable --limit 1")
+            targets = [target for target in load_targets(job_dir, config) if target["paper_id"] == ids[0]]
+            prior = _load_previous_items(job_dir / "fulltext" / "status.json").get(ids[0])
+            if len(targets) != 1 or targets[0].get("source_key") != "cnki" or not prior or prior.get("status") not in {"pending", "needs_attention", "unavailable", "abstract_only"}:
+                raise ValueError("只能重新定位当前尚未获取全文的知网单篇，已有全文不重复下载")
+        except (ValueError, OSError) as error:
+            emit("error", stage="fulltext", message=f"全文获取失败：{error}")
+            return 1
     # Recheck legacy successes before any network access. An unverified cache
     # must not silently become extraction input on a normal resume.
     status_path = job_dir / "fulltext" / "status.json"
@@ -952,7 +966,7 @@ def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailab
     actual = fetcher if fetcher is not None else make_fetcher(config, job_dir)
     try:
         return _run_fulltext(config, job_dir, resume=resume, limit=limit, only=only,
-                             retry_unavailable=retry_unavailable, fetcher=actual)
+                             retry_unavailable=retry_unavailable, restart_cnki=restart_cnki, fetcher=actual)
     finally:
         close = getattr(actual, "close", None)
         if callable(close):
@@ -967,6 +981,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, help="本次最多获取的篇数")
     parser.add_argument("--only", help="仅处理指定论文标识，逗号分隔（如 GSC-001,GSC-002）")
     parser.add_argument("--retry-unavailable", action="store_true", help="重试此前标为待补充（unavailable/abstract_only）的项")
+    parser.add_argument("--restart-cnki", action="store_true", help="显式重新定位已选知网单篇，从正常检索页开始一次")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review-only", action="store_true", help="仅离线复核缓存，不访问网站")
     mode.add_argument("--open-current", action="store_true", help="只显示任务已绑定的全文页面")
@@ -976,6 +991,8 @@ def main(argv: list[str] | None = None) -> int:
         config = json.loads(args.config.read_text(encoding="utf-8"))
         if not isinstance(config, dict):
             raise ValueError("运行配置无效")
+        if args.restart_cnki and (args.review_only or args.open_current):
+            raise ValueError("重新定位不能与离线复核或仅查看原页面同时使用")
         if args.review_only:
             review_saved_fulltext(args.output_dir)
             return 0
@@ -996,6 +1013,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             only=args.only,
             retry_unavailable=args.retry_unavailable,
+            restart_cnki=args.restart_cnki,
         )
     except Exception as error:
         emit("error", stage="fulltext", message=f"全文获取失败：{error}")
