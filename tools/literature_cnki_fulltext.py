@@ -18,7 +18,8 @@ ENTRY = "https://kns.cnki.net/kns8s/defaultresult/index"
 ROWS = (".result-table-list tbody tr", "table.result-table-list tr", ".search-table tr")
 CONTROLS = "a,button,input[type=button],input[type=submit]"
 WAIT_SECONDS = 60.0
-_CONTROL_LABEL_JS = "e => (e.getAttribute('aria-label') || e.innerText || e.value || e.getAttribute('title') || e.querySelector('img')?.alt || '').trim()"
+_CONTROL_LABEL_JS = "e => [e.getAttribute('aria-label'), e.innerText, e.value, e.getAttribute('title'), e.querySelector('img')?.alt].map(v => String(v || '').trim()).find(Boolean) || ''"
+_CONTROL_READY_JS = "e => e.isConnected && !e.disabled && e.getAttribute('aria-disabled') !== 'true'"
 
 # Returns positions in the same exact selector used by a subsequent locator.
 # It does not evaluate onclick handlers, fetch hidden endpoints, or expose hrefs.
@@ -34,7 +35,7 @@ _CNKI_UI_JS = r"""/* literature_cnki_fulltext_ui */ () => {
     if(found.length) {rowSelector=sel; rows=found.map((row,index)=>({index,visible:visible(row),anchors:Array.from(row.querySelectorAll('a')).map((a,index)=>({index,visible:visible(a),text:text(a)}))})); break;}
   }
   const titles=Array.from(document.querySelectorAll('h1,.wx-tit h1,.brief h1,.title h1')).filter(visible).map(text).filter(Boolean);
-  const label = e => e.getAttribute('aria-label') || text(e) || e.getAttribute('title') || e.querySelector('img')?.alt || '';
+  const label = e => [e.getAttribute('aria-label'),e.innerText,e.value,e.getAttribute('title'),e.querySelector('img')?.alt].map(v=>String(v||'').trim()).find(Boolean)||'';
   const controls=Array.from(document.querySelectorAll('a,button,input[type=button],input[type=submit]')).map((e,index)=>({index,text:label(e),visible:visible(e),enabled:!e.disabled&&e.getAttribute('aria-disabled')!=='true'})).filter(e=>e.visible);
   const head=(document.body?.innerText||'').slice(0,8000);
   return {queries,rowSelector,rows,titles,controls,
@@ -113,6 +114,38 @@ def _download_control(ui):
     # Prefer one unambiguous PDF control; do not click both PDF and CAJ.
     chosen = pdf or general
     return (chosen[0] if len(chosen) == 1 else None), bool(caj), len(chosen) > 1
+
+
+def _download_element(page):
+    """Choose one current visible download node without a stale DOM position.
+
+    ElementHandles refer to the verified node itself. Inserting an advertisement
+    or a navigation anchor before it cannot silently retarget the later click.
+    A detached/replaced node fails closed rather than clicking its replacement.
+    """
+    elements = page.query_selector_all(CONTROLS)
+    selected = None
+    try:
+        controls = []
+        for index, element in enumerate(elements):
+            if element.is_visible():
+                controls.append({"index": index, "text": element.evaluate(_CONTROL_LABEL_JS),
+                    "visible": True, "enabled": element.is_enabled() and element.evaluate(_CONTROL_READY_JS)})
+        control, _, ambiguous = _download_control({"controls": controls})
+        if not control or ambiguous:
+            return None, None
+        selected = elements[control["index"]]
+        if not selected.is_visible() or not selected.is_enabled() or not selected.evaluate(_CONTROL_READY_JS) or _norm(selected.evaluate(_CONTROL_LABEL_JS)) != _norm(control["text"]):
+            selected = None
+            return None, None
+        return selected, control
+    finally:
+        for element in elements:
+            if element is not selected:
+                try:
+                    element.dispose()
+                except Exception:
+                    pass
 
 
 def run_cnki(fetcher, record, opts):
@@ -356,24 +389,43 @@ def run_cnki(fetcher, record, opts):
                     if ambiguous:
                         return pause("page_error", "知网详情有多个无法唯一核对的下载控件，已暂停；请在原页面选择目标。")
                     if control:
-                        locator = current.locator(CONTROLS).nth(int(control["index"]))
-                        if not locator.is_visible() or not locator.is_enabled() or _norm(locator.evaluate(_CONTROL_LABEL_JS)) != _norm(control["text"]):
-                            return pause("page_error", "知网下载控件发生变化，已暂停；未点击其他控件。")
                         fetcher._pace(current.url)
                         latest_snap, latest_ui = read()
                         latest_reason = fetcher._reason(latest_snap)
                         if latest_reason:
                             return pause(latest_reason, snapshot=latest_snap)
-                        latest_control, _, _ = _download_control(latest_ui)
-                        if not _official(current.url) or not _identity(latest_snap, latest_ui, record) or latest_control != control:
+                        latest_control, _, latest_ambiguous = _download_control(latest_ui)
+                        if not _official(current.url) or not _identity(latest_snap, latest_ui, record) or latest_ambiguous or not latest_control or _norm(latest_control["text"]) != _norm(control["text"]):
                             return pause("page_error", "知网详情或下载控件在等待期间发生变化，已暂停；未点击其他控件。")
-                        # Record before clicking: resuming cannot duplicate a
-                        # click that already reached the publisher.
-                        flow_write("download_clicked")
-                        step = "download_clicked"
-                        action = "download"
-                        fetcher._progress("全文获取：已点击当前知网详情页的下载控件，等待文件生成或真实下载；不会重复点击。")
-                        locator.click(timeout=15_000, no_wait_after=True)
+                        element, current_control = _download_element(current)
+                        if element is None:
+                            return pause("page_error", "知网下载控件无法唯一核对，已暂停；未点击其他控件。")
+                        try:
+                            final_snap, final_ui = read()
+                            final_reason = fetcher._reason(final_snap)
+                            final_control, _, final_ambiguous = _download_control(final_ui)
+                            if final_reason:
+                                return pause(final_reason, snapshot=final_snap)
+                            if (not _official(current.url) or not _identity(final_snap, final_ui, record)
+                                or final_ambiguous or not final_control
+                                or _norm(current_control["text"]) != _norm(latest_control["text"])
+                                or _norm(final_control["text"]) != _norm(current_control["text"])
+                                or not element.is_visible() or not element.is_enabled()
+                                or not element.evaluate(_CONTROL_READY_JS)
+                                or _norm(element.evaluate(_CONTROL_LABEL_JS)) != _norm(current_control["text"])):
+                                return pause("page_error", "知网下载控件发生变化，已暂停；未点击其他控件。")
+                            # Record before clicking: resuming cannot duplicate a
+                            # click that already reached the publisher.
+                            flow_write("download_clicked")
+                            step = "download_clicked"
+                            action = "download"
+                            fetcher._progress("全文获取：已点击当前知网详情页的下载控件，等待文件生成或真实下载；不会重复点击。")
+                            element.click(timeout=15_000, no_wait_after=True)
+                        finally:
+                            try:
+                                element.dispose()
+                            except Exception:
+                                pass
                         start = fetcher._clock()
                         tick()
                         continue

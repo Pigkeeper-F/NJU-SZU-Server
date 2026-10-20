@@ -100,6 +100,34 @@ class Locator:
             self.page.on_download(self.page)
 
 
+class Element:
+    """Identity-bound node: unrelated DOM insertions cannot retarget it."""
+    def __init__(self, page, data):
+        self.page, self.data, self.disposed = page, data, False
+
+    def is_visible(self):
+        return self.data.get("visible", True)
+
+    def is_enabled(self):
+        return self.data.get("enabled", True)
+
+    def evaluate(self, script):
+        if script == mod._CONTROL_LABEL_JS:
+            return self.data["text"]
+        if script == mod._CONTROL_READY_JS:
+            return any(item is self.data for item in self.page.ui["controls"]) and self.is_enabled()
+        raise AssertionError(script)
+
+    def click(self, **options):
+        assert self.evaluate(mod._CONTROL_READY_JS)
+        assert options.get("no_wait_after") is True
+        self.page.download_clicks += 1
+        self.page.on_download(self.page)
+
+    def dispose(self):
+        self.disposed = True
+
+
 class Page:
     def __init__(self, context, target, opener=None):
         self.context, self.target, self._opener = context, target, opener
@@ -143,6 +171,10 @@ class Page:
 
     def locator(self, selector):
         return Locator(self, selector)
+
+    def query_selector_all(self, selector):
+        assert selector == mod.CONTROLS
+        return [Element(self, item) for item in self.ui["controls"]]
 
     def evaluate(self, script):
         if "literature_cnki_fulltext_ui" in script:
@@ -425,6 +457,33 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "attention")
         self.assertEqual(result["reason"], "verification")
 
+    def test_unrelated_controls_inserted_during_pacing_do_not_retarget_download(self):
+        fetcher = self.fetcher()
+        original_pace = fetcher._pace
+        inserted = []
+        def pace(url):
+            original_pace(url)
+            if "article/abstract" in url and not inserted:
+                inserted.append(True)
+                fetcher._page.ui["controls"].insert(0, control("登录", 0))
+                fetcher._page.ui["controls"][1]["index"] = 1
+        fetcher._pace = pace
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(fetcher._page.download_clicks, 1)
+
+    def test_new_second_pdf_during_pacing_still_pauses_without_click(self):
+        fetcher = self.fetcher()
+        original_pace = fetcher._pace
+        def pace(url):
+            original_pace(url)
+            if "article/abstract" in url:
+                fetcher._page.ui["controls"].append(control("PDF下载", 1))
+        fetcher._pace = pace
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "attention")
+        self.assertEqual(fetcher._page.download_clicks, 0)
+
 
 class LocalDOMTests(unittest.TestCase):
     @classmethod
@@ -471,6 +530,32 @@ class LocalDOMTests(unittest.TestCase):
         selected, _, _ = mod._download_control(self.page.evaluate(mod._CNKI_UI_JS))
         self.assertEqual(selected["index"], 0)
         self.assertEqual(self.page.locator(mod.CONTROLS).nth(0).evaluate(mod._CONTROL_LABEL_JS), "PDF下载")
+
+    def test_actual_dom_whitespace_fallback_and_dynamic_insertion_click_original_node(self):
+        self.page.set_content('<a href="#" title="PDF下载" style="display:inline-block;width:30px;height:30px" '
+            'onclick="document.body.dataset.downloaded=\'yes\';return false">\n   </a>')
+        data = self.page.evaluate(mod._CNKI_UI_JS)
+        self.assertEqual(data["controls"][0]["text"], "PDF下载")
+        element, selected = mod._download_element(self.page)
+        self.assertEqual(selected["text"], "PDF下载")
+        self.assertEqual(element.evaluate(mod._CONTROL_LABEL_JS), "PDF下载")
+        # Reproduce a navigation/ad widget that inserts an unrelated anchor
+        # after the snapshot/handle selection, before the eventual click.
+        self.page.evaluate("document.body.insertAdjacentHTML('afterbegin', '<a href=\"#\" onclick=\"document.body.dataset.wrong=1;return false\">登录</a>')")
+        element.click(no_wait_after=True)
+        self.assertEqual(self.page.locator("body").get_attribute("data-downloaded"), "yes")
+        self.assertIsNone(self.page.locator("body").get_attribute("data-wrong"))
+        element.dispose()
+
+    def test_actual_dom_whitespace_input_and_image_fallback_labels_are_consistent(self):
+        self.page.set_content('<a href="#" aria-label="  " title="PDF下载" style="display:inline-block;width:30px;height:30px">\n </a>'
+                              '<button title="下载全文">\n </button><a href="#"><img alt="CAJ下载" style="width:20px;height:20px"></a>')
+        data = self.page.evaluate(mod._CNKI_UI_JS)
+        elements = self.page.query_selector_all(mod.CONTROLS)
+        self.assertEqual([item["text"] for item in data["controls"]], ["PDF下载", "下载全文", "CAJ下载"])
+        self.assertEqual([item.evaluate(mod._CONTROL_LABEL_JS) for item in elements], ["PDF下载", "下载全文", "CAJ下载"])
+        for element in elements:
+            element.dispose()
 
 
 if __name__ == "__main__":
