@@ -22,6 +22,9 @@ const BACKEND_FILES = [
   'tools/literature_pubmed.py',
   'tools/literature_search.py',
   'tools/literature_sources.py',
+  'tools/literature_source_runner.py',
+  'tools/literature_source_worker.py',
+  'tools/literature_source_guard.py',
   'tools/scholar-flow.js',
   'tools/source-download.js'
 ];

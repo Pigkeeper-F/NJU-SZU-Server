@@ -7,7 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,6 +28,14 @@ def read_report(output: Path) -> dict:
 def read_csv_rows(output: Path) -> list[dict]:
     with (output / "candidates.csv").open(encoding="utf-8-sig", newline="") as stream:
         return list(csv.DictReader(stream))
+
+
+@contextmanager
+def injected_adapter(modules):
+    """Explicit source seam: a fake must never reach the real browser worker."""
+    adapter = modules["literature_browser"]
+    with patch("literature_search.injected_source_runner", lambda *args, **kwargs: adapter.run(*args, **kwargs)):
+        yield
 
 
 class LiteratureSearchTest(unittest.TestCase):
@@ -69,7 +77,7 @@ class LiteratureSearchTest(unittest.TestCase):
         adapter = types.SimpleNamespace(run=lambda *args, **kwargs: (received.append((args, kwargs)) or {"status": "no_results", "url": "https://scholar.google.com/scholar", "results": []}))
         config = {"topic": "中国水产养殖", "query": "China aquaculture climate change", "sources": ["google-scholar"],
                   "publicationYearFrom": 2015, "publicationYearTo": 2023, "limit": 10}
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": adapter}):
+        with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": adapter}):
             self.assertEqual(run(config, Path(temp)), 0)
             self.assertEqual(received, [(("google-scholar", config["query"], False, 10, 2015, 2023), {"job_dir": Path(temp)})])
             report = read_report(Path(temp))
@@ -233,7 +241,7 @@ class LiteratureSearchTest(unittest.TestCase):
                         "applied_filters": ["query"], "deferred_rules": ["publicationYearFrom", "publicationYearTo"]}
             return {"status": "ok", "results": [{"title": "Same paper", "year": 2022}], "applied_filters": ["query"]}
 
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}):
+        with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": types.SimpleNamespace(run=browser_run)}):
             output, stdout = Path(temp), io.StringIO()
             with redirect_stdout(stdout):
                 self.assertEqual(run(config, output), 0)
@@ -271,7 +279,7 @@ class LiteratureSearchTest(unittest.TestCase):
 
     def test_checkpoint_refuses_changed_queries_and_attention_is_not_zero_hits(self) -> None:
         adapter = types.SimpleNamespace(run=lambda *args, **kwargs: {"status": "attention", "reason": "results_unrecognized"})
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": adapter}):
+        with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": adapter}):
             output = Path(temp)
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(run({**CONFIG, "sources": ["web-of-science"]}, output), 0)
@@ -290,7 +298,7 @@ class LiteratureSearchTest(unittest.TestCase):
         def browser_run(source, query, scrape_current, limit, year_from, year_to, **kwargs):
             calls.append(source)
             return {"status": "ok", "results": [{"title": f"{source} {index}", "year": 2020} for index in range(15)]}
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+        with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
             self.assertEqual(run({**CONFIG, "sources": ["web-of-science", "cnki", "google-scholar"]}, Path(temp)), 0)
             report = read_report(Path(temp))
         self.assertEqual(calls, ["web-of-science", "cnki", "google-scholar"])
@@ -307,7 +315,7 @@ class LiteratureSearchTest(unittest.TestCase):
                 return {"status": "error", "message": "浏览器连接暂时失败"}
             return {"status": "ok", "results": [{"title": source, "year": 2020}]}
         config = {**CONFIG, "sources": ["google-scholar", "cnki"]}
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+        with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
             output = Path(temp)
             self.assertEqual(run(config, output), 1)
             report = read_report(output)
@@ -344,8 +352,8 @@ class LiteratureSearchTest(unittest.TestCase):
                     "results": [{"title": f"{source} broiler heat study {index}", "year": 2020,
                                  "result_url": f"https://example.org/{source}/{index}"} for index in range(10)]}
 
-        with tempfile.TemporaryDirectory(prefix="literature-six-source-retry-") as temp, patch.dict(
-                sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}):
+        with tempfile.TemporaryDirectory(prefix="literature-six-source-retry-") as temp, injected_adapter(
+                {"literature_browser": types.SimpleNamespace(run=browser_run)}):
             output = Path(temp)
             config_path = output / "run_config.json"
             config_path.write_bytes(frozen)
@@ -424,7 +432,7 @@ class LiteratureSearchTest(unittest.TestCase):
             return {"status": "ok", "results": [{"title": f"{source} study {i}", "year": 2020}
                                                    for i in range(10)]}
 
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser)}):
+        with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": types.SimpleNamespace(run=browser)}):
             output = Path(temp)
             config_path = output / "run_config.json"
             config_path.write_bytes(frozen)
@@ -502,7 +510,7 @@ class LiteratureSearchTest(unittest.TestCase):
     def test_invalid_defer_or_queue_does_not_write_or_launch_browser(self) -> None:
         config = {**CONFIG, "sources": ["web-of-science", "cnki"]}
         browser = types.SimpleNamespace(run=lambda *args, **kwargs: {"status": "attention", "reason": "login"})
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": browser}):
+        with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": browser}):
             output = Path(temp)
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(run(config, output), 0)
@@ -544,7 +552,7 @@ class LiteratureSearchTest(unittest.TestCase):
             calls.append(source)
             return {"status": "ok", "results": [{"title": "Repeated candidate", "year": 2020}]}
         config = {**CONFIG, "sources": ["cnki", "web-of-science"], "batch": {"size": 2, "maxBatches": 2}}
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+        with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
             output = Path(temp)
             self.assertEqual(run(config, output), 0)
             self.assertEqual(run(config, output), 0)
@@ -565,7 +573,7 @@ class LiteratureSearchTest(unittest.TestCase):
                                  **({"transport": "pubmed_web"} if source == "pubmed" and index == 1 else {})}
                                 for index in range(15)]}
         config = {**CONFIG, "sources": sources, "sourceQueries": {key: key + " confirmed terms" for key in sources}}
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+        with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
             output = Path(temp)
             self.assertEqual(run(config, output), 0)
             report, rows = read_report(output), read_csv_rows(output)
@@ -600,7 +608,7 @@ class LiteratureSearchTest(unittest.TestCase):
                     return {"status": "ok", "transport": transport, "results": [{"title": f"{source} heat study", "year": 2020,
                                      "pmid": "123456" if source == "pubmed" else ""}]}
                 config = {**CONFIG, "sources": sources, "sourceQueries": {key: key + " frozen query" for key in sources}}
-                with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
+                with tempfile.TemporaryDirectory() as temp, injected_adapter({"literature_browser": types.SimpleNamespace(run=browser_run)}), redirect_stdout(io.StringIO()):
                     output = Path(temp)
                     self.assertEqual(run(config, output), 0)
                     report = read_report(output)

@@ -183,7 +183,15 @@
   function literatureCompletedMessage(job) {
     const base = '候选检索已保存 ' + job.count + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。';
     const extra = literatureDeliverableSummary(job);
-    return extra ? base + extra : base;
+    return (extra ? base + extra : base) + literatureProcessingBasisMessage(job);
+  }
+  function literatureProcessingBasisMessage(job) {
+    const basis = job?.processingBasis;
+    if (!basis) return '';
+    const count = Number.isSafeInteger(basis.candidateCount) && basis.candidateCount >= 0 ? basis.candidateCount : '待核对';
+    const omitted = Array.isArray(basis.deferredSources) ? basis.deferredSources.map(source => LITERATURE_SOURCE_LABELS[source] || source).join('、') : '待核对';
+    return '本次后续处理基于现有' + count + '条候选；待补检来源：' + (omitted || '待核对')
+      + '，当前快照不代表全部来源已检索完成。原检索任务仍可在历史中补检，补检结果不会自动混入此快照。';
   }
   function literatureDeliverableSummary(job) {
     const files = Array.isArray(job.files) ? job.files : [];
@@ -210,7 +218,7 @@
   async function autoOpenLiteratureBrowser(id, job) {
     const source = job.attention?.source, reason = job.attention?.reason;
     const t = task(id);
-    if (job.status !== 'needs_attention' || job.stage === 'awaiting_confirmation'
+    if (job.status !== 'needs_attention' || job.stage === 'awaiting_confirmation' || job.deferredOnly === true
       || !LITERATURE_EXECUTABLE_SOURCES.includes(source) || !['login', 'verification', 'access_required'].includes(reason)) {
       t.literatureAutoOpenNotice = ''; return false;
     }
@@ -335,8 +343,34 @@
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
+  async function continueAvailableLiterature(mod) {
+    const t = task(mod.id);
+    if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
+    const job = t.literatureJob;
+    if (!job?.id || job.deletedAt || job.status === 'running' || job.deferredOnly !== true || !Number.isSafeInteger(job.count) || job.count <= 0) {
+      t.literatureError = '当前任务仍需检索或没有可用候选，不能按已有结果建立后续运行。'; render(); return;
+    }
+    if (t.literatureConfig && !sameLiteratureDeferralConfig(job.config, t.literatureConfig)) {
+      t.literatureError = '检索设置已改变，请先从历史载入原任务；后续处理使用原任务的候选与冻结规则快照。'; render(); return;
+    }
+    const until = LITERATURE_STAGE_ORDER.indexOf(t.literatureUntil) >= LITERATURE_STAGE_ORDER.indexOf('dedupe') ? t.literatureUntil : 'dedupe';
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      await checkLiteratureRuntime(job.config?.sources || []);
+      const next = await request('/api/literature/continue-available', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: job.id, until }) });
+      if (!next?.id || next.id === job.id || !next.processingBasis) throw new Error('未收到可核对的独立后续运行，请刷新历史任务查看；原任务保留。');
+      t.literatureConfig = JSON.parse(JSON.stringify(next.config || job.config)); t.literatureUntil = next.until || until;
+      saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureUntil: t.literatureUntil,
+        literatureSource: literatureSource(mod) };
+      applyLiteratureJob(mod, next);
+      await watchLiterature(mod.id, next.id);
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
   function literatureAttentionMessage(job) {
     const source = job.attention?.source;
+    if (job.deferredOnly === true) return '已暂缓，当前没有其他待检索来源。原来源仍待补检，已有候选保留；可用已有候选建立后续处理运行，或在原页面核对后点击“补检该来源”。';
     if (job.attention?.reason === 'results_unrecognized') {
       const prefix = LITERATURE_EXECUTABLE_SOURCES.includes(source) ? (LITERATURE_SOURCE_LABELS[source] || source) + '：' : '';
       return prefix + String(job.message || job.error || '尚不能确认当前检索页面，已有结果保留。');
@@ -356,7 +390,8 @@
       await checkLiteratureRuntime(t.literatureJob.config?.sources || []);
       await request('/api/literature/browser', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: t.literatureJob.id }) });
-      t.literatureAutoOpenNotice = '已请求打开本任务的官方页面，请在平台专用检索浏览器处理后回到这里点击“检查并继续”。';
+      t.literatureAutoOpenNotice = t.literatureJob.deferredOnly === true ? '已请求打开原任务页面，确认可用后回到这里点击“补检该来源”。'
+        : '已请求打开本任务的官方页面，请在平台专用检索浏览器处理后回到这里点击“检查并继续”。';
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
@@ -557,7 +592,7 @@
   const LITERATURE_SOURCE_LABELS = { 'google-scholar': 'Google Scholar', 'cnki': '中国知网', 'web-of-science': 'Web of Science 核心合集',
     'wanfang': '万方', 'scopus': 'Scopus', 'pubmed': 'PubMed' };
   const LITERATURE_EXECUTABLE_SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
-  const LITERATURE_FILE_LABELS = { 'run_config.json': '运行配置（冻结）', 'candidates.json': '候选清单 JSON（累计）', 'candidates.csv': '候选清单 CSV（累计）',
+  const LITERATURE_FILE_LABELS = { 'run_config.json': '运行配置（冻结）', 'processing-basis.json': '本次处理依据', 'candidates.json': '候选清单 JSON（累计）', 'candidates.csv': '候选清单 CSV（累计）',
     'dedupe/dedupe.json': '去重结果 JSON', 'dedupe/dedupe.csv': '去重结果 CSV', 'fulltext/status.json': '全文获取状态',
     'extraction/check_report.json': '提取校验报告', 'validation/validation.json': '校验结果 JSON', 'validation/validation.md': '待审核清单',
     'export/literature.csv': '文献表 CSV', 'export/literature.xlsx': '文献表 Excel', 'export/parameters.csv': '参数明细表 CSV',
@@ -617,8 +652,8 @@
       const paused = job.status === 'needs_attention' && job.resumeStage === stage;
       const state = paused ? 'pending' : LITERATURE_STAGE_STATES[job.stages[stage]] ? job.stages[stage] : 'pending';
       const item = node('span', undefined, 'literature-stage is-' + state);
-      item.append(node('span', LITERATURE_STAGE_LABELS[stage] || stage));
-      item.append(node('span', paused ? '待人工处理' : LITERATURE_STAGE_STATES[state], 'literature-stage-state'));
+      item.append(node('span', stage === 'discover' && job.processingBasis ? '候选快照就绪' : LITERATURE_STAGE_LABELS[stage] || stage));
+      item.append(node('span', paused ? job.deferredOnly === true ? '已暂缓，待补检' : '待人工处理' : LITERATURE_STAGE_STATES[state], 'literature-stage-state'));
       bar.append(item);
     });
     const meta = [];
@@ -804,8 +839,12 @@
       t.literatureJobs.forEach(job => {
         const row = node('div', undefined, 'literature-history-row' + (job.id === t.literatureJob?.id ? ' is-current' : ''));
         row.append(node('span', String(job.id || '').slice(0, 8), 'literature-history-id'));
-        row.append(node('span', job.deletedAt ? '已删除，可恢复' : (LITERATURE_STATUS_LABELS[job.status] || job.status || '') + (job.stage ? ' · ' + literatureStageLabel(job.stage) : ''), 'literature-history-status'));
-        row.append(node('span', String(job.message || '').slice(0, 60), 'literature-history-message'));
+        row.append(node('span', job.deletedAt ? '已删除，可恢复' : job.deferredOnly === true ? '已暂缓，待补检'
+          : (job.processingBasis ? '现有候选后续处理 · ' : '') + (LITERATURE_STATUS_LABELS[job.status] || job.status || '') + (job.stage ? ' · ' + literatureStageLabel(job.stage) : ''), 'literature-history-status'));
+        const historyMessage = job.deferredOnly === true ? '当前没有其他待检索来源，已有' + job.count + '条候选可继续处理。'
+          : job.processingBasis ? literatureProcessingBasisMessage(job) : String(job.message || '');
+        const historyNote = node('span', job.processingBasis ? historyMessage : historyMessage.slice(0, 60), 'literature-history-message');
+        historyNote.title = historyMessage; row.append(historyNote);
         if (job.deletedAt) {
           const restore = node('button', '恢复', 'quiet-button'); restore.type = 'button';
           restore.disabled = !!t.literatureHistoryBusy || t.literatureJobsLoading;
@@ -827,6 +866,7 @@
   }
   function literaturePanel(mod, t, container = panel) {
     const box = node('div', undefined, 'literature-connector');
+    let timeoutAttention = null;
     const overview = node('div', undefined, 'literature-overview');
     const introduction = node('div');
     introduction.append(node('h3', '文献任务'), node('p', '讨论需求 → 确认设置 → 执行 → 核查结果', 'codex-status'));
@@ -879,37 +919,48 @@
     untilWrap.append(until); row.append(untilWrap);
     box.append(row);
     box.append(node('p', '登录流程：需要登录、验证或机构权限时，平台会尝试自动打开本任务的官方页面。请在平台专用检索浏览器操作，它会保存该浏览器的登录状态；普通 Edge/Chrome 的登录不会自动共享。完成后回到本平台点击“检查并继续”，任务才会恢复。', 'codex-status'));
+    box.append(node('p', '后台对每次页面加载或候选获取设置1分钟时限，超时后暂停并保留已保存结果；正式检索每页单独计时，依赖准备另行提示。', 'codex-status'));
+    if (job?.processingBasis) box.append(node('p', literatureProcessingBasisMessage(job), 'codex-status'));
     const executionOrder = job ? Array.isArray(job.executionOrder) ? job.executionOrder : job.config?.sources : newLiteratureSourceOrder(t.literatureConfig?.sources);
-    if (Array.isArray(executionOrder) && executionOrder.length) box.append(node('p', (job ? '当前任务执行顺序：' : '新检索执行顺序：')
+    if (!job?.processingBasis && Array.isArray(executionOrder) && executionOrder.length) box.append(node('p', (job ? '当前任务执行顺序：' : '新检索执行顺序：')
       + executionOrder.map(source => LITERATURE_SOURCE_LABELS[source] || source).join(' → '), 'codex-status'));
     if (job) {
       const deferred = Array.isArray(job.deferredSources) ? [...new Set(job.deferredSources)].filter(source => job.config?.sources?.includes(source)) : [];
-      box.append(node('p', '状态：' + (deferred.length && job.status === 'completed' ? '仍有暂缓来源待补检，检索尚未全部完成' : job.message || literatureStageLabel(job.stage) || job.status)
+      box.append(node('p', '状态：' + (job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : deferred.length && job.status === 'completed' ? '仍有暂缓来源待补检，检索尚未全部完成' : job.message || literatureStageLabel(job.stage) || job.status)
         + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
       if (deferred.length) box.append(node('p', '暂缓来源待补检：' + deferred.map(source => LITERATURE_SOURCE_LABELS[source] || source).join('、')
-        + '。已有候选保留，检索尚未全部完成；可打开原页面处理后点击“检查并继续”补检。', 'codex-status'));
+        + '。已有候选保留，检索尚未全部完成；可打开原页面处理后点击“' + (job.deferredOnly === true ? '补检该来源' : '检查并继续') + '”补检。', 'codex-status'));
       const stages = literatureStageBar(job);
       if (stages) box.append(stages);
       if (awaitingConfirm) box.append(node('p', '提取字段等待确认：点击“设置提取字段”，新增或核对表头后确认并继续提取。', 'codex-status'));
     }
     if (awaitingAccess) {
       const attention = node('section', undefined, 'literature-confirm'); attention.setAttribute('aria-live', 'polite');
+      if (job.deferredOnly !== true && job.resumeStage === 'discover' && job.attention?.reason === 'results_unrecognized'
+        && job.message === '当前来源加载超过1分钟，已暂停；已有结果保留。请查看原页面后检查并继续，或暂缓此来源。') timeoutAttention = attention;
       const hasSourcePage = LITERATURE_EXECUTABLE_SOURCES.includes(job.attention?.source);
-      attention.append(node('h4', '当前需要处理：' + (hasSourcePage ? LITERATURE_SOURCE_LABELS[job.attention.source] : '检索暂停')));
+      attention.append(node('h4', job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : '当前需要处理：' + (hasSourcePage ? LITERATURE_SOURCE_LABELS[job.attention.source] : '检索暂停')));
       attention.append(node('p', literatureAttentionMessage(job), 'codex-status'));
-      if (t.literatureAutoOpenNotice) attention.append(node('p', t.literatureAutoOpenNotice, 'codex-status'));
+      if (t.literatureAutoOpenNotice && job.deferredOnly !== true) attention.append(node('p', t.literatureAutoOpenNotice, 'codex-status'));
       const actions = node('div', undefined, 'literature-confirm-actions');
       if (hasSourcePage) {
-        const open = node('button', '打开登录/检索页面', 'quiet-button'); open.type = 'button';
+        const open = node('button', job.deferredOnly === true ? '查看原页面' : '打开登录/检索页面', 'quiet-button'); open.type = 'button';
         open.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
         open.onclick = () => openLiteratureBrowser(mod);
         actions.append(open);
       }
-      const resume = node('button', '检查并继续', 'primary-button'); resume.type = 'button';
+      const resume = node('button', job.deferredOnly === true ? '补检该来源' : '检查并继续', 'primary-button'); resume.type = 'button';
       resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
       resume.onclick = () => continueLiterature(mod);
       actions.append(resume);
-      if (hasSourcePage && job.resumeStage === 'discover' && job.config?.sources?.includes(job.attention.source)) {
+      if (job.deferredOnly === true && Number.isSafeInteger(job.count) && job.count > 0 && !job.deletedAt) {
+        const target = LITERATURE_STAGE_ORDER.indexOf(t.literatureUntil) >= LITERATURE_STAGE_ORDER.indexOf('dedupe') ? t.literatureUntil : 'dedupe';
+        const targets = { dedupe: '去重', fulltext: '获取全文', extract: '提取', validate: '校验', export: '导出' };
+        const available = node('button', '用已有' + job.count + '条候选继续' + targets[target], 'quiet-button'); available.type = 'button';
+        available.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameLiteratureDeferralConfig(job.config, t.literatureConfig);
+        available.onclick = () => continueAvailableLiterature(mod); actions.append(available);
+      }
+      if (job.deferredOnly !== true && hasSourcePage && job.resumeStage === 'discover' && job.config?.sources?.includes(job.attention.source)) {
         const defer = node('button', '暂缓此来源，继续其他来源', 'quiet-button'); defer.type = 'button';
         defer.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameLiteratureDeferralConfig(job.config, t.literatureConfig);
         defer.title = '保留当前来源已有候选和页码，先继续其他来源；暂缓来源仍须补检。';
@@ -1008,6 +1059,15 @@
     box.append(literatureHistory(mod, t));
     if (t.literatureError) box.append(node('p', t.literatureError, 'codex-error'));
     container.append(box);
+    if (timeoutAttention && typeof timeoutAttention.scrollIntoView === 'function') {
+      const event = Array.isArray(job.events) ? job.events[job.events.length - 1] : null;
+      const stamp = JSON.stringify([job.id, job.attention?.source || '', event?.at || '', job.message]);
+      const revealed = saved[mod.id]?.literatureTimeoutReveals || {};
+      if (revealed[job.id] !== stamp) {
+        timeoutAttention.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        saved[mod.id] = { ...saved[mod.id], literatureTimeoutReveals: { ...revealed, [job.id]: stamp } }; persist();
+      }
+    }
   }
   async function reply(module, messages) {
     const t = task(module.id);

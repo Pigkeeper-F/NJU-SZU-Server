@@ -29,6 +29,16 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 _common = importlib.import_module("literature-common")  # 文件名含连字符，见 literature-common.py 头部说明
 _sources = importlib.import_module("literature_sources")
+_source_runner = importlib.import_module("literature_source_runner")
+
+# Explicit in-process unit-test injection only. No HTTP/config/CLI field sets
+# this seam; production always invokes the fixed, killable 60-second worker.
+injected_source_runner = None
+
+
+def _run_source(*args, **kwargs):
+    runner = injected_source_runner or _source_runner.run_source
+    return runner(*args, **kwargs)
 
 emit = _common.emit
 safe_url = _common.safe_url
@@ -556,7 +566,6 @@ def _page_fingerprint(rows: list[dict]) -> str:
 def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
                batch_index: int | None = None, resume: bool = False, defer_source: str | None = None) -> int:
     """One discovery batch, many pages; commit every page before advancing."""
-    import literature_browser
 
     output_dir = Path(output_dir)
     validate_config(config)
@@ -636,7 +645,7 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
             emit("stage", stage="search", source=source,
                  message=f"{_sources.label_of(source)}：正在获取第{page_index + 1}页，{quantity}",
                  deferred_sources=list(state.get("deferred_sources", [])))
-            search = literature_browser.run(source, query, source == resumed_source, batch_size(config),
+            search = _run_source(source, query, source == resumed_source, batch_size(config),
                                             config.get("publicationYearFrom"), config.get("publicationYearTo"),
                                             job_dir=output_dir, page_index=page_index, full_page=True)
             resumed_source = None  # only the paused page may read a manual tab
@@ -754,8 +763,6 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
         emit("error", message=f"检索失败：已达本任务批数上限（{max_batches}）；如需追加批次请新建任务并调整批数上限")
         return 1
 
-    import literature_browser  # noqa: PLC0415 - task/source bound persistent tabs
-
     if not state or state["batch_index"] != index:
         state = {"version": 1, "config_fingerprint": fingerprint, "batch_index": index, "sources": {},
                  "pending_source": None, "pending_reason": None}
@@ -778,7 +785,7 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
              deferred_sources=list(state.get("deferred_sources", [])))
         state.update(pending_source=source, pending_reason=None)
         _common.atomic_write_json(checkpoint_path, state)
-        search = literature_browser.run(source, query, source == resumed_source, batch_size(config),
+        search = _run_source(source, query, source == resumed_source, batch_size(config),
                                         config.get("publicationYearFrom"), config.get("publicationYearTo"), job_dir=output_dir)
         if search.get("status") in {"attention", "captcha"}:
             reason = search.get("reason", "verification" if search.get("status") == "captcha" else "results_unrecognized")

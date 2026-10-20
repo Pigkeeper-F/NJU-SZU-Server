@@ -36,7 +36,7 @@ def report(root):
 class FormalPagingTests(unittest.TestCase):
     def execute(self, config, root, browser, **kwargs):
         output = io.StringIO()
-        with patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser)}), redirect_stdout(output):
+        with patch("literature_search.injected_source_runner", browser), redirect_stdout(output):
             code = run(config, root, **kwargs)
         return code, [json.loads(line) for line in output.getvalue().splitlines()]
 

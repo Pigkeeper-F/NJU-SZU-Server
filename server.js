@@ -293,6 +293,13 @@ async function handleLiterature(req, res, url) {
       return sendJson(res, 200, scholar.advance(data.id, { until: data.until, confirmations: data.confirmations,
         ...(Object.hasOwn(data, 'deferSource') ? { deferSource: data.deferSource } : {}) }));
     }
+    if (req.method === 'POST' && route === '/api/literature/continue-available') {
+      const data = JSON.parse(await readBody(req, 4 * 1024));
+      if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => !['id', 'until'].includes(key))) {
+        throw new Error('只需提供原任务标识与后续处理阶段');
+      }
+      return sendJson(res, 200, scholar.continueAvailable(data.id, { until: data.until }));
+    }
     if (req.method === 'POST' && route === '/api/literature/browser') {
       const data = JSON.parse(await readBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Object.keys(data).some(key => key !== 'id')) throw new Error('只需提供当前检索任务标识');

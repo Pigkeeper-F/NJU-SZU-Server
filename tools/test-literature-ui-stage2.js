@@ -105,11 +105,13 @@ function functionSource(name) {
   const end = codex.indexOf('\n  }', start);
   return codex.slice(start, end + 4);
 }
+const scrolls = [];
 class Element {
   constructor(tag, text, className) { this.tag = tag; this.textContent = text || ''; this.className = className || ''; this.children = []; }
   append(...items) { this.children.push(...items); }
   prepend(...items) { this.children.unshift(...items); }
   setAttribute(key, value) { this[key] = value; }
+  scrollIntoView(options) { scrolls.push({ element: this, options, mounted: elements(container).includes(this) }); }
 }
 function elements(parent) { return [parent, ...parent.children.flatMap(elements)]; }
 const calls = [];
@@ -129,8 +131,8 @@ const context = vm.createContext({
 });
 const configCode = codex.slice(codex.indexOf('  const LITERATURE_CONFIG_KEYS'), codex.indexOf('  async function prepareLiterature'));
 const labelsCode = codex.slice(codex.indexOf('  const LITERATURE_STAGE_ORDER'), codex.indexOf('  function literatureFileLabel'));
-vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
-  + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, openLiteratureBrowser, literatureAttentionMessage, literatureStageLabel, literatureStageBar, literaturePanel };', context);
+vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'continueAvailableLiterature', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureProcessingBasisMessage', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
+  + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, continueAvailableLiterature, openLiteratureBrowser, literatureAttentionMessage, literatureProcessingBasisMessage, literatureStageLabel, literatureStageBar, literaturePanel };', context);
 const subject = context.subject;
 
 async function multiSourceTests() {
@@ -407,6 +409,48 @@ async function multiSourceTests() {
   container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
   assert.ok(elements(container).some(item => item.textContent.includes('仍有暂缓来源待补检，检索尚未全部完成')));
   assert.ok(!elements(container).some(item => item.textContent.includes('状态：检索全部完成')), '暂缓列表不能显示为全部完成');
+  current.literatureJob = { ...deferralJob, deferredOnly: true, count: 50, message: '其余未暂缓来源已处理，请处理当前来源或继续暂缓' };
+  current.literatureConfig = JSON.parse(JSON.stringify(deferralConfig)); current.literatureUntil = 'discover'; calls.length = 0;
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  const deferredOnlyNodes = elements(container);
+  assert.ok(deferredOnlyNodes.some(item => item.textContent === '已暂缓，当前没有其他待检索来源'));
+  assert.ok(!deferredOnlyNodes.some(item => item.textContent.startsWith('当前需要处理：') || item.textContent.includes('请处理当前来源或继续暂缓')));
+  assert.ok(!deferredOnlyNodes.some(item => item.tag === 'button' && item.textContent === '暂缓此来源，继续其他来源'));
+  assert.ok(deferredOnlyNodes.some(item => item.tag === 'button' && item.textContent === '补检该来源'));
+  assert.ok(deferredOnlyNodes.some(item => item.tag === 'button' && item.textContent === '查看原页面'));
+  assert.ok(deferredOnlyNodes.some(item => item.tag === 'button' && item.textContent === '用已有50条候选继续去重'));
+  assert.equal(calls.length, 0, 'Showing the deferred state never starts a processing run automatically');
+  current.literatureJob = { ...current.literatureJob, count: 0 };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.ok(!elements(container).some(item => item.tag === 'button' && item.textContent.startsWith('用已有')));
+  const child = { ...deferralJob, id: 'partial-child', status: 'completed', stage: 'completed', count: 12, deferredOnly: false, deferredSources: [],
+    processingBasis: { parentJobId: deferralJob.id, candidateCount: 50, deferredSources: ['web-of-science'], candidateSnapshotSha256: 'fixture', createdAt: 'fixture' },
+    stages: { discover: 'done', dedupe: 'done' } };
+  current.literatureJob = child;
+  for (const status of ['running', 'needs_attention', 'completed']) {
+    current.literatureJob = { ...child, status };
+    container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+    const childNodes = elements(container);
+    assert.ok(childNodes.some(item => item.textContent.includes('现有50条候选；待补检来源：Web of Science 核心合集')
+      && item.textContent.includes('当前快照不代表全部来源已检索完成')), 'All child states retain frozen incomplete-search provenance');
+    assert.ok(!childNodes.some(item => item.textContent.startsWith('当前任务执行顺序：')), 'Processing children must not imply they will search omitted sources');
+    assert.ok(childNodes.some(item => item.textContent === '候选快照就绪'));
+  }
+  current.literatureJob = { ...deferralJob, deferredOnly: false, message: '当前来源加载超过1分钟，已暂停；已有结果保留。请查看原页面后检查并继续，或暂缓此来源。',
+    attention: { source: 'web-of-science', reason: 'results_unrecognized' }, events: [{ at: 'timeout-round-1' }] };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.equal(scrolls.length, 1); assert.equal(scrolls[0].mounted, true, 'Timeout scrolling happens only after the card is in the DOM');
+  assert.equal(scrolls[0].element['aria-live'], 'polite');
+  assert.ok(elements(scrolls[0].element).some(item => item.textContent.startsWith('当前需要处理：')));
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.equal(scrolls.length, 1, 'Polling or rerendering the same timeout cannot steal scroll repeatedly');
+  current.literatureJob.events = [{ at: 'timeout-round-2' }];
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.equal(scrolls.length, 2, 'A later actual timeout can reveal the card once again');
+  current.literatureJob = { ...current.literatureJob, deferredOnly: true, events: [{ at: 'deferred-round' }] };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.equal(scrolls.length, 2, 'Deferred-only state never reopens the timeout attention card');
+  assert.ok(codex.includes("'processing-basis.json': '本次处理依据'"));
   console.log('LITERATURE_UI_STAGE2_TESTS_PASS');
 }
 multiSourceTests().catch(error => { console.error(error); process.exitCode = 1; });

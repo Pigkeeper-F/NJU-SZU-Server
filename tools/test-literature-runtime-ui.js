@@ -23,7 +23,7 @@ function functionSource(name) {
   return source.slice(start, end + 4);
 }
 const FUNCTIONS = ['checkLiteratureRuntime', 'autoOpenLiteratureBrowser', 'watchLiterature', 'startLiterature',
-  'continueLiterature', 'openLiteratureBrowser', 'confirmLiteratureFields', 'literatureAttentionMessage', 'literatureCompletedMessage'];
+  'continueLiterature', 'continueAvailableLiterature', 'openLiteratureBrowser', 'confirmLiteratureFields', 'literatureAttentionMessage', 'literatureCompletedMessage', 'literatureProcessingBasisMessage'];
 function job(overrides = {}) {
   return { id: 'original-job', status: 'needs_attention', stage: 'verification', resumeStage: 'discover', until: 'discover',
     config: { topic: 'fixture topic', query: 'fixture query', sources: ['cnki'], limit: 10,
@@ -33,7 +33,7 @@ function job(overrides = {}) {
 }
 function harness(savedSnapshot) {
   let activeJob = job();
-  let runtime = copy(RUNTIME), runtimeError = null, browserError = null;
+  let runtime = copy(RUNTIME), runtimeError = null, browserError = null, availableError = null;
   const calls = [], messages = [];
   const saved = savedSnapshot ? copy(savedSnapshot) : { [MODULE]: { literatureSource: 'fixture-source' } };
   const current = { busy: false, literatureBusy: false, literatureError: '', literatureUntil: 'discover',
@@ -59,6 +59,15 @@ function harness(savedSnapshot) {
         activeJob = { ...activeJob, status: 'completed', stage: 'completed', until: body.until, attention: null };
         return copy(activeJob);
       }
+      if (url === '/api/literature/continue-available') {
+        if (availableError) throw availableError;
+        const parent = activeJob;
+        activeJob = { ...parent, id: 'partial-processing-child', status: 'completed', stage: 'completed', until: body.until,
+          resumeStage: body.until === 'dedupe' ? 'fulltext' : 'extract', attention: null, deferredOnly: false,
+          processingBasis: { parentJobId: parent.id, candidateCount: parent.count, deferredSources: parent.deferredSources,
+            candidateSnapshotSha256: 'fixture-sha256', createdAt: '2026-10-20T00:00:00.000Z' } };
+        return copy(activeJob);
+      }
       if (url.startsWith('/api/literature/job?')) return copy(activeJob);
       throw new Error('Unexpected fixture request: ' + url);
     },
@@ -69,7 +78,7 @@ function harness(savedSnapshot) {
   vm.runInContext(configCode + labelsCode + '\n' + FUNCTIONS.map(functionSource).join('\n')
     + '\nglobalThis.subject = { ' + FUNCTIONS.join(', ') + ' };', context);
   return { subject: context.subject, current, saved, calls, messages,
-    setRuntime(value) { runtime = value; }, setRuntimeError(error) { runtimeError = error; }, setBrowserError(error) { browserError = error; },
+    setRuntime(value) { runtime = value; }, setRuntimeError(error) { runtimeError = error; }, setBrowserError(error) { browserError = error; }, setAvailableError(error) { availableError = error; },
     setJob(next) { activeJob = copy(next); current.literatureJob = copy(next); current.literatureConfig = copy(next.config); current.literatureUntil = next.until; },
     count(url) { return calls.filter(call => call.url === url).length; },
     posts() { return calls.filter(call => call.method === 'POST'); }
@@ -110,7 +119,7 @@ async function main() {
   for (const text of ['当前端口后台需要更新', '旧启动窗口', '重新打开本项目启动器', '平台专用检索浏览器', '普通 Edge/Chrome 的登录不会自动共享']) {
     assert.ok(source.includes(text), 'Runtime/login instructions should be visible: ' + text);
   }
-  assert.ok(source.includes("node('button', '打开登录/检索页面'"), 'Manual open remains available after an automatic attempt');
+  assert.ok(source.includes("'查看原页面' : '打开登录/检索页面'"), 'Manual open remains available after an automatic attempt');
   const old = harness(); old.setRuntimeError(new Error('404 route not found'));
   await old.subject.startLiterature(mod);
   assert.equal(old.posts().length, 0, 'Old server must not receive a new search');
@@ -166,6 +175,36 @@ async function main() {
   assert.equal(orderOnlyDefer.calls[0].url, '/api/literature/runtime');
   assert.deepEqual(orderOnlyDefer.calls[1].body, { id: originalOrderJob.id, until: 'discover', deferSource: 'web-of-science' });
   assert.deepEqual(copy(orderOnlyDefer.current.literatureConfig), originalOrderJob.config);
+  const partialParent = job({ deferredOnly: true, deferredSources: ['cnki'], count: 50 });
+  const partialParentBytes = JSON.stringify(partialParent);
+  const available = harness(); available.setJob(partialParent);
+  await available.subject.continueAvailableLiterature(mod);
+  assert.equal(available.calls[0].url, '/api/literature/runtime');
+  assert.deepEqual(available.calls[1], { url: '/api/literature/continue-available', method: 'POST', body: { id: partialParent.id, until: 'dedupe' } });
+  assert.equal(available.current.literatureJob.id, 'partial-processing-child');
+  assert.equal(available.current.literatureJob.processingBasis.parentJobId, partialParent.id);
+  assert.equal(available.current.literatureUntil, 'dedupe', 'Discover selection explicitly starts the new snapshot at dedupe');
+  assert.equal(JSON.stringify(partialParent), partialParentBytes, 'Starting a child cannot edit the original job');
+  assert.equal(available.count('/api/literature/search'), 0); assert.equal(available.count('/api/literature/advance'), 0);
+  assert.ok(available.messages.some(args => String(args[1]).includes('现有50条候选') && String(args[1]).includes('待补检来源：中国知网')
+    && String(args[1]).includes('当前快照不代表全部来源已检索完成')), 'Completion messages retain incomplete-search provenance without claiming a deferred source has no records');
+  const higher = harness(); higher.setJob(partialParent); higher.current.literatureUntil = 'validate';
+  await higher.subject.continueAvailableLiterature(mod);
+  assert.equal(higher.calls[1].body.until, 'validate', 'Higher explicitly selected processing boundaries are retained');
+  for (const invalid of [{ deferredOnly: false }, { count: 0 }, { deletedAt: 'deleted' }, { status: 'running' }]) {
+    const rejected = harness(); rejected.setJob({ ...partialParent, ...invalid });
+    await rejected.subject.continueAvailableLiterature(mod); assert.equal(rejected.calls.length, 0);
+  }
+  const changedPartial = harness(); changedPartial.setJob(partialParent); changedPartial.current.literatureConfig.query = 'new scientific rule';
+  await changedPartial.subject.continueAvailableLiterature(mod); assert.equal(changedPartial.calls.length, 0);
+  const failedPartial = harness(); failedPartial.setJob(partialParent); failedPartial.setAvailableError(new Error('fixture snapshot rejected'));
+  await failedPartial.subject.continueAvailableLiterature(mod);
+  assert.equal(failedPartial.current.literatureJob.id, partialParent.id); assert.match(failedPartial.current.literatureError, /fixture snapshot rejected/);
+  const oldPartial = harness(); oldPartial.setJob(partialParent); oldPartial.setRuntimeError(new Error('old backend'));
+  await oldPartial.subject.continueAvailableLiterature(mod); assert.equal(oldPartial.posts().length, 0);
+  const duplicatePartial = harness(); duplicatePartial.setJob(partialParent);
+  await Promise.all([duplicatePartial.subject.continueAvailableLiterature(mod), duplicatePartial.subject.continueAvailableLiterature(mod)]);
+  assert.equal(duplicatePartial.count('/api/literature/continue-available'), 1, 'Repeated clicks cannot create duplicate child runs');
   const confirm = harness(); confirm.setJob(job({ stage: 'awaiting_confirmation', resumeStage: 'extract', until: 'validate', attention: null }));
   await confirm.subject.confirmLiteratureFields(mod);
   assert.equal(confirm.calls[0].url, '/api/literature/runtime');
@@ -212,6 +251,7 @@ async function main() {
   assert.match(failedOpen.current.literatureAutoOpenNotice, /已请求打开/);
 
   for (const nonAuth of [job({ attention: null, stage: 'interrupted', message: '网络暂停' }),
+    job({ deferredOnly: true, deferredSources: ['cnki'] }),
     job({ attention: { source: 'cnki', reason: 'results_unrecognized' } }),
     job({ attention: { source: 'unknown', reason: 'login' } }),
     job({ stage: 'awaiting_confirmation', resumeStage: 'extract', attention: { source: 'cnki', reason: 'login' } })]) {

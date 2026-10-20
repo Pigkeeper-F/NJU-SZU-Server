@@ -44,6 +44,7 @@ const STAGE_LABELS = { discover: '候选检索', dedupe: '跨来源去重', full
 const DELIVERABLE_PATTERNS = [
   /^run_config\.json$/,
   /^candidates\.(?:json|csv)$/,
+  /^processing-basis\.json$/,
   /^dedupe\/dedupe\.(?:json|csv)$/,
   /^fulltext\/status\.json$/,
   /^fulltext\/files\/[^/\\]+\.(?:pdf|txt)$/,
@@ -107,6 +108,42 @@ function deferredSources(value, config) {
 function checkpointDeferredSources(dir, config, fallback = []) {
   const state = loadJsonFile(path.join(dir, 'discovery-state.json'));
   return deferredSources(state && Object.hasOwn(state, 'deferred_sources') ? state.deferred_sources : fallback, config);
+}
+
+function checkpointDeferredOnly(dir, config) {
+  const state = loadJsonFile(path.join(dir, 'discovery-state.json'));
+  const selected = selectedSources(config), queue = state?.deferred_sources;
+  if (!selected.length || !Array.isArray(queue) || !queue.length || new Set(queue).size !== queue.length
+      || queue.some(source => !selected.includes(source) || state?.sources?.[source]?.status !== 'attention')
+      || !queue.includes(state?.pending_source)) return false;
+  const remaining = selected.filter(source => !['ok', 'no_results'].includes(state?.sources?.[source]?.status));
+  return remaining.length > 0 && remaining.every(source => queue.includes(source) && state?.sources?.[source])
+    && queue.every(source => remaining.includes(source));
+}
+
+function candidateRecords(document) {
+  const records = Array.isArray(document?.records) ? document.records : document?.results;
+  return Array.isArray(records) && records.every(record => record && typeof record === 'object' && !Array.isArray(record)) ? records : null;
+}
+
+function sha256(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
+
+function processingBasisFor(dir, config) {
+  const basis = loadJsonFile(path.join(dir, 'processing-basis.json'));
+  if (!basis || basis.version !== 1 || !ID.test(basis.parentJobId || '')
+      || !Number.isSafeInteger(basis.candidateCount) || basis.candidateCount <= 0
+      || typeof basis.createdAt !== 'string' || !Number.isFinite(Date.parse(basis.createdAt))
+      || !Array.isArray(basis.deferredSources) || !basis.deferredSources.length
+      || JSON.stringify(deferredSources(basis.deferredSources, config)) !== JSON.stringify(basis.deferredSources)) return null;
+  try {
+    const candidates = fs.readFileSync(path.join(dir, 'candidates.json'));
+    const records = candidateRecords(JSON.parse(candidates.toString('utf8')));
+    if (!records || records.length !== basis.candidateCount || sha256(candidates) !== basis.candidateSnapshotSha256
+        || sha256(fs.readFileSync(path.join(dir, 'run_config.json'))) !== basis.configSnapshotSha256
+        || sha256(fs.readFileSync(path.join(dir, 'candidates.csv'))) !== basis.candidateCsvSnapshotSha256) return null;
+  } catch (_) { return null; }
+  return { parentJobId: basis.parentJobId, candidateCount: basis.candidateCount,
+    deferredSources: [...basis.deferredSources], candidateSnapshotSha256: basis.candidateSnapshotSha256, createdAt: basis.createdAt };
 }
 
 function executionOrder(config, queue) {
@@ -188,15 +225,41 @@ async function preparePython(root, job, progress) {
   return python;
 }
 
+const pythonProcessSpecs = new Map();
+
+async function stagePythonProcessSpec(root, python) {
+  if (process.platform !== 'win32' || !path.isAbsolute(python) || !fs.existsSync(python)) return { executable: python, environment: {} };
+  const key = path.resolve(python).toLowerCase();
+  if (!pythonProcessSpecs.has(key)) {
+    const pending = (async () => {
+      // CPython's Windows venv redirector has a different PID from its script.
+      // Probe only interpreter identity; never print these internal paths to UI.
+      const raw = await runCommand(python, ['-c', 'import json,sys; print(json.dumps({"baseExecutable":getattr(sys,"_base_executable",sys.executable),"launcher":sys.executable}))'],
+        { cwd: root, timeout: 5000 });
+      let value;
+      try { value = JSON.parse(raw); } catch (_) { throw new Error('无法确认 Python 阶段进程，请检查本机运行环境'); }
+      if (![value?.baseExecutable, value?.launcher].every(name => typeof name === 'string' && path.isAbsolute(name)
+          && !/[\r\n\0]/.test(name) && fs.existsSync(name))) throw new Error('无法确认 Python 阶段进程，请检查本机运行环境');
+      return { executable: value.baseExecutable, environment: { __PYVENV_LAUNCHER__: value.launcher } };
+    })();
+    pythonProcessSpecs.set(key, pending);
+    pending.catch(() => { if (pythonProcessSpecs.get(key) === pending) pythonProcessSpecs.delete(key); });
+  }
+  return pythonProcessSpecs.get(key);
+}
+
 //: 通用阶段执行器（§9.6）：spawn python -u <script> --config/--output-dir + stdout NDJSON。
 //: discover 沿用既有 180s 文案；其余阶段用新超时文案（§8.3）。
-function runStageProcess(root, job, python, scriptName, extraArgs, onEvent) {
+async function runStageProcess(root, job, python, scriptName, extraArgs, onEvent) {
+  const spec = await stagePythonProcessSpec(root, python);
+  // A stop during the fixed interpreter probe must not launch a late stage.
+  if (job.status !== 'running') throw new Error('任务已停止，阶段未启动');
   return new Promise((resolve, reject) => {
     const stage = job.activeStage || 'discover';
     const seconds = job.limits?.[stage] || STAGE_TIMEOUTS[stage] || 180;
     const script = path.join(root, 'tools', scriptName);
     const args = ['-u', script, '--config', path.join(job.dir, 'run_config.json'), '--output-dir', job.dir, ...(extraArgs || [])];
-    const child = spawn(python, args, { cwd: root, env: pythonEnv(), windowsHide: true });
+    const child = spawn(spec.executable, args, { cwd: root, env: { ...pythonEnv(), ...spec.environment }, windowsHide: true });
     job.child = child;
     let buffer = '';
     let stderr = '';
@@ -259,8 +322,8 @@ function detectStagedArtifacts(jobDir) {
   const stages = {};
   const candidates = loadJsonFile(path.join(jobDir, 'candidates.json'));
   const config = loadJsonFile(path.join(jobDir, 'run_config.json'));
-  stages.discover = candidates && candidates.discovery_complete !== false && !checkpointDeferredSources(jobDir, config).length
-    && Array.isArray(candidates.batches) && candidates.batches.length ? 'done' : 'pending';
+  stages.discover = processingBasisFor(jobDir, config) || (candidates && candidates.discovery_complete !== false && !checkpointDeferredSources(jobDir, config).length
+    && Array.isArray(candidates.batches) && candidates.batches.length) ? 'done' : 'pending';
 
   const dedupe = loadJsonFile(path.join(jobDir, 'dedupe', 'dedupe.json'));
   stages.dedupe = dedupe && Number.isInteger(dedupe.version) && dedupe.version >= 1 && Array.isArray(dedupe.groups) ? 'done' : 'pending';
@@ -385,11 +448,12 @@ class LiteratureConnector {
   }
 
   public(job) {
-    const queue = deferredSources(job.deferredSources, job.config);
+    const queue = checkpointDeferredSources(job.dir, job.config, job.deferredSources);
     return { id: job.id, status: job.status, stage: job.stage, message: job.message,
       count: job.count, config: job.config, files: job.files, events: job.events, error: job.error,
       stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters,
-      attention: sourceAttention(job.attention), deferredSources: queue, executionOrder: executionOrder(job.config, queue), deletedAt: job.deletedAt || null };
+      attention: sourceAttention(job.attention), deferredSources: queue, deferredOnly: checkpointDeferredOnly(job.dir, job.config),
+      executionOrder: executionOrder(job.config, queue), processingBasis: job.processingBasis || null, deletedAt: job.deletedAt || null };
   }
 
   persist(job) {
@@ -641,6 +705,55 @@ class LiteratureConnector {
     return this.public(job);
   }
 
+  continueAvailable(id, options = {}) {
+    if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    const until = options?.until;
+    if (!STAGES.slice(1).includes(until)) throw new Error('后续处理阶段必须为 dedupe–export');
+    if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) {
+      throw new Error('已有文献任务正在运行，请等待或停止后重试');
+    }
+    const parentDir = path.join(this.base, id);
+    const parent = this.jobs.get(id) || loadJsonFile(path.join(parentDir, 'job.json'));
+    if (!parent) throw new Error('检索任务不存在');
+    if (parent.deletedAt) throw new Error('该任务已删除，请先恢复后再处理');
+    if (!['needs_attention', 'failed', 'cancelled'].includes(parent.status) || parent.resumeStage !== 'discover'
+        || parent.child || parent.browserOpening) throw new Error('只能从已暂停的检索任务建立后续处理');
+    let configBytes, candidateBytes, csvBytes, config, candidates;
+    try {
+      configBytes = fs.readFileSync(path.join(parentDir, 'run_config.json'));
+      candidateBytes = fs.readFileSync(path.join(parentDir, 'candidates.json'));
+      csvBytes = fs.readFileSync(path.join(parentDir, 'candidates.csv'));
+      config = JSON.parse(configBytes.toString('utf8'));
+      candidates = JSON.parse(candidateBytes.toString('utf8'));
+    } catch (_) { throw new Error('已保存候选或冻结配置不完整，无法建立后续处理'); }
+    if (!checkpointDeferredOnly(parentDir, config)) throw new Error('仍有未暂缓的待检索来源，请先处理或暂缓后再继续');
+    const records = candidateRecords(candidates);
+    if (!records?.length || (Object.hasOwn(candidates, 'count') && candidates.count !== records.length)) {
+      throw new Error('没有可用的已保存候选，或候选数量与文件不一致');
+    }
+    const basis = { parentJobId: id, candidateCount: records.length,
+      deferredSources: checkpointDeferredSources(parentDir, config), candidateSnapshotSha256: sha256(candidateBytes),
+      createdAt: new Date().toISOString() };
+    const newId = randomUUID(), dir = path.join(this.base, newId);
+    fs.mkdirSync(dir, { recursive: true });
+    for (const [name, bytes] of [['run_config.json', configBytes], ['candidates.json', candidateBytes], ['candidates.csv', csvBytes]]) {
+      fs.writeFileSync(path.join(dir, name), bytes, { flag: 'wx' });
+    }
+    fs.writeFileSync(path.join(dir, 'processing-basis.json'), JSON.stringify({ version: 1, ...basis,
+      configSnapshotSha256: sha256(configBytes), candidateCsvSnapshotSha256: sha256(csvBytes) }, null, 2) + '\n', { flag: 'wx' });
+    const job = { id: newId, dir, config, resumeCurrent: false, status: 'running', stage: 'queued',
+      message: `基于现有 ${records.length} 条候选建立后续处理；部分来源仍待补检`, count: records.length,
+      files: ['run_config.json', 'candidates.json', 'candidates.csv', 'processing-basis.json'], events: [], error: null, child: null,
+      stages: Object.fromEntries(STAGES.map(stage => [stage, stage === 'discover' ? 'done' : 'pending'])),
+      resumeStage: 'dedupe', until, counters: { candidates: records.length }, limits: resolveLimits(config),
+      activeStage: null, python: null, resumeRun: false, attention: null, deferredSources: [], deferSource: null,
+      processingBasis: basis };
+    this.jobs.set(newId, job);
+    this.update(job, 'queued', job.message);
+    void this.run(job, 'dedupe', until);
+    return this.public(job);
+  }
+
   //: 从磁盘装载历史任务（advance 续跑用）；interrupted（服务重启遗留 running）在此重写。
   loadPersisted(id) {
     const dir = path.join(this.base, id);
@@ -662,7 +775,8 @@ class LiteratureConnector {
       counters: saved.counters && typeof saved.counters === 'object' ? saved.counters : {},
       limits: resolveLimits(saved.config || diskConfig), activeStage: null, python: null, resumeRun: true,
       attention: sourceAttention(saved.attention), browserOpening: false,
-      deferredSources: checkpointDeferredSources(dir, config), deferSource: null, deletedAt: saved.deletedAt || null
+      deferredSources: checkpointDeferredSources(dir, config), deferSource: null, deletedAt: saved.deletedAt || null,
+      processingBasis: processingBasisFor(dir, config)
     };
     const detected = detectStagedArtifacts(dir);
     if (saved.status === 'running') {
@@ -793,6 +907,8 @@ class LiteratureConnector {
     const frozenConfig = saved.config || loadJsonFile(path.join(dir, 'run_config.json'));
     saved.deletedAt = saved.deletedAt || null;
     saved.deferredSources = checkpointDeferredSources(dir, frozenConfig);
+    saved.deferredOnly = checkpointDeferredOnly(dir, frozenConfig);
+    saved.processingBasis = processingBasisFor(dir, frozenConfig);
     saved.executionOrder = executionOrder(frozenConfig, saved.deferredSources);
     if (saved.status === 'running') {
       saved.status = 'failed'; saved.stage = 'interrupted';
@@ -829,6 +945,8 @@ class LiteratureConnector {
       if (saved.deletedAt && options.includeDeleted !== true) continue;
       const config = saved.config || loadJsonFile(path.join(this.base, name, 'run_config.json'));
       saved.deferredSources = checkpointDeferredSources(path.join(this.base, name), config);
+      saved.deferredOnly = checkpointDeferredOnly(path.join(this.base, name), config);
+      saved.processingBasis = processingBasisFor(path.join(this.base, name), config);
       saved.executionOrder = executionOrder(config, saved.deferredSources);
       entries.push({ mtime: stat.mtimeMs, job: saved });
     }
