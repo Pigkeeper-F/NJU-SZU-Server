@@ -180,8 +180,8 @@
     });
     history.disabled = !(rules.versions || []).length;
     $('task-summary-ai').disabled = !!pendingRules || busy();
-    $('task-rules-execute').textContent = isDownload ? '按审核方案开始执行' : isPlot ? '按方案生成图表' : isModify ? '按方案修改并计算' : '按规则执行清洗';
-    $('task-rules-execute').disabled = !rules.confirmed || !rulesVisible || !!pendingRules || busy() || (isModify || isPlot) && rules.draft.trim() !== rules.confirmed;
+    $('task-rules-execute').textContent = isDownload ? '按方案开始下载' : isPlot ? '按方案生成图表' : isModify ? '按方案修改并计算' : '按规则执行清洗';
+    $('task-rules-execute').disabled = !(isDownload ? confirmedRules() : rules.confirmed) || !rulesVisible || !!pendingRules || busy() || (isModify || isPlot) && rules.draft.trim() !== rules.confirmed;
   }
 
   function switchTask(targetId) {
@@ -225,7 +225,7 @@
   function confirmedRules() {
     var state = root.Store.getState();
     var mod = state.modules.filter(function (item) { return item.id === state.activeModuleId; })[0];
-    if (mod && mod.type === 'download-data' && mod.doc && mod.doc.status === 'approved') return mod.doc.content;
+    if (mod && mod.type === 'download-data' && mod.doc) return mod.doc.status === 'approved' ? mod.doc.content : '';
     if (!mod || !(mod.type === 'download-data' || mod.type === 'clean-data' || isModification(mod) || isPlotting(mod) || mod.type === 'result-audit')) return '';
     return rulesFor(current(), mod.id).confirmed || '';
   }
@@ -279,8 +279,7 @@
     if ((isModification(mod) || isPlotting(mod)) && rulesFor(current(), mod.id).draft.trim() !== rules) { showMessage('方案草稿已变化，请重新审核通过后再执行。'); render(); return; }
     if (mod && mod.type === 'download-data') {
       if (busy() || pendingRules) { showMessage('当前任务尚未完成，请稍后。'); return; }
-      if (mod.doc && mod.doc.status === 'approved') { $('rules-dialog').close(); root.LiteratureUI.start(mod); }
-      else showMessage('文献获取需要先审核通过下方方案，然后按方案开始执行。已有明确文件链接可用模块中的辅助下载入口。');
+      if (root.CodexUI.openDownload(mod)) $('rules-dialog').close();
       return;
     }
     if (!mod || !(mod.type === 'clean-data' || isModification(mod) || isPlotting(mod))) { showMessage('当前模块不支持按方案执行文件处理。'); return; }

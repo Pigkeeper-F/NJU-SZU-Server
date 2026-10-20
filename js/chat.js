@@ -446,7 +446,7 @@
     chip.setAttribute('data-status', st);
     bar.appendChild(chip);
     var downloadPending = mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed');
-    bar.appendChild(el('span', 'status-hint', downloadPending ? '审核获取方案 → 按方案开始执行 → 讨论并处理问题 → 核查成果后交接' : STATUS_HINT[st] || ''));
+    bar.appendChild(el('span', 'status-hint', downloadPending ? '审核下载方案 → 核对文件地址并下载 → 核查成果后交接' : STATUS_HINT[st] || ''));
     if (mod.type === 'manual-review') bar.appendChild(el('span', 'status-hint', '这是成果审核：由你查看结果和核查报告，在对话中记录审核对象、通过或退回理由，再提交并选择通过或打回。退回上游修改需手动切换对应模块。'));
 
     var actions = el('div', 'status-actions');
@@ -1120,7 +1120,7 @@
 
   /** 结果确认门：run 存在时渲染护栏（ran→[确认结果]/[有问题]；confirmed→已确认徽标） */
   function buildRunGate(body, mod, ui) {
-    if (mod.type === 'download-data') { body.appendChild(el('span', 'status-hint', '文献获取的成果请在上方执行面板核查后交接；已有文件链接的下载结果在文件面板确认。')); return; }
+    if (mod.type === 'download-data') { body.appendChild(el('span', 'status-hint', '在上方下载区域核对文件与来源，确认后交给清洗。')); return; }
     var run = mod && mod.run;
     if (!run) return;
     var gate = el('div', 'doc-run-gate');
@@ -1352,7 +1352,7 @@
       } else if (mod.type === 'literature-mining') {
         actions.appendChild(el('span', 'status-hint', '方案已审核；在上方“文献任务”中核对本次检索设置，再开始执行。'));
       } else if (mod.type === 'download-data') {
-        actions.appendChild(docButton('按审核方案开始执行', 'primary', !!(root.LiteratureUI && root.LiteratureUI.isBusy()), function () { root.LiteratureUI.start(mod); }));
+        actions.appendChild(docButton('按方案开始下载', 'primary', !!(root.CodexUI && root.CodexUI.busy(mod.id)), function () { root.CodexUI.openDownload(mod); }));
       } else if (mod.type === 'calculation' && mod.mode === 'direct') {
         actions.appendChild(el('span', 'status-hint', '按上方“运行现有代码”执行，使用已有代码与输入数据。'));
       } else if (mod.type === 'clean-data' || mod.type === 'calculation') {

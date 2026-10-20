@@ -30,10 +30,11 @@ dialog.label = new Element('label');
 dialog.append(new Element('h2'), new Element('p'), dialog.label);
 const sent = [];
 let preparations = 0;
+let downloads = 0;
 const browser = {
   localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, String(value)) },
   ModuleSpace: { isBusy: () => false, sendText: text => { sent.push(text); return true; } },
-  CodexUI: { useCodex: () => true, prepareConfirmedExecution: async () => { preparations++; return true; }, cancelPreparedExecution() {} }
+  CodexUI: { useCodex: () => true, prepareConfirmedExecution: async () => { preparations++; return true; }, cancelPreparedExecution() {}, openDownload: () => { downloads++; return true; } }
 };
 const context = vm.createContext({ window: browser, document: { getElementById: get, createElement: tag => new Element(tag) }, Event: class { constructor(type) { this.type = type; } }, console });
 const load = name => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'js', name), 'utf8'), context);
@@ -110,5 +111,11 @@ const edit = text => { get('task-summary-draft').value = text; get('task-summary
   assert.equal(browser.TaskManager.switchTask(saved.activeTaskId),true);
   assert.equal(browser.TaskManager.rulesForModule(calc.id).version,2);
   assert.equal(browser.TaskManager.rulesForModule(drawing.id).version,1);
+  assert.equal(browser.TaskManager.createTask('FAO下载验证','download'),true);
+  const download = store.getState().modules[0];
+  store.saveDoc(download.id,'FAOSTAT TM，2024，按官方导出地址下载'); store.approveDoc(download.id);
+  await click('task-rules-execute');
+  assert.equal(downloads,1,'下载规则执行按钮必须进入文件下载器');
+  assert.equal(preparations,2,'数据下载不得进入计算文件执行器');
   console.log('CALCULATION_PLAN_TESTS_PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; });

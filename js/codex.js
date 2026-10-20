@@ -1270,6 +1270,7 @@
     } catch (error) { cancelPreparedExecution(mod.id); t.error = error.message; render(); }
   }
   function basisForDownload(mod, sourceType) {
+    if (mod.doc && (mod.doc.status !== 'approved' || sourceType === 'rules')) return null;
     if (!sourceType && mod.doc?.status === 'approved') return { text: mod.doc.content, label: '已审核下载方案', sourceType: 'doc' };
     if (sourceType !== 'doc') {
       const rules = root.TaskManager?.rulesForModule(mod.id);
@@ -1279,6 +1280,7 @@
     return null;
   }
   function openDownload(mod, basis) {
+    if (mod?.type !== 'download-data') return false;
     const t = task(mod.id);
     if (t.busy) return false;
     basis = basis || basisForDownload(mod);
@@ -1299,6 +1301,9 @@
     const id = downloadModuleId, basis = downloadBasis, t = task(id);
     if (t.busy) return;
     const status = document.getElementById('download-status');
+    const current = Store.getState().modules.find(mod => mod.id === id);
+    const approved = current && basisForDownload(current, basis.sourceType);
+    if (!approved || approved.text !== basis.text) { status.textContent = '下载方案已变化，请重新审核并打开下载窗口。'; return; }
     const lines = document.getElementById('download-sources').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
     if (!lines.length || lines.length > 5) { status.textContent = '请填写 1 到 5 个文件地址。'; return; }
     const sources = lines.map(line => { const parts = line.split('|'); return { url: parts[0].trim(), name: parts.slice(1).join('|').trim() }; });
@@ -1393,6 +1398,10 @@
     if (panel.hidden) return;
     const t = task(mod.id);
     panel.replaceChildren();
+    if (mod.type === 'download-data') {
+      panel.append(node('h3', '按方案下载数据'));
+      panel.append(node('p', '讨论并审核下载方案 → 核对实际文件地址 → 开始下载 → 检查文件与来源。每次最多5个公开文件，每个20MB；数据库查询页面需先取得实际导出文件地址。', 'codex-status'));
+    }
     if (mod.type === 'calculation') panel.append(node('p', '输入可来自下载数据、数据清洗、文献挖掘中的一条或多条路径。将本次需要的成果文件上传到此处，再确定计算方式与方案。', 'codex-status'));
     const row = node('div', undefined, 'codex-toolbar');
     if (t.backend === 'codex') {
@@ -1450,7 +1459,7 @@
     }
     const refreshButton = node('button', '刷新文件', 'quiet-button'); refreshButton.type = 'button'; refreshButton.disabled = t.busy; refreshButton.onclick = () => refresh(mod.id); fileRow.append(refreshButton);
     if (mod.type === 'download-data') {
-      const start = node('button', '已有文件链接：直接下载', 'quiet-button'); start.type = 'button'; start.disabled = t.busy || !!root.LiteratureUI?.isBusy(); start.onclick = () => openDownload(mod); fileRow.append(start);
+      const start = node('button', '按方案开始下载', 'primary-button'); start.type = 'button'; start.disabled = t.busy || !basisForDownload(mod) || !!root.LiteratureUI?.isBusy(); start.onclick = () => openDownload(mod); fileRow.append(start);
       const handoff = node('button', saved[mod.id]?.download?.confirmed ? '查看已交接的清洗模块' : '确认文件并进入清洗', 'quiet-button'); handoff.type = 'button'; handoff.disabled = t.busy || !saved[mod.id]?.download?.files.length || !!saved[mod.id]?.download?.failures.length; handoff.onclick = () => handoffDownload(mod); fileRow.append(handoff);
       const run = saved[mod.id]?.download;
       fileRow.append(node('span', run ? '下载成功 ' + run.files.length + ' 个，失败 ' + run.failures.length + ' 个；' + (run.confirmed ? '已确认交给清洗' : '待人工核查') : '先确认规则，下载后检查文件，再交给清洗。', 'codex-status'));
@@ -1474,9 +1483,7 @@
       stop.onclick = async () => { try { await request('/api/codex/cancel?id=' + t.job.id, { method: 'POST' }); } catch (error) { t.error = error.message; render(); } };
       row.append(stop);
     }
-    if (mod.type === 'download-data' && root.LiteratureUI) {
-      const auxiliary = node('details'); auxiliary.append(node('summary', '已有文件链接或查看旧下载')); auxiliary.append(fileRow); panel.append(auxiliary);
-    } else panel.append(fileRow);
+    panel.append(fileRow);
     if (mod.type === 'plotting') plotPanel(mod,t);
     if (mod.type === 'result-audit') panel.append(node('p', '先讨论并在上方确认核查原则，或直接上传已有标准；再核查结果、讨论定位。每个标准文件上限 20MB。', 'codex-status'));
     if (mod.type === 'clean-data' && saved[mod.id]?.inputBatch) panel.append(node('p', '当前交接输入 ' + saved[mod.id].inputBatch.names.length + ' 个；历史原始文件保留，不自动合并到本次清洗。', 'codex-status'));
