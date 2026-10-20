@@ -1031,6 +1031,128 @@ class FlowTests(unittest.TestCase):
                 self.assertNotIn("origin_summary", result)
                 self.assertEqual(self.context.pages[-1].download_clicks, 0)
 
+    def test_verified_official_file_delivered_despite_unapproved_side_popup_then_close_after_status(self):
+        saved_file = self.path / "verified.pdf"
+        saved_status = self.path / "saved-status.json"
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "https://unapproved.example/side-window?token=never-export"
+                owner.emit("popup", child)
+                owner.emit("download", Download())
+                for task_page in (owner, child):
+                    original_close = task_page.close
+                    def close(*, run_before_unload=False, original=original_close):
+                        self.assertTrue(saved_file.exists(), "file must be saved before either task window closes")
+                        self.assertTrue(saved_status.exists(), "success status must be saved before either task window closes")
+                        original(run_before_unload=run_before_unload)
+                    task_page.close = close
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        parent, child = self.context.pages[1], self.context.pages[2]
+        self.assertIs(fetcher._page, parent)
+        self.assertEqual(fetcher._binding["cnki_flow"]["cleanup_target_id"], child.target)
+        self.assertFalse(parent.closed)
+        self.assertFalse(child.closed)
+        self.assertFalse(child.gotos)
+        self.assertEqual(child.download_clicks, 0)
+        self.assertNotIn("never-export", json.dumps(fetcher._binding))
+        saved_file.write_bytes(result["bytes"])
+        saved_status.write_text(json.dumps({"status": "fetched_pdf", "file": saved_file.name}), encoding="utf-8")
+        self.assertTrue(fetcher.complete_paper()["closed"])
+        self.assertTrue(parent.closed)
+        self.assertTrue(child.closed)
+        self.assertFalse(self.context.pages[0].closed)
+
+    def test_unapproved_popup_nonofficial_file_is_still_rejected(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "https://unapproved.example/side-window"
+                owner.emit("popup", child)
+                download = Download()
+                download.url = "https://unapproved.example/file.pdf"
+                owner.emit("download", download)
+            page.on_download = opened
+        self.context.next_setup = setup
+        result = mod.run_cnki(self.fetcher(), RECORD, {})
+        self.assertEqual(result["status"], "attention")
+        self.assertNotIn("bytes", result)
+        self.assertIn("来源无法核对", result["message"])
+        self.assertFalse(self.context.pages[1].closed)
+        self.assertFalse(self.context.pages[2].closed)
+
+    def test_captured_download_survives_popup_close_and_real_save_as(self):
+        saved = []
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "https://unapproved.example/transient"
+                owner.emit("popup", child)
+                class ClosedPageDownload(Download):
+                    def save_as(self, path):
+                        self_test.assertTrue(child.closed)
+                        saved.append(path)
+                        super().save_as(path)
+                self_test = self
+                child.close()
+                original_cdp = self.context.new_cdp_session
+                def no_closed_target(target):
+                    if target.is_closed():
+                        raise AssertionError("closed page target ID must not be requested")
+                    return original_cdp(target)
+                self.context.new_cdp_session = no_closed_target
+                child.emit("download", ClosedPageDownload())
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(result["bytes"], PDF)
+        self.assertEqual(len(saved), 1)
+        self.assertTrue(self.context.pages[2].closed)
+        self.assertFalse(self.context.pages[1].closed)
+        self.assertEqual(self.context.pages[1].download_clicks, 1)
+
+    def test_verified_mainframe_pdf_response_delivered_before_side_origin_wait(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.url = "https://unapproved.example/side"
+                child.main_frame = type("Frame", (), {"page": child})()
+                request = type("Request", (), {"frame": child.main_frame, "is_navigation_request": lambda self: True})()
+                response = type("Response", (), {"url": "https://kns.cnki.net/actual.pdf", "status": 200,
+                    "headers": {"content-type": "application/pdf"}, "request": request, "body": lambda self: PDF})()
+                self.context.emit("response", response)
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(result["bytes"], PDF)
+        self.assertEqual(fetcher._binding["target_id"], "owned-1")
+        self.assertEqual(fetcher._binding["cnki_flow"]["cleanup_target_id"], "owned-2")
+        self.assertFalse(any("下载窗口正在跳转" in value for value in self.messages))
+
+    def test_pdf_bytes_without_verified_click_source_are_not_queued(self):
+        # An old untracked download_clicked state is not upgraded merely
+        # because a page emits a new PDF event. An explicit fresh click flow
+        # supplies its source proof; filesystem/flyout records are not scanned.
+        child = self._bound_blob_after_verified_file()
+        second = self.fetcher()
+        second._binding["cnki_flow"].pop("download_click_target_ids")
+        second._binding["cnki_flow"].pop("download_click_target_id")
+        second._binding["cnki_flow"].pop("download_click_count")
+        second._write_binding()
+        child.scheduled.append((self.clock.now + 1, "download", Download()))
+        result = mod.run_cnki(second, RECORD, {})
+        self.assertEqual(result["status"], "attention")
+        self.assertNotIn("bytes", result)
+
 
 class OriginSummaryTests(unittest.TestCase):
     def test_fixed_categories_and_no_credentials_paths_queries_fragments_or_port_values(self):

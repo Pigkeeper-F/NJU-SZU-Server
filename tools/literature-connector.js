@@ -521,7 +521,14 @@ class LiteratureConnector {
       if (job.status !== 'needs_attention' || job.resumeStage !== 'fulltext') throw new Error('任务状态已变化，请刷新后再操作');
       const raw = await runCommand(spec.executable, ['-u', path.join(this.root, 'tools', 'literature_fulltext.py'),
         '--config', path.join(job.dir, 'run_config.json'), '--output-dir', job.dir, '--open-current'],
-      { cwd: this.root, timeout: 15000, environment: spec.environment });
+      { cwd: this.root, timeout: 15000, environment: spec.environment }).catch(error => {
+        for (const line of String(error.message || '').trim().split(/\r?\n/).reverse()) {
+          let event;
+          try { event = JSON.parse(line); } catch (_) { continue; }
+          if (event?.type === 'error' && typeof event.message === 'string') throw new Error(event.message);
+        }
+        throw new Error('无法显示原任务下载窗口，请核对它是否仍然打开。');
+      });
       let result;
       try { result = JSON.parse(raw); } catch (_) { throw new Error('全文任务页未返回有效状态，请重试'); }
       if (result?.opened !== true) throw new Error('全文任务页尚未打开，请先显式继续获取全文');
