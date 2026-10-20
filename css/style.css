@@ -773,6 +773,58 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
 .research-summary-line { line-height: 1.6; }
 .research-files { color: var(--muted); word-break: break-all; }
 
+/* 冷启动：候选检索式 */
+.research-plans { margin: 4px 0 6px; }
+.research-plan {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.research-plan-query { flex: 1 1 auto; font-size: 12px; color: var(--text); word-break: break-all; }
+.research-plan-why { flex: 0 0 100%; font-size: 11.5px; color: var(--muted); }
+
+/* 人工初筛 */
+.research-screening { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.research-screening-title { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.research-screen-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+.research-check { flex: 0 0 auto; margin: 0; }
+.research-screen-title { flex: 1 1 auto; color: var(--text); }
+.research-screen-meta { flex: 0 0 auto; font-size: 11.5px; color: var(--muted); }
+
+/* 环节②：候选科学问题与说明书 */
+.question-list { margin-top: 8px; }
+.question-card {
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+}
+.question-statement { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.question-line { font-size: 12px; color: var(--muted); line-height: 1.55; }
+.question-spec { margin-top: 8px; }
+.question-spec-title { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.question-spec-text {
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
 .status-bar {
   display: flex;
   align-items: center;

@@ -241,6 +241,53 @@ async function handleCodex(req, res, url) {
   } catch (error) { sendJson(res, 400, { error: error.message }); }
 }
 
+// ==================================================================
+// 【环节② · 2026-10-20】handleResearch：科学问题的凝练
+// ----------------------------------------------------------------------------
+//   action='candidates' → 由上游空白与文献要点生成 3–5 个候选科学问题（带依据与可行性初判）
+//   action='specify'   → 把人选定的那条展开成结构化「科学问题说明书」
+// 上游产物由服务端自己读（upstreamJobIds → .workbench/literature/<id>/research/），
+// 前端不需要也不应该把文件内容原样回传。
+// ==================================================================
+async function handleResearch(req, res, url) {
+  const route = url.pathname;
+  if (req.method === 'POST' && route === '/api/research/questions') {
+    const data = JSON.parse(await readBody(req, 256 * 1024));
+    const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
+    if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
+    const rq = require('./tools/research-question');
+    let gaps = [];
+    let notes = [];
+    let topic = '';
+    const jobIds = Array.isArray(data.upstreamJobIds) ? data.upstreamJobIds : [];
+    for (const jobId of jobIds) {
+      if (typeof jobId !== 'string') continue;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) continue;
+      const out = rq.loadResearchOutputs(path.join(ROOT, '.workbench', 'literature', jobId));
+      gaps = gaps.concat(out.gaps);
+      notes = notes.concat(out.notes);
+      topic = topic || out.topic;
+    }
+    if (Array.isArray(data.gaps)) gaps = gaps.concat(data.gaps);
+    if (Array.isArray(data.notes)) notes = notes.concat(data.notes);
+    const idea = String(data.idea || topic || '').trim();
+    try {
+      if (data.action === 'specify') {
+        const spec = await rq.buildSpecification({
+          idea, candidate: data.choice, gaps, notes, modelCfg: cfg, callModel
+        });
+        return sendJson(res, 200, { ok: true, ...spec });
+      }
+      const result = await rq.buildCandidates({ idea, gaps, notes, modelCfg: cfg, callModel });
+      return sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      return sendJson(res, 400, { error: (error && error.message) || '问题凝练失败' });
+    }
+  }
+  res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify({ error: '未知的接口' }));
+}
+
 async function handleLiterature(req, res, url) {
   try {
     const route = url.pathname;
@@ -292,6 +339,46 @@ async function handleLiterature(req, res, url) {
         return sendJson(res, 500, { error: '文献调研失败：' + ((error && error.message) || '未知错误') });
       }
     }
+    // 【选题冷启动 · 2026-10-20】POST /api/literature/research-plan：模糊想法 → 检索维度 + 候选检索式。
+    // 环节①的入口：真实场景里人手上往往只有一个模糊想法，先把它转成可执行的检索再开跑。
+    if (req.method === 'POST' && route === '/api/literature/research-plan') {
+      const data = JSON.parse(await readBody(req, 64 * 1024));
+      const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
+      if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
+      try {
+        const plan = await require('./tools/research-question').planQueries({ idea: data.idea, modelCfg: cfg, callModel });
+        return sendJson(res, 200, plan);
+      } catch (error) {
+        return sendJson(res, 400, { error: (error && error.message) || '选题拆解失败' });
+      }
+    }
+    // 【人工初筛 · 2026-10-20】POST /api/literature/research-screen：把人的初筛结果写进作业目录。
+    // 要点抽取只对保留的候选做；被排除的条目连同理由一起留档（可溯源、可回看）。
+    if (req.method === 'POST' && route === '/api/literature/research-screen') {
+      const data = JSON.parse(await readBody(req, 64 * 1024));
+      const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
+        return sendJson(res, 400, { error: '检索任务标识无效。' });
+      }
+      const keep = Array.isArray(data.keep) ? data.keep.map(String).filter(Boolean).slice(0, 200) : [];
+      const exclude = (Array.isArray(data.exclude) ? data.exclude : [])
+        .map((item) => ({ id: String((item && item.id) || ''), reason: String((item && item.reason) || '') }))
+        .filter((item) => item.id).slice(0, 200);
+      const dir = path.join(ROOT, '.workbench', 'literature', jobId, 'research');
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(
+          path.join(dir, 'screening.json'),
+          JSON.stringify({ keep, exclude, screenedAt: new Date().toISOString() }, null, 2) + '\n',
+          'utf8'
+        );
+      } catch (error) {
+        return sendJson(res, 500, { error: '初筛结果写入失败：' + ((error && error.message) || '未知错误') });
+      }
+      return sendJson(res, 200, { ok: true, keep: keep.length, exclude: exclude.length });
+    }
+    // 【环节② · 2026-10-20】POST /api/research/questions 由独立的 handleResearch 处理
+    // （它不在 /api/literature/ 前缀下，见请求分发处的分支）。
     // 【stage2】POST /advance：从 resumeStage 续跑（缺省 until=export），支持字段确认关口（§21.2.2）。
     if (req.method === 'POST' && route === '/api/literature/advance') {
       const data = JSON.parse(await readBody(req, 64 * 1024));
@@ -303,6 +390,34 @@ async function handleLiterature(req, res, url) {
     }
     if (req.method === 'GET' && route === '/api/literature/job') {
       return sendJson(res, 200, literature.snapshot(url.searchParams.get('id')));
+    }
+    // 【人工初筛 · 2026-10-20】GET /api/literature/candidates：检索作业的候选清单（供环节①初筛界面）。
+    // 只回题录层面的字段（不含全文），够人判断"这篇要不要读"。
+    if (req.method === 'GET' && route === '/api/literature/candidates') {
+      const jobId = url.searchParams.get('id') || '';
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
+        return sendJson(res, 400, { error: '检索任务标识无效。' });
+      }
+      const file = path.join(ROOT, '.workbench', 'literature', jobId, 'candidates.json');
+      let data = null;
+      try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { data = null; }
+      const records = data && Array.isArray(data.records) ? data.records : [];
+      return sendJson(res, 200, {
+        jobId,
+        count: records.length,
+        source: (data && data.source) || '',
+        query: (data && data.query) || '',
+        retrieved_at: (data && data.retrieved_at) || '',
+        candidates: records.map((record) => ({
+          id: String(record.candidate_id || ''),
+          title: String(record.title || ''),
+          authors: String(record.authors || record.byline || ''),
+          year: record.year || '',
+          venue: String(record.venue || ''),
+          doi: String(record.doi || ''),
+          snippet: String(record.snippet || '').slice(0, 400)
+        }))
+      });
     }
     if (req.method === 'POST' && route === '/api/literature/cancel') {
       return sendJson(res, 200, literature.cancel(url.searchParams.get('id')));
@@ -1498,7 +1613,7 @@ function serveStatic(req, res) {
 if (require.main === module) {
   const server = http.createServer((req, res) => {
     if (String(req.url || '').startsWith('/api/') && !checkRequestGuards(req, res)) return;
-    if ((String(req.url || '').startsWith('/api/codex/') || String(req.url || '').startsWith('/api/literature/') || req.url === '/api/dependencies/open') &&
+    if ((String(req.url || '').startsWith('/api/codex/') || String(req.url || '').startsWith('/api/literature/') || String(req.url || '').startsWith('/api/research/') || req.url === '/api/dependencies/open') &&
       req.method === 'POST' && req.headers['x-workbench'] !== '1') {
       return sendJson(res, 403, { error: '请从工作台发起请求' });
     }
@@ -1515,6 +1630,8 @@ if (require.main === module) {
       handleCodex(request, response, new URL(request.url, 'http://localhost')));
     if (String(req.url || '').startsWith('/api/literature/')) return guarded('/api/literature', (request, response) =>
       handleLiterature(request, response, new URL(request.url, 'http://localhost')));
+    if (String(req.url || '').startsWith('/api/research/')) return guarded('/api/research', (request, response) =>
+      handleResearch(request, response, new URL(request.url, 'http://localhost')));
     if (req.method === 'POST' && req.url === '/api/dependencies/open') return guarded('/api/dependencies/open', (_, response) => openDependencies(response));
     if (req.method === 'POST' && req.url === '/api/ai/chat') return guarded('/api/ai/chat', handleChat);
     if (req.method === 'POST' && req.url === '/api/ai/test') return guarded('/api/ai/test', handleAiTest);

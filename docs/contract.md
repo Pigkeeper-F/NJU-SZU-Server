@@ -1300,3 +1300,65 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 
 `node tools/test-literature-research.js`（mock 模型，不联网）：24 项断言全通过，覆盖
 正常路径、产物落盘、诚实性兜底、脏 JSON 不崩、无候选报错、提示词含「仅题录不得推断」的硬要求。
+
+---
+
+## 24. 环节①冷启动 + 人工初筛 · 环节②科学问题凝练（2026-10-20）
+
+### 24.1 为什么补这两块
+
+数据挖掘（文献挖掘）是**题目已知**的流程：入口是 `topic + query + targetFields`，检索式由已定的问题倒推。
+而环节①是**题目未知**（人手上只有一个模糊想法）、环节②是**要靠人判断**（从空白里挑值得做、做得动的问题）。
+所以这两环的形态是**人机交替**，不是一键全自动。
+
+### 24.2 环节① · 选题冷启动 `POST /api/literature/research-plan`
+
+入参 `{ idea, settings?, credential? }` → 出参 `{ idea, dimensions:[{name,keywords[]}], queries:[{query,rationale}] }`。
+
+提示词要求：3–5 个检索维度、3 条不同角度的检索式（宽口径 / 聚焦方法 / 聚焦对象）、
+必须是 Google Scholar 能直接跑的语法、不得编造文献。
+
+### 24.3 环节① · 人工初筛
+
+- `GET /api/literature/candidates?id=<jobId>`：候选清单（id / 标题 / 作者 / 年 / 期刊 / DOI / 摘要片段），只回题录层字段。
+- `POST /api/literature/research-screen`：入参 `{ jobId, keep[], exclude[{id,reason}] }` →
+  写 `<作业目录>/research/screening.json`。
+- 要点抽取（`/api/literature/research`）会**读这份初筛记录**：只对 `keep` 里的候选抽要点，
+  被排除的条目连同理由进 `research/screening_result.json`（可回看、可追溯）；没有初筛记录则全部保留。
+
+### 24.4 环节② · 科学问题凝练 `POST /api/research/questions`
+
+独立前缀 `/api/research/`（自成一个 handler，不挂在 `/api/literature/` 下）。
+
+| action | 入参 | 出参 |
+|---|---|---|
+| `candidates` | `{ idea, upstreamJobIds[], settings? }` | `{ ok, candidates[] }` |
+| `specify` | `{ idea, choice, upstreamJobIds[], settings? }` | `{ ok, markdown, candidate }` |
+
+- **上游产物由服务端自己读**：`upstreamJobIds` → `.workbench/literature/<id>/research/{gaps,notes}.json`，
+  前端不（也不该）把文件内容原样回传。
+- 候选问题字段：`statement / hypothesis / variables[] / boundary / gapRefs[] / basis[{id,what}] / feasibility`。
+- **硬要求（代码兜底，不只靠提示词）**：候选必须至少有一条 `gapRefs` 和一条 `basis`，否则丢弃；
+  模型的输出不可全信。材料不足时**允许返回空数组**——那是正确答案，不硬凑。
+- 说明书用 Markdown 固定小节：研究问题 / 可检验形式 / 研究对象与关键变量 / 边界条件 /
+  与文献空白的对应 / 可行性初判 / 预期贡献。
+
+### 24.5 衔接：①→② 真正接上的那一环
+
+环节①检索成功后把作业 id 写进**模块参数** `params.researchJobId`（归一化保留，刷新不丢）；
+`collectUpstreamArtifacts` 除 exec 产物目录与 `CodexUI.literatureJobId` 外，**多读这个来源**，
+于是环节②能拿到上游的空白清单与文献要点。
+
+### 24.6 前端（保持简洁）
+
+- 环节①面板：`想法` + `生成检索式`（→ 候选检索式，点一条填入）＋ `检索式` + `检索` →
+  **检索后不直接抽取**，先列候选让人勾选（默认全勾）→ `确认初筛并生成要点`。
+  刷新后按 `params.researchJobId` 自动恢复候选清单。
+- 环节②面板：`想法` + `生成候选问题` → 候选卡片（陈述 / 假设 / 变量 / 边界 / 对应空白 / 文献依据 / 可行性）+ `采用这条`
+  → 说明书写入**环节文档**（走人工审核门），它就是下游③数据获取、④方法选择的输入契约。
+
+### 24.7 回归
+
+`node tools/test-research-question.js`（mock 模型）：22 项断言全通过，覆盖冷启动解析、候选生成的
+依据硬过滤、材料不足返回空数组、说明书固定小节、人工初筛过滤与留档、初筛记录被要点抽取读取。
+`node tools/test-literature-research.js`：24 项断言全通过。

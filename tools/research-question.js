@@ -1,0 +1,292 @@
+'use strict';
+/**
+ * 研究前端的两块语义能力（九步研究流程 · 环节① 的冷启动 + 环节② 的问题凝练）。
+ *
+ *   planQueries()     选题冷启动：模糊想法 → 检索维度 → 候选检索式（环节①入口）
+ *   buildCandidates() 文献空白 → 候选科学问题（环节②的第一次交互）
+ *   buildSpecification() 选定的候选问题 → 结构化「科学问题说明书」（环节②的第二次交互）
+ *
+ * 设计原则（与师兄的分工一致）：
+ *   - 机器负责把判断的素材准备好（检索式、候选问题、依据、可行性初判）；
+ *   - 人的判断不可替代（选哪条检索式、选哪个问题），所以每一步都把依据摊开给人看。
+ *   - 硬约束：所有依据必须来自输入材料，不得虚构文献 id 或空白条目。
+ *
+ * 纯逻辑模块：模型调用由调用方注入（服务端传 callModel），便于 mock 回归。
+ */
+
+const fs = require('fs');
+const path = require('path');
+
+const MAX_GAPS = 12;
+const MAX_NOTES = 40;
+
+function loadJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { return null; }
+}
+
+/** 读作业目录里的调研产物（环节①的输出），供环节②使用。 */
+function loadResearchOutputs(jobDir) {
+  const notes = loadJson(path.join(jobDir, 'research', 'notes.json'));
+  const gaps = loadJson(path.join(jobDir, 'research', 'gaps.json'));
+  const synthesis = loadJson(path.join(jobDir, 'research', 'synthesis.json'));
+  return {
+    notes: (notes && Array.isArray(notes.notes)) ? notes.notes : [],
+    gaps: (gaps && Array.isArray(gaps.gaps)) ? gaps.gaps : [],
+    consensus: (synthesis && Array.isArray(synthesis.consensus)) ? synthesis.consensus : [],
+    disagreements: (synthesis && Array.isArray(synthesis.disagreements)) ? synthesis.disagreements : [],
+    topic: (notes && notes.meta && notes.meta.topic) || ''
+  };
+}
+
+/** 把 json 包裹（可能是代码围栏）解出来。 */
+function parseJsonLoose(text) {
+  if (typeof text !== 'string') return null;
+  let raw = text.trim();
+  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) raw = fence[1].trim();
+  const start = raw.search(/[[{]/);
+  if (start < 0) return null;
+  const open = raw[start];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === open) depth += 1;
+    else if (ch === close) {
+      depth -= 1;
+      if (depth === 0) {
+        try { return JSON.parse(raw.slice(start, i + 1)); } catch (error) { return null; }
+      }
+    }
+  }
+  return null;
+}
+
+function asList(value, limit) {
+  const out = [];
+  if (!Array.isArray(value)) return out;
+  for (const item of value) {
+    if (out.length >= limit) break;
+    if (typeof item === 'string') {
+      const text = item.trim();
+      if (text) out.push(text);
+    } else if (item && typeof item === 'object') {
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// 环节① · 选题冷启动
+// ---------------------------------------------------------------------------
+
+function planPrompt(idea) {
+  return [
+    '你是科研选题助手。用户给出一个**可能还很模糊**的研究想法，请帮���把它变成可执行的文献检索。',
+    '',
+    '请输出 JSON：',
+    '{',
+    '  "dimensions": [{"name": "检索维度名", "keywords": ["同义词/上下位词", "..."]}],',
+    '  "queries": [{"query": "Google Scholar 检索式", "rationale": "为什么这样检索、能捞到什么"}]',
+    '}',
+    '',
+    '要求：',
+    '1. dimensions 给 3–5 个维度，每个维度 3–6 个关键词或同义词。',
+    '2. queries 给 3 条不同角度的检索式：一条宽口径（覆盖该方向主要工作）、一条聚焦方法、',
+    '   一条聚焦具体对象/场景。每条要说明检索意图。',
+    '3. 检索式用 Google Scholar 能直接跑的语法：短语用双引号，OR / AND 连接，必要时加括号；',
+    '   不要写检索教程、不要解释语法。',
+    '4. 不要编造具体文献或结果；这里只负责把想法转成检索。',
+    '5. 只输出 JSON。',
+    '',
+    '研究想法：' + idea
+  ].join('\n');
+}
+
+async function planQueries({ idea, callModel, modelCfg } = {}) {
+  const text = String(idea || '').trim();
+  if (!text) throw new Error('请先写下你的研究想法（哪怕只有一句话）');
+  if (typeof callModel !== 'function') throw new Error('缺少模型调用入口');
+  const reply = await callModel(modelCfg, [{ role: 'user', content: planPrompt(text) }], 120000);
+  const parsed = parseJsonLoose(reply);
+  if (!parsed || typeof parsed !== 'object') throw new Error('选题拆解没有返回可解析的结果');
+  const dimensions = asList(parsed.dimensions, 6).map((item) => ({
+    name: String((item && item.name) || '').trim(),
+    keywords: asList(item && item.keywords, 8).map(String)
+  })).filter((item) => item.name);
+  const queries = asList(parsed.queries, 5).map((item) => ({
+    query: String((item && item.query) || '').trim(),
+    rationale: String((item && item.rationale) || '').trim()
+  })).filter((item) => item.query);
+  if (!queries.length) throw new Error('选题拆解没有给出可用的检索式');
+  return { idea: text, dimensions, queries };
+}
+
+// ---------------------------------------------------------------------------
+// 环节② · 候选科学问题
+// ---------------------------------------------------------------------------
+
+function gapsBrief(gaps) {
+  return asList(gaps, MAX_GAPS).map((gap, index) => ({
+    index: index + 1,
+    gap: String(gap.gap || ''),
+    direction: String(gap.direction || ''),
+    basis: asList(gap.basis, 4).map((b) => ({ id: String(b.id || ''), what: String(b.what || '') }))
+  }));
+}
+
+function notesBrief(notes) {
+  return asList(notes, MAX_NOTES).map((note) => ({
+    id: String(note.id || ''),
+    title: String(note.title || ''),
+    authors: String(note.authors || ''),
+    year: note.year || '',
+    evidence: String(note.evidence || ''),
+    question: String(note.question || ''),
+    conclusion: String(note.conclusion || ''),
+    limitation: String(note.limitation || '')
+  }));
+}
+
+function candidatesPrompt(idea, gaps, notes) {
+  return [
+    '你是科研选题助手。下面是研究想法、文献调研得出的研究空白清单（每条含支撑依据）、以及已读文献的要点。',
+    '请提出 **3–5 个候选科学问题**——不是把所有空白都变成问题，而是挑出「值得做、且做得动」的那几个。',
+    '',
+    '输出 JSON 数组，每个元素：',
+    '{',
+    '  "statement": "一句话研究问题",',
+    '  "hypothesis": "可检验的假设（可证伪的表述）",',
+    '  "variables": ["关键变量"],',
+    '  "boundary": "研究边界条件（对象范围、时空尺度、适用条件）",',
+    '  "gapRefs": ["对应空白的原文"],',
+    '  "basis": [{"id": "文献 id", "what": "该文献里支持这个问题的具体结论"}],',
+    '  "feasibility": "可行性初判：需要什么数据与方法、可能卡在哪、能否被证伪"',
+    '}',
+    '',
+    '硬要求：',
+    '1. gapRefs 必须是输入里空白的原文；basis.id 必须是输入里出现过的文献 id。不得虚构。',
+    '2. 每个问题至少对应一条空白、至少一条文献依据；写不出依据的条目不要写。',
+    '3. 变量与边界要具体到能操作，不要写「效果」「影响」这类无法测量的词。',
+    '4. 若输入材料不足以支撑任何问题，返回空数组——这是允许的答案。',
+    '5. 只输出 JSON 数组。',
+    '',
+    '【研究想法】' + String(idea || ''),
+    '',
+    '【研究空白】',
+    JSON.stringify(gapsBrief(gaps), null, 1),
+    '',
+    '【文献要点】',
+    JSON.stringify(notesBrief(notes), null, 1)
+  ].join('\n');
+}
+
+function normalizeCandidate(raw, index) {
+  if (!raw || typeof raw !== 'object') return null;
+  const statement = String(raw.statement || '').trim();
+  if (!statement) return null;
+  return {
+    id: 'Q' + (index + 1),
+    statement,
+    hypothesis: String(raw.hypothesis || '').trim(),
+    variables: asList(raw.variables, 8).map(String),
+    boundary: String(raw.boundary || '').trim(),
+    gapRefs: asList(raw.gapRefs, 6).map(String),
+    basis: asList(raw.basis, 6).map((item) => ({
+      id: String((item && item.id) || ''),
+      what: String((item && item.what) || '')
+    })).filter((item) => item.id),
+    feasibility: String(raw.feasibility || '').trim()
+  };
+}
+
+async function buildCandidates({ idea, gaps, notes, callModel, modelCfg } = {}) {
+  if (typeof callModel !== 'function') throw new Error('缺少模型调用入口');
+  if (!asList(gaps, 1).length) throw new Error('没有研究空白可用——先完成文献调研环节（环节①）。');
+  const reply = await callModel(modelCfg, [{ role: 'user', content: candidatesPrompt(idea, gaps, notes) }], 180000);
+  const parsed = parseJsonLoose(reply);
+  const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.candidates) ? parsed.candidates : []);
+  const candidates = [];
+  let dropped = 0;
+  for (const item of list) {
+    const candidate = normalizeCandidate(item, candidates.length);
+    // 硬要求：每个候选至少对应一条空白、至少一条文献依据。
+    // 提示词里已经要求过，但模型的输出不能全信——没有依据的条目在这里直接丢掉。
+    if (!candidate) { dropped += 1; continue; }
+    if (!candidate.gapRefs.length || !candidate.basis.length) { dropped += 1; continue; }
+    candidates.push(candidate);
+    if (candidates.length >= 5) break;
+  }
+  return { idea: String(idea || ''), candidates, dropped };
+}
+
+// ---------------------------------------------------------------------------
+// 环节② · 问题说明书
+// ---------------------------------------------------------------------------
+
+function specificationPrompt(idea, candidate, gaps, notes) {
+  return [
+    '你是科研选题助手。请把选定的候选科学问题展开成一份「科学问题说明书」，',
+    '它要作为后续环节（数据获取与清洗、方法选择与运行、图表绘制、文章撰写）的输入契约。',
+    '',
+    '必须用 Markdown 二级标题分出这些小节，标题照抄：',
+    '## 研究问题',
+    '## 可检验形式',
+    '## 研究对象与关键变量',
+    '## 边界条件',
+    '## 与文献空白的对应',
+    '## 可行性初判',
+    '## 预期贡献',
+    '',
+    '要求：',
+    '1. 只依据给定材料；材料里没有的写「待明确」，不要编造数据、方法或文献。',
+    '2. 每条论断标明依据（文献 id 或空白编号），让下游能回溯。',
+    '3. 「可检验形式」要写清什么结果算支持、什么结果算否定。',
+    '4. 不要写「结果显著」这类空话；写不出来的部分直接标「待明确」。',
+    '',
+    '【研究想法】' + String(idea || ''),
+    '',
+    '【选定的候选问题】',
+    JSON.stringify(candidate, null, 1),
+    '',
+    '【研究空白】',
+    JSON.stringify(gapsBrief(gaps), null, 1),
+    '',
+    '【文献要点】',
+    JSON.stringify(notesBrief(notes), null, 1)
+  ].join('\n');
+}
+
+async function buildSpecification({ idea, candidate, gaps, notes, callModel, modelCfg } = {}) {
+  if (typeof callModel !== 'function') throw new Error('缺少模型调用入口');
+  if (!candidate || !candidate.statement) throw new Error('缺少选定的候选问题');
+  const reply = await callModel(modelCfg, [{ role: 'user', content: specificationPrompt(idea, candidate, gaps, notes) }], 180000);
+  const text = String(reply || '').trim();
+  if (!text) throw new Error('模型没有返回问题说明书');
+  return {
+    markdown: text,
+    candidate,
+    writtenAt: new Date().toISOString()
+  };
+}
+
+module.exports = {
+  planQueries,
+  buildCandidates,
+  buildSpecification,
+  loadResearchOutputs,
+  parseJsonLoose,
+  planPrompt,
+  candidatesPrompt,
+  specificationPrompt
+};

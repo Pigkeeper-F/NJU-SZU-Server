@@ -154,6 +154,45 @@ function collectFulltexts(jobDir, records) {
   return { matched, total: texts.length, usedCount: Object.keys(used).length };
 }
 
+/** 读人工初筛结果（research/screening.json）：没有就返回 null。 */
+function loadScreening(jobDir) {
+  const data = loadJson(path.join(jobDir, 'research', 'screening.json'));
+  if (!data || typeof data !== 'object') return null;
+  const keep = Array.isArray(data.keep) ? data.keep.map(String) : [];
+  const exclude = Array.isArray(data.exclude)
+    ? data.exclude.map((item) => ({ id: String((item && item.id) || ''), reason: String((item && item.reason) || '') }))
+        .filter((item) => item.id)
+    : [];
+  if (!keep.length && !exclude.length) return null;
+  return { keep, exclude, screenedAt: data.screenedAt || '' };
+}
+
+/**
+ * 按人工初筛结果过滤候选：
+ *   exclude 里的直接剔除（带理由）；keep 非空时只保留 keep 里的；没有初筛记录 → 全保留。
+ * 返回 { records, excluded }，excluded 会进产物（排除理由可回看）。
+ */
+function applyScreening(records, screening) {
+  if (!screening) return { records, excluded: [] };
+  const keep = new Set(screening.keep);
+  const excluded = [];
+  const kept = [];
+  for (const record of records) {
+    const id = String(record.candidate_id || '');
+    const hit = screening.exclude.find((item) => item.id === id);
+    if (hit) {
+      excluded.push({ id, reason: hit.reason || '人工排除', title: record.title || '' });
+      continue;
+    }
+    if (keep.size && !keep.has(id)) {
+      excluded.push({ id, reason: '初筛未勾选', title: record.title || '' });
+      continue;
+    }
+    kept.push(record);
+  }
+  return { records: kept, excluded };
+}
+
 /** 组装送进模型的文献包。 */
 function buildBundles(records, fulltexts) {
   return records.map((record) => {
@@ -331,7 +370,10 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
     throw new Error('该作业还没有检索候选（candidates.json 不存在或为空），请先完成首批检索。');
   }
   const fulltexts = collectFulltexts(jobDir, candidates.records);
-  const bundles = buildBundles(candidates.records, fulltexts);
+  // 人工初筛：只对保留的候选做要点抽取；被排除的条目连同理由进产物。
+  const screening = loadScreening(jobDir);
+  const screened = applyScreening(candidates.records, screening);
+  const bundles = buildBundles(screened.records, fulltexts);
   if (onEvent) onEvent({ type: 'research:start', total: bundles.length, withFulltext: bundles.filter((b) => b.hasFulltext).length });
 
   const notes = [];
@@ -407,6 +449,8 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
     search_url: candidates.meta.search_url,
     retrieved_at: candidates.meta.retrieved_at,
     candidate_count: candidates.records.length,
+    screened_count: screened.records.length,
+    excluded_count: screened.excluded.length,
     with_fulltext: bundles.filter((b) => b.hasFulltext).length,
     only_title: bundles.filter((b) => !b.hasFulltext).length,
     synthesis_truncated: truncated,
@@ -443,6 +487,20 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
   writeText(gapsMd, renderGapsMd(synthesis.gaps, notes));
   files.push('research/gaps.md');
 
+  // 人工初筛的留档：谁被留下、谁被排除、为什么排除（可回看、可追溯）。
+  if (screening) {
+    const screeningFile = path.join(outDir, 'screening_result.json');
+    writeJson(screeningFile, {
+      screenedAt: screening.screenedAt || '',
+      kept: screened.records.map((record) => ({
+        id: String(record.candidate_id || ''),
+        title: record.title || ''
+      })),
+      excluded: screened.excluded
+    });
+    files.push('research/screening_result.json');
+  }
+
   if (onEvent) onEvent({ type: 'research:done', files, notes: notes.length, gaps: synthesis.gaps.length });
 
   return {
@@ -456,4 +514,4 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
   };
 }
 
-module.exports = { runResearchStage, parseJsonLoose, notesPrompt, synthesisPrompt, buildBundles };
+module.exports = { runResearchStage, parseJsonLoose, notesPrompt, synthesisPrompt, buildBundles, loadScreening, applyScreening };

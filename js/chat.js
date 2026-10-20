@@ -446,17 +446,42 @@
    */
   function buildResearchPanel(mod) {
     if (!mod || mod.type !== 'literature-research') return null;
-    var state = uiOf(mod.id).research || (uiOf(mod.id).research = { topic: '', query: '', busy: false, message: '', result: null });
+    var state = uiOf(mod.id).research || (uiOf(mod.id).research = {
+      topic: '', query: '', busy: false, message: '', result: null,
+      plan: null, planBusy: false, planMessage: '',
+      candidates: null, keep: null, screeningBusy: false, jobId: ''
+    });
+    // 刷新后恢复：作业 id 记在模块参数上，候选清单按它重新拉回（否则初筛界面会丢）
+    if (!state.jobId && mod.params && typeof mod.params.researchJobId === 'string') {
+      state.jobId = mod.params.researchJobId;
+    }
+    if (!state.candidates && state.jobId) {
+      researchGet('/api/literature/candidates?id=' + encodeURIComponent(state.jobId)).then(function (data) {
+        state.candidates = (data && data.candidates) || [];
+        state.keep = state.keep || state.candidates.map(function (c) { return c.id; });
+        render();
+      }).catch(function () { /* 拉不到就留空，用户可重新检索 */ });
+    }
     var box = el('div', 'research-panel');
 
     var topicRow = el('label', 'research-field');
-    topicRow.appendChild(el('span', 'research-label', '主题'));
+    topicRow.appendChild(el('span', 'research-label', '想法'));
     var topicInput = el('input', 'research-input');
     topicInput.type = 'text';
-    topicInput.placeholder = '研究主题（用于检索式与后续归纳）';
+    topicInput.placeholder = '研究想法（哪怕只有一句话）';
     topicInput.value = state.topic || '';
     topicInput.addEventListener('input', function () { state.topic = topicInput.value; });
     topicRow.appendChild(topicInput);
+    // 冷启动：只有模糊想法时，让 AI 先出候选检索式
+    var planBtn = el('button', 'quiet-button', state.planBusy ? '生成中…' : '生成检索式');
+    planBtn.type = 'button';
+    planBtn.disabled = state.planBusy === true;
+    planBtn.addEventListener('click', function () {
+      state.topic = topicInput.value.trim();
+      runResearchPlan(mod);
+      render();
+    });
+    topicRow.appendChild(planBtn);
     box.appendChild(topicRow);
 
     var queryRow = el('label', 'research-field');
@@ -469,8 +494,30 @@
     queryRow.appendChild(queryInput);
     box.appendChild(queryRow);
 
+    // 候选检索式（冷启动结果）：点一条即填入检索式框
+    if (state.plan && state.plan.queries && state.plan.queries.length) {
+      var planBox = el('div', 'research-plans');
+      for (var pi = 0; pi < state.plan.queries.length; pi++) {
+        (function (item) {
+          var row = el('div', 'research-plan');
+          var use = el('button', 'quiet-button', '用这条');
+          use.type = 'button';
+          use.addEventListener('click', function () {
+            state.query = item.query;
+            render();
+          });
+          row.appendChild(el('span', 'research-plan-query', item.query));
+          if (item.rationale) row.appendChild(el('span', 'research-plan-why', item.rationale));
+          row.appendChild(use);
+          planBox.appendChild(row);
+        })(state.plan.queries[pi]);
+      }
+      box.appendChild(planBox);
+    }
+    if (state.planMessage) box.appendChild(el('div', 'research-status', state.planMessage));
+
     var actions = el('div', 'research-actions');
-    var runBtn = el('button', 'status-btn status-btn-primary', state.busy ? '调研中…' : '检索并生成要点');
+    var runBtn = el('button', 'status-btn status-btn-primary', state.busy ? '调研中…' : '检索');
     runBtn.type = 'button';
     runBtn.disabled = state.busy === true;
     runBtn.addEventListener('click', function () {
@@ -483,11 +530,49 @@
     if (state.message) actions.appendChild(el('span', 'research-status', state.message));
     box.appendChild(actions);
 
+    // 人工初筛：检索完成后列出候选，勾掉不相关的再抽要点
+    if (state.candidates && state.candidates.length) {
+      var list = el('div', 'research-screening');
+      list.appendChild(el('div', 'research-screening-title',
+        '初筛：勾掉不要读的（' + state.candidates.length + ' 篇候选）'));
+      for (var ci = 0; ci < state.candidates.length; ci++) {
+        (function (item) {
+          var row = el('label', 'research-screen-row');
+          var cb = el('input', 'research-check');
+          cb.type = 'checkbox';
+          cb.checked = state.keep ? state.keep.indexOf(item.id) >= 0 : true;
+          cb.addEventListener('change', function () {
+            var keep = state.keep || state.candidates.map(function (c) { return c.id; });
+            var at = keep.indexOf(item.id);
+            if (cb.checked && at < 0) keep.push(item.id);
+            if (!cb.checked && at >= 0) keep.splice(at, 1);
+            state.keep = keep;
+          });
+          row.appendChild(cb);
+          row.appendChild(el('span', 'research-screen-title', item.title || '(无标题)'));
+          var meta = [item.authors, item.year, item.venue].filter(Boolean).join(' · ');
+          if (meta) row.appendChild(el('span', 'research-screen-meta', meta));
+          list.appendChild(row);
+        })(state.candidates[ci]);
+      }
+      var screenActions = el('div', 'research-actions');
+      var screenBtn = el('button', 'status-btn status-btn-primary', state.screeningBusy ? '抽取中…' : '确认初筛并生成要点');
+      screenBtn.type = 'button';
+      screenBtn.disabled = state.screeningBusy === true;
+      screenBtn.addEventListener('click', function () {
+        runResearchScreen(mod);
+        render();
+      });
+      screenActions.appendChild(screenBtn);
+      list.appendChild(screenActions);
+      box.appendChild(list);
+    }
+
     if (state.result) {
       var sum = el('div', 'research-summary');
-      var meta = state.result.meta || {};
+      var meta2 = state.result.meta || {};
       sum.appendChild(el('div', 'research-summary-line',
-        '文献 ' + (meta.candidate_count || 0) + ' 篇（有全文 ' + (meta.with_fulltext || 0) + ' 篇）'
+        '文献 ' + (meta2.candidate_count || 0) + ' 篇（有全文 ' + (meta2.with_fulltext || 0) + ' 篇）'
         + '｜要点 ' + ((state.result.notes || []).length) + ' 条'
         + '｜空白 ' + ((state.result.gaps || []).length) + ' 条'));
       var files = (state.result.files || []).join('、');
@@ -519,18 +604,51 @@
     });
   }
 
-  /** 环节①一键调研：检索 → 等作业完成 → 抽要点与空白。 */
+  /** 环节① · 冷启动：模糊想法 → 候选检索式（人在几条里挑一条）。 */
+  function runResearchPlan(mod) {
+    var state = uiOf(mod.id).research;
+    if (!state || state.planBusy) return;
+    if (!state.topic) {
+      state.planMessage = '先写一句你的研究想法';
+      render();
+      return;
+    }
+    state.planBusy = true;
+    state.planMessage = '拆解中…';
+    render();
+    researchPost('/api/literature/research-plan', { idea: state.topic, settings: readLlmSettings() || {} })
+      .then(function (plan) {
+        state.planBusy = false;
+        state.plan = plan;
+        state.planMessage = plan && plan.dimensions && plan.dimensions.length
+          ? ('检索维度：' + plan.dimensions.map(function (d) { return d.name; }).join('、'))
+          : '';
+        render();
+      })
+      .catch(function (error) {
+        state.planBusy = false;
+        state.planMessage = '拆解失败：' + ((error && error.message) || '未知错误');
+        render();
+      });
+  }
+
+  /**
+   * 环节①：检索 → 列出候选 → 人工初筛 → 抽要点与空白。
+   * 检索完成后不直接抽取：先让人勾掉不相关的（省模型调用，也更准）。
+   */
   function runResearch(mod) {
     var state = uiOf(mod.id).research;
     if (!state || state.busy) return;
     if (!state.topic || !state.query) {
-      state.message = '请先填主题与检索式';
+      state.message = '请先填想法与检索式（检索式可以点「生成检索式」自动生成）';
       render();
       return;
     }
     state.busy = true;
     state.message = '检索中…';
     state.result = null;
+    state.candidates = null;
+    state.keep = null;
     render();
 
     var jobId = '';
@@ -541,7 +659,7 @@
       if (!jobId) throw new Error('检索作业没有返回标识');
       state.message = '检索中（作业 ' + jobId.slice(0, 8) + '…）…';
       render();
-      // 轮询作业状态：检索阶段完成后才做要点抽取
+      // 轮询作业状态：检索阶段完成后才进初筛
       var waited = 0;
       function poll() {
         return researchGet('/api/literature/job?id=' + encodeURIComponent(jobId)).then(function (job) {
@@ -558,25 +676,58 @@
       }
       return poll();
     }).then(function () {
-      state.message = '抽取要点与研究空白中…';
-      render();
-      return researchPost('/api/literature/research', { jobId: jobId, settings: readLlmSettings() || {} });
-    }).then(function (result) {
-      state.busy = false;
-      state.result = result;
-      state.message = result && result.ok
-        ? '完成：' + ((result.notes || []).length) + ' 篇要点、' + ((result.gaps || []).length) + ' 条研究空白'
-        : ('部分完成：' + ((result && result.error) || '模型返回异常'));
+      // 作业 id 记到模块参数上：环节②靠它把调研产物传下去（衔接的关键一环）
       var Store = getStore();
-      if (Store && Store.appendMessage) {
-        Store.appendMessage(mod.id, '文献调研产物：' + state.message + '。产物在检索作业 ' + jobId.slice(0, 8) + ' 的 research/ 目录下。', 'system');
-      }
+      if (Store && Store.setModuleParam) Store.setModuleParam(mod.id, 'researchJobId', jobId);
+      state.jobId = jobId;
+      return researchGet('/api/literature/candidates?id=' + encodeURIComponent(jobId));
+    }).then(function (data) {
+      state.busy = false;
+      state.candidates = (data && data.candidates) || [];
+      state.keep = state.candidates.map(function (c) { return c.id; });
+      state.message = state.candidates.length
+        ? ('检索到 ' + state.candidates.length + ' 篇，请初筛后生成要点')
+        : '检索没有结果——换条检索式或放宽条件';
       render();
     }).catch(function (error) {
       state.busy = false;
       state.message = '失败：' + ((error && error.message) || '未知错误');
       render();
     });
+  }
+
+  /** 环节① · 人工初筛：写 screening.json，再抽要点与研究空白。 */
+  function runResearchScreen(mod) {
+    var state = uiOf(mod.id).research;
+    if (!state || state.screeningBusy || !state.jobId) return;
+    var all = (state.candidates || []).map(function (c) { return c.id; });
+    var keep = state.keep || all;
+    var excluded = all.filter(function (id) { return keep.indexOf(id) < 0; })
+      .map(function (id) { return { id: id, reason: '初筛未勾选' }; });
+    state.screeningBusy = true;
+    state.message = '抽取要点与研究空白中…';
+    render();
+    researchPost('/api/literature/research-screen', { jobId: state.jobId, keep: keep, exclude: excluded })
+      .then(function () {
+        return researchPost('/api/literature/research', { jobId: state.jobId, settings: readLlmSettings() || {} });
+      })
+      .then(function (result) {
+        state.screeningBusy = false;
+        state.result = result;
+        state.message = result && result.ok
+          ? ('完成：' + ((result.notes || []).length) + ' 篇要点、' + ((result.gaps || []).length) + ' 条研究空白')
+          : ('部分完成：' + ((result && result.error) || '模型返回异常'));
+        var Store = getStore();
+        if (Store && Store.appendMessage) {
+          Store.appendMessage(mod.id, '文献调研产物：' + state.message + '。产物在检索作业 ' + String(state.jobId).slice(0, 8) + ' 的 research/ 目录下。', 'system');
+        }
+        render();
+      })
+      .catch(function (error) {
+        state.screeningBusy = false;
+        state.message = '失败：' + ((error && error.message) || '未知错误');
+        render();
+      });
   }
 
   /**
@@ -605,9 +756,154 @@
         try { jobId = root.CodexUI.literatureJobId(up.id) || ''; } catch (error) { jobId = ''; }
       }
       if (jobId) jobs.push(jobId);
+      // 环节①的调研作业 id 记在模块参数上（researchJobId）——环节②靠它拿到上游的
+      // 空白清单与文献要点，这是「①→②」真正接上的那一环。
+      if (up.params && typeof up.params === 'object' && typeof up.params.researchJobId === 'string' && up.params.researchJobId) {
+        if (jobs.indexOf(up.params.researchJobId) < 0) jobs.push(up.params.researchJobId);
+      }
       cursor = up.dependsOn;
     }
     return { dirs: dirs, jobs: jobs };
+  }
+
+  /**
+   * 环节② · 科学问题凝练面板：想法 → 候选科学问题 → 人选一条 → 问题说明书。
+   * 说明书写进环节文档（走人工审核门），它就是下游③数据获取与④方法选择的输入契约。
+   */
+  function buildQuestionPanel(mod) {
+    if (!mod || mod.type !== 'question-formation') return null;
+    var state = uiOf(mod.id).question || (uiOf(mod.id).question = {
+      idea: '', busy: false, message: '', candidates: [], chosen: null, spec: null
+    });
+    var box = el('div', 'research-panel');
+
+    var ideaRow = el('label', 'research-field');
+    ideaRow.appendChild(el('span', 'research-label', '想法'));
+    var ideaInput = el('input', 'research-input');
+    ideaInput.type = 'text';
+    ideaInput.placeholder = '你想研究什么（一句话即可）';
+    ideaInput.value = state.idea || '';
+    ideaInput.addEventListener('input', function () { state.idea = ideaInput.value; });
+    ideaRow.appendChild(ideaInput);
+    var genBtn = el('button', 'status-btn status-btn-primary', state.busy ? '生成中…' : '生成候选问题');
+    genBtn.type = 'button';
+    genBtn.disabled = state.busy === true;
+    genBtn.addEventListener('click', function () {
+      state.idea = ideaInput.value.trim();
+      runQuestionCandidates(mod);
+      render();
+    });
+    ideaRow.appendChild(genBtn);
+    box.appendChild(ideaRow);
+
+    if (state.message) box.appendChild(el('div', 'research-status', state.message));
+
+    if (state.candidates && state.candidates.length) {
+      var list = el('div', 'question-list');
+      list.appendChild(el('div', 'research-screening-title', '候选科学问题（' + state.candidates.length + ' 条）'));
+      for (var ci = 0; ci < state.candidates.length; ci++) {
+        (function (item) {
+          var card = el('div', 'question-card');
+          card.appendChild(el('div', 'question-statement', item.statement));
+          if (item.hypothesis) card.appendChild(el('div', 'question-line', '假设：' + item.hypothesis));
+          if (item.variables && item.variables.length) {
+            card.appendChild(el('div', 'question-line', '变量：' + item.variables.join('、')));
+          }
+          if (item.boundary) card.appendChild(el('div', 'question-line', '边界：' + item.boundary));
+          if (item.gapRefs && item.gapRefs.length) {
+            card.appendChild(el('div', 'question-line', '对应空白：' + item.gapRefs.join('；')));
+          }
+          if (item.basis && item.basis.length) {
+            var basis = item.basis.map(function (b) { return b.id + '：' + b.what; }).join('；');
+            card.appendChild(el('div', 'question-line', '文献依据：' + basis));
+          }
+          if (item.feasibility) card.appendChild(el('div', 'question-line', '可行性：' + item.feasibility));
+          var take = el('button', 'quiet-button', '采用这条');
+          take.type = 'button';
+          take.addEventListener('click', function () {
+            runQuestionSpecification(mod, item);
+            render();
+          });
+          card.appendChild(take);
+          list.appendChild(card);
+        })(state.candidates[ci]);
+      }
+      box.appendChild(list);
+    }
+
+    if (state.spec) {
+      var specBox = el('div', 'question-spec');
+      specBox.appendChild(el('div', 'question-spec-title', '问题说明书'));
+      var pre = el('pre', 'question-spec-text', state.spec);
+      specBox.appendChild(pre);
+      box.appendChild(specBox);
+    }
+    return box;
+  }
+
+  /** 环节② · 第一步：由上游空白与文献要点生成候选科学问题。 */
+  function runQuestionCandidates(mod) {
+    var state = uiOf(mod.id).question;
+    if (!state || state.busy) return;
+    state.busy = true;
+    state.message = '凝练中（读取上游调研产物）…';
+    render();
+    researchPost('/api/research/questions', {
+      action: 'candidates',
+      idea: state.idea,
+      upstreamJobIds: collectUpstreamArtifacts(mod.id).jobs,
+      settings: readLlmSettings() || {}
+    }).then(function (result) {
+      state.busy = false;
+      state.candidates = (result && result.candidates) || [];
+      state.message = state.candidates.length
+        ? ('给出 ' + state.candidates.length + ' 个候选问题，选一条')
+        : '没有可支撑的候选问题——可能是文献材料不足，或这个方向已被充分研究';
+      render();
+    }).catch(function (error) {
+      state.busy = false;
+      state.message = '失败：' + ((error && error.message) || '未知错误');
+      render();
+    });
+  }
+
+  /** 环节② · 第二步：把选定的问题展开成说明书，并写进环节文档（人工审核门）。 */
+  function runQuestionSpecification(mod, candidate) {
+    var state = uiOf(mod.id).question;
+    if (!state || state.busy) return;
+    state.busy = true;
+    state.chosen = candidate;
+    state.message = '展开问题说明书…';
+    render();
+    researchPost('/api/research/questions', {
+      action: 'specify',
+      idea: state.idea,
+      choice: candidate,
+      upstreamJobIds: collectUpstreamArtifacts(mod.id).jobs,
+      settings: readLlmSettings() || {}
+    }).then(function (result) {
+      state.busy = false;
+      state.spec = result && result.markdown ? result.markdown : '';
+      state.message = '说明书已生成';
+      var Store = getStore();
+      // 写进环节文档：它要经人工审核才生效，审核通过后就是下游的输入契约
+      if (Store && Store.saveDoc && state.spec) {
+        try {
+          Store.saveDoc(mod.id, state.spec);
+        } catch (error) { /* 文档保存失败不阻断，消息里仍会说明 */ }
+      }
+      if (Store && Store.appendMessage) {
+        Store.appendMessage(mod.id,
+          '科学问题说明书已生成' + (Store.getState && Store.getState().modules.find(function (m) { return m.id === mod.id; }) && Store.getState().modules.find(function (m) { return m.id === mod.id; }).doc
+            ? '并已写入环节文档（待人工审核）' : '（未能写入环节文档）') + '。',
+          'system');
+      }
+      render();
+    }).catch(function (error) {
+      state.busy = false;
+      state.message = '失败：' + ((error && error.message) || '未知错误');
+      render();
+    });
   }
 
   function actionButton(text, kind, onClick) {
@@ -1681,6 +1977,8 @@
       if (specCard) spaceEl.appendChild(specCard);
       var researchPanel = buildResearchPanel(active);
       if (researchPanel) spaceEl.appendChild(researchPanel);
+      var questionPanel = buildQuestionPanel(active);
+      if (questionPanel) spaceEl.appendChild(questionPanel);
       spaceEl.appendChild(buildDocCard(active));
 
       var list = el('div', 'msg-list');
