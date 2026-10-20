@@ -234,6 +234,38 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(context.pages[-1].gotos[0][1]["timeout"], 60000)
         self.assertFalse(context.pages[-1].closed)
 
+    def test_cnki_http_200_entry_error_stops_batch_and_pending_resume_without_navigating(self):
+        context = Context([
+            {"response": Response(200), "snapshot": snapshot(
+                text="来源应用不正确(01)\n联系我们\n中国知网首页",
+                source_application_error=True, page_error=True)},
+            {"snapshot": snapshot()},
+        ])
+        url = "https://kns.cnki.net/kcms2/article/abstract?filename=paper"
+        first = self.fetcher(context)
+        result = first.fetch_page(url, {})
+        self.assertEqual((result["status"], result["reason"]), ("attention", "page_error"))
+        self.assertIn("来源应用不正确或下载入口失效", result["message"])
+        self.assertNotIn("登录", result["message"])
+        self.assertNotIn("频繁", result["message"])
+        self.assertNotIn("html_evidence", result)
+        # A batch caller cannot open another paper after the first failure.
+        self.assertEqual(first.fetch_page("https://publisher.test/next", {}), result)
+        self.assertEqual(len(context.pages[-1].gotos), 1)
+        self.assertFalse(first.complete_paper()["closed"])
+        original_binding = json.loads(first.binding_path.read_text(encoding="utf-8"))
+        self.assertEqual(original_binding["attention_reason"], "page_error")
+        first.close()
+        # With no navigation response on resume, inspect the exact retained
+        # error page again, rather than refreshing or clearing the pending bind.
+        second = self.fetcher(context)
+        resumed = second.fetch_page(url, {})
+        self.assertEqual(resumed, result)
+        self.assertEqual(context.creates, 1)
+        self.assertEqual(len(context.pages[-1].gotos), 1)
+        self.assertEqual(json.loads(second.binding_path.read_text(encoding="utf-8")), original_binding)
+        self.assertTrue(all(not page.closed for page in context.pages))
+
     def test_completion_closes_only_owned_page_after_saved_result_and_preserves_pacing(self):
         context = Context([{"response": Response(headers={"content-type": "application/pdf"}, body=PDF)}])
         fetcher = self.fetcher(context)
@@ -425,6 +457,21 @@ class LocalDOMTests(unittest.TestCase):
         data = self.evaluate('<nav>登录 / 注册</nav><article><h1>Publication abstract</h1><p>' + 'Abstract text. ' * 100 + '</p></article>')
         self.assertFalse(data["login"])
         self.assertFalse(data["container_verified"])
+
+    def test_cnki_entry_failure_actual_dom_is_page_error_even_without_http_error(self):
+        for error in ("来源应用不正确(01)", "来源应用不正确（01）", "来源应用错误", "下载入口已失效", "链接已失效"):
+            with self.subTest(error=error):
+                # The observed page puts the message in an ordinary div,
+                # so checking only h1/h2 or the HTTP status would miss it.
+                data = self.evaluate('<div class="error"><div>' + error + '</div>'
+                                     '<a href="https://www.cnki.net/">中国知网首页</a></div>')
+                self.assertTrue(data["source_application_error"])
+                self.assertTrue(data["page_error"])
+                self.assertEqual(mod.FulltextBrowserFetcher._reason(data, 200), "page_error")
+                self.assertFalse(data["login"])
+                self.assertFalse(data["rate_limited"])
+                self.assertFalse(data["container_verified"])
+        self.assertFalse(self.evaluate('<nav>中国知网 登录 / 注册</nav><h1>Publication abstract</h1>')["source_application_error"])
 
 
 if __name__ == "__main__":

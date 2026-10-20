@@ -183,6 +183,16 @@ def _record_result_url(record: dict) -> str:
     return safe_url(record.get("result_url") or record.get("source_url"))
 
 
+def _cnki_transfer_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return ((parsed.hostname or "").lower() == "bar.cnki.net"
+            and parsed.path.rstrip("/").lower() == "/bar/download/order")
+
+
+CNKI_ENTRY_MESSAGE = ("知网候选只有依赖原页面的下载中转链接，不能作为全文直链使用，已暂停；"
+                      "请从知网正常检索或详情页核对单篇入口，或提供已下载的全文材料。")
+
+
 def candidate_urls(record: dict) -> list[tuple[str, str]]:
     """Ordered (kind, url) attempt chain for one record, deduplicated.
 
@@ -193,6 +203,8 @@ def candidate_urls(record: dict) -> list[tuple[str, str]]:
     seen: set[str] = set()
 
     def add(kind: str, url: str) -> None:
+        if _cnki_transfer_url(url):
+            return  # A cached transfer is not a stable article/download URL.
         parsed = urlparse(url)
         if ((parsed.hostname or "").lower().endswith(".cnki.net")
                 and parsed.path.rstrip("/").lower() == "/kcms2/article/abstract" and not parsed.query):
@@ -445,6 +457,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     stem, item = _sanitize_stem(paper_id), _item_skeleton(record)
     attempts = candidate_urls(record)
     if not attempts:
+        if any(_cnki_transfer_url(link["url"]) for link in _collect_links(record)) or _cnki_transfer_url(_record_result_url(record)):
+            raise FulltextPause(paper_id, reason="page_error", message=CNKI_ENTRY_MESSAGE)
         if str(record.get("snippet") or "").strip():
             item.update(kind="abstract", status="abstract_only", evidence_level="search_result_snippet",
                         reason="无合法全文入口，仅有检索片段（待补充）")
@@ -453,6 +467,7 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             item.update(status="unavailable", reason=("知网入口缺少单篇文献标识，请从官方页面补充有效入口（待补充）" if missing_cnki else "无合法全文入口（待补充）"))
         return item
     failures, seen, abstract = [], set(), None
+    blocked_transfer = any(_cnki_transfer_url(link["url"]) for link in _collect_links(record))
     for kind, url in attempts:
         if url in seen:
             continue
@@ -500,12 +515,19 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
                 if not isinstance(link, dict):
                     continue
                 linked = safe_url(link.get("url"))
+                if _cnki_transfer_url(linked):
+                    # Following the extracted href with goto would lose its
+                    # official click context. Do not simulate headers/tickets.
+                    blocked_transfer = True
+                    continue
                 if linked and linked not in seen and all(other != linked for _, other in attempts):
                     attempts.append(("pdf" if _url_looks_pdf(linked) else "html", linked))
             if verdict == "unavailable":
                 failures.append(f"页面不可用（{url}）：{reason}")
             continue
         failures.append(f"页面导航失败（{url}）：{result.get('status') or '未知'}")
+    if blocked_transfer:
+        raise FulltextPause(paper_id, reason="page_error", message=CNKI_ENTRY_MESSAGE)
     if abstract:
         return _settle_html(item, job_dir, *abstract)
     reason = "；".join(failures)[:600] or "全部获取路径失败"
@@ -629,6 +651,16 @@ def review_saved_fulltext(job_dir: Path, *, emit_result=True) -> dict:
         if not isinstance(item, dict):
             raise ValueError("全文条目无效，无法复核")
         prior = str(item.get("status") or "")
+        source = urlparse(str(item.get("source_url") or ""))
+        if (prior == "unavailable" and (source.hostname or "").lower().endswith(".cnki.net")
+                and source.path.rstrip("/").lower() == "/kcms2/article/abstract" and not source.query):
+            # Diagnose the missing permanent entry offline. Keep the item gated:
+            # a retry must not replay an old transfer or invent document IDs.
+            if item.get("reason") != CNKI_ENTRY_MESSAGE or item.get("entry_required") is not True:
+                item.update(reason=CNKI_ENTRY_MESSAGE, entry_required=True, reviewed_at=now_iso())
+                changes.append({"paper_id": str(item.get("paper_id") or ""), "previous_status": prior,
+                                "status": prior, "reason": CNKI_ENTRY_MESSAGE})
+            continue
         if prior not in FETCHED_STATUSES:
             continue
         reviewed += 1

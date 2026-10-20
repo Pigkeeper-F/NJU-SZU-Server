@@ -20,6 +20,22 @@ from test_literature_fulltext_browser import Clock, Context, Response, snapshot
 
 
 class ReviewSafetyTests(unittest.TestCase):
+    def test_cnki_missing_entry_is_explained_offline_without_requeue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            job = Path(temp)
+            (job / "fulltext").mkdir()
+            original = {"version": 1, "items": [{"paper_id":"CNKI-001", "status":"unavailable", "path":"",
+                "source_url":"https://kns.cnki.net/kcms2/article/abstract", "reason":"old failure"}]}
+            (job / "fulltext/status.json").write_text(json.dumps(original), encoding="utf-8")
+            with patch.object(fulltext, "make_fetcher", side_effect=AssertionError("no browser")):
+                report = fulltext.review_saved_fulltext(job, emit_result=False)
+            item = read_status(job)["items"][0]
+            self.assertEqual(item["status"], "unavailable")
+            self.assertTrue(item["entry_required"])
+            self.assertIn("中转链接", item["reason"])
+            self.assertEqual(report["counts"]["changed"], 1)
+            self.assertEqual(report["counts"]["pending"], 0)
+
     def legacy_job(self, root: Path):
         job = root / "old-cache"
         folder = job / "fulltext" / "files"
@@ -93,6 +109,39 @@ class FetchSafetyTests(unittest.TestCase):
             self.assertEqual(fetcher.calls, [])
             valid = candidate("CNKI-002", result_url="https://kns.cnki.net/kcms2/article/abstract?v=article-identity")
             self.assertTrue(fulltext.candidate_urls(valid))
+
+    def test_cached_cnki_transfer_is_never_replayed_and_pauses_batch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            job = Path(temp)
+            transfer = "https://bar.cnki.net/bar/download/order?id=fixture-only"
+            rows = [candidate("CNKI-001", result_url="https://kns.cnki.net/kcms2/article/abstract",
+                              links=[{"label":"下载", "url":transfer}]),
+                    candidate("GSC-002", result_url="https://example.org/next")]
+            write_candidates(job, rows)
+            fetcher = FakeFetcher()
+            code, events = run_stage(job, fetcher=fetcher)
+            self.assertEqual(code, 0)
+            self.assertEqual([call for call in fetcher.calls if call[0] != "ensure_ready"], [])
+            self.assertEqual(events[-1]["type"], "attention")
+            self.assertEqual(events[-1]["reason"], "page_error")
+            self.assertIn("中转链接", events[-1]["message"])
+            self.assertNotIn("fixture-only", events[-1]["message"])
+            items = status_map(read_status(job))
+            self.assertEqual(items["CNKI-001"]["status"], "needs_attention")
+            self.assertEqual(items["GSC-002"]["status"], "pending")
+            self.assertEqual(fulltext.candidate_urls(rows[0]), [])
+
+    def test_legal_article_body_is_not_rejected_because_old_transfer_also_exists(self):
+        with tempfile.TemporaryDirectory() as temp:
+            title = "Heat stress and growth performance in broiler chickens"
+            stable = "https://example.org/article"
+            transfer = "https://bar.cnki.net/bar/download/order?id=fixture-only"
+            record = fulltext._target_from_candidate(candidate("CNKI-001", title=title, result_url=stable,
+                links=[{"label":"下载", "url":transfer}]))
+            fetcher = FakeFetcher(page={stable:article_page(title)})
+            result = fulltext.fetch_one(record, Path(temp), {"fetcher":fetcher})
+            self.assertEqual(result["status"], "fetched_html")
+            self.assertNotIn(("fetch_page", transfer), fetcher.calls)
 
     def test_long_pubmed_abstract_follows_observed_pmc_link_and_saves_only_verified_body(self):
         with tempfile.TemporaryDirectory() as temp:

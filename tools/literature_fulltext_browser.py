@@ -79,6 +79,7 @@ _SNAPSHOT_JS = r"""/* literature_fulltext_snapshot */ () => {
   const bodyText=(document.body?.innerText || '').slice(0,2000000);
   const prefix=bodyText.slice(0,5000);
   const headline=Array.from(document.querySelectorAll('h1,h2,[role="alert"]')).filter(visible).map(text).join(' ').slice(0,2000);
+  const sourceApplicationError=/(?:来源应用|来源程序)(?:不正确|错误|无效)|(?:下载入口|(?:下载|来源)?链接)(?:已(?:经)?)?(?:失效|无效|错误)/i.test(headline+'\n'+prefix.slice(0,2000));
   return {
     text:bodyText,
     page_title:document.title || '',
@@ -90,7 +91,8 @@ _SNAPSHOT_JS = r"""/* literature_fulltext_snapshot */ () => {
     verification:Array.from(document.querySelectorAll('iframe[src*="captcha"],iframe[src*="recaptcha"],.geetest_panel,.verifybox,#captcha,.captcha')).some(visible)
       || /人机验证|滑动验证|请完成验证|访问验证|unusual traffic|verify you are human|are you a robot/i.test(prefix.slice(0,2000)),
     rate_limited:/too many requests|请求过于频繁|访问过于频繁|操作过于频繁|访问频率|rate limit|retry later/i.test(prefix.slice(0,2000)),
-    page_error:/^(?:\s*(?:404|page not found|not found|页面不存在|页面错误))\b/i.test(headline)
+    source_application_error:sourceApplicationError,
+    page_error:sourceApplicationError || /^(?:\s*(?:404|page not found|not found|页面不存在|页面错误))\b/i.test(headline)
       || /您所访问的页面不存在|页面不存在或已被删除|requested page (?:does not exist|could not be found)/i.test(prefix.slice(0,2000)),
     login:Array.from(document.querySelectorAll('input[type="password"]')).some(visible)
       || /请先登录|请登录后|登录后方可|sign in to access|log in to access|please sign in|please log in/i.test(prefix.slice(0,2000)),
@@ -279,12 +281,15 @@ class FulltextBrowserFetcher:
             self._binding["last_request_at"] = self._last_request
             self._write_binding()
 
-    def _attention(self, reason, url):
+    def _attention(self, reason, url, *, snapshot=None):
         safe = literature_browser.safe_url(url)
         self._binding["pending_url_hash"] = _url_hash(self._request_url)
         self._binding["attention_reason"] = reason
         self._write_binding()
-        result = {"status": "attention", "reason": reason, "url": safe, "message": _MESSAGES[reason]}
+        message = _MESSAGES[reason]
+        if reason == "page_error" and isinstance(snapshot, dict) and snapshot.get("source_application_error"):
+            message = "知网提示来源应用不正确或下载入口失效，已暂停；请从知网正常详情或检索页面核对入口后继续。"
+        result = {"status": "attention", "reason": reason, "url": safe, "message": message}
         self._blocked = result
         return result
 
@@ -298,7 +303,7 @@ class FulltextBrowserFetcher:
     def _reason(snapshot, status=0):
         if status == 429 or snapshot.get("rate_limited"):
             return "rate_limited"
-        if status == 404 or snapshot.get("page_error"):
+        if status == 404 or snapshot.get("page_error") or snapshot.get("source_application_error"):
             return "page_error"
         if snapshot.get("verification"):
             return "verification"
@@ -386,7 +391,7 @@ class FulltextBrowserFetcher:
                         error_snapshot = {}
                     if not isinstance(error_snapshot, dict):
                         error_snapshot = {}
-                    return self._attention(self._reason(error_snapshot, status), page.url or url)
+                    return self._attention(self._reason(error_snapshot, status), page.url or url, snapshot=error_snapshot)
                 content_type = str((getattr(response, "headers", {}) or {}).get("content-type", "")).lower()
                 if "application/pdf" in content_type:
                     self._progress("全文获取：文件正在生成或下载，等待实际传输完成后再保存。")
@@ -406,7 +411,7 @@ class FulltextBrowserFetcher:
                     return self._attention("page_error", page.url or url)
                 reason = self._reason(snapshot, status)
                 if reason:
-                    return self._attention(reason, page.url or url)
+                    return self._attention(reason, page.url or url, snapshot=snapshot)
                 self._clear_pending()
                 final_url = literature_browser.safe_url(page.url) or safe
                 links = []

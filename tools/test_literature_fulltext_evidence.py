@@ -147,6 +147,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(revalidate_saved_html(item, "404 Page not found")[0], "unavailable")
         self.assertEqual(item, original)
 
+    def test_cnki_source_application_errors_override_body_and_downgrade_saved_cache(self):
+        body, evidence = body_fixture()
+        for error in ("来源应用不正确(01)", "来源应用不正确（01）", "来源应用错误", "下载入口已失效", "链接已失效"):
+            with self.subTest(error=error):
+                text = error + "\n摘要\n" + body
+                verdict, reason = assess_html(text, "https://kns.cnki.net/kcms2/article/abstract", evidence, TITLE, DOI)
+                self.assertEqual(verdict, "unavailable")
+                self.assertIn("来源应用不正确或下载入口失效", reason)
+                self.assertNotIn("登录", reason)
+                self.assertNotIn("限流", reason)
+                for version in (None, EVIDENCE_VERSION):
+                    item = {"status": "fetched_html", "title": TITLE, "doi": DOI,
+                            "source_url": "https://kns.cnki.net/kcms2/article/abstract",
+                            "evidence_version": version, "content_sha256": content_sha256(text),
+                            "html_evidence": evidence}
+                    original = copy.deepcopy(item)
+                    self.assertFalse(verified_saved_html(item, text)[0])
+                    self.assertEqual(revalidate_saved_html(item, text), (verdict, reason))
+                    self.assertEqual(item, original)
+
 
 if __name__ == "__main__":
     unittest.main()
