@@ -407,6 +407,137 @@ class LiteratureSearchTest(unittest.TestCase):
             self.assertEqual(calls, previous_calls, "重复继续不能再次检索已完成来源")
             self.assertEqual(repeated["records"], complete["records"], "同批次不得重复累计或换编号")
 
+    def test_defer_sources_keeps_frozen_six_source_batch_and_retries_only_current(self) -> None:
+        sources = ["pubmed", "scopus", "wanfang", "web-of-science", "cnki", "google-scholar"]
+        queries = {source: source + " frozen query" for source in sources}
+        config = {**CONFIG, "sources": sources, "sourceQueries": queries, "searchMode": "test"}
+        frozen = json.dumps(config, ensure_ascii=False).encode("utf-8")
+        calls, available = [], {"web-of-science": False, "cnki": False}
+
+        def browser(source, query, current, limit, year_from, year_to, *, job_dir):
+            calls.append((source, query, current))
+            self.assertEqual(query, queries[source])
+            self.assertEqual((limit, year_from, year_to), (10, 2015, 2023))
+            if source in available and not available[source]:
+                return {"status": "attention", "reason": "login" if source == "cnki" else "results_unrecognized",
+                        "message": "CNKI login" if source == "cnki" else "WOS 524 timeout"}
+            return {"status": "ok", "results": [{"title": f"{source} study {i}", "year": 2020}
+                                                   for i in range(10)]}
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": types.SimpleNamespace(run=browser)}):
+            output = Path(temp)
+            config_path = output / "run_config.json"
+            config_path.write_bytes(frozen)
+
+            def attempt(**options):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    self.assertEqual(run(config, output, **options), 0)
+                events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+                data = read_report(output)
+                state = json.loads((output / "discovery-state.json").read_text(encoding="utf-8"))
+                self.assertEqual(config_path.read_bytes(), frozen)
+                self.assertEqual(json.dumps(config, ensure_ascii=False).encode("utf-8"), frozen)
+                self.assertEqual(state["config_fingerprint"], config_fingerprint(config))
+                self.assertEqual(state["batch_index"], 1)
+                self.assertEqual([batch["batch_index"] for batch in data["batches"]], [1])
+                self.assertEqual(len(read_csv_rows(output)), data["count"])
+                self.assertTrue(all("deferred_sources" in event for event in events))
+                self.assertEqual(events[-1]["deferred_sources"], state.get("deferred_sources", []))
+                self.assertEqual(data["deferred_sources"], state.get("deferred_sources", []))
+                if state.get("pending_source"):
+                    self.assertFalse(data["discovery_complete"])
+                    self.assertEqual(data["batches"][0]["status"], "partial")
+                    self.assertFalse(any(event["type"] == "result" for event in events))
+                return events[-1], data, state
+
+            event, first, state = attempt()
+            self.assertEqual((event["source"], first["count"]), ("web-of-science", 30))
+            first_records = first["records"]
+            original_wos = state["sources"]["web-of-science"]
+
+            event, data, state = attempt(resume=True, defer_source="web-of-science")
+            self.assertEqual((event["source"], data["count"]), ("cnki", 30))
+            self.assertEqual(state["deferred_sources"], ["web-of-science"])
+            self.assertEqual(state["sources"]["web-of-science"], original_wos)
+            original_cnki = state["sources"]["cnki"]
+
+            event, data, state = attempt(resume=True, defer_source="cnki")
+            self.assertEqual((event["source"], event["reason"], data["count"]), ("web-of-science", "results_unrecognized", 40))
+            self.assertIn("524", event["message"])
+            self.assertEqual(state["deferred_sources"], ["web-of-science", "cnki"])
+            self.assertEqual(state["sources"]["web-of-science"], original_wos)
+            self.assertEqual(state["sources"]["cnki"], original_cnki)
+            forty = {row["candidate_id"]: row for row in data["records"]}
+            self.assertEqual(data["records"][:30], first_records)
+            self.assertEqual([call[0] for call in calls], sources)
+
+            # Restart from disk: retry current WOS only, keeping CNKI deferred.
+            event, data, state = attempt(resume=True)
+            self.assertEqual((event["source"], data["count"]), ("web-of-science", 40))
+            self.assertEqual(state["deferred_sources"], ["cnki"])
+            self.assertEqual(calls[-1], ("web-of-science", queries["web-of-science"], True))
+            self.assertEqual({row["candidate_id"]: row for row in data["records"]}, forty)
+
+            available["web-of-science"] = True
+            event, data, state = attempt(resume=True)
+            self.assertEqual((event["source"], data["count"]), ("cnki", 50))
+            self.assertEqual(state["deferred_sources"], ["cnki"])
+            self.assertTrue(all(row in data["records"] for row in forty.values()))
+
+            available["cnki"] = True
+            event, complete, state = attempt(resume=True)
+            self.assertEqual((event["type"], complete["count"]), ("result", 60))
+            self.assertEqual(state["deferred_sources"], [])
+            self.assertIsNone(state["pending_source"])
+            self.assertTrue(complete["discovery_complete"])
+            self.assertEqual(len({row["candidate_id"] for row in complete["records"]}), 60)
+            previous_calls = list(calls)
+            _, repeated, _ = attempt(resume=True)
+            self.assertEqual(calls, previous_calls)
+            self.assertEqual(repeated["records"], complete["records"])
+            for source in sources[:3] + ["google-scholar"]:
+                self.assertEqual(sum(call[0] == source for call in calls), 1)
+
+    def test_invalid_defer_or_queue_does_not_write_or_launch_browser(self) -> None:
+        config = {**CONFIG, "sources": ["web-of-science", "cnki"]}
+        browser = types.SimpleNamespace(run=lambda *args, **kwargs: {"status": "attention", "reason": "login"})
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_browser": browser}):
+            output = Path(temp)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(run(config, output), 0)
+            checkpoint = output / "discovery-state.json"
+            original = json.loads(checkpoint.read_text(encoding="utf-8"))
+            cases = [({}, {"defer_source": "web-of-science"}),
+                     ({}, {"resume": True, "defer_source": "cnki"}),
+                     ({}, {"resume": True, "defer_source": "unknown"}),
+                     ({}, {"resume": True, "defer_source": ""}),
+                     ({"sources": {"web-of-science": {"status": "error"}}}, {"resume": True, "defer_source": "web-of-science"}),
+                     ({"sources": {"web-of-science": "broken"}}, {"resume": True, "defer_source": "web-of-science"})]
+            cases += [({"deferred_sources": queue}, {"resume": True, "defer_source": "web-of-science"})
+                      for queue in (None, "web-of-science", ["web-of-science", "web-of-science"], ["unknown"], ["cnki"])]
+            for change, options in cases:
+                with self.subTest(change=change, options=options):
+                    checkpoint.write_text(json.dumps({**original, **change}), encoding="utf-8")
+                    before = {path.name: path.read_bytes() for path in output.iterdir()}
+                    with patch.object(browser, "run", side_effect=AssertionError("invalid request launched browser")), redirect_stdout(io.StringIO()):
+                        self.assertEqual(run(config, output, **options), 1)
+                    self.assertEqual({path.name: path.read_bytes() for path in output.iterdir()}, before)
+            empty_output = output / "absent"
+            with patch.object(browser, "run", side_effect=AssertionError("no checkpoint")), redirect_stdout(io.StringIO()):
+                self.assertEqual(run(config, empty_output, resume=True, defer_source="web-of-science"), 1)
+            self.assertFalse(empty_output.exists())
+
+    def test_cli_forwards_defer_source_with_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config_path = Path(temp) / "config.json"
+            config_path.write_text(json.dumps(CONFIG), encoding="utf-8")
+            output = Path(temp) / "output"
+            with patch("sys.argv", ["literature_search.py", "--config", str(config_path), "--output-dir", str(output),
+                                    "--resume", "--defer-source", "google-scholar"]), patch("literature_search.run", return_value=0) as driver:
+                self.assertEqual(main(), 0)
+            driver.assert_called_once_with(CONFIG, output, False, batch_index=None, resume=True, defer_source="google-scholar")
+
     def test_new_batch_has_new_checkpoint_and_preserves_old_batch(self) -> None:
         calls = []
         def browser_run(source, query, scrape_current, limit, year_from, year_to, **kwargs):

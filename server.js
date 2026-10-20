@@ -290,16 +290,22 @@ async function handleLiterature(req, res, url) {
     // 【stage2】POST /advance：从 resumeStage 续跑（缺省 until=export），支持字段确认关口（§21.2.2）。
     if (req.method === 'POST' && route === '/api/literature/advance') {
       const data = JSON.parse(await readBody(req, 64 * 1024));
-      return sendJson(res, 200, scholar.advance(data.id, { until: data.until, confirmations: data.confirmations }));
+      return sendJson(res, 200, scholar.advance(data.id, { until: data.until, confirmations: data.confirmations,
+        ...(Object.hasOwn(data, 'deferSource') ? { deferSource: data.deferSource } : {}) }));
     }
     if (req.method === 'POST' && route === '/api/literature/browser') {
       const data = JSON.parse(await readBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Object.keys(data).some(key => key !== 'id')) throw new Error('只需提供当前检索任务标识');
       return sendJson(res, 200, await scholar.openLogin(data.id));
     }
+    if (req.method === 'POST' && ['/api/literature/delete', '/api/literature/restore'].includes(route)) {
+      const data = JSON.parse(await readBody(req, 4 * 1024));
+      if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => key !== 'id')) throw new Error('只需提供当前检索任务标识');
+      return sendJson(res, 200, route.endsWith('/delete') ? scholar.deleteJob(data.id) : scholar.restoreJob(data.id));
+    }
     // 【stage2】GET /jobs：历史任务找回（?limit= 1–50，默认 20；§21.2.3）。
     if (req.method === 'GET' && route === '/api/literature/jobs') {
-      return sendJson(res, 200, { jobs: scholar.list(url.searchParams.get('limit')) });
+      return sendJson(res, 200, { jobs: scholar.list(url.searchParams.get('limit'), { includeDeleted: url.searchParams.get('includeDeleted') === '1' }) });
     }
     if (req.method === 'GET' && route === '/api/literature/job') {
       return sendJson(res, 200, scholar.snapshot(url.searchParams.get('id')));

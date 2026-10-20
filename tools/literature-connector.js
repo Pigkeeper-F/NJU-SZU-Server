@@ -94,6 +94,25 @@ function sourceAttention(value) {
   return { source: value.source, reason: value.reason };
 }
 
+function selectedSources(config) {
+  const known = new Set(executableSources().map(source => source.key));
+  return [...new Set((Array.isArray(config?.sources) ? config.sources : []).filter(source => typeof source === 'string' && known.has(source)))];
+}
+
+function deferredSources(value, config) {
+  const selected = new Set(selectedSources(config));
+  return [...new Set((Array.isArray(value) ? value : []).filter(source => selected.has(source)))];
+}
+
+function checkpointDeferredSources(dir, config, fallback = []) {
+  const state = loadJsonFile(path.join(dir, 'discovery-state.json'));
+  return deferredSources(state && Object.hasOwn(state, 'deferred_sources') ? state.deferred_sources : fallback, config);
+}
+
+function executionOrder(config, queue) {
+  return [...selectedSources(config).filter(source => !queue.includes(source)), ...queue];
+}
+
 function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     if (options.job?.status === 'cancelled') { reject(new Error('检索已停止')); return; }
@@ -239,7 +258,9 @@ function extractionCoverage(jobDir) {
 function detectStagedArtifacts(jobDir) {
   const stages = {};
   const candidates = loadJsonFile(path.join(jobDir, 'candidates.json'));
-  stages.discover = candidates && candidates.discovery_complete !== false && Array.isArray(candidates.batches) && candidates.batches.length ? 'done' : 'pending';
+  const config = loadJsonFile(path.join(jobDir, 'run_config.json'));
+  stages.discover = candidates && candidates.discovery_complete !== false && !checkpointDeferredSources(jobDir, config).length
+    && Array.isArray(candidates.batches) && candidates.batches.length ? 'done' : 'pending';
 
   const dedupe = loadJsonFile(path.join(jobDir, 'dedupe', 'dedupe.json'));
   stages.dedupe = dedupe && Number.isInteger(dedupe.version) && dedupe.version >= 1 && Array.isArray(dedupe.groups) ? 'done' : 'pending';
@@ -364,13 +385,15 @@ class LiteratureConnector {
   }
 
   public(job) {
+    const queue = deferredSources(job.deferredSources, job.config);
     return { id: job.id, status: job.status, stage: job.stage, message: job.message,
       count: job.count, config: job.config, files: job.files, events: job.events, error: job.error,
       stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters,
-      attention: sourceAttention(job.attention) };
+      attention: sourceAttention(job.attention), deferredSources: queue, executionOrder: executionOrder(job.config, queue), deletedAt: job.deletedAt || null };
   }
 
   persist(job) {
+    job.deferredSources = checkpointDeferredSources(job.dir, job.config, job.deferredSources);
     fs.mkdirSync(job.dir, { recursive: true });
     fs.writeFileSync(path.join(job.dir, 'job.json'), JSON.stringify(this.public(job), null, 2) + '\n');
   }
@@ -449,6 +472,9 @@ class LiteratureConnector {
     this.appendEventLog(job, event);
     if (Number.isInteger(runId) && job.runId !== runId) return; // 旧一代 run：只审计不改状态
     if (job.status === 'cancelled') return;
+    if (stageKey === 'discover' && Object.hasOwn(event, 'deferred_sources')) {
+      job.deferredSources = deferredSources(event.deferred_sources, job.config);
+    }
     if (event.type === 'stage') {
       if (stageKey === 'discover' && Number.isSafeInteger(event.count) && event.count >= 0) {
         job.count = event.count;
@@ -460,6 +486,7 @@ class LiteratureConnector {
     if (event.type === 'attention') {
       job.status = 'needs_attention';
       job.resumeStage = stageKey;
+      if (stageKey === 'discover' && job.stages) job.stages.discover = 'pending';
       job.attention = sourceAttention(event);
       this.registerFiles(job, event.files);
       if (Number.isInteger(event.count)) { job.count = event.count; this.mergeCounters(job, stageKey, event); }
@@ -484,6 +511,18 @@ class LiteratureConnector {
       return;
     }
     if (event.type === 'result') {
+      if (stageKey === 'discover') {
+        const queue = checkpointDeferredSources(job.dir, job.config, job.deferredSources);
+        const candidates = loadJsonFile(path.join(job.dir, 'candidates.json'));
+        if (queue.length || event.discovery_complete === false || candidates?.discovery_complete === false) {
+          const state = loadJsonFile(path.join(job.dir, 'discovery-state.json'));
+          this.onStageEvent(job, runId, stageKey, { type: 'attention', stage: 'verification',
+            source: state?.pending_source || queue[0], reason: state?.pending_reason || 'results_unrecognized',
+            message: '仍有暂缓或未完成来源，已有候选保留；请继续补检待处理来源后再进入去重。',
+            count: event.count, files: event.files, deferred_sources: queue });
+          return;
+        }
+      }
       job.count = Number.isInteger(event.count) ? event.count : 0;
       this.registerFiles(job, event.files);
       if (stageKey === 'fulltext') this.registerFulltextFiles(job);
@@ -502,20 +541,26 @@ class LiteratureConnector {
   async runSingleStage(job, python, stage, runId) {
     job.python = python;
     const onEvent = event => this.onStageEvent(job, runId, stage, event);
-    if (stage === 'discover' && this.search) return this.search(job, python, onEvent);
+    if (stage === 'discover' && this.search) {
+      try { return await this.search(job, python, onEvent); }
+      finally { job.deferSource = null; }
+    }
     if (stage === 'extract' && this.extract) return this.extract(job, python, onEvent);
     if (stage === 'extract') return defaultExtractStage(this.root, job, python, onEvent);
     const extraArgs = [];
     if (stage === 'discover') {
       if (job.resumeCurrent) extraArgs.push('--scrape-current');
       if (job.resumeRun) extraArgs.push('--resume');
+      if (job.deferSource) extraArgs.push('--defer-source', job.deferSource);
     } else if (job.resumeRun) {
       extraArgs.push('--resume');
     }
-    return this.runStage(STAGE_SCRIPTS[stage], extraArgs, job, onEvent);
+    try { return await this.runStage(STAGE_SCRIPTS[stage], extraArgs, job, onEvent); }
+    finally { if (stage === 'discover') job.deferSource = null; }
   }
 
   async run(job, fromStage = 'discover', until = 'discover') {
+    if (job.deletedAt) throw new Error('该任务已删除，请先恢复后再执行');
     const runId = (Number.isInteger(job.runId) ? job.runId : 0) + 1;
     job.runId = runId;
     job.activeStage = fromStage;
@@ -586,7 +631,8 @@ class LiteratureConnector {
     const job = { id, dir: path.join(this.base, id), config, resumeCurrent: resumeCurrent === true, status: 'running', stage: 'queued',
       message: '任务已排队', count: 0, files: ['run_config.json'], events: [], error: null, child: null,
       stages: Object.fromEntries(STAGES.map(stage => [stage, 'pending'])), resumeStage: null, until: boundary,
-      counters: {}, limits: resolveLimits(config), activeStage: null, python: null, resumeRun: false, attention: null };
+      counters: {}, limits: resolveLimits(config), activeStage: null, python: null, resumeRun: false, attention: null,
+      deferredSources: [], deferSource: null };
     this.jobs.set(id, job);
     fs.mkdirSync(job.dir, { recursive: true });
     fs.writeFileSync(path.join(job.dir, 'run_config.json'), JSON.stringify(config, null, 2) + '\n', { flag: 'wx', mode: 0o444 });
@@ -615,7 +661,8 @@ class LiteratureConnector {
       until: typeof saved.until === 'string' ? saved.until : null,
       counters: saved.counters && typeof saved.counters === 'object' ? saved.counters : {},
       limits: resolveLimits(saved.config || diskConfig), activeStage: null, python: null, resumeRun: true,
-      attention: sourceAttention(saved.attention), browserOpening: false
+      attention: sourceAttention(saved.attention), browserOpening: false,
+      deferredSources: checkpointDeferredSources(dir, config), deferSource: null, deletedAt: saved.deletedAt || null
     };
     const detected = detectStagedArtifacts(dir);
     if (saved.status === 'running') {
@@ -645,9 +692,34 @@ class LiteratureConnector {
   advance(id, options = {}) {
     const requested = options && typeof options === 'object' ? options : {};
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    const stored = this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json'));
+    if (stored?.deletedAt) throw new Error('该任务已删除，请先恢复后再执行');
     let until = requested.until == null || requested.until === '' ? 'export' : String(requested.until);
     if (!STAGES.includes(until)) throw new Error('阶段边界必须是 discover–export 的有效阶段名');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening)) throw new Error('已有文献检索正在运行，请等待或停止后重试');
+    const hasDefer = Object.hasOwn(requested, 'deferSource') && requested.deferSource !== undefined;
+    if (hasDefer) {
+      // Validate before loading/mutating a persisted job or appending any field
+      // confirmations. Only Python changes the actual discovery checkpoint.
+      const dir = path.join(this.base, id);
+      const pending = this.jobs.get(id) || loadJsonFile(path.join(dir, 'job.json'));
+      if (!pending) throw new Error('检索任务不存在');
+      const config = pending.config || loadJsonFile(path.join(dir, 'run_config.json'));
+      const attention = sourceAttention(pending.attention);
+      const checkpoint = loadJsonFile(path.join(dir, 'discovery-state.json'));
+      if (pending.status !== 'needs_attention' || pending.resumeStage !== 'discover') throw new Error('只能暂缓当前等待处理的检索来源');
+      const originalUntil = pending.until || 'discover';
+      if (!STAGES.includes(originalUntil)) throw new Error('原任务运行阶段无效，请先核对任务记录');
+      if (requested.until != null && requested.until !== '' && String(requested.until) !== originalUntil) {
+        throw new Error('暂缓来源只调整执行顺序，不能改变原任务的本次运行阶段');
+      }
+      until = originalUntil;
+      if (typeof requested.deferSource !== 'string' || !selectedSources(config).includes(requested.deferSource)
+          || requested.deferSource !== attention?.source || requested.deferSource !== checkpoint?.pending_source
+          || checkpoint?.sources?.[requested.deferSource]?.status !== 'attention') {
+        throw new Error('暂缓来源必须是原任务当前等待处理的已选来源');
+      }
+    }
     const job = this.jobs.get(id) || this.loadPersisted(id);
     if ((requested.until == null || requested.until === '') && job.status === 'needs_attention' && job.resumeStage === 'discover') until = job.until || 'discover';
     if (job.status === 'cancelled') throw new Error('任务已停止，不能继续；请发起新检索');
@@ -659,7 +731,9 @@ class LiteratureConnector {
     if (STAGES.indexOf(until) < STAGES.indexOf(stage)) throw new Error('请选择当前待运行阶段或之后的阶段');
     if (requested.confirmations != null) this.appendConfirmations(job, requested.confirmations);
     job.resumeRun = true;
-    if (stage === 'discover' && (job.attention || job.stage === 'verification' || job.stage === 'interrupted')) job.resumeCurrent = true;
+    job.deferSource = hasDefer ? requested.deferSource : null;
+    if (hasDefer) job.resumeCurrent = false;
+    else if (stage === 'discover' && (job.attention || job.stage === 'verification' || job.stage === 'interrupted')) job.resumeCurrent = true;
     job.attention = null;
     job.status = 'running';
     job.error = null;
@@ -672,6 +746,7 @@ class LiteratureConnector {
   async openLogin(id) {
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const job = this.jobs.get(id) || this.loadPersisted(id);
+    if (job.deletedAt) throw new Error('该任务已删除，请先恢复后再打开检索页面');
     if (job.status !== 'needs_attention' || job.resumeStage !== 'discover') throw new Error('当前任务没有等待登录或验证的检索来源');
     if ([...this.jobs.values()].some(item => item.status === 'running' || item.browserOpening)) throw new Error('检索浏览器正在使用，请稍后再打开');
     const attention = sourceAttention(job.attention);
@@ -715,6 +790,10 @@ class LiteratureConnector {
     if (!fs.existsSync(file)) throw new Error('检索任务不存在');
     const saved = loadJsonFile(file);
     if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('检索任务不存在');
+    const frozenConfig = saved.config || loadJsonFile(path.join(dir, 'run_config.json'));
+    saved.deletedAt = saved.deletedAt || null;
+    saved.deferredSources = checkpointDeferredSources(dir, frozenConfig);
+    saved.executionOrder = executionOrder(frozenConfig, saved.deferredSources);
     if (saved.status === 'running') {
       saved.status = 'failed'; saved.stage = 'interrupted';
       saved.error = '本地服务已重启，检索中断；已保存的文件仍可下载。';
@@ -734,7 +813,7 @@ class LiteratureConnector {
   }
 
   //: GET /api/literature/jobs（§21.2.3）：按 job.json mtime 倒序，损坏记录跳过。
-  list(limit) {
+  list(limit, options = {}) {
     const size = Math.min(50, Math.max(1, Number.isInteger(Number(limit)) && Number(limit) > 0 ? Math.trunc(Number(limit)) : 20));
     if (!fs.existsSync(this.base)) return [];
     const entries = [];
@@ -746,11 +825,45 @@ class LiteratureConnector {
       if (!stat.isFile()) continue;
       const saved = loadJsonFile(file);
       if (!saved || typeof saved !== 'object' || Array.isArray(saved)) continue;
+      saved.deletedAt = saved.deletedAt || null;
+      if (saved.deletedAt && options.includeDeleted !== true) continue;
+      const config = saved.config || loadJsonFile(path.join(this.base, name, 'run_config.json'));
+      saved.deferredSources = checkpointDeferredSources(path.join(this.base, name), config);
+      saved.executionOrder = executionOrder(config, saved.deferredSources);
       entries.push({ mtime: stat.mtimeMs, job: saved });
     }
     entries.sort((a, b) => b.mtime - a.mtime);
     return entries.slice(0, size).map(entry => entry.job);
   }
+
+  setDeleted(id, deleted) {
+    if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    const dir = path.join(this.base, id), file = path.join(dir, 'job.json');
+    let saved = loadJsonFile(file);
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('检索任务不存在');
+    let live = this.jobs.get(id);
+    if (live?.status === 'running' || live?.child || live?.browserOpening) {
+      throw new Error('任务正在运行或打开检索页面，请先停止后再删除或恢复');
+    }
+    if (!live && saved.status === 'running') live = this.loadPersisted(id);
+    if (live && saved.status === 'running' && live.status !== 'running') saved = { ...saved, ...this.public(live) };
+    const deletedAt = deleted ? saved.deletedAt || new Date().toISOString() : null;
+    if ((saved.deletedAt || null) !== deletedAt) {
+      const temporary = path.join(dir, `job.json.tmp-${process.pid}-${Date.now()}`);
+      try {
+        fs.writeFileSync(temporary, JSON.stringify({ ...saved, deletedAt }, null, 2) + '\n', 'utf8');
+        fs.renameSync(temporary, file);
+      } finally {
+        if (fs.existsSync(temporary)) { try { fs.unlinkSync(temporary); } catch (_) {} }
+      }
+    }
+    if (live) live.deletedAt = deletedAt;
+    return this.snapshot(id);
+  }
+
+  deleteJob(id) { return this.setDeleted(id, true); }
+
+  restoreJob(id) { return this.setDeleted(id, false); }
 
   download(id, name) {
     const job = this.snapshot(id);
@@ -767,6 +880,7 @@ class LiteratureConnector {
   cancel(id) {
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const job = this.jobs.get(id) || this.loadPersisted(id);
+    if (job.deletedAt) throw new Error('该任务已删除，请先恢复后再操作');
     if (!job || !['running', 'needs_attention'].includes(job.status)) throw new Error('检索任务未在运行');
     job.status = 'cancelled';
     if (job.child) { try { job.child.kill('SIGTERM'); } catch (_) {} }

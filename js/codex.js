@@ -35,7 +35,7 @@
   function task(id) {
     if (!tasks[id]) tasks[id] = { files: [], busy: false, backend: saved[id]?.backend || preferences.backend || 'codex', model: saved[id]?.model ?? preferences.model ?? '', execute: false, executeOnce: false, error: '', job: null, filesOpen: false, logOpen: false,
       literatureConfig: saved[id]?.literatureConfig || null, literatureJob: null, literatureBusy: false, literatureError: '',
-      literatureUntil: saved[id]?.literatureUntil || 'discover', literatureJobs: null, literatureJobsTried: false, literatureJobsLoading: false, literatureJobsError: '',
+      literatureUntil: saved[id]?.literatureUntil || 'discover', literatureJobs: null, literatureJobsTried: false, literatureJobsLoading: false, literatureJobsError: '', literatureIncludeDeleted: false, literatureHistoryBusy: null,
       literatureConfirmJob: null, literatureConfirmDrafts: null };
     return tasks[id];
   }
@@ -231,15 +231,19 @@
   }
   async function watchLiterature(id, jobId) {
     const t = task(id);
+    const generation = (t.literatureWatchGeneration || 0) + 1; t.literatureWatchGeneration = generation;
     t.literatureBusy = true;
     try {
       while (true) {
         const job = await request('/api/literature/job?id=' + encodeURIComponent(jobId));
+        if (t.literatureWatchGeneration !== generation) return;
+        if (job.deletedAt) { detachLiteratureJob(id, jobId); render(); return; }
         t.literatureJob = job;
         if (job.status !== 'needs_attention') t.literatureAutoOpenNotice = '';
         render();
         if (job.status !== 'running') {
           await autoOpenLiteratureBrowser(id, job);
+          if (t.literatureWatchGeneration !== generation) return;
           const stamp = job.id + ':' + job.status + ':' + (job.stage || '') + ':' + (Array.isArray(job.events) ? job.events.length : 0);
           if (saved[id]?.literatureDelivered !== stamp) {
             const text = job.status === 'completed' ? literatureCompletedMessage(job)
@@ -256,8 +260,18 @@
         await new Promise(resolve => setTimeout(resolve, 1200));
       }
       t.literatureError = '';
-    } catch (error) { t.literatureError = error.message; }
-    finally { t.literatureBusy = false; render(); }
+    } catch (error) { if (t.literatureWatchGeneration === generation) t.literatureError = error.message; }
+    finally { if (t.literatureWatchGeneration === generation) { t.literatureBusy = false; render(); } }
+  }
+  function detachLiteratureJob(id, jobId) {
+    const t = task(id);
+    if (t.literatureJob?.id !== jobId && saved[id]?.literatureJobId !== jobId) return;
+    t.literatureWatchGeneration = (t.literatureWatchGeneration || 0) + 1;
+    t.literatureJob = null; t.literatureBusy = false; t.literatureError = ''; t.literatureAutoOpenNotice = '';
+    if (saved[id]) {
+      delete saved[id].literatureJobId; delete saved[id].literatureDelivered; delete saved[id].literatureAutoOpenStamp;
+    }
+    closeLiteratureFields(); persist();
   }
   function applyLiteratureJob(mod, job) {
     const t = task(mod.id);
@@ -288,23 +302,34 @@
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
-  async function continueLiterature(mod) {
+  async function continueLiterature(mod, options = {}) {
     const t = task(mod.id);
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
     const job = t.literatureJob;
     if (!job?.id) { t.literatureError = '没有可继续的检索任务'; render(); return; }
-    if (t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig)) {
+    const deferSource = options.deferSource;
+    const restoreFrozenOrder = deferSource !== undefined && t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig)
+      && sameLiteratureDeferralConfig(job.config, t.literatureConfig);
+    if (t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig) && !restoreFrozenOrder) {
       t.literatureError = '本次设置已改变，不能混入旧任务结果；请确认新配置并发起新检索，或从历史任务重新载入原配置'; render(); return;
     }
-    const until = t.literatureUntil || job.until || 'discover';
+    if (deferSource !== undefined && (job.status !== 'needs_attention' || job.resumeStage !== 'discover'
+      || deferSource !== job.attention?.source || !LITERATURE_EXECUTABLE_SOURCES.includes(deferSource) || !job.config?.sources?.includes(deferSource))) {
+      t.literatureError = '只能暂缓当前等待人工处理的检索来源；请刷新任务状态后重试。'; render(); return;
+    }
+    const until = deferSource !== undefined ? job.until || t.literatureUntil || 'discover' : t.literatureUntil || job.until || 'discover';
     if (job.resumeStage && LITERATURE_STAGE_ORDER.indexOf(until) < LITERATURE_STAGE_ORDER.indexOf(job.resumeStage)) {
       t.literatureError = '请先在“本次做到哪一步”选择“' + literatureStageLabel(job.resumeStage) + '”或更后的阶段，再继续原任务'; render(); return;
     }
     t.literatureBusy = true; t.literatureError = ''; render();
     try {
       await checkLiteratureRuntime(job.config?.sources || []);
-      const body = { id: job.id, until };
+      const body = { id: job.id, until, ...(deferSource !== undefined ? { deferSource } : {}) };
       const next = await request('/api/literature/advance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (restoreFrozenOrder) {
+        t.literatureConfig = JSON.parse(JSON.stringify(job.config));
+        saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig }; persist();
+      }
       applyLiteratureJob(mod, next);
       await watchLiterature(mod.id, next.id || job.id);
     } catch (error) { t.literatureError = error.message; }
@@ -373,7 +398,7 @@
     if (t.literatureJobsLoading) return;
     t.literatureJobsLoading = true; t.literatureJobsTried = true;
     try {
-      const data = await request('/api/literature/jobs?limit=20');
+      const data = await request('/api/literature/jobs?limit=20' + (t.literatureIncludeDeleted ? '&includeDeleted=1' : ''));
       t.literatureJobs = Array.isArray(data.jobs) ? data.jobs : [];
       t.literatureJobsError = '';
     } catch (error) {
@@ -382,9 +407,25 @@
     }
     finally { t.literatureJobsLoading = false; render(); }
   }
+  async function changeLiteratureHistory(mod, job, restore = false) {
+    const t = task(mod.id);
+    if (!job?.id || t.literatureHistoryBusy || t.literatureJobsLoading) return;
+    if (job.status === 'running') { t.literatureJobsError = '任务正在运行，请先停止后再删除。'; render(); return; }
+    t.literatureHistoryBusy = job.id; t.literatureJobsError = ''; render();
+    try {
+      const next = await request(restore ? '/api/literature/restore' : '/api/literature/delete', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: job.id }) });
+      if (!restore) detachLiteratureJob(mod.id, job.id);
+      t.literatureJobs = (t.literatureJobs || []).map(item => item.id === job.id ? next : item)
+        .filter(item => t.literatureIncludeDeleted || !item.deletedAt);
+      await loadLiteratureJobs(mod);
+    } catch (error) { t.literatureJobsError = (restore ? '恢复失败：' : '删除失败：') + error.message; }
+    finally { t.literatureHistoryBusy = null; render(); }
+  }
   function attachLiteratureJob(mod, job) {
     const t = task(mod.id);
     if (!job?.id) return;
+    if (job.deletedAt) { t.literatureJobsError = '该任务已删除，请先点击“恢复”。'; render(); return; }
     t.literatureError = '';
     if (job.config) {
       t.literatureConfig = JSON.parse(JSON.stringify(job.config));
@@ -414,10 +455,14 @@
       : key === 'perSourceLimit' && config.searchMode === 'formal' ? config.perSourceLimit === undefined ? 100 : config.perSourceLimit
       : config[key] ?? null));
   }
+  function newLiteratureSourceOrder(sources) {
+    if (!Array.isArray(sources)) return sources;
+    return [...sources.filter(source => source !== 'web-of-science'), ...sources.filter(source => source === 'web-of-science')];
+  }
   function newLiteratureSearchConfig(config) {
     const mode = config.searchMode ?? 'test';
     if (!['test', 'formal'].includes(mode)) throw new Error('请选择测试运行或正式检索');
-    const next = { ...config, searchMode: mode, stopMode: mode === 'formal' ? 'end' : 'count', perSourceLimit: mode === 'formal' ? null : 10, limit: 10,
+    const next = { ...config, sources: newLiteratureSourceOrder(config.sources), searchMode: mode, stopMode: mode === 'formal' ? 'end' : 'count', perSourceLimit: mode === 'formal' ? null : 10, limit: 10,
       ...(config.batch ? { batch: { ...config.batch, size: 10 } } : {}) };
     if (mode === 'formal' && config.stopMode !== 'end' && config.limits) {
       next.limits = { ...config.limits }; delete next.limits.discover;
@@ -428,6 +473,12 @@
     if (!one || !other) return false;
     const keys = [...LITERATURE_CONFIG_KEYS, ...LITERATURE_CONFIG_EXTRA_KEYS.filter(key => one[key] !== undefined && other[key] !== undefined)];
     return literatureConfigKey(one, keys) === literatureConfigKey(other, keys);
+  }
+  function sameLiteratureDeferralConfig(one, other) {
+    if (sameLiteratureConfig(one, other)) return true;
+    if (!Array.isArray(one?.sources) || !Array.isArray(other?.sources)
+      || JSON.stringify([...one.sources].sort()) !== JSON.stringify([...other.sources].sort())) return false;
+    return sameLiteratureConfig(one, { ...other, sources: [...one.sources] });
   }
   function parseLiteratureConfig(text) {
     const raw = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -739,9 +790,13 @@
     box.append(node('summary', '历史任务（刷新后仍可找回）' + (Array.isArray(t.literatureJobs) ? ' · ' + t.literatureJobs.length : '')));
     const head = node('div', undefined, 'literature-history-head');
     const refresh = node('button', t.literatureJobsLoading ? '刷新中…' : '刷新任务列表', 'quiet-button');
-    refresh.type = 'button'; refresh.disabled = t.literatureJobsLoading;
+    refresh.type = 'button'; refresh.disabled = t.literatureJobsLoading || !!t.literatureHistoryBusy;
     refresh.onclick = () => loadLiteratureJobs(mod);
-    head.append(refresh); box.append(head);
+    const deleted = node('button', t.literatureIncludeDeleted ? '隐藏已删除' : '查看已删除', 'quiet-button'); deleted.type = 'button';
+    deleted.disabled = t.literatureJobsLoading || !!t.literatureHistoryBusy;
+    deleted.onclick = () => { t.literatureIncludeDeleted = !t.literatureIncludeDeleted; return loadLiteratureJobs(mod); };
+    head.append(refresh, deleted); box.append(head);
+    box.append(node('p', '删除后可在“查看已删除”中恢复，原文件和进度保留。', 'codex-status'));
     if (!Array.isArray(t.literatureJobs)) box.append(node('p', '正在读取历史任务…', 'codex-status'));
     else if (!t.literatureJobs.length) box.append(node('p', '暂无历史任务记录。', 'codex-status'));
     else {
@@ -749,11 +804,21 @@
       t.literatureJobs.forEach(job => {
         const row = node('div', undefined, 'literature-history-row' + (job.id === t.literatureJob?.id ? ' is-current' : ''));
         row.append(node('span', String(job.id || '').slice(0, 8), 'literature-history-id'));
-        row.append(node('span', (LITERATURE_STATUS_LABELS[job.status] || job.status || '') + (job.stage ? ' · ' + literatureStageLabel(job.stage) : ''), 'literature-history-status'));
+        row.append(node('span', job.deletedAt ? '已删除，可恢复' : (LITERATURE_STATUS_LABELS[job.status] || job.status || '') + (job.stage ? ' · ' + literatureStageLabel(job.stage) : ''), 'literature-history-status'));
         row.append(node('span', String(job.message || '').slice(0, 60), 'literature-history-message'));
-        const open = node('button', '查看', 'quiet-button'); open.type = 'button'; open.disabled = t.literatureBusy || t.busy;
-        open.onclick = () => attachLiteratureJob(mod, job);
-        row.append(open); list.append(row);
+        if (job.deletedAt) {
+          const restore = node('button', '恢复', 'quiet-button'); restore.type = 'button';
+          restore.disabled = !!t.literatureHistoryBusy || t.literatureJobsLoading;
+          restore.onclick = () => changeLiteratureHistory(mod, job, true); row.append(restore);
+        } else {
+          const open = node('button', '查看', 'quiet-button'); open.type = 'button'; open.disabled = t.literatureBusy || t.busy;
+          open.onclick = () => attachLiteratureJob(mod, job);
+          const remove = node('button', '删除', 'quiet-button'); remove.type = 'button';
+          remove.disabled = job.status === 'running' || !!t.literatureHistoryBusy || t.literatureJobsLoading;
+          remove.title = job.status === 'running' ? '请先停止正在运行的任务' : '从历史列表隐藏，可恢复；文件和进度保留';
+          remove.onclick = () => changeLiteratureHistory(mod, job); row.append(open, remove);
+        }
+        list.append(row);
       });
       box.append(list);
     }
@@ -814,8 +879,15 @@
     untilWrap.append(until); row.append(untilWrap);
     box.append(row);
     box.append(node('p', '登录流程：需要登录、验证或机构权限时，平台会尝试自动打开本任务的官方页面。请在平台专用检索浏览器操作，它会保存该浏览器的登录状态；普通 Edge/Chrome 的登录不会自动共享。完成后回到本平台点击“检查并继续”，任务才会恢复。', 'codex-status'));
+    const executionOrder = job ? Array.isArray(job.executionOrder) ? job.executionOrder : job.config?.sources : newLiteratureSourceOrder(t.literatureConfig?.sources);
+    if (Array.isArray(executionOrder) && executionOrder.length) box.append(node('p', (job ? '当前任务执行顺序：' : '新检索执行顺序：')
+      + executionOrder.map(source => LITERATURE_SOURCE_LABELS[source] || source).join(' → '), 'codex-status'));
     if (job) {
-      box.append(node('p', '状态：' + (job.message || literatureStageLabel(job.stage) || job.status) + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
+      const deferred = Array.isArray(job.deferredSources) ? [...new Set(job.deferredSources)].filter(source => job.config?.sources?.includes(source)) : [];
+      box.append(node('p', '状态：' + (deferred.length && job.status === 'completed' ? '仍有暂缓来源待补检，检索尚未全部完成' : job.message || literatureStageLabel(job.stage) || job.status)
+        + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
+      if (deferred.length) box.append(node('p', '暂缓来源待补检：' + deferred.map(source => LITERATURE_SOURCE_LABELS[source] || source).join('、')
+        + '。已有候选保留，检索尚未全部完成；可打开原页面处理后点击“检查并继续”补检。', 'codex-status'));
       const stages = literatureStageBar(job);
       if (stages) box.append(stages);
       if (awaitingConfirm) box.append(node('p', '提取字段等待确认：点击“设置提取字段”，新增或核对表头后确认并继续提取。', 'codex-status'));
@@ -836,7 +908,14 @@
       const resume = node('button', '检查并继续', 'primary-button'); resume.type = 'button';
       resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
       resume.onclick = () => continueLiterature(mod);
-      actions.append(resume); attention.append(actions); box.append(attention);
+      actions.append(resume);
+      if (hasSourcePage && job.resumeStage === 'discover' && job.config?.sources?.includes(job.attention.source)) {
+        const defer = node('button', '暂缓此来源，继续其他来源', 'quiet-button'); defer.type = 'button';
+        defer.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameLiteratureDeferralConfig(job.config, t.literatureConfig);
+        defer.title = '保留当前来源已有候选和页码，先继续其他来源；暂缓来源仍须补检。';
+        defer.onclick = () => continueLiterature(mod, { deferSource: job.attention.source }); actions.append(defer);
+      }
+      attention.append(actions); box.append(attention);
     }
     if (t.literatureConfig) {
       const config = t.literatureConfig;
@@ -879,14 +958,15 @@
         : '测试运行：每个来源最多取10条候选，用于检查检索词和流程；不会自动扩大到正式数量。';
       details.append(node('p', quantity, 'codex-status'));
       const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（六个来源均可选择，按研究需要勾选）'));
-      Object.entries(LITERATURE_SOURCE_LABELS).forEach(([value, label]) => {
+      newLiteratureSourceOrder(Object.keys(LITERATURE_SOURCE_LABELS)).forEach(value => {
+        const label = LITERATURE_SOURCE_LABELS[value];
         const wrap = node('label', label); const check = node('input'); check.type = 'checkbox'; check.checked = config.sources.includes(value);
         check.disabled = t.literatureBusy || t.busy;
         check.onchange = () => { config.sources = check.checked ? [...new Set([...config.sources, value])] : config.sources.filter(source => source !== value); resetDiscoverBudget(); persistConfig(); render(); };
         wrap.prepend(check); sources.append(wrap);
       });
       fields.append(sources);
-      config.sources.forEach(source => {
+      newLiteratureSourceOrder(config.sources).forEach(source => {
         const wrap = node('label', (LITERATURE_SOURCE_LABELS[source] || source) + ' 检索式（留空沿用默认）');
         const field = node('textarea'); field.rows = 2; field.maxLength = 2000;
         field.value = config.sourceQueries?.[source] || ''; field.disabled = t.literatureBusy || t.busy;

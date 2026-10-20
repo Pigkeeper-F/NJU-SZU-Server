@@ -102,6 +102,79 @@ class FormalPagingTests(unittest.TestCase):
             self.assertEqual(report(root)["records"][:10], original)
             self.assertEqual(report(root)["count"], 25)
 
+    def test_deferred_formal_source_keeps_pages_and_resumes_exact_page(self):
+        for stop_mode in ("count", "end"):
+            with self.subTest(stop_mode=stop_mode), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                config = {**CONFIG, "sources": ["web-of-science", "scopus"], "stopMode": stop_mode,
+                          "perSourceLimit": None if stop_mode == "end" else 25}
+                frozen = json.dumps(config).encode("utf-8")
+                (root / "run_config.json").write_bytes(frozen)
+                calls, available = [], False
+
+                def browser(source, query, current, *args, **kwargs):
+                    index = kwargs["page_index"]
+                    calls.append((source, index, current))
+                    if source == "scopus":
+                        return page(index, rows(100, 10), False)
+                    if index == 1 and not available:
+                        return {"status": "attention", "reason": "login", "message": "WOS login required"}
+                    return page(index, rows(index * 10, 5 if index == 2 else 10), index < 2)
+
+                _, events = self.execute(config, root, browser)
+                original = copy.deepcopy(report(root)["records"])
+                self.assertEqual((events[-1]["type"], len(original)), ("attention", 10))
+                state_path = root / "discovery-state.json"
+                checkpoint = json.loads(state_path.read_text(encoding="utf-8"))
+                pending_page = copy.deepcopy(checkpoint["sources"]["web-of-science"])
+                self.assertEqual((pending_page["next_page"], pending_page["pages_fetched"]), (1, 1))
+
+                code, events = self.execute(config, root, browser, resume=True, defer_source="web-of-science")
+                self.assertEqual(code, 0)
+                self.assertEqual((events[-1]["type"], events[-1]["source"], events[-1]["count"]), ("attention", "web-of-science", 20))
+                self.assertFalse(any(event["type"] == "result" for event in events))
+                self.assertTrue(all(event["deferred_sources"] == ["web-of-science"] for event in events))
+                checkpoint = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(checkpoint["sources"]["web-of-science"], pending_page)
+                self.assertEqual(checkpoint["deferred_sources"], ["web-of-science"])
+                self.assertFalse(report(root)["discovery_complete"])
+                twenty = {row["candidate_id"]: row for row in report(root)["records"]}
+                before_calls = list(calls)
+                self.execute(config, root, browser, resume=True, defer_source="web-of-science")
+                self.assertEqual(calls, before_calls, "仅剩暂缓来源时不能自动重试")
+                self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["sources"]["web-of-science"], pending_page)
+
+                available = True
+                code, events = self.execute(config, root, browser, resume=True)
+                self.assertEqual((code, events[-1]["type"], events[-1]["count"]), (0, "result", 35))
+                complete = report(root)
+                self.assertTrue(complete["discovery_complete"])
+                self.assertEqual(complete["deferred_sources"], [])
+                self.assertEqual(complete["records"][:10], original)
+                self.assertTrue(all(row in complete["records"] for row in twenty.values()))
+                self.assertEqual(calls, [("web-of-science", 0, False), ("web-of-science", 1, False),
+                                         ("scopus", 0, False), ("web-of-science", 1, True), ("web-of-science", 2, False)])
+                checkpoint = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(checkpoint["config_fingerprint"], config_fingerprint(config))
+                self.assertEqual(checkpoint["batch_index"], 1)
+                self.assertEqual((root / "run_config.json").read_bytes(), frozen)
+                self.assertEqual(complete["source_status"]["web-of-science"]["stop_reason"],
+                                 "exhausted" if stop_mode == "end" else "limit_reached")
+
+    def test_invalid_formal_defer_keeps_all_saved_page_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            def browser(*args, **kwargs):
+                index = kwargs["page_index"]
+                return page(0, rows(0, 10), True) if index == 0 else {"status": "attention", "reason": "login"}
+            self.execute(CONFIG, root, browser)
+            before = {path.name: path.read_bytes() for path in root.iterdir()}
+            for options in ({"defer_source": "pubmed"}, {"resume": True, "defer_source": "cnki"}):
+                with self.subTest(options=options):
+                    code, _ = self.execute(CONFIG, root, lambda *args, **kwargs: self.fail("invalid defer launched browser"), **options)
+                    self.assertEqual(code, 1)
+                    self.assertEqual({path.name: path.read_bytes() for path in root.iterdir()}, before)
+
     def test_mid_page_technical_failure_retry_preserves_checkpoint(self):
         fail = True
 

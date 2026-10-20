@@ -273,12 +273,14 @@ def write_results(output_dir: Path, query: str, search: dict, config: dict | Non
         "count": len(records),
         "applied_filters": applied,
         "deferred_rules": deferred,
-        "status": "partial" if search.get("pending_source") else "complete",
+        "status": "partial" if search.get("pending_source") or search.get("deferred_sources") else "complete",
     }
     if source_status:
         batch["source_status"] = source_status
     if search.get("pending_source"):
         batch["pending_source"] = search["pending_source"]
+    if "deferred_sources" in search:
+        batch["deferred_sources"] = list(search["deferred_sources"])
     existing = load_existing_report(output_dir)
     grouped: dict[int, list[dict]] = {}
     for record in existing.get("records") or []:
@@ -311,12 +313,14 @@ def write_results(output_dir: Path, query: str, search: dict, config: dict | Non
         "caution": "Search snippets are not verified abstracts or full text; all records await screening.",
         "batches": batches,
         "records": all_records,
-        "discovery_complete": not bool(search.get("pending_source")),
+        "discovery_complete": not bool(search.get("pending_source") or search.get("deferred_sources")),
     }
     if source_status:
         report["source_status"] = source_status
     if search.get("pending_source"):
         report["pending_source"] = search["pending_source"]
+    if "deferred_sources" in search:
+        report["deferred_sources"] = list(search["deferred_sources"])
     paths = _common.job_paths(output_dir)
     _common.atomic_write_json(paths["candidates_json"], report)
     buffer = io.StringIO()
@@ -325,7 +329,10 @@ def write_results(output_dir: Path, query: str, search: dict, config: dict | Non
     for record in all_records:
         writer.writerow(csv_cells(record))
     _common.atomic_write_text(paths["candidates_csv"], buffer.getvalue(), encoding="utf-8-sig")
-    return {"count": len(records), "total": len(all_records), "batch_index": batch_index, "files": ["candidates.json", "candidates.csv"]}
+    result = {"count": len(records), "total": len(all_records), "batch_index": batch_index, "files": ["candidates.json", "candidates.csv"]}
+    if "deferred_sources" in search:
+        result["deferred_sources"] = list(search["deferred_sources"])
+    return result
 
 
 def validate_config(config: object) -> None:
@@ -461,8 +468,64 @@ def checkpoint_report(output_dir: Path, config: dict, state: dict) -> dict:
         search_url = search_url or safe_url(entry.get("url"))
         statuses[source] = {key: value for key, value in entry.items() if key != "results"}
     return write_results(output_dir, config["query"], {"url": search_url, "results": raw,
-                         "source_status": statuses, "pending_source": state.get("pending_source")},
+                         "source_status": statuses, "pending_source": state.get("pending_source"),
+                         "deferred_sources": list(state.get("deferred_sources", []))},
                          config, batch_index=state["batch_index"])
+
+
+def _prepare_source_schedule(config: dict, state: dict, *, resume: bool, scrape_current: bool,
+                             defer_source: str | None) -> tuple[list[str], str | None]:
+    """Validate the whole queue before mutating any scheduling state."""
+    selected, entries = config["sources"], state.get("sources")
+    queue = state.get("deferred_sources", [])
+    if (not isinstance(entries, dict) or not isinstance(queue, list)
+            or any(not isinstance(source, str) or source not in selected for source in queue)
+            or len(set(queue)) != len(queue)
+            or any(not isinstance(entries.get(source), dict) for source in queue)):
+        raise ValueError("暂缓来源检查点无效；请保留已有成果并核对原任务")
+    pending = state.get("pending_source")
+    if defer_source is not None:
+        if (not resume or not isinstance(defer_source, str) or defer_source not in selected
+                or pending != defer_source or not isinstance(entries.get(defer_source), dict)
+                or entries[defer_source].get("status") != "attention"):
+            raise ValueError("只能在原任务续跑时暂缓当前等待人工处理的已选来源")
+    queue = [source for source in queue if entries[source].get("status") not in {"ok", "no_results"}]
+    resumed_source = pending if (resume or scrape_current) and state.get("pending_reason") in ATTENTION_REASONS else None
+    if defer_source is not None:
+        queue = [source for source in queue if source != defer_source] + [defer_source]
+        resumed_source = None
+    elif (resume or scrape_current) and pending:
+        queue = [source for source in queue if source != pending]
+    if queue or "deferred_sources" in state or defer_source is not None:
+        state["deferred_sources"] = queue
+    return [source for source in selected if source not in queue], resumed_source
+
+
+def _next_pending_source(config: dict, state: dict) -> str | None:
+    queue = state.get("deferred_sources", [])
+    order = [source for source in config["sources"] if source not in queue] + queue
+    return next((source for source in order if (state["sources"].get(source) or {}).get("status") not in {"ok", "no_results"}), None)
+
+
+def _pause_deferred_sources(output_dir: Path, config: dict, state: dict) -> bool:
+    queue = [source for source in state.get("deferred_sources", [])
+             if (state["sources"].get(source) or {}).get("status") not in {"ok", "no_results"}]
+    if not queue:
+        return False
+    state["deferred_sources"] = queue
+    source = queue[0]
+    entry = state["sources"][source]
+    reason = entry.get("reason") if entry.get("reason") in ATTENTION_REASONS else "results_unrecognized"
+    entry["status"] = "attention"
+    state.update(pending_source=source, pending_reason=reason)
+    _common.atomic_write_json(output_dir / "discovery-state.json", state)
+    result = checkpoint_report(output_dir, config, state)
+    previous_message = str(entry.get("message") or "").strip()
+    emit("attention", stage="verification", source=source, reason=reason,
+         message="其余未暂缓来源已尝试；仍有待补检来源：" + "、".join(_sources.label_of(key) for key in queue)
+                 + "。已有成果保留。" + (previous_message + " " if previous_message else "")
+                 + "请处理当前来源后检查并继续，或继续暂缓。", **result)
+    return True
 
 
 def _record_keys(row: dict) -> set[str]:
@@ -491,7 +554,7 @@ def _page_fingerprint(rows: list[dict]) -> str:
 
 
 def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
-               batch_index: int | None = None, resume: bool = False) -> int:
+               batch_index: int | None = None, resume: bool = False, defer_source: str | None = None) -> int:
     """One discovery batch, many pages; commit every page before advancing."""
     import literature_browser
 
@@ -523,7 +586,12 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
     if not state or state["batch_index"] != index:
         state = {"version": 2, "config_fingerprint": fingerprint, "batch_index": index,
                  "sources": {}, "pending_source": None, "pending_reason": None}
-    resumed_source = state.get("pending_source") if (resume or scrape_current) and state.get("pending_reason") in ATTENTION_REASONS else None
+    try:
+        scheduled_sources, resumed_source = _prepare_source_schedule(
+            config, state, resume=resume, scrape_current=scrape_current, defer_source=defer_source)
+    except ValueError as error:
+        emit("error", message=str(error))
+        return 1
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def persist():
@@ -534,7 +602,7 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
         # Keep this source's completed pages as well as previous sources.
         error = error and not to_end
         entry.update(status="error" if error else "attention", reason=reason,
-                     stop_reason="error" if error else "needs_attention")
+                     stop_reason="error" if error else "needs_attention", message=message)
         state.update(pending_source=source, pending_reason=None if error else reason)
         result = persist()
         emit("error" if error else "attention", stage="search" if error else "verification",
@@ -542,7 +610,10 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
              message=message or "无法确认下一检索页；已有候选已保留，请核对官方页面后检查并继续。", **result)
         return 1 if error else 0
 
-    for source in config["sources"]:
+    if defer_source is not None:
+        state.update(pending_source=_next_pending_source(config, state), pending_reason=None)
+        persist()
+    for source in scheduled_sources:
         entry = state["sources"].get(source)
         if entry and entry.get("status") in {"ok", "no_results"}:
             continue
@@ -563,7 +634,8 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
                 return stop(entry, source, message="已达单来源1000页保护上限，已有结果保留。请缩小检索范围后新建任务。")
             quantity = f"已保留{len(entry['results'])}条候选，检索到可访问末页" if to_end else f"已保留{len(entry['results'])}/{target}条候选"
             emit("stage", stage="search", source=source,
-                 message=f"{_sources.label_of(source)}：正在获取第{page_index + 1}页，{quantity}")
+                 message=f"{_sources.label_of(source)}：正在获取第{page_index + 1}页，{quantity}",
+                 deferred_sources=list(state.get("deferred_sources", [])))
             search = literature_browser.run(source, query, source == resumed_source, batch_size(config),
                                             config.get("publicationYearFrom"), config.get("publicationYearTo"),
                                             job_dir=output_dir, page_index=page_index, full_page=True)
@@ -635,10 +707,11 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
                 return stop(entry, source, message=str(search.get("source_limit_message") or "已触及来源可访问结果上限，已有结果已保存；尚不能确认主题文献已全部获取。请核对或缩小检索范围。"))
             if search.get("has_next") is not True:
                 return stop(entry, source, message="本页已保存，但无法确认后续页。请核对官方分页控件后检查并继续。")
-        state.update(pending_source=next((key for key in config["sources"]
-                                         if (state["sources"].get(key) or {}).get("status") not in {"ok", "no_results"}), None),
+        state.update(pending_source=_next_pending_source(config, state),
                      pending_reason=None)
         persist()
+    if _pause_deferred_sources(output_dir, config, state):
+        return 0
     result = persist()
     counts = "；".join((f"{_sources.label_of(source)} {state['sources'][source]['count']}条" if to_end
                        else f"{_sources.label_of(source)} {state['sources'][source]['count']}/{target}条")
@@ -649,9 +722,10 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
     return 0
 
 
-def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_index: int | None = None, resume: bool = False) -> int:
+def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_index: int | None = None,
+        resume: bool = False, defer_source: str | None = None) -> int:
     if config.get("searchMode") == "formal":
-        return run_formal(config, output_dir, scrape_current, batch_index=batch_index, resume=resume)
+        return run_formal(config, output_dir, scrape_current, batch_index=batch_index, resume=resume, defer_source=defer_source)
     output_dir = Path(output_dir)
     validate_config(config)
     checkpoint_path = output_dir / "discovery-state.json"
@@ -685,14 +759,23 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
     if not state or state["batch_index"] != index:
         state = {"version": 1, "config_fingerprint": fingerprint, "batch_index": index, "sources": {},
                  "pending_source": None, "pending_reason": None}
-    # Determine this once: only the source that was paused may read its current tab.
-    resumed_source = state.get("pending_source") if (resume or scrape_current) and state.get("pending_reason") in ATTENTION_REASONS else None
+    try:
+        scheduled_sources, resumed_source = _prepare_source_schedule(
+            config, state, resume=resume, scrape_current=scrape_current, defer_source=defer_source)
+    except ValueError as error:
+        emit("error", message=str(error))
+        return 1
     output_dir.mkdir(parents=True, exist_ok=True)
-    for source in config["sources"]:
+    if defer_source is not None:
+        state.update(pending_source=_next_pending_source(config, state), pending_reason=None)
+        _common.atomic_write_json(checkpoint_path, state)
+        checkpoint_report(output_dir, config, state)
+    for source in scheduled_sources:
         if (state["sources"].get(source) or {}).get("status") in {"ok", "no_results"}:
             continue
         query = (config.get("sourceQueries") or {}).get(source, config["query"])
-        emit("stage", stage="search", source=source, message=f"按已确认配置检索 {_sources.label_of(source)}（第 {index} 批）")
+        emit("stage", stage="search", source=source, message=f"按已确认配置检索 {_sources.label_of(source)}（第 {index} 批）",
+             deferred_sources=list(state.get("deferred_sources", [])))
         state.update(pending_source=source, pending_reason=None)
         _common.atomic_write_json(checkpoint_path, state)
         search = literature_browser.run(source, query, source == resumed_source, batch_size(config),
@@ -702,6 +785,7 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
             if reason not in ATTENTION_REASONS:
                 reason = "results_unrecognized"
             state["sources"][source] = {"status": "attention", "reason": reason, "query": query,
+                                         "message": str(search.get("message") or ""),
                                          "url": safe_url(search.get("url")), "results": [],
                                          "transport": metadata_transport(search.get("transport")),
                                          "applied_filters": [], "deferred_rules": deferred_rules(config)}
@@ -726,11 +810,14 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
         state.update(pending_source=None, pending_reason=None)
         _common.atomic_write_json(checkpoint_path, state)
         # Sources not attempted yet make this a partial artifact after interruption.
-        state["pending_source"] = next((key for key in config["sources"] if (state["sources"].get(key) or {}).get("status") not in {"ok", "no_results"}), None)
+        state["pending_source"] = _next_pending_source(config, state)
         _common.atomic_write_json(checkpoint_path, state)
         checkpoint_report(output_dir, config, state)
 
-    emit("stage", stage="save", message="保存各来源候选；跨来源重复留待去重阶段处理")
+    if _pause_deferred_sources(output_dir, config, state):
+        return 0
+    emit("stage", stage="save", message="保存各来源候选；跨来源重复留待去重阶段处理",
+         deferred_sources=list(state.get("deferred_sources", [])))
     result = checkpoint_report(output_dir, config, state)
     if index > 1:
         summary = f"已保存 {result['count']} 条待复核候选（第 {index} 批，累计 {result['total']} 条）"
@@ -747,11 +834,12 @@ def main() -> int:
     parser.add_argument("--scrape-current", action="store_true", help="After manual login/verification, read only the pending source's bound tab")
     parser.add_argument("--batch-index", type=int, default=None, help="续批/重试指定批次号；缺省 = 1 + 已有最大批号（新批次）")
     parser.add_argument("--resume", action="store_true", help="断点续跑最近一批：保留已完成来源，仅继续待处理来源")
+    parser.add_argument("--defer-source", default=None, help="配合 --resume 暂缓当前等待来源，先继续其他来源")
     args = parser.parse_args()
     try:
         config = json.loads(args.config.read_text(encoding="utf-8"))
         validate_config(config)
-        return run(config, args.output_dir, args.scrape_current, batch_index=args.batch_index, resume=args.resume)
+        return run(config, args.output_dir, args.scrape_current, batch_index=args.batch_index, resume=args.resume, defer_source=args.defer_source)
     except Exception as error:
         emit("error", message=f"检索失败：{error}")
         return 1

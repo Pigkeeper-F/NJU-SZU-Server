@@ -1307,3 +1307,27 @@ WOS官方导航超时后有限检查当前标签页：若真实表单已就绪�
 已观察到中国站显示Cloudflare“Error code 524 / A timeout occurred”且Host Error的官方故障页：此状态应明确提示WOS服务端响应超时、保留任务稍后继续，不引导反复登录，也不能当验证码或零结果。可见DOM仅提取固定错误类别，不持久化整页文本、网络地址或会话信息；公共attention.reason继续使用results_unrecognized，无新增来源或任务接口。
 
 网页显示上述固定524超时提示时，只显示官网超时与稍后原任务继续的说明，不再追加“去官方页面处理登录”或普通浏览器登录不共享的提示。原真实登录/验证码卡片及按钮行为保持不变。
+
+## 2026-10-20 WOS最后执行、暂缓来源并继续其他来源
+
+按用户要求，网页新建检索配置在冻结前把已选WOS移至sources末尾，其他来源相对顺序不变，并明确显示执行顺序。历史任务run_config.json、来源集合、查询及指纹保持原值；不能靠改写历史配置绕过检查点。
+
+POST /api/literature/advance新增可选deferSource（已选来源key）。仅允许needs_attention且resumeStage=discover、与当前attention.source及检查点pending_source一致的待处理来源；拒绝未知、未选、运行中、非discover或非当前来源的暂缓请求，保留原until。网页人工等待卡提供“暂缓此来源，继续其他来源”，通过原job.id提交deferSource，不调用/search，不创建新批次。检索CLI增加--defer-source，须与--resume及有效原检查点一起使用，由Python单独原子更新调度状态；Node不直接修改检查点。
+
+discovery-state.json可增加deferred_sources:[key…]队列，缺省为空，唯一且仅含原配置已选来源。暂缓动作把当前来源移到队尾并保留其题录、reason和分页检查点，继续未暂缓、未完成的来源。已完成来源不重跑。普通检查并继续会仅从暂缓队列移除当前pending_source以实际重试它，其他暂缓项保留。其余来源处理结束后，按队列选下一待处理来源，返回needs_attention，公共快照提供deferredSources和executionOrder（原来源中未暂缓者+队列），已有候选始终可下载。Python进度/attention事件带deferred_sources供Node同步并持久化，重启从检查点恢复真实队列。
+
+只要仍有暂缓、登录、验证或未完成来源，候选报告discovery_complete=false、批次status=partial，不发送检索全部完成事件，不自动推进去重/全文。网页列明待补检来源；暂缓不等于零命中、删除来源或科学方案变更。末页与正式模式原分页、测试每来源10条、字段确认及所有凭据保护沿用。WOS无响应时可以保持暂缓，登录/验证码留在各任务绑定的官方窗口由用户处理。
+
+暂缓动作可接受网页草稿与原任务仅sources排列不同（集合相同、其他规则全部一致）的情况：按原job.config/原until执行调度，并恢复该任务配置显示，以executionOrder体现新的实际顺序。来源集合、检索式或其他规则变更仍拒绝混入原任务；普通检查并继续的冻结一致性规则保持不变。
+
+### 2026-10-20 Windows 检查点原子替换的短暂锁重试
+
+共享 Python `atomic_write_text` / `atomic_write_json` 保持同目录临时文件、flush/fsync、关闭句柄后 `os.replace` 的原子性。仅当替换遇到 `PermissionError` 或 Windows 共享/锁冲突（winerror 32/33）时，按50、100、200、400、800毫秒最多重试5次；其他错误立即抛出。持续失败仍抛出原错误并尽力清理临时文件，保留已有目标文件，不删除旧目标、不改为直接覆盖、不自动修改属性/ACL。该保护不把永久权限问题声称已修复，也不改变任务配置、来源队列或断点语义。测试使用隔离临时目录和模拟替换失败，核对一次失败后成功、持续失败旧文件完整、共享冲突可重试及其他错误不重试。
+
+## 2026-10-20 历史文献任务删除与恢复
+
+按用户要求，每条历史文献任务提供“删除”按钮；采用可恢复删除，仅在原job.json登记deletedAt，不移动或删除任务目录、候选、全文、进度和冻结配置。运行中的任务拒绝删除，提示先停止；重复删除幂等。POST /api/literature/delete与POST /api/literature/restore接收{id}，沿用现有本地同源及X-Workbench防护；仅可操作规范校验的任务id。删除记录不得被advance、browser或新阶段执行使用，须先恢复。
+
+GET /api/literature/jobs缺省隐藏deletedAt记录；includeDeleted=1可返回供恢复的记录，公共快照提供deletedAt（缺省null）。网页历史区域提供“查看已删除”入口，已删除记录仅显示“恢复”，恢复后原job.id和成果仍可查看/继续。删除当前已选历史任务时停止该任务的网页轮询并解除当前job绑定，保留对话和科学规则草稿；不启动新检索。其他任务不受影响，刷新及后台重启后删除状态仍保持。用隔离fixture验证删除、重启、恢复、非法id和运行中拒绝，不删除真实测试成果。
+
+旧后台遗留的磁盘running记录、在当前单一后台无活任务时，删除可先走既有loadPersisted中断恢复规则核验为interrupted，再登记删除；不把确实仍在运行的live任务或browserOpening视为中断。恢复后保持核验的中断状态及原成果，避免历史记录永远无法删除。

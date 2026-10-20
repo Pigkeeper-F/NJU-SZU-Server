@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,19 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, target)
+        # Windows readers and security scanners can briefly deny replacement.
+        # Retry the same closed, fully flushed temporary file; never remove or
+        # write directly over the existing checkpoint to work around a lock.
+        retry_delays = (0.05, 0.1, 0.2, 0.4, 0.8)
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                os.replace(temp, target)
+                break
+            except OSError as error:
+                transient_access = isinstance(error, PermissionError) or getattr(error, "winerror", None) in {32, 33}
+                if not transient_access or attempt == len(retry_delays):
+                    raise
+                time.sleep(retry_delays[attempt])
     except BaseException:
         try:
             temp.unlink()

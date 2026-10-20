@@ -54,7 +54,7 @@ assert.ok(codex.includes('function attachLiteratureJob'), '点击历史任务应
 assert.ok(codex.includes('literatureJobId'), '选中的任务应写入 localStorage 以便刷新后重挂');
 
 // 5) until 续跑窗口 + 继续/重试入口
-assert.ok(codex.includes("until: t.literatureUntil || 'discover'") && codex.includes('const body = { id: job.id, until }'), 'search/advance 应显式带 until，包括 discover');
+assert.ok(codex.includes("until: t.literatureUntil || 'discover'") && codex.includes('const body = { id: job.id, until,'), 'search/advance 应显式带 until，包括 discover');
 assert.ok(codex.includes('仅检索候选') && codex.includes('完整流水线'), '应有运行边界选择项，检索阶段不混同测试模式');
 assert.ok(codex.includes('继续下一阶段'), 'completed 且 resumeStage 非空应可继续');
 assert.ok(codex.includes('重试当前阶段') && codex.includes('继续中断的任务'), 'failed（含 interrupted）应可重试/继续');
@@ -158,6 +158,14 @@ async function multiSourceTests() {
   assert.equal(config.searchMode, 'test', '新整理配置默认测试');
   assert.equal(config.stopMode, 'count', '测试模式按数量停止');
   assert.equal(config.perSourceLimit, 10, '测试每来源固定10条');
+  assert.deepEqual(Array.from(config.sources), ['google-scholar', 'cnki', 'wanfang', 'scopus', 'pubmed', 'web-of-science'], 'AI整理的新任务将WOS放到最后，保留其他相对顺序');
+  const orderedHistory = { ...config, sources: ['pubmed', 'web-of-science', 'cnki', 'scopus'] };
+  const orderedHistoryBytes = JSON.stringify(orderedHistory);
+  const newlyOrdered = subject.newLiteratureSearchConfig(orderedHistory);
+  assert.deepEqual(Array.from(newlyOrdered.sources), ['pubmed', 'cnki', 'scopus', 'web-of-science']);
+  assert.equal(JSON.stringify(orderedHistory), orderedHistoryBytes, '新启动排序不得改写历史来源数组');
+  assert.equal(subject.sameLiteratureConfig(orderedHistory, JSON.parse(orderedHistoryBytes)), true, '历史比较不排序或改写');
+  assert.equal(subject.sameLiteratureConfig(orderedHistory, newlyOrdered), false, '来源执行顺序确实改变时普通续跑仍须保留原冻结配置');
   const formal = subject.parseLiteratureConfig(JSON.stringify({ ...config, searchMode: 'formal', perSourceLimit: 120, limit: 2, batch: { size: 2, maxBatches: 3 } }));
   assert.equal(formal.limit, 10, '正式数量独立于接口页大小');
   assert.equal(formal.batch.size, 10, '新模式接口页大小为10');
@@ -194,6 +202,7 @@ async function multiSourceTests() {
   assert.equal(current.literatureConfig.extraction.maxCharsPerPaper, 120000, '新任务应保存服务端规范化后的冻结配置，避免默认字段误报配置已改');
   assert.notEqual(current.literatureConfig, responseJob.config, '编辑草稿不得改变已冻结任务对象');
   assert.equal(calls[0].body.until, 'discover', '首次只检索也显式发送运行边界');
+  assert.equal(calls[0].body.config.sources.at(-1), 'web-of-science', '新start提交时WOS仍排最后');
   calls.length = 0; responseJob = { id: 'existing-job' };
   current.literatureConfig = config;
   current.literatureUntil = 'discover';
@@ -227,6 +236,8 @@ async function multiSourceTests() {
   const checks = nodes.filter(item => item.tag === 'input' && item.type === 'checkbox');
   assert.equal(checks.length, 6, '页面提供全部六来源');
   assert.ok(checks.every(item => item.checked && !item.disabled), '六来源均可选择，不要求登录后才能勾选');
+  assert.deepEqual(nodes.filter(item => item.tag === 'label' && item.children[0]?.type === 'checkbox').map(item => item.textContent),
+    ['Google Scholar', '中国知网', '万方', 'Scopus', 'PubMed', 'Web of Science 核心合集'], '来源复选框展示顺序将WOS放最后');
   for (const label of sourceLabels) {
     assert.ok(nodes.some(item => item.tag === 'label' && item.textContent === label && item.children[0]?.type === 'checkbox'), '来源标签完整：' + label);
     const queryField = nodes.find(item => item.tag === 'label' && item.textContent === label + ' 检索式（留空沿用默认）')?.children[0];
@@ -341,6 +352,61 @@ async function multiSourceTests() {
   assert.equal(current.literatureConfig.perSourceLimit, 10, '从正式切回测试恢复固定10条');
   container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
   assert.ok(!elements(container).some(item => item['aria-label'] === '正式检索每来源候选上限'), '测试模式不提供可扩大数量的输入');
+
+  // 暂缓仅改变原任务的来源调度，保留原边界、历史来源顺序和候选。
+  const deferralConfig = { ...config, sources: ['google-scholar', 'web-of-science', 'cnki', 'pubmed'] };
+  const deferralJob = { id: 'original-deferred-job', config: deferralConfig, status: 'needs_attention', stage: 'verification', resumeStage: 'discover', until: 'discover',
+    attention: { source: 'web-of-science', reason: 'results_unrecognized' }, message: 'WOS等待稍后重试', count: 30,
+    files: ['candidates.csv'], executionOrder: ['google-scholar', 'cnki', 'pubmed', 'web-of-science'], deferredSources: ['web-of-science'] };
+  const deferralBytes = JSON.stringify(deferralJob);
+  current.literatureJob = deferralJob; current.literatureConfig = JSON.parse(JSON.stringify(deferralConfig)); current.literatureUntil = 'export';
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  const deferralNodes = elements(container);
+  assert.deepEqual(deferralNodes.filter(item => item.tag === 'label' && item.textContent.endsWith(' 检索式（留空沿用默认）')).map(item => item.textContent),
+    ['Google Scholar', '中国知网', 'PubMed', 'Web of Science 核心合集'].map(label => label + ' 检索式（留空沿用默认）'), '历史来源检索式也只在展示层将WOS放最后');
+  assert.deepEqual(Array.from(current.literatureConfig.sources), deferralConfig.sources, '展示排序不能改写载入的历史来源顺序');
+  assert.ok(deferralNodes.some(item => item.textContent === '当前任务执行顺序：Google Scholar → 中国知网 → PubMed → Web of Science 核心合集'), '执行顺序来自原任务的调度快照');
+  assert.ok(deferralNodes.some(item => item.textContent.includes('暂缓来源待补检：Web of Science 核心合集') && item.textContent.includes('检索尚未全部完成')));
+  const deferButton = deferralNodes.find(item => item.tag === 'button' && item.textContent === '暂缓此来源，继续其他来源');
+  assert.ok(deferButton && !deferButton.disabled);
+  calls.length = 0; responseJob = { id: deferralJob.id };
+  await deferButton.onclick();
+  assert.deepEqual(calls[0], { url: '/api/literature/advance', body: { id: deferralJob.id, until: 'discover', deferSource: 'web-of-science' } }, '暂缓沿用原job和原until，不受当前下拉选择扩大边界');
+  assert.ok(!calls.some(call => call.url === '/api/literature/search'));
+  assert.equal(JSON.stringify(deferralJob), deferralBytes, '暂缓不得改写冻结配置、候选数量或文件');
+  calls.length = 0;
+  current.busy = true; await subject.continueLiterature({ id: 'module-1' }, { deferSource: 'web-of-science' }); current.busy = false;
+  current.literatureBusy = true; await subject.continueLiterature({ id: 'module-1' }, { deferSource: 'web-of-science' }); current.literatureBusy = false;
+  assert.equal(calls.length, 0, '忙态不能重复暂缓');
+  await subject.continueLiterature({ id: 'module-1' }, { deferSource: 'cnki' });
+  assert.equal(calls.length, 0, '只能暂缓当前待处理来源');
+  current.literatureConfig = { ...current.literatureConfig, query: 'different scientific query' };
+  await subject.continueLiterature({ id: 'module-1' }, { deferSource: 'web-of-science' });
+  assert.equal(calls.length, 0, '科学规则变更不能混入原任务暂缓');
+  current.literatureConfig = { ...JSON.parse(JSON.stringify(deferralConfig)), sources: ['google-scholar', 'cnki', 'pubmed', 'web-of-science'] };
+  await subject.continueLiterature({ id: 'module-1' });
+  assert.equal(calls.length, 0, '仅改变来源顺序时普通continue仍须重新载入冻结配置');
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  const orderOnlyNodes = elements(container);
+  const orderOnlyDefer = orderOnlyNodes.find(item => item.tag === 'button' && item.textContent === '暂缓此来源，继续其他来源');
+  assert.ok(orderOnlyDefer && !orderOnlyDefer.disabled, '只有来源排列改变时仍可暂缓当前来源');
+  assert.ok(orderOnlyNodes.find(item => item.tag === 'button' && item.textContent === '检查并继续').disabled, '排列例外只允许暂缓，不放宽普通continue');
+  await orderOnlyDefer.onclick();
+  assert.deepEqual(calls[0].body, { id: deferralJob.id, until: 'discover', deferSource: 'web-of-science' });
+  assert.equal(JSON.stringify(current.literatureConfig), JSON.stringify(deferralConfig), '成功暂缓后恢复原冻结配置，来源调度使用executionOrder');
+  assert.notEqual(current.literatureConfig, deferralJob.config, '恢复使用独立副本，不能让界面编辑污染job');
+  assert.equal(JSON.stringify(deferralJob), deferralBytes);
+  for (const sources of [['google-scholar', 'cnki', 'pubmed', 'web-of-science', 'pubmed'],
+    ['google-scholar', 'cnki', 'unknown', 'web-of-science'], ['google-scholar', 'cnki', 'web-of-science']]) {
+    current.literatureConfig = { ...JSON.parse(JSON.stringify(deferralConfig)), sources };
+    calls.length = 0; await subject.continueLiterature({ id: 'module-1' }, { deferSource: 'web-of-science' });
+    assert.equal(calls.length, 0, '新增、删除、重复或未知来源不能借排列例外进入原任务');
+  }
+  current.literatureConfig = JSON.parse(JSON.stringify(deferralConfig));
+  current.literatureJob = { ...deferralJob, status: 'completed', stage: 'completed', message: '检索全部完成' };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.ok(elements(container).some(item => item.textContent.includes('仍有暂缓来源待补检，检索尚未全部完成')));
+  assert.ok(!elements(container).some(item => item.textContent.includes('状态：检索全部完成')), '暂缓列表不能显示为全部完成');
   console.log('LITERATURE_UI_STAGE2_TESTS_PASS');
 }
 multiSourceTests().catch(error => { console.error(error); process.exitCode = 1; });

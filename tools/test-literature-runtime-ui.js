@@ -129,6 +129,26 @@ async function main() {
   assert.equal(resume.calls[0].url, '/api/literature/runtime');
   assert.deepEqual(advance.body, { id: 'original-job', until: 'discover' });
   assert.equal(resume.count('/api/literature/search'), 0, 'Resume must keep the original task');
+  const deferred = harness(); deferred.current.literatureUntil = 'export';
+  await deferred.subject.continueLiterature(mod, { deferSource: 'cnki' });
+  assert.equal(deferred.calls[0].url, '/api/literature/runtime', 'Temporarily deferring a source still requires the current backend');
+  assert.deepEqual(deferred.calls[1].body, { id: 'original-job', until: 'discover', deferSource: 'cnki' });
+  assert.equal(deferred.count('/api/literature/search'), 0, 'Deferral never creates a replacement search');
+  const oldDefer = harness(); oldDefer.setRuntimeError(new Error('old backend'));
+  await oldDefer.subject.continueLiterature(mod, { deferSource: 'cnki' });
+  assert.equal(oldDefer.posts().length, 0, 'Old backend cannot receive deferral commands');
+  const doubleDefer = harness();
+  await Promise.all([doubleDefer.subject.continueLiterature(mod, { deferSource: 'cnki' }), doubleDefer.subject.continueLiterature(mod, { deferSource: 'cnki' })]);
+  assert.equal(doubleDefer.count('/api/literature/advance'), 1, 'Busy state prevents duplicate concurrent deferrals');
+  const orderOnlyDefer = harness();
+  const originalOrderJob = job({ attention: { source: 'web-of-science', reason: 'results_unrecognized' },
+    config: { ...job().config, sources: ['web-of-science', 'cnki', 'pubmed'] } });
+  orderOnlyDefer.setJob(originalOrderJob);
+  orderOnlyDefer.current.literatureConfig.sources = ['cnki', 'pubmed', 'web-of-science'];
+  await orderOnlyDefer.subject.continueLiterature(mod, { deferSource: 'web-of-science' });
+  assert.equal(orderOnlyDefer.calls[0].url, '/api/literature/runtime');
+  assert.deepEqual(orderOnlyDefer.calls[1].body, { id: originalOrderJob.id, until: 'discover', deferSource: 'web-of-science' });
+  assert.deepEqual(copy(orderOnlyDefer.current.literatureConfig), originalOrderJob.config);
   const confirm = harness(); confirm.setJob(job({ stage: 'awaiting_confirmation', resumeStage: 'extract', until: 'validate', attention: null }));
   await confirm.subject.confirmLiteratureFields(mod);
   assert.equal(confirm.calls[0].url, '/api/literature/runtime');
