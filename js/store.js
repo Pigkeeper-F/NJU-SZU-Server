@@ -66,6 +66,7 @@
   'use strict';
 
   var STORAGE_KEY = 'fa_state_v1';
+  var DOC_HISTORY_KEY = 'fa_doc_history_v1';
   var SIDEBAR_MIN = 180;
   var SIDEBAR_MAX = 520;
   var SIDEBAR_DEFAULT = 240;
@@ -1081,6 +1082,7 @@
     if (!body) return null;
     if (body.length > MAX_DOC_CHARS) return null; // 超长拒绝，UI 层负责提示
     var created = !(mod.doc && typeof mod.doc === 'object');
+    if (!created && !archiveDoc(moduleId, mod.doc)) return null;
     mod.doc = {
       content: body,
       status: 'draft',
@@ -1089,6 +1091,37 @@
     };
     emit('doc:save', { moduleId: moduleId, doc: deepClone(mod.doc), created: created });
     return deepClone(mod.doc);
+  }
+
+  function readDocHistory() {
+    try {
+      var raw = root.localStorage.getItem(DOC_HISTORY_KEY);
+      if (!raw) return Object.create(null);
+      var parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.assign(Object.create(null), parsed) : null;
+    } catch (error) { return null; }
+  }
+
+  function getDocHistory(moduleId) {
+    var history = readDocHistory();
+    var entries = history && history[moduleId];
+    return Array.isArray(entries) ? entries.filter(function (item) {
+      return item && typeof item.content === 'string' && item.content.trim() && item.content.length <= MAX_DOC_CHARS && ['draft', 'approved'].indexOf(item.status) >= 0;
+    }).map(function (item) {
+      return {content:item.content, status:item.status, updatedAt:item.updatedAt || '', approvedAt:item.approvedAt || null, archivedAt:item.archivedAt || ''};
+    }) : [];
+  }
+
+  function archiveDoc(moduleId, doc) {
+    var history = readDocHistory();
+    if (!history) return false;
+    var entries = getDocHistory(moduleId);
+    var last = entries[entries.length - 1];
+    if (last && last.content === doc.content && last.status === doc.status && last.updatedAt === doc.updatedAt && last.approvedAt === doc.approvedAt) return true;
+    entries.push({content:doc.content, status:doc.status, updatedAt:doc.updatedAt, approvedAt:doc.approvedAt, archivedAt:nowISO()});
+    history[moduleId] = entries;
+    try { root.localStorage.setItem(DOC_HISTORY_KEY, JSON.stringify(history)); return true; }
+    catch (error) { return false; }
   }
 
   /** 人工审核通过：无 doc 返回 false；否则置 approved + approvedAt=now，emit 'doc:approve' */
@@ -1109,6 +1142,7 @@
   function rejectDoc(moduleId, note) {
     var mod = findModule(moduleId);
     if (!mod || !mod.doc) return false;
+    if (mod.doc.status === 'approved' && !archiveDoc(moduleId, mod.doc)) return false;
     var text = (typeof note === 'string') ? note.trim() : '';
     mod.doc.status = 'draft';
     mod.doc.approvedAt = null;
@@ -1414,6 +1448,7 @@
     rejectModule: rejectModule,
     // —— 环节文档（用户与 AI 协商的标准文档 + 人工审核）
     saveDoc: saveDoc,
+    getDocHistory: getDocHistory,
     approveDoc: approveDoc,
     rejectDoc: rejectDoc,
     // —— 执行记录与结果确认门（跑完待确认 + 三级归因打回）

@@ -746,21 +746,27 @@
   }
 
   /** AI 生成标准文档：按所选模板调 compose；按钮 disable + 文案「生成中…」；失败卡片内 textContent 显示错误 */
-  function generateDoc(mod) {
+  function generateDoc(mod, revise) {
     var ui = uiOf(mod.id);
-    if (ui.gen) return;
+    if (ui.gen || isBusy()) return;
+    mod = findModule(getStore().getState().modules, mod.id);
+    if (!mod) return;
+    if (revise && inputEl && inputEl.value.trim()) { ui.genErr = '请先发送输入框中的修改意见，再点击“AI 总结并修改方案”。'; render(); return; }
+    var basis = JSON.stringify(mod.doc || null);
+    var discussionBasis = JSON.stringify((mod.messages || []).filter(function (message) { return message.role === 'user' || message.role === 'assistant'; }));
     ui.gen = true; ui.genErr = ''; ui.notice = '';
     render();
-    postCompose('doc', mod, templateOf(mod.id)).then(function (text) {
-      ui.gen = false;
+    return postCompose('doc', mod, templateOf(mod.id), revise ? { revision: { baseDoc: mod.doc } } : null).then(function (text) {
+      var current = findModule(getStore().getState().modules, mod.id);
+      if (!current || JSON.stringify(current.doc || null) !== basis) throw new Error('方案已发生变化，AI 返回内容未覆盖当前方案，请按当前版本重试。');
+      if (revise && JSON.stringify((current.messages || []).filter(function (message) { return message.role === 'user' || message.role === 'assistant'; })) !== discussionBasis) throw new Error('讨论中又有新内容，AI 返回内容未覆盖当前方案，请按最新讨论重试。');
       var saved = getStore().saveDoc(mod.id, text);
-      if (!saved) throw new Error('生成内容为空或超过 ' + MAX_DOC_CHARS + ' 字，未写入');
+      if (!saved) throw new Error('内容为空、超过 ' + MAX_DOC_CHARS + ' 字，或历史版本无法保存；原方案未改动。');
       ui.code = null; ui.exec = null; ui.codeErr = ''; ui.execErr = '';
-      ui.notice = '已生成标准文档（草稿），可直接审核或继续编辑。';
+      ui.notice = revise ? '已生成修订草稿，请核对并重新审核。原版本可在“历史方案”中查看。' : '已生成标准文档（草稿），可直接审核或继续编辑。';
     }).catch(function (err) {
-      ui.gen = false;
       ui.genErr = errorText('AI 生成失败', err);
-    }).then(function () { render(); });
+    }).then(function () { ui.gen = false; render(); });
   }
 
   /** 生成代码：先 compose(code) 拿到代码，进入确认层（不自动执行）。
@@ -1333,17 +1339,15 @@
     if (ui.reject) buildDocRejectBox(body, mod, ui);
 
     var actions = el('div', 'doc-actions');
-    actions.appendChild(docButton('编辑', '', false, function () { enterDocEdit(mod); }));
+    actions.appendChild(docButton('编辑', '', isBusy(), function () { enterDocEdit(mod); }));
+    actions.appendChild(docButton(ui.gen ? 'AI 正在修订方案…' : 'AI 总结并修改方案', '', isBusy(), function () { generateDoc(mod, true); }));
     if (st === 'draft') {
-      actions.appendChild(docButton('审核通过', 'primary', false, function () {
+      actions.appendChild(docButton('审核通过', 'primary', isBusy(), function () {
         getStore().approveDoc(mod.id);
         render();
       }));
-      actions.appendChild(docButton('打回', '', false, function () {
+      actions.appendChild(docButton('打回', '', isBusy(), function () {
         ui.reject = true; render();
-      }));
-      actions.appendChild(docButton(ui.gen ? '生成中…（长任务可能需数分钟）' : '重新生成', '', ui.gen, function () {
-        generateDoc(mod);
       }));
     } else if (st === 'approved') {
       // run.status === 'confirmed'（本环节产出已确认）时不再提供重新执行入口，引导进入下一步 / 下一模块
@@ -1352,11 +1356,11 @@
       } else if (mod.type === 'literature-mining') {
         actions.appendChild(el('span', 'status-hint', '方案已审核；在上方“文献任务”中核对本次检索设置，再开始执行。'));
       } else if (mod.type === 'download-data') {
-        actions.appendChild(docButton('按方案开始下载', 'primary', !!(root.CodexUI && root.CodexUI.busy(mod.id)), function () { root.CodexUI.openDownload(mod); }));
+        actions.appendChild(docButton('按方案开始下载', 'primary', isBusy(), function () { root.CodexUI.openDownload(mod); }));
       } else if (mod.type === 'calculation' && mod.mode === 'direct') {
         actions.appendChild(el('span', 'status-hint', '按上方“运行现有代码”执行，使用已有代码与输入数据。'));
       } else if (mod.type === 'clean-data' || mod.type === 'calculation') {
-        actions.appendChild(docButton(ui.codeLoading ? '生成代码中…（长任务可能需数分钟）' : '生成代码并执行', 'primary', ui.codeLoading, function () {
+        actions.appendChild(docButton(ui.codeLoading ? '生成代码中…（长任务可能需数分钟）' : '生成代码并执行', 'primary', isBusy(), function () {
           composeCode(mod);
         }));
       } else {
@@ -1364,6 +1368,8 @@
       }
     }
     body.appendChild(actions);
+    body.appendChild(el('div', 'doc-meta', '先在下方对话说明修改要求，再点击“AI 总结并修改方案”。AI 只整理方案，修订后需重新审核。'));
+    buildDocHistory(body, mod, ui);
 
     // 【X2】迭代闭环提示：上次执行失败 → 本次「生成代码并执行」已附带 stderr 反馈（仅在按钮可见时显示）
     if (st === 'approved' && !(mod.run && mod.run.status === 'confirmed') &&
@@ -1378,6 +1384,25 @@
     if (ui.exec) buildDocExecResult(body, mod, ui);
     else if (mod.run) buildRunGate(body, mod, ui);   // 刷新后 ui.exec 丢失但 run 仍在：仍渲染确认门
     if (ui.execErr) body.appendChild(el('div', 'doc-error', ui.execErr));
+  }
+
+  function buildDocHistory(body, mod, ui) {
+    var versions = getStore().getDocHistory(mod.id);
+    if (!versions.length) return;
+    var details = el('details', 'doc-plan-history');
+    details.appendChild(el('summary', '', '历史方案 · ' + versions.length + ' 个版本'));
+    versions.slice().reverse().forEach(function (version, index) {
+      var entry = el('div', 'doc-plan-version');
+      entry.appendChild(el('div', 'doc-meta', '版本 ' + (versions.length - index) + ' · ' + (version.status === 'approved' ? '曾审核通过' : '草稿') + ' · ' + formatDateTime(version.updatedAt)));
+      entry.appendChild(el('div', 'doc-content', version.content));
+      entry.appendChild(docButton('恢复为草稿', '', isBusy(), function () {
+        if (!getStore().saveDoc(mod.id, version.content)) { ui.genErr = '历史版本无法保存，当前方案未改动。'; render(); return; }
+        ui.genErr = ''; ui.notice = '历史方案已恢复为草稿；请核对并重新审核。';
+        ui.code = null; ui.exec = null; render();
+      }));
+      details.appendChild(entry);
+    });
+    body.appendChild(details);
   }
 
   function buildDocEditor(body, mod) {
@@ -1395,7 +1420,7 @@
       if (!String(text).trim()) { ui.genErr = '保存失败：内容不能为空'; render(); return; }
       if (String(text).length > MAX_DOC_CHARS) { ui.genErr = '保存失败：超过 ' + MAX_DOC_CHARS + ' 字'; render(); return; }
       var saved = getStore().saveDoc(mod.id, text);
-      if (!saved) { ui.genErr = '保存失败：内容无效'; render(); return; }
+      if (!saved) { ui.genErr = '保存失败：内容无效或历史版本无法保存，原方案未改动。'; render(); return; }
       ui.genErr = ''; ui.code = null; ui.exec = null; ui.codeErr = ''; ui.execErr = '';
       ui.notice = '文档已保存为草稿。';
       docEditingId = null; docDraftText = '';
@@ -1468,7 +1493,7 @@
 
     // ---- 增量快速路径：纯消息追加（含 AI pending 指示翻转），其余一律全量 ----
     // 文档卡任一变化（内容/状态/编辑态/生成与执行瞬态）都会使 docSigOf 改变 -> 强制全量重建。
-    var pendingNow = active ? !!pendingModules[active.id] : false;
+    var pendingNow = active ? !!pendingModules[active.id] || !!uiOf(active.id).gen : false;
     var canFast = !!active && !fallback &&
       msgListState.moduleId === active.id &&
       msgListState.count >= 0 &&
@@ -1584,7 +1609,7 @@
     if (!inputEl) return;
     var id = activeModuleId();
     if (!id) return;                                    // 无选中模块 / 模块不存在 -> 忽略
-    if (pendingModules[id] || (root.CodexUI && root.CodexUI.busy(id))) return;
+    if (pendingModules[id] || (root.CodexUI && root.CodexUI.busy(id)) || docUi[id] && docUi[id].gen) return;
     var raw = inputEl.value;
     if (String(raw).trim().length > MAX_INPUT_CHARS) {  // 超长拦截（Store 同样会拒绝，这里提前给提示）
       if (root.alert) root.alert('单条记录最长 ' + MAX_INPUT_CHARS + ' 字，请拆分后再发送。');
@@ -1610,7 +1635,8 @@
     if (root.LiteratureUI && root.LiteratureUI.isBusy()) return true;
     var state = getStore().getState();
     return (state.modules || []).some(function (mod) {
-      return !!(pendingModules[mod.id] || (root.CodexUI && root.CodexUI.busy(mod.id)));
+      var ui = docUi[mod.id];
+      return !!(pendingModules[mod.id] || (root.CodexUI && root.CodexUI.busy(mod.id)) || ui && (ui.gen || ui.codeLoading || ui.execLoading));
     });
   }
 

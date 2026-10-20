@@ -813,6 +813,12 @@ function buildComposePrompt(payload) {
   }[type];
   const blocks = [template, '【环节信息】\n' + brief];
   if (guidance) blocks.push('【本环节职责】\n' + guidance + '\n仅把研究者明确采用的做法写成确定规则；信息不足处标“待确认”，候选建议须注明，不自行补造科学阈值或方法。');
+  if (payload.mode === 'doc' && payload.revision && payload.revision.baseDoc) {
+    const base = payload.revision.baseDoc;
+    if (typeof base.content !== 'string' || !base.content.trim() || base.content.length > 20000) throw new Error('修订需要有效的当前方案，最长20000字');
+    blocks.push('【方案修订要求】\n以以下完整方案为基线，结合最近讨论中研究者明确决定的修改，输出完整修订草稿。保留没有变更的已确认规则，不能把背景闲聊、AI建议或未确认推测写成决定。新旧要求冲突且研究者未明确取舍时标为待确认。只更新方案文字，不执行任务，不把草稿标为已审核，不声称已下载或完成运行。不要只给摘要或改动清单。');
+    blocks.push('【当前方案（完整基线）】\n' + base.content);
+  }
   if (payload.mode === 'code') {
     const docText = moduleDocText(payload.module);
     blocks.push('【环节文档】\n' + (docText || '（尚未生成文档，请依据环节信息与对话记录自行推断）'));

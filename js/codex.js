@@ -1178,7 +1178,7 @@
   }
   async function prepareConfirmedExecution(id) {
     const t = task(id);
-    if (t.busy) throw new Error('当前文件或 AI 任务尚未完成');
+    if (t.busy || root.ModuleSpace?.isBusy()) throw new Error('当前文件或 AI 任务尚未完成');
     if (t.backend !== 'codex') throw new Error('请先选择本机 Codex');
     const sid = await session(id);
     t.files = (await request('/api/codex/files?session=' + sid)).files;
@@ -1282,7 +1282,7 @@
   function openDownload(mod, basis) {
     if (mod?.type !== 'download-data') return false;
     const t = task(mod.id);
-    if (t.busy) return false;
+    if (t.busy || root.ModuleSpace?.isBusy()) return false;
     basis = basis || basisForDownload(mod);
     if (!basis?.text) { t.error = '请先确认上方下载规则，或审核下载方案，再开始下载。'; render(); return false; }
     downloadModuleId = mod.id; downloadBasis = basis;
@@ -1299,7 +1299,7 @@
   document.getElementById('download-start').onclick = async () => {
     if (!downloadModuleId || !downloadBasis) return;
     const id = downloadModuleId, basis = downloadBasis, t = task(id);
-    if (t.busy) return;
+    if (t.busy || root.ModuleSpace?.isBusy()) return;
     const status = document.getElementById('download-status');
     const current = Store.getState().modules.find(mod => mod.id === id);
     const approved = current && basisForDownload(current, basis.sourceType);
@@ -1459,7 +1459,7 @@
     }
     const refreshButton = node('button', '刷新文件', 'quiet-button'); refreshButton.type = 'button'; refreshButton.disabled = t.busy; refreshButton.onclick = () => refresh(mod.id); fileRow.append(refreshButton);
     if (mod.type === 'download-data') {
-      const start = node('button', '按方案开始下载', 'primary-button'); start.type = 'button'; start.disabled = t.busy || !basisForDownload(mod) || !!root.LiteratureUI?.isBusy(); start.onclick = () => openDownload(mod); fileRow.append(start);
+      const start = node('button', '按方案开始下载', 'primary-button'); start.type = 'button'; start.disabled = t.busy || !basisForDownload(mod) || !!root.ModuleSpace?.isBusy(); start.onclick = () => openDownload(mod); fileRow.append(start);
       const handoff = node('button', saved[mod.id]?.download?.confirmed ? '查看已交接的清洗模块' : '确认文件并进入清洗', 'quiet-button'); handoff.type = 'button'; handoff.disabled = t.busy || !saved[mod.id]?.download?.files.length || !!saved[mod.id]?.download?.failures.length; handoff.onclick = () => handoffDownload(mod); fileRow.append(handoff);
       const run = saved[mod.id]?.download;
       fileRow.append(node('span', run ? '下载成功 ' + run.files.length + ' 个，失败 ' + run.failures.length + ' 个；' + (run.confirmed ? '已确认交给清洗' : '待人工核查') : '先确认规则，下载后检查文件，再交给清洗。', 'codex-status'));

@@ -225,7 +225,7 @@
 
   // ---------------- 数据备份 / 恢复（体验升级 · 2026-10-13） ----------------
   // 只备份研究记录；账号、API Key 和服务端 .workbench 文件均不包含。
-  const BACKUP_KEYS = ['fa_state_v1', 'fa_projects_v1', 'research_workspace_meta_v1', 'fa_current_project_id_v1', 'research_tasks_v1', 'research_legacy_projects_imported_v1'];
+  const BACKUP_KEYS = ['fa_state_v1', 'fa_doc_history_v1', 'fa_projects_v1', 'research_workspace_meta_v1', 'fa_current_project_id_v1', 'research_tasks_v1', 'research_legacy_projects_imported_v1'];
   function backupKeys() {
     const keys = BACKUP_KEYS.slice();
     try {

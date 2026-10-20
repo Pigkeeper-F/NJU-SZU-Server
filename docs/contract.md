@@ -1438,3 +1438,11 @@ Windows虚拟环境启动器可能产生不同于实际脚本的PID；Node阶段
 文献检索、筛选、材料获取和数值提取归文献挖掘模块。LiteratureUI.start 对 download-data 拒绝新文献运行；下载模块中既有误入的文献批次保留为折叠只读记录（可刷新状态、停止旧批次、下载已有成果），不自动把旧批次的检索问题注入下载对话，不提供继续文献提取或新批次入口。清空或覆盖原记录均不属于迁移。
 
 workflowPrompt 按模块分别描述实际工具：下载对话帮助确定数据源、年份、范围、指标与实际文件地址；仅文献挖掘提示词提供文献执行能力说明。原 download-dialog 的 DOM id、现有下载 API 和存储键保持不变。
+
+## 2026-10-20 继续讨论与 AI 修订方案
+
+已有文档的方案卡片（包括已审核状态）提供“AI 总结并修改方案”，调用 /api/ai/compose 的 mode=doc，新增可选 revision={baseDoc:{content,status,updatedAt,approvedAt}}。请求沿用本模块的模型配置，携带完整当前方案与最近讨论。服务端明确只整理已确认规则、保留未变更内容，建议和冲突仍待确认；仅输出完整修订草稿，不执行任务、不自动审核。旧请求无 revision 时保持原行为。
+
+AI 返回前若当前方案已被编辑/审核/替换或模块不再存在，拒绝覆盖；错误、空或超限响应不改变原方案。修订成功调用 saveDoc 后状态回 draft，执行入口继续依审核状态控制。ModuleSpace.isBusy 增加方案生成中的状态，避免切换任务或同时开始下载/计算。输入框中未发送的文字保持原样并提示先发送。
+
+新增独立存储键 fa_doc_history_v1（不改变 fa_state_v1 或 module.doc 结构）：{[moduleId]:[{content,status,updatedAt,approvedAt,archivedAt}]}。saveDoc 覆盖已有有效文档前归档原版本；已审核文档打回前同样归档。归档失败时不覆盖原文档。Store 新增 getDocHistory(moduleId)->历史版本深拷贝数组；同一版本不重复归档。方案卡片的折叠历史可查看并恢复为草稿，恢复仍通过 saveDoc，当前版本先归档，恢复不自动审核或执行。浏览器备份/恢复包含新键，旧备份无此键仍可读取。新增 CSS 类 .doc-plan-history、.doc-plan-version。
