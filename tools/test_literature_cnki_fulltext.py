@@ -961,6 +961,109 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(child.download_clicks, 0)
         self.assertFalse(child.gotos)
 
+    def test_pending_http_naturally_redirects_to_official_without_replay(self):
+        def setup(page):
+            def opened(owner):
+                child = self.context.new_page(opener=owner)
+                child.detail(child)
+                child.url = "http://kns.cnki.net/temporary-entry?token=never-export"
+                child.ui["generating"] = True
+                child.on("natural-ready", lambda _: setattr(child, "url", "https://kns.cnki.net/kcms2/article/abstract?v=never-export"))
+                child.scheduled.append((self.clock.now + 2, "natural-ready", None))
+                child.scheduled.append((self.clock.now + 3, "download", Download()))
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["status"], "pdf_page")
+        parent, child = self.context.pages[1], self.context.pages[2]
+        self.assertEqual(parent.download_clicks, 1)
+        self.assertEqual(child.download_clicks, 0)
+        self.assertEqual(len(parent.gotos), 1)
+        self.assertFalse(child.gotos)
+        self.assertEqual(sum("下载窗口正在跳转" in value for value in self.messages), 1)
+        self.assertNotIn("never-export", json.dumps(fetcher._binding))
+
+    def test_pending_origin_deadline_independent_of_parent_generation_and_safe_summary(self):
+        opened_at = []
+        def setup(page):
+            def opened(owner):
+                opened_at.append(self.clock.now)
+                owner.ui["generating"] = True
+                child = self.context.new_page(opener=owner)
+                child.url = "http://secret-user:secret-password@kns.cnki.net:8129/private-path?v=secret-token#secret-fragment"
+                owner.emit("popup", child)
+            page.on_download = opened
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["diagnostic"], "origin")
+        summary = result["origin_summary"]
+        self.assertEqual((summary["protocol"], summary["hostname"], summary["category"]), ("http", "kns.cnki.net", "http_cnki"))
+        self.assertEqual(fetcher._binding["cnki_flow"]["origin_summary"], summary)
+        self.assertGreaterEqual(self.clock.now - opened_at[0], 60)
+        self.assertLess(self.clock.now - opened_at[0], 61)
+        self.assertEqual(sum("下载窗口正在跳转" in value for value in self.messages), 1)
+        for secret in ("secret-user", "secret-password", "8129", "private-path", "secret-token", "secret-fragment"):
+            self.assertNotIn(secret, json.dumps(result, ensure_ascii=False))
+            self.assertNotIn(secret, json.dumps(fetcher._binding, ensure_ascii=False))
+        self.assertEqual(self.context.pages[1].download_clicks, 1)
+        self.assertFalse(self.context.pages[2].gotos)
+        self.assertEqual(self.context.pages[2].download_clicks, 0)
+
+    def test_official_popup_concrete_auth_or_page_error_precedes_origin_diagnostic(self):
+        for name, problem, expected in (("auth", {"verification": True}, "verification"),
+                                        ("source", {"page_error": True, "source_application_error": True}, "page_error")):
+            with self.subTest(name=name):
+                self.path = Path(self.tmp.name) / name
+                def setup(page):
+                    def opened(owner):
+                        child = self.context.new_page(opener=owner)
+                        child.detail(child)
+                        child.snap.update(problem)
+                        owner.emit("popup", child)
+                    page.on_download = opened
+                self.context.next_setup = setup
+                result = mod.run_cnki(self.fetcher(), RECORD, {})
+                self.assertEqual(result["reason"], expected)
+                self.assertNotEqual(result.get("diagnostic"), "origin")
+                self.assertNotIn("origin_summary", result)
+                self.assertEqual(self.context.pages[-1].download_clicks, 0)
+
+
+class OriginSummaryTests(unittest.TestCase):
+    def test_fixed_categories_and_no_credentials_paths_queries_fragments_or_port_values(self):
+        cases = [
+            ("http://kns.cnki.net/secret-path?v=secret-token", "http", "kns.cnki.net", "http_cnki"),
+            ("https://publisher.example/secret-path?v=secret-token", "https", "publisher.example", "https_other"),
+            ("https://secret-user:secret-pass@kns.cnki.net:8791/secret-path?v=secret-token#secret-fragment", "https", "kns.cnki.net", "official_unsupported"),
+            ("https://kns.cnki.net:not-a-port/secret-path?v=secret-token", "https", "kns.cnki.net", "official_unsupported"),
+            ("https://kns.cnki.net:443/secret-path?v=secret-token", "https", "kns.cnki.net", "https_cnki"),
+            ("about:blank#secret-token", "about", "", "about_variant"),
+            ("about:srcdoc", "about", "", "about_variant"),
+            ("chrome-extension://private-extension-id/secret-path?v=secret-token", "chrome-extension", "", "browser_internal"),
+            ("chrome-error://chromewebdata/secret-path?v=secret-token", "chrome-error", "", "browser_internal"),
+            ("blob:https://kns.cnki.net/secret-path?v=secret-token", "blob:https", "kns.cnki.net", "official_blob_pending"),
+            ("blob:https://publisher.example/secret-path?v=secret-token", "blob:https", "publisher.example", "blob_other"),
+            ("file:///C:/secret-path?v=secret-token", "other", "", "other"),
+        ]
+        for value, protocol, hostname, category in cases:
+            with self.subTest(category=category, protocol=protocol):
+                summary = mod._origin_summary(value)
+                self.assertEqual((summary["protocol"], summary["hostname"], summary["category"]), (protocol, hostname, category))
+                serialized = json.dumps(summary, ensure_ascii=False)
+                for secret in ("secret-user", "secret-pass", "8791", "not-a-port", "secret-path", "secret-token", "secret-fragment", "private-extension-id"):
+                    self.assertNotIn(secret, serialized)
+
+    def test_summary_never_changes_allowed_official_origins(self):
+        for value in ("http://kns.cnki.net/article", "https://publisher.example/article", "blob:https://kns.cnki.net/id",
+                      "https://user:pass@kns.cnki.net/article", "https://kns.cnki.net:8791/article", "https://kns.cnki.net:not-a-port/article"):
+            with self.subTest(value=value):
+                mod._origin_summary(value)
+                self.assertFalse(mod._official(value))
+        self.assertTrue(mod._official("https://kns.cnki.net/kcms2/article/abstract?v=secret-token"))
+
 
 class LocalDOMTests(unittest.TestCase):
     @classmethod

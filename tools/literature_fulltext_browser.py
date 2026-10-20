@@ -212,10 +212,60 @@ class FulltextBrowserFetcher:
             return {"status": "error", "message": "本机全文浏览器未能连接，请检查浏览器环境。"}
 
     def open_current(self):
-        """Only foreground an existing binding; never create/reopen a page."""
+        """Show the exact retained task window without navigation or adoption.
+
+        A pending CNKI popup may be the window needing the researcher's help,
+        even before its origin or artifact is accepted for automatic fetching.
+        Its persisted opener witness allows showing it, never treating it as
+        downloaded content or changing the active task-page binding.
+        """
         try:
+            flow = self._binding.get("cnki_flow")
+            if isinstance(flow, dict) and "pending_popup" in flow:
+                witness = flow.get("pending_popup")
+                if not isinstance(witness, dict):
+                    return {"opened": False, "message": "任务下载窗口的记录无法核对，未打开其他页面。"}
+                owner_id, child_id = witness.get("owner_target_id"), witness.get("target_id")
+                bound_id = self._binding.get("target_id")
+                if (witness.get("opener_verified") is not True
+                    or witness.get("action") not in {"title", "download"}
+                    or not all(isinstance(value, str) and value and len(value) <= 200
+                               for value in (owner_id, child_id))
+                    or owner_id == child_id or bound_id not in {owner_id, child_id}
+                    or flow.get("target_id") != bound_id):
+                    return {"opened": False, "message": "任务下载窗口与当前任务的记录不一致，未打开其他页面。"}
+                context = self._connect()
+
+                def recorded_page(target_id):
+                    unverified = False
+                    for candidate in context.pages:
+                        try:
+                            if not candidate.is_closed() and literature_browser._target_id(context, candidate) == target_id:
+                                return candidate
+                        except Exception:
+                            unverified = True
+                    if unverified:
+                        raise RuntimeError("Recorded task window cannot be verified")
+                    return None
+
+                child = recorded_page(child_id)
+                if child is None:
+                    return {"opened": False, "message": "原任务记录的下载窗口已关闭或无法找到，未改为打开父页面。"}
+                owner = recorded_page(owner_id)
+                opener = child.opener()
+                if owner is not None:
+                    owned = opener is owner
+                else:
+                    # A successfully adopted popup normally loses its opener
+                    # when our old locator page closes. Unadopted windows with
+                    # no verifiable live opener remain for explicit review.
+                    owned = (opener is None and witness.get("adopted") is True and bound_id == child_id)
+                if not owned:
+                    return {"opened": False, "message": "原任务下载窗口的打开关系无法核对，未打开其他页面。"}
+                child.bring_to_front()
+                return {"opened": True, "message": "已显示原任务记录的待核对下载窗口；尚未确认全文下载完成。"}
             page = self._find_bound_page()
-            if page is None:
+            if page is None or page.is_closed():
                 return {"opened": False, "message": "原任务的全文页面已关闭，请显式继续原任务。"}
             page.bring_to_front()
             return {"opened": True, "message": "已打开原任务的全文页面，请在该页处理后检查并继续。"}

@@ -1002,7 +1002,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = fetcher.open_current()
                 if not result.get("opened"):
                     raise ValueError(result.get("message") or "尚无该任务绑定的全文页面")
-                emit("result", stage="fulltext_browser", opened=True, message="已显示原任务全文页面")
+                emit("result", stage="fulltext_browser", opened=True, message=str(result.get("message") or "已显示原任务全文页面"))
                 return 0
             finally:
                 fetcher.close()

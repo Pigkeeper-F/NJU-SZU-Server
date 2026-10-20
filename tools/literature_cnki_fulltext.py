@@ -27,6 +27,19 @@ _POPUP_MESSAGES = {
     "owner": "知网下载窗口与本次任务的打开关系无法核对，已暂停；请保留窗口核对。",
     "handoff_error": "知网下载窗口已出现，但任务绑定交接未完成，已暂停；请保留窗口后继续核对。",
 }
+_ORIGIN_LABELS = {
+    "http_cnki": "HTTP知网域名，尚未进入可核验HTTPS官方页面",
+    "https_cnki": "标准HTTPS知网官方页面",
+    "https_other": "HTTPS其他域名，尚未进入可核验官方页面",
+    "http_other": "HTTP其他域名，尚未进入可核验官方页面",
+    "browser_internal": "浏览器内部页面",
+    "about_variant": "about内部或空白页面，尚未取得真实文件",
+    "official_blob_pending": "官方blob文件窗口，尚待真实文件校验",
+    "official_unsupported": "知网域名但访问形式含不支持的凭据或端口",
+    "blob_other": "未核验来源的blob页面",
+    "other": "其他或无法识别的页面协议",
+    "unverified_window": "尚未核对到本次任务窗口",
+}
 
 # Returns positions in the same exact selector used by a subsequent locator.
 # It does not evaluate onclick handlers, fetch hidden endpoints, or expose hrefs.
@@ -62,10 +75,61 @@ def _hash(value):
 
 
 def _official(url):
-    parsed = urlsplit(str(url or ""))
-    host = (parsed.hostname or "").lower()
-    return (parsed.scheme == "https" and not parsed.username and not parsed.password
-            and parsed.port in (None, 443) and (host == "cnki.net" or host.endswith(".cnki.net")))
+    try:
+        parsed = urlsplit(str(url or ""))
+        host = (parsed.hostname or "").lower()
+        return (parsed.scheme == "https" and not parsed.username and not parsed.password
+                and parsed.port in (None, 443) and (host == "cnki.net" or host.endswith(".cnki.net")))
+    except (ValueError, TypeError):
+        return False
+
+
+def _origin_summary(value):
+    """Fixed categories plus protocol/hostname; never serialize a full URL.
+
+    Credentials, port values, paths, query strings and fragments are excluded
+    even for malformed/untrusted URLs. Hostnames are normalized ASCII only.
+    This function is explanatory and never grants permission to a new origin.
+    """
+    protocol, hostname, category = "other", "", "other"
+    try:
+        parsed = urlsplit(str(value or ""))
+        scheme = parsed.scheme.lower()
+        blob = scheme == "blob"
+        if blob:
+            parsed = urlsplit(parsed.path)
+            scheme = parsed.scheme.lower()
+            protocol = "blob:" + scheme if scheme in {"http", "https"} else "blob"
+        else:
+            protocol = scheme if scheme in {"http", "https", "about", "chrome", "chrome-extension", "chrome-error", "edge", "edge-extension", "devtools"} else "other"
+        raw_host = str(parsed.hostname or "").lower()
+        try:
+            host = raw_host.encode("idna").decode("ascii")
+            if re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", host):
+                hostname = host
+        except (ValueError, UnicodeError):
+            pass
+        cnki = bool(hostname and (hostname == "cnki.net" or hostname.endswith(".cnki.net")))
+        try:
+            unsupported = bool(parsed.username or parsed.password) or parsed.port not in {None, 443}
+        except ValueError:
+            unsupported = True
+        if blob:
+            category = "official_unsupported" if cnki and unsupported else "official_blob_pending" if cnki and scheme == "https" else "blob_other"
+        elif scheme == "about":
+            hostname, category = "", "about_variant"
+        elif scheme in {"chrome", "chrome-extension", "chrome-error", "edge", "edge-extension", "devtools"}:
+            hostname, category = "", "browser_internal"
+        elif scheme == "https":
+            category = "official_unsupported" if cnki and unsupported else "https_cnki" if cnki else "https_other"
+        elif scheme == "http":
+            category = "http_cnki" if cnki else "http_other"
+        else:
+            hostname = ""
+    except (ValueError, TypeError):
+        pass
+    return {"protocol": protocol, "hostname": hostname, "category": category,
+            "description": _ORIGIN_LABELS[category]}
 
 
 def _lookup_page(url):
@@ -196,6 +260,8 @@ def run_cnki(fetcher, record, opts):
     action = None
     popup_error = None
     attached = set()
+    origin_wait_started = {}
+    origin_wait_reported = set()
 
     def pause(reason, message=None, snapshot=None):
         result = fetcher._attention(reason, getattr(fetcher._page, "url", lookup), snapshot=snapshot)
@@ -245,11 +311,54 @@ def run_cnki(fetcher, record, opts):
 
     def popup_pause(code=None):
         code = code or popup_error or "handoff_error"
+        summary = None
+        if code == "origin":
+            target = pending_popup_page()
+            if target is not None and _official(target.url):
+                # A witnessed official page can report a concrete failure.
+                # Preserve that cause instead of relabeling it as an origin
+                # problem; no third-party/error-page DOM is inspected here.
+                try:
+                    snap = target.evaluate(_SNAPSHOT_JS)
+                    reason = fetcher._reason(snap, response_status.get(id(target), 0)) if isinstance(snap, dict) else None
+                    if reason:
+                        return pause(reason, snapshot=snap)
+                except Exception:
+                    pass
+            summary = _origin_summary(target.url) if target is not None else {
+                "protocol": "other", "hostname": "", "category": "unverified_window",
+                "description": _ORIGIN_LABELS["unverified_window"]}
         diagnostic(code)
-        result = pause("page_error", _POPUP_MESSAGES[code])
+        message = _POPUP_MESSAGES[code]
+        if summary is not None:
+            try:
+                updated = copy.deepcopy(fetcher._binding)
+                updated.setdefault("cnki_flow", {})["origin_summary"] = summary
+                commit_binding(updated)
+            except Exception:
+                return popup_pause("handoff_error")
+            message += f" 当前窗口：协议 {summary['protocol']}；域名 {summary['hostname'] or '无可报告域名'}；类别 {summary['description']}。"
+        result = pause("page_error", message)
         result["diagnostic"] = code
+        if summary is not None:
+            result["origin_summary"] = summary
         fetcher._blocked = dict(result)
         return result
+
+    def pending_popup_page():
+        witness = fetcher._binding.get("cnki_flow", {}).get("pending_popup", {})
+        if not isinstance(witness, dict) or witness.get("opener_verified") is not True:
+            return None
+        for owner, target in list(popups):
+            try:
+                if target.is_closed() or literature_browser._target_id(fetcher._context, target) != witness.get("target_id"):
+                    continue
+                if owner is not None and not owner.is_closed() and target.opener() is not owner:
+                    continue
+                return target
+            except Exception:
+                continue
+        return None
 
     def register_popup(owner, popup):
         """Persist this click's opener witness before any origin decision."""
@@ -369,6 +478,7 @@ def run_cnki(fetcher, record, opts):
             flow["target_id"] = popup_id
             flow["pending_popup"]["adopted"] = True
             flow.pop("diagnostic", None)
+            flow.pop("origin_summary", None)
             if owner is not None and owner is not popup and not owner.is_closed():
                 flow["cleanup_target_id"] = witness["owner_target_id"]
             commit_binding(updated)
@@ -391,6 +501,7 @@ def run_cnki(fetcher, record, opts):
     def adopt_popup():
         if popup_error:
             return False
+        waiting = False
         for owner, popup in list(popups):
             try:
                 if popup.is_closed():
@@ -401,7 +512,16 @@ def run_cnki(fetcher, record, opts):
                     return diagnostic("owner")
                 if not _official(popup.url):
                     if popup.url != "about:blank" and not (str(popup.url).startswith("blob:") and _artifact_origin(popup.url)):
-                        return diagnostic("origin")
+                        target_id = literature_browser._target_id(fetcher._context, popup)
+                        if target_id not in origin_wait_started:
+                            origin_wait_started[target_id] = fetcher._clock()
+                        if target_id not in origin_wait_reported:
+                            fetcher._progress("全文获取：下载窗口正在跳转，等待就绪，最多1分钟；不会重新打开或重复点击。")
+                            origin_wait_reported.add(target_id)
+                        if fetcher._clock() - origin_wait_started[target_id] >= WAIT_SECONDS:
+                            return diagnostic("origin")
+                        waiting = True
+                        continue
                     # Official blob / empty attachment windows are not
                     # accepted as documents on URL alone. Await actual bytes.
                     continue
@@ -409,7 +529,7 @@ def run_cnki(fetcher, record, opts):
                     return False
             except Exception:
                 return diagnostic("handoff_error")
-        return True
+        return "waiting" if waiting else True
 
     def finish_artifact(blob):
         for owner, popup in list(popups):
@@ -625,8 +745,14 @@ def run_cnki(fetcher, record, opts):
                 # A goto deadline can fire although usable DOM has arrived.
             fetcher._record_destination(page.url)
         while True:
-            if not adopt_popup():
+            adoption = adopt_popup()
+            if not adoption:
                 return popup_pause()
+            if adoption == "waiting":
+                # Independent popup deadline: parent generation text or an old
+                # navigation deadline cannot reset/shorten this observed wait.
+                tick()
+                continue
             saved = artifact()
             if saved:
                 return saved
