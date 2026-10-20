@@ -1533,7 +1533,7 @@
       spaceEl.appendChild(buildStatusBar(active, modules));
       var specCard = buildSpecCard(active);
       if (specCard) spaceEl.appendChild(specCard);
-      if (!(active.type === 'calculation' && active.mode === 'modify')) spaceEl.appendChild(buildDocCard(active));
+      if (!(active.type === 'calculation' && active.mode === 'modify') && active.type !== 'plotting') spaceEl.appendChild(buildDocCard(active));
 
       var list = el('div', 'msg-list');
       if (!messages.length) {

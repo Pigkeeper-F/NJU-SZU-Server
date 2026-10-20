@@ -90,5 +90,21 @@ const edit = text => { get('task-summary-draft').value = text; get('task-summary
   const rules = saved.tasks.find(task => task.id === saved.activeTaskId).rulesByModule[calc.id];
   assert.equal(rules.versions.length, 2);
   assert.equal(rules.confirmed, rules.draft);
+  // Plotting uses the same single-plan approval gate and keeps its own versions.
+  store.addModule(); store.addModule(); store.addModule();
+  const drawing = store.addModule();
+  assert.equal(drawing.type, 'plotting');
+  assert.equal(get('task-summary').firstElementChild.textContent, '绘图方案');
+  assert.equal(browser.TaskManager.confirmedRules(), '');
+  assert.equal(get('task-rules-execute').disabled, true);
+  edit('折线图；year横轴、value纵轴；PNG、SVG、代码与绘图数据');
+  click('task-summary-save');
+  assert.equal(browser.TaskManager.rulesForModule(drawing.id).version, 1);
+  await click('task-rules-execute');
+  assert.match(sent[1], /已审核的绘图方案 v1/);
+  edit('改为散点图');
+  assert.equal(get('task-rules-execute').disabled, true);
+  await click('task-rules-execute');
+  assert.equal(sent.length, 2);
   console.log('CALCULATION_PLAN_TESTS_PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; });

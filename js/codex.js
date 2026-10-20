@@ -67,6 +67,7 @@
     try {
       const sid = await session(id);
       t.files = (await request('/api/codex/files?session=' + sid)).files;
+      if (Store.getState().modules.find(mod => mod.id === id)?.type === 'plotting') await loadPlotRuns(id);
       t.error = '';
     } catch (error) { t.error = error.message; }
     render();
@@ -159,6 +160,7 @@
             }
             saved[id].delivered = job.id; persist();
           }
+          if (Store.getState().modules.find(mod => mod.id === id)?.type === 'plotting') await loadPlotRuns(id);
           break;
         }
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1150,16 +1152,21 @@
     const t = task(module.id);
     if (t.busy) throw new Error('文件上传或 Codex 任务正在进行');
     const executeRequested = t.executeOnce || t.execute;
+    const plotPlan = module.type === 'plotting' && executeRequested ? t.preparedPlotPlan : undefined;
+    if (module.type === 'plotting' && executeRequested && !plotPlan) throw new Error('请在绘图方案中审核后点击生成');
+    t.preparedPlotPlan = null;
     t.executeOnce = false;
+    t.plotGenerating = !!plotPlan;
     t.busy = true; t.error = ''; t.job = null; render();
     try {
       const sid = await session(module.id);
       const batch = saved[module.id]?.inputBatch;
       if (module.type === 'clean-data' && batch) messages = [{ role: 'user', text: '当前下载交接批次（来源信息，不替代本模块的清洗规则）：\n仅处理以下当前输入文件，其他 input 文件为历史保留，不自动合并：\n' + batch.names.join('\n') + '\n获取依据：' + batch.label + '\n' + batch.text.slice(0, 1500) }, ...messages];
-      const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, mode: module.mode }, messages, execute: executeRequested, model: t.model || null }) });
+      const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, mode: module.mode }, messages, execute: executeRequested, model: t.model || null, ...(plotPlan ? {plotPlan} : {}) }) });
+      if (plotPlan) { t.plotSelectedRunId = job.id; saved[module.id].plotSelectedRunId = job.id; Store.setModuleStatus(module.id,'doing'); }
       saved[module.id].jobId = job.id; persist();
       await watch(module.id, job.id);
-    } finally { t.busy = false; render(); }
+    } finally { t.busy = false; t.plotGenerating = false; render(); }
   }
   async function prepareConfirmedExecution(id) {
     const t = task(id);
@@ -1169,6 +1176,12 @@
     t.files = (await request('/api/codex/files?session=' + sid)).files;
     const mod = Store.getState().modules.find(item => item.id === id);
     if (!t.files.some(file => file.group === 'input')) { render(); return false; }
+    if (mod?.type === 'plotting') {
+      const basis = root.TaskManager?.rulesForModule(id);
+      const inputNames = plotInputNames(id);
+      if (!basis?.text || !inputNames.length) throw new Error('请先上传并选择绘图数据，审核绘图方案后再生成');
+      t.preparedPlotPlan = {text:basis.text, version:basis.version, inputNames, previousRunId:t.plotSelectedRunId || saved[id]?.plotSelectedRunId || undefined};
+    }
     if (mod?.type === 'calculation' && !t.files.some(file => /\.(py|r|jl|m|ipynb)$/i.test(file.name) && file.group === 'input')) throw new Error('请先上传计算代码');
     if (mod?.type === 'calculation' && !t.files.some(file => /\.(csv|tsv|xlsx|xls|json|txt)$/i.test(file.name) && file.group === 'input')) throw new Error('请先上传输入数据');
     t.execute = false;
@@ -1176,7 +1189,66 @@
     render();
     return true;
   }
-  function cancelPreparedExecution(id) { task(id).executeOnce = false; render(); }
+  function cancelPreparedExecution(id) { task(id).executeOnce = false; task(id).preparedPlotPlan = null; render(); }
+  function plotInputNames(id) {
+    const all = task(id).files.filter(file => file.group === 'input' && /\.(csv|tsv|xlsx|xls|json|txt)$/i.test(file.name)).map(file=>file.name);
+    const chosen = saved[id]?.plotInputNames;
+    return Array.isArray(chosen) ? all.filter(name=>chosen.includes(name)) : all;
+  }
+  async function loadPlotRuns(id) {
+    const t = task(id); if (t.plotRunsLoading) return;
+    t.plotRunsLoading = true;
+    try { const sid = await session(id); t.plotRuns = (await request('/api/codex/plots?session='+sid)).runs; t.plotError = ''; }
+    catch (error) { t.plotRuns = t.plotRuns || []; t.plotError = '绘图记录读取失败：'+error.message+'。若刚更新网页，请重新运行工作台启动器。'; }
+    finally { t.plotRunsLoading = false; render(); }
+  }
+  function plotPanel(mod,t) {
+    const box = node('section',undefined,'plotting-results');
+    const title = node('div',undefined,'codex-toolbar'); title.append(node('h3','图表预览与版本'));
+    const plan = node('button','查看方案 / 生成图表','primary-button'); plan.type='button'; plan.disabled=t.busy;
+    plan.onclick=()=>root.TaskManager?.openPlan(); title.append(plan); box.append(title);
+    box.append(node('p','上传数据 → 对话讨论 → 审核绘图方案 → 生成预览。修改时选中一版图讨论，修订方案后重新生成；图片、代码和绘图数据分别下载。','codex-status'));
+    const inputs = t.files.filter(file=>file.group==='input' && /\.(csv|tsv|xlsx|xls|json|txt)$/i.test(file.name));
+    const selected = plotInputNames(mod.id);
+    if (inputs.length) {
+      const data = node('details'); data.open=true; data.append(node('summary','本次绘图使用的数据 · '+selected.length));
+      inputs.forEach(file=>{
+        const label = node('label'); const check = node('input'); check.type='checkbox'; check.checked=selected.includes(file.name); check.disabled=t.busy;
+        check.onchange=()=>{ const values = new Set(plotInputNames(mod.id)); check.checked ? values.add(file.name) : values.delete(file.name); saved[mod.id] = {...saved[mod.id],plotInputNames:[...values]}; persist(); render(); };
+        label.append(check,document.createTextNode(file.name.replace(/^[0-9a-f]{8}-/,''))); data.append(label);
+      }); box.append(data);
+    }
+    if (t.plotRuns === undefined && !t.plotRunsLoading) void loadPlotRuns(mod.id);
+    const runs = t.plotRuns || [];
+    if(t.plotGenerating && runs.length) box.append(node('p','正在生成新版本；已完成的历史图和下载文件保留在下方。','codex-status'));
+    if (!runs.length) box.append(node('p',t.plotRunsLoading ? '正在读取绘图版本…' : t.plotGenerating ? '正在按审核方案生成图表；完成后会显示预览和下载文件。进度见下方执行记录。' : '还没有生成图表。先与 AI 讨论，再打开上方绘图方案审核并生成。','codex-status'));
+    else {
+      const chosen = t.plotSelectedRunId || saved[mod.id]?.plotSelectedRunId;
+      const run = runs.find(item=>item.id===chosen) || runs[0];
+      const label = node('label','查看绘图版本 '); const select = node('select'); select.setAttribute('aria-label','查看绘图版本');
+      runs.forEach((item,i)=>{ const option = node('option','第'+(runs.length-i)+'版 · 方案v'+item.planVersion+' · '+new Date(item.createdAt).toLocaleString('zh-CN')+' · '+({completed:'已生成',failed:'未完成',running:'生成中',cancelled:'已停止',interrupted:'已中断'}[item.status]||item.status)); option.value=item.id; select.append(option); });
+      select.value=run.id; select.disabled=t.busy;
+      select.onchange=()=>{ t.plotSelectedRunId=select.value; saved[mod.id]={...saved[mod.id],plotSelectedRunId:select.value}; persist(); render(); }; label.append(select); box.append(label);
+      box.append(node('p','方案 v'+run.planVersion+' · 输入 '+run.inputFiles.length+' 个 · 模型 '+(run.model||'待执行')+' · '+run.id.slice(0,8),'plotting-meta'));
+      if (run.error) box.append(node('p',run.error,'codex-error'));
+      const images=run.files.filter(file=>/\.(png|jpe?g|webp)$/i.test(file.name));
+      images.forEach(file=>{ const image=node('img',undefined,'plotting-preview'); image.alt='绘图预览：'+file.name.split('/').pop(); image.src='/api/codex/preview?session='+saved[mod.id]?.sessionId+'&name='+encodeURIComponent(file.name); image.loading='lazy'; const full=node('a'); full.href=image.src; full.target='_blank'; full.rel='noopener'; full.title='点击查看大图'; full.append(image); box.append(full); });
+      if (!images.length) box.append(node('p','本版尚无可预览图片，请检查状态或日志。','codex-status'));
+      const downloads=node('div',undefined,'plotting-downloads');
+      run.files.forEach(file=>{ const link=node('a',file.name.split('/').pop()+' · '+Math.ceil(file.size/1024)+'KB'); link.href='/api/codex/download?session='+saved[mod.id]?.sessionId+'&group=output&name='+encodeURIComponent(file.name); downloads.append(link); }); box.append(downloads);
+      const feedback=node('textarea',undefined,'plotting-feedback'); feedback.rows=3; feedback.placeholder='例如：按物种分面、字号加大、图例移到下方。涉及分组或统计口径的修改也请明确说明。'; feedback.setAttribute('aria-label','这版图的修改意见'); feedback.value=saved[mod.id]?.plotFeedback||''; feedback.disabled=t.busy;
+      feedback.oninput=()=>{ saved[mod.id]={...saved[mod.id],plotFeedback:feedback.value}; persist(); };
+      const discuss=node('button','讨论这版怎么改','quiet-button'); discuss.type='button'; discuss.disabled=t.busy;
+      discuss.onclick=()=>{
+        if (!feedback.value.trim()) { t.plotError='请先填写这版图的修改意见。'; render(); return; }
+        const mode=document.getElementById('conversation-mode'); mode.value='ai'; mode.dispatchEvent(new Event('change'));
+        const sent=ModuleSpace.sendText('请查看绘图版本 '+run.id+'（方案v'+run.planVersion+'）的图片、代码和绘图数据，讨论以下修改意见并给出修订后的完整绘图方案。保留未改变的已确认要求，现在只讨论，不运行或改写文件：\n'+feedback.value.trim());
+        if (!sent) { t.plotError='当前无法发送，请先处理输入框中的文字或等待任务结束。'; render(); }
+      }; box.append(feedback,discuss);
+    }
+    if(t.plotError) box.append(node('p',t.plotError,'codex-error'));
+    panel.append(box);
+  }
   async function runDirect(mod) {
     const t = task(mod.id);
     try {
@@ -1339,10 +1411,10 @@
       if (t.error) panel.append(node('p', t.error, 'codex-error'));
       return;
     }
-    if (t.backend === 'api' && mod.type !== 'download-data') { panel.append(node('p', 'API 模式提供文字指导；数据清洗的上传与执行需切换本机 Codex。')); return; }
+    if (t.backend === 'api' && mod.type !== 'download-data') { panel.append(node('p', 'API 模式提供文字指导；文件上传与实际执行需切换本机 Codex。')); return; }
     if (mod.type !== 'download-data' && account?.error) panel.append(node('p', account.error + '；请打开左下角设置检查连接。', 'codex-error'));
     else if (mod.type !== 'download-data' && account && !account.loggedIn) panel.append(node('p', '请打开左下角设置，登录本机 Codex。', 'codex-error'));
-    if (!['download-data', 'clean-data', 'calculation', 'result-audit'].includes(mod.type)) {
+    if (!['download-data', 'clean-data', 'calculation', 'result-audit', 'plotting'].includes(mod.type)) {
       panel.append(node('p', '本模块可用 Codex 对话梳理方案与规则；当前不执行下载、计算或文件处理。'));
       if (t.busy) panel.append(node('p', 'Codex 正在回复…', 'codex-status'));
       if (t.error) panel.append(node('p', t.error, 'codex-error'));
@@ -1364,7 +1436,7 @@
       const input = node('input'); input.type = 'file'; input.multiple = true;
       input.accept = mod.type === 'calculation' ? '.py,.r,.R,.jl,.m,.ipynb,.csv,.tsv,.xlsx,.xls,.json,.txt' : '.csv,.tsv,.xlsx,.xls,.json,.txt';
       input.disabled = t.busy;
-      input.setAttribute('aria-label', mod.type === 'calculation' ? '上传计算代码和输入数据' : '上传清洗原始文件');
+      input.setAttribute('aria-label', mod.type === 'calculation' ? '上传计算代码和输入数据' : mod.type === 'plotting' ? '上传绘图数据' : '上传清洗原始文件');
       input.onchange = () => upload(mod.id, Array.from(input.files)); fileRow.append(input);
     }
     const refreshButton = node('button', '刷新文件', 'quiet-button'); refreshButton.type = 'button'; refreshButton.disabled = t.busy; refreshButton.onclick = () => refresh(mod.id); fileRow.append(refreshButton);
@@ -1396,6 +1468,7 @@
     if (mod.type === 'download-data' && root.LiteratureUI) {
       const auxiliary = node('details'); auxiliary.append(node('summary', '已有文件链接或查看旧下载')); auxiliary.append(fileRow); panel.append(auxiliary);
     } else panel.append(fileRow);
+    if (mod.type === 'plotting') plotPanel(mod,t);
     if (mod.type === 'result-audit') panel.append(node('p', '先讨论并在上方确认核查原则，或直接上传已有标准；再核查结果、讨论定位。每个标准文件上限 20MB。', 'codex-status'));
     if (mod.type === 'clean-data' && saved[mod.id]?.inputBatch) panel.append(node('p', '当前交接输入 ' + saved[mod.id].inputBatch.names.length + ' 个；历史原始文件保留，不自动合并到本次清洗。', 'codex-status'));
     const list = node('div', undefined, 'codex-files');

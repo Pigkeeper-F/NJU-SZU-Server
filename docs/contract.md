@@ -1413,3 +1413,13 @@ Windows虚拟环境启动器可能产生不同于实际脚本的PID；Node阶段
 弹窗初始地址可能仍在正常跳转；仅对本次有见证的准确窗口最多观察60秒，等待它自然进入可核验官方页，不主动重提导航、点击下载、扩展允许域名或绕过浏览器提示。该时限独立于父页的文件生成状态。超时来源诊断只显示安全的协议、域名和固定类别，绝不保存或展示用户信息、路径、查询、v/token、fragment及具体端口；安全官方页上的真实404、来源错误或登录提示优先显示对应原因。普通继续只检查原记录中的窗口。
 
 浏览器下载记录只证明曾触发传输，不能凭GUID文件名、大小或截图当作平台已取得全文，也不扫描浏览器下载目录猜文件。对本次已核对题名的真实点击，下载事件还须关联已点击target或其持久direct-opener窗口；仅官方来源的真实download/主框架PDF响应并通过文件校验才能交付。先处理已到文件事件，再等待旁支弹窗跳转；已校验的官方文件不因旁支窗口地址未获页面操作许可而丢弃。未知旁支仍不接管、导航或点击，只有opener已证明且准确ID可核验时登记为文件与状态保存后的cleanup_target_id；记录冲突或关系不明则暂停。下载小窗口已关闭时，已捕获的真实文件事件仍可完成保存，缺失事件不得从截图或任意目录补造。
+
+## 2026-10-20 绘图完整流程
+
+绘图复用任务规则弹窗，唯一方案保存在既有 `research_tasks_v1.rulesByModule[moduleId]` 的草稿、已审核文本及版本；底部不再显示第二份绘图方案卡。可上传 CSV/TSV/Excel/JSON/TXT，在只读对话中查看数据、讨论图型与科学口径，审核后显式生成。草稿有未审核变更时禁止执行。旧 `mod.doc` 仍可只读核对并手动复制为草稿。
+
+`POST /api/codex/run` 对 plotting 新增执行支持，execute=true 必须带 `plotPlan:{text,version,inputNames,previousRunId?}`；服务端校验非空已确认文本、版本、实际输入及同会话历史版本，保存方案、输入 SHA-256 与模型。每次运行使用独立输出目录，生成图像与绘图代码，不覆盖旧版本。普通绘图对话仍只读。沿用所选本机 Codex 模型、网络关闭与仅本次输出可写的执行沙箱。首次读取绘图数据或生成时由服务器在项目 `.venv` 准备 requirements-plotting.txt 中的公开绘图依赖，过程显示进度；失败有明确错误，不声称出图成功。
+
+新增 `GET /api/codex/plots?session=...` 返回 `{runs:[{id,status,createdAt,finishedAt,planVersion,planHash,model,previousRunId,inputFiles,files,error}]}`，按新到旧排列，从磁盘记录恢复，停止和失败也保留。新增 `GET /api/codex/preview?session=...&name=...` 仅以核对过的 PNG/JPEG/WebP 类型内联提供本会话输出，沿用下载的路径边界校验；SVG/PDF 与代码仍通过附件下载，不能以内联 HTML 执行。
+
+绘图区域显示当前版本、预览、图片/代码/绘图数据下载及修改意见。讨论修改时明确所选历史版本且不执行；核对修订方案后生成新版本，刷新后仍可找回。`research_codex_tasks_v1` 兼容扩展绘图视图选择与反馈草稿，不改变旧字段。TaskManager 新增 `openPlan()` 供绘图区域打开同一方案弹窗，不建立第二份文本或确认状态。新增 CSS 类 `.plotting-results`、`.plotting-preview`、`.plotting-feedback`、`.plotting-downloads`、`.plotting-meta`。不新增脚本或 Store API。

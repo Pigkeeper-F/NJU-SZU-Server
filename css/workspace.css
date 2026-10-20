@@ -946,4 +946,14 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 .literature-legacy-history>summary{cursor:pointer;color:var(--muted);font-size:13px}
 .task-previous-plan{margin-top:18px;padding-top:12px;border-top:1px solid var(--border);font-size:13px}
 .task-previous-plan>summary{cursor:pointer;color:var(--muted)}
+.plotting-results{margin-top:16px;padding:18px;border:1px solid var(--border);border-radius:12px;background:#fafbf9}
+.plotting-results h3{margin:0;font-size:16px}
+.plotting-results details>label{display:block;font-size:13px;margin:8px 0}
+.plotting-preview{display:block;max-width:100%;max-height:62vh;object-fit:contain;margin:16px auto;background:#fff;border:1px solid var(--border);border-radius:8px}
+.plotting-feedback{display:block;box-sizing:border-box;width:100%;margin:16px 0 8px;min-height:80px;padding:12px;border:1px solid var(--border);border-radius:8px;font:inherit;resize:vertical}
+.plotting-downloads{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.plotting-downloads a{padding:7px 10px;background:#fff;border:1px solid var(--border);border-radius:6px;font-size:12px}
+.plotting-meta{font-size:12px;color:var(--muted)}
+.codex-panel:has(.plotting-results){max-height:46vh;overflow:auto;overscroll-behavior:contain}
+.plotting-results .plotting-preview{max-height:28vh;cursor:zoom-in}
 @media(max-width:680px){.literature-help-dialog{padding:18px}.literature-help-dialog .literature-workflow-grid{grid-template-columns:1fr}}

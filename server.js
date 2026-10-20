@@ -10,6 +10,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { CodexBridge } = require('./tools/codex-bridge');
+const plotting = require('./tools/plotting');
 const { fetchSource } = require('./tools/source-download');
 const { LiteratureFlow } = require('./tools/literature-flow');
 const { LiteratureConnector } = require('./tools/literature-connector');
@@ -55,7 +56,7 @@ function workflowPrompt(module, executor = 'api') {
       ? '文献挖掘的“需对齐内容”是设计讨论清单，不是首批候选检索的启动条件。已确认规则优先；用户未填写的可选范围保持不限，不把建议默认值冒充科学结论。全文参数提取等确需科学判断的步骤到达时再确认。'
       : '文档中的需对齐内容是尚未确定的业务选项，不是已批准规则。提供具体建议或默认方案并注明假设，涉及关键科学判断、删除/插补/替换策略时先让用户确认。不要一次性要求回答全部待对齐项。',
     '按定义、输入、执行、交付、检查、异常推进，直接帮助整理方案、规则、数据结构、代码、报告与交接内容；只在有证据时报告完成或通过检查。输出应具体、简洁，优先给出当前可用成果与下一步。',
-    executor === 'api' ? '当前系统只提供文字对话，没有文件读取、下载、代码执行、浏览、数据库或模块操作工具。不能声称已经下载数据、读取未提供的文件、运行计算或生成实际附件。需要外部操作时提供可执行步骤或代码，并让用户提供结果后继续检查。API 接入不等于拥有这些工具。' : ['clean-data', 'calculation', 'result-audit'].includes(module.type) ? '本次是 Codex 本地文件任务。按任务模式读取已上传数据、代码与计算结果；只在允许执行的模块与模式下写入输出目录。只有实际执行成功时才报告完成。' : '本次是本机 Codex 模块对话。当前模块仅提供方案、规则和结果检查的文字指导；没有上传文件、联网浏览、下载或写入执行功能。不要声称已访问网站、读取未上传的文件、运行计算或生成实际附件。',
+    executor === 'api' ? '当前系统只提供文字对话，没有文件读取、下载、代码执行、浏览、数据库或模块操作工具。不能声称已经下载数据、读取未提供的文件、运行计算或生成实际附件。需要外部操作时提供可执行步骤或代码，并让用户提供结果后继续检查。API 接入不等于拥有这些工具。' : ['clean-data', 'calculation', 'result-audit', 'plotting'].includes(module.type) ? '本次是 Codex 本地文件任务。按任务模式读取已上传数据、代码与计算结果；只在允许执行的模块与模式下写入输出目录。只有实际执行成功时才报告完成。' : '本次是本机 Codex 模块对话。当前模块仅提供方案、规则和结果检查的文字指导；没有上传文件、联网浏览、下载或写入执行功能。不要声称已访问网站、读取未上传的文件、运行计算或生成实际附件。',
     '人工审核模块中，AI 只能提供审核建议和证据整理，最终人工决定由用户给出。SOC 是可替换示例，仅在主题适用时采用。',
     ['download-data', 'literature-mining'].includes(module.type) ? '网页文献执行面板支持：审核通过获取方案后点击“按审核方案开始执行”，按方案检索 Europe PMC/Crossref/Google Scholar、筛选首批最多3篇、获取开放全文、读取全文或上传材料、提取数据与原文证据；问题会暂停并列出，研究者答复并点击继续后续跑。此普通对话只讨论和补充方案，不自行执行上述工具；材料与进度以面板真实记录为准，不说已完成未发生的操作。原文件链接下载仅为辅助入口。方案应明确检索范围、筛选条件、提取字段/单位、验收；复杂来源登录、OCR、图中数值不自动执行。' : '',
     '区分用户提供的信息、假设、建议、待确认事项与已验证结果；不编造来源、数值、文献、运行结果或审核结论。保持当前模块职责，交接时说明下游需要的成果及版本。',
@@ -243,11 +244,18 @@ async function handleCodex(req, res, url) {
     if (req.method === 'POST' && route === '/api/codex/run') {
       const data = JSON.parse(await readBody(req));
       if (!Object.hasOwn(WORKFLOW_FILES, data.module?.type)) throw new Error('未知工作流模块');
-      if (!['clean-data', 'calculation'].includes(data.module.type) && data.execute === true) throw new Error('当前模块仅支持拟方案');
+      if (!['clean-data', 'calculation', 'plotting'].includes(data.module.type) && data.execute === true) throw new Error('当前模块仅支持拟方案');
       if (data.module.type === 'calculation' && !['direct', 'modify'].includes(data.module.mode)) throw new Error('请先选择直接计算或修改计算');
       const messages = normalizeMessages(data.messages);
       if (!messages.length || messages.at(-1).role !== 'user') throw new Error('请提供用户指令');
-      return sendJson(res, 202, await codex.run(data.sessionId, messages, workflowPrompt(data.module, 'codex'), ['clean-data', 'calculation'].includes(data.module.type) && data.execute === true, typeof data.model === 'string' ? data.model : null, data.module.type, data.module.mode));
+      return sendJson(res, 202, await codex.run(data.sessionId, messages, workflowPrompt(data.module, 'codex'), ['clean-data', 'calculation', 'plotting'].includes(data.module.type) && data.execute === true, typeof data.model === 'string' ? data.model : null, data.module.type, data.module.mode, data.plotPlan));
+    }
+    if (req.method === 'GET' && route === '/api/codex/plots') return sendJson(res,200,{ runs:plotting.runs(codex,url.searchParams.get('session')) });
+    if (req.method === 'GET' && route === '/api/codex/preview') {
+      const file = codex.download(url.searchParams.get('session'), 'output', url.searchParams.get('name') || '');
+      const mime = plotting.rasterType(file);
+      res.writeHead(200, {'Content-Type':mime,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"});
+      fs.createReadStream(file).on('error',()=>res.destroy()).pipe(res); return;
     }
     if (req.method === 'GET' && route === '/api/codex/job') return sendJson(res, 200, codex.snapshot(url.searchParams.get('id')));
     if (req.method === 'POST' && route === '/api/codex/cancel') return sendJson(res, 200, await codex.cancel(url.searchParams.get('id')));
