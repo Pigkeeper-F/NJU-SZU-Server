@@ -9,7 +9,7 @@ Coverage (offline fixtures only; no real site is ever contacted):
 - resume policy (fetched_* kept, needs_attention retried, unavailable gated behind
   --retry-unavailable), --limit / --only / fulltext.maxPapers quotas;
 - captcha -> attention(verification) + exit 0 + needs_attention item;
-- relay with fake SOC modules (browser/common/download_pdf) for the real fetcher glue;
+- production alias points at the dedicated task-page fetcher;
 - one end-to-end pass over a real localhost http.server fixture (paper.pdf,
   article.html, paywall.html, missing page, refused port).
 """
@@ -24,8 +24,8 @@ import socket
 import sys
 import tempfile
 import threading
-import types
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,6 +36,19 @@ import literature_fulltext as lf
 def fake_pdf_bytes(size: int | None = None) -> bytes:
     size = size or lf.MIN_PDF_BYTES + 1024
     return b"%PDF-1.4\n" + b"0" * (size - 9)
+
+
+def article_page(title: str = "论文 GSC-002") -> dict:
+    """Explicit body fixture; unrelated long page text is never upgraded."""
+    sections = []
+    for number, heading in enumerate(("Introduction", "Materials and methods", "Results", "Discussion")):
+        text = (f"This section {number} describes temperature effects on poultry growth and measured production responses. " * 5).strip()
+        sections.append({"heading": heading, "text": text})
+    body = "\n\n".join(f"{section['heading']}\n{section['text']}" for section in sections)
+    return {"status": "ok", "text": body,
+            "html_evidence": {"origin": "dom_article_region", "container_verified": True,
+                              "container": "article .body", "page_title": title, "citation_title": title,
+                              "article_text": body, "sections": sections}}
 
 
 def candidate(cid: str, *, result_url: str = "", links: list[dict] | None = None, snippet: str = "", **extra) -> dict:
@@ -172,28 +185,37 @@ class ClassifyTargetTest(unittest.TestCase):
 
 
 class AssessHtmlTextTest(unittest.TestCase):
-    def test_long_text_is_fulltext(self) -> None:
-        self.assertEqual(lf.assess_html_text("正文内容 " * 500)[0], "fulltext")
+    def test_long_text_without_dom_proof_is_not_fulltext(self) -> None:
+        self.assertEqual(lf.assess_html_text("正文内容 " * 500)[0], "unavailable")
+
+    def test_verified_article_is_fulltext(self) -> None:
+        page = article_page()
+        self.assertEqual(lf.assess_html_text(page["text"], evidence=page["html_evidence"], expected_title="论文 GSC-002")[0], "fulltext")
+
+    def test_long_pubmed_abstract_stays_abstract(self) -> None:
+        verdict, _ = lf.assess_html_text("Abstract\n" + "A long abstract with results and references. " * 150,
+                                          url="https://pubmed.ncbi.nlm.nih.gov/33925609/")
+        self.assertEqual(verdict, "abstract")
 
     def test_medium_text_is_abstract_with_pending_note(self) -> None:
-        verdict, reason = lf.assess_html_text("摘要文本 " * 80)
+        verdict, reason = lf.assess_html_text("摘要\n" + "摘要文本 " * 80)
         self.assertEqual(verdict, "abstract")
-        self.assertIn("待补充", reason)
+        self.assertTrue(reason)
 
     def test_short_text_is_unavailable(self) -> None:
         verdict, reason = lf.assess_html_text("太短")
         self.assertEqual(verdict, "unavailable")
-        self.assertIn("待补充", reason)
+        self.assertTrue(reason)
 
     def test_english_paywall_marker_wins_over_length(self) -> None:
         verdict, reason = lf.assess_html_text("Purchase this article to continue. " * 200)
         self.assertEqual(verdict, "unavailable")
-        self.assertIn("付费墙", reason)
+        self.assertIn("权限", reason)
 
     def test_chinese_paywall_marker_wins_over_length(self) -> None:
         verdict, reason = lf.assess_html_text("需订阅后阅读全文 " * 300)
         self.assertEqual(verdict, "unavailable")
-        self.assertIn("待补充", reason)
+        self.assertIn("权限", reason)
 
 
 class ValidatePdfBytesTest(unittest.TestCase):
@@ -252,7 +274,7 @@ class FetchOneTest(unittest.TestCase):
     def test_pdf_failure_falls_back_to_html_page(self) -> None:
         fetcher = FakeFetcher(
             pdf={"https://example.org/dead.pdf": {"status": "no_pdf_button_found"}},
-            page={"https://example.org/article": {"status": "ok", "text": "研究全文正文 " * 400}},
+            page={"https://example.org/article": article_page("论文 GSC-001")},
         )
         item = lf.fetch_one(
             self._target(result_url="https://example.org/article", links=[{"label": "[PDF]", "url": "https://example.org/dead.pdf"}]),
@@ -283,7 +305,7 @@ class FetchOneTest(unittest.TestCase):
         fetcher = FakeFetcher(page={"https://example.org/article": {"status": "ok", "text": "Purchase this article to continue reading " * 60}})
         item = lf.fetch_one(self._target(result_url="https://example.org/article"), self.job, self._opts(fetcher))
         self.assertEqual(item["status"], "unavailable")
-        self.assertIn("付费墙", item["reason"])
+        self.assertIn("权限", item["reason"])
         self.assertIn("待补充", item["reason"])
         self.assertEqual(item["path"], "")
 
@@ -294,13 +316,13 @@ class FetchOneTest(unittest.TestCase):
         self.assertIn("待补充", item["reason"])
 
     def test_abstract_level_page_saved_as_txt_with_abstract_evidence(self) -> None:
-        fetcher = FakeFetcher(page={"https://example.org/article": {"status": "ok", "text": "摘要内容 " * 150}})
+        fetcher = FakeFetcher(page={"https://example.org/article": {"status": "ok", "text": "摘要\n" + "摘要内容 " * 150}})
         item = lf.fetch_one(self._target(result_url="https://example.org/article"), self.job, self._opts(fetcher))
         self.assertEqual(item["status"], "abstract_only")
         self.assertEqual(item["kind"], "html")
         self.assertEqual(item["evidence_level"], "abstract_only")
         self.assertTrue((self.job / item["path"]).exists())
-        self.assertIn("待补充", item["reason"])
+        self.assertIn("正文", item["reason"])
 
     def test_unreachable_everything_reports_combined_reason(self) -> None:
         fetcher = FakeFetcher(pdf={"https://example.org/dead.pdf": {"status": "nav_error", "error": "boom"}})
@@ -440,7 +462,7 @@ class RunFlowTest(unittest.TestCase):
 
     def test_fresh_run_status_document_and_result_event(self) -> None:
         self._three_papers()
-        fetcher = FakeFetcher(page={"https://example.org/article": {"status": "ok", "text": "研究全文正文 " * 400}})
+        fetcher = FakeFetcher(page={"https://example.org/article": article_page()})
         code, events = run_stage(self.job, fetcher=fetcher)
         self.assertEqual(code, 0)
         self.assertEqual(events[0]["type"], "stage")
@@ -491,8 +513,8 @@ class RunFlowTest(unittest.TestCase):
 
         # resume: needs_attention and pending are retried; fetched item is untouched
         fetcher2 = FakeFetcher(page={
-            "https://example.org/article": {"status": "ok", "text": "研究全文正文 " * 400},
-            "https://example.org/dead": {"status": "ok", "text": "另一篇全文正文 " * 400},
+            "https://example.org/article": article_page(),
+            "https://example.org/dead": article_page("论文 GSC-003"),
         })
         code2, events2 = run_stage(self.job, fetcher=fetcher2, resume=True)
         self.assertEqual(code2, 0)
@@ -507,7 +529,7 @@ class RunFlowTest(unittest.TestCase):
 
     def test_unavailable_is_gated_behind_retry_flag(self) -> None:
         self._three_papers()
-        code, _ = run_stage(self.job, fetcher=FakeFetcher(page={"https://example.org/article": {"status": "ok", "text": "研究全文正文 " * 400}}))
+        code, _ = run_stage(self.job, fetcher=FakeFetcher(page={"https://example.org/article": article_page()}))
         self.assertEqual(code, 0)
         self.assertEqual(status_map(read_status(self.job))["GSC-003"]["status"], "unavailable")
 
@@ -521,7 +543,7 @@ class RunFlowTest(unittest.TestCase):
         self.assertEqual(status_map(read_status(self.job))["GSC-003"]["status"], "unavailable")
 
         # with the flag the item is retried and can become fetched
-        fetcher3 = FakeFetcher(page={"https://example.org/dead": {"status": "ok", "text": "补获全文正文 " * 400}})
+        fetcher3 = FakeFetcher(page={"https://example.org/dead": article_page("论文 GSC-003")})
         code3, _ = run_stage(self.job, fetcher=fetcher3, resume=True, retry_unavailable=True)
         self.assertEqual(code3, 0)
         self.assertEqual(status_map(read_status(self.job))["GSC-003"]["status"], "fetched_html")
@@ -537,6 +559,38 @@ class RunFlowTest(unittest.TestCase):
         self.assertEqual(events2[-1]["count"], 1)
         self.assertEqual(events2[-1]["counts"]["skipped"], 1)
 
+    def test_verified_html_cache_retains_evidence_and_never_reopens_browser(self) -> None:
+        write_candidates(self.job, [candidate("GSC-002", result_url="https://example.org/article")])
+        first = FakeFetcher(page={"https://example.org/article": article_page()})
+        self.assertEqual(run_stage(self.job, fetcher=first)[0], 0)
+        original = status_map(read_status(self.job))["GSC-002"]
+        self.assertEqual(original["evidence_version"], "fulltext-evidence-v1")
+        self.assertTrue(original["content_sha256"])
+        second = FakeFetcher()
+        self.assertEqual(run_stage(self.job, fetcher=second, resume=True)[0], 0)
+        item = status_map(read_status(self.job))["GSC-002"]
+        self.assertEqual(item["status"], "fetched_html")
+        self.assertEqual(item["content_sha256"], original["content_sha256"])
+        self.assertEqual(second.calls, [])
+
+    def test_old_long_html_cache_cannot_silently_enter_fetched_result(self) -> None:
+        write_candidates(self.job, [candidate("GSC-002", result_url="https://pubmed.ncbi.nlm.nih.gov/33925609/")])
+        folder = self.job / "fulltext" / "files"
+        folder.mkdir(parents=True)
+        text = "Abstract\n" + "A long abstract followed by references. " * 200
+        (folder / "GSC-002.txt").write_text(text, encoding="utf-8")
+        (self.job / "fulltext" / "status.json").write_text(json.dumps({"version": 1, "items": [{
+            "paper_id": "GSC-002", "status": "fetched_html", "path": "fulltext/files/GSC-002.txt",
+            "source_url": "https://pubmed.ncbi.nlm.nih.gov/33925609/", "evidence_level": "fulltext_html",
+        }]}), encoding="utf-8")
+        fetcher = FakeFetcher()
+        code, events = run_stage(self.job, fetcher=fetcher, resume=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(events[-1]["count"], 0)
+        self.assertNotEqual(status_map(read_status(self.job))["GSC-002"]["status"], "fetched_html")
+        self.assertEqual((folder / "GSC-002.txt").read_text(encoding="utf-8"), text)
+        self.assertEqual(fetcher.calls, [])
+
     def test_fetched_item_with_missing_file_is_requeued(self) -> None:
         write_candidates(self.job, [candidate("GSC-001", links=[{"label": "[PDF]", "url": "https://example.org/a.pdf"}])])
         run_stage(self.job, fetcher=FakeFetcher())
@@ -549,7 +603,7 @@ class RunFlowTest(unittest.TestCase):
 
     def test_limit_caps_this_run_and_keeps_rest_pending(self) -> None:
         self._three_papers()
-        fetcher = FakeFetcher(page={"https://example.org/article": {"status": "ok", "text": "研究全文正文 " * 400}})
+        fetcher = FakeFetcher(page={"https://example.org/article": article_page()})
         code, events = run_stage(self.job, fetcher=fetcher, limit=1)
         self.assertEqual(code, 0)
         counts = read_status(self.job)["counts"]
@@ -568,7 +622,7 @@ class RunFlowTest(unittest.TestCase):
 
     def test_only_selects_single_paper(self) -> None:
         self._three_papers()
-        fetcher = FakeFetcher(page={"https://example.org/article": {"status": "ok", "text": "研究全文正文 " * 400}})
+        fetcher = FakeFetcher(page={"https://example.org/article": article_page()})
         code, _ = run_stage(self.job, fetcher=fetcher, only=["GSC-002"])
         self.assertEqual(code, 0)
         items = status_map(read_status(self.job))
@@ -585,7 +639,7 @@ class RunFlowTest(unittest.TestCase):
 
     def test_only_mixed_unknown_reports_and_continues(self) -> None:
         self._three_papers()
-        fetcher = FakeFetcher(page={"https://example.org/article": {"status": "ok", "text": "研究全文正文 " * 400}})
+        fetcher = FakeFetcher(page={"https://example.org/article": article_page()})
         code, events = run_stage(self.job, fetcher=fetcher, only="GSC-002,GSC-999")
         self.assertEqual(code, 0)
         self.assertTrue(any("GSC-999" in event.get("message", "") for event in events if event["type"] == "stage"))
@@ -618,7 +672,7 @@ class RunFlowTest(unittest.TestCase):
             {"canonical_id": "GSC-002", "title": "第二篇", "doi": "",
              "records": [candidate("GSC-002", result_url="https://example.org/2")]},
         ])
-        fetcher = FakeFetcher(page={"https://example.org/2": {"status": "ok", "text": "全文正文 " * 500}})
+        fetcher = FakeFetcher(page={"https://example.org/2": article_page("第二篇")})
         code, events = run_stage(self.job, fetcher=fetcher)
         self.assertEqual(code, 0)
         self.assertIn("去重结果", events[0]["message"])
@@ -630,7 +684,7 @@ class RunFlowTest(unittest.TestCase):
 
     def test_status_json_is_atomic_and_reparsable(self) -> None:
         self._three_papers()
-        run_stage(self.job, fetcher=FakeFetcher(page={"https://example.org/article": {"status": "ok", "text": "研究全文正文 " * 400}}))
+        run_stage(self.job, fetcher=FakeFetcher(page={"https://example.org/article": article_page()}))
         leftover = list((self.job / "fulltext").glob("*.tmp"))
         self.assertEqual(leftover, [])
         read_status(self.job)  # raises if not valid JSON
@@ -650,8 +704,8 @@ class MainCliTest(unittest.TestCase):
 
     def _run_main(self, argv: list[str], fetcher: FakeFetcher | None = None):
         buffer = io.StringIO()
-        factory = (lambda config: fetcher) if fetcher is not None else lf.SocBrowserFetcher
-        with patch.object(lf, "SocBrowserFetcher", factory), contextlib.redirect_stdout(buffer):
+        factory = (lambda config, job_dir=None: fetcher) if fetcher is not None else lf.make_fetcher
+        with patch.object(lf, "make_fetcher", factory), contextlib.redirect_stdout(buffer):
             code = lf.main(argv)
         lines = [json.loads(line) for line in buffer.getvalue().splitlines() if line.strip()]
         return code, lines
@@ -708,163 +762,18 @@ class MainCliTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# SOC module glue (fake browser/common/download_pdf modules)
+# Production task-page fetcher alias (detailed lifecycle tests in its own suite)
 # ---------------------------------------------------------------------------
 
-class _FakeResponse:
-    def __init__(self, headers: dict | None = None, body: bytes = b"") -> None:
-        self.headers = headers or {}
-        self._body = body
-
-    def body(self) -> bytes:
-        return self._body
-
-
-class _FakePage:
-    def __init__(self, *, text: str = "", goto_error: str | None = None, content_type: str = "text/html", url: str = "https://example.org/article") -> None:
-        self.url = url
-        self._text = text
-        self._goto_error = goto_error
-        self._content_type = content_type
-        self.goto_calls: list[dict] = []
-
-    def goto(self, url: str, wait_until: str | None = None, timeout: int | None = None):
-        self.goto_calls.append({"url": url, "timeout": timeout})
-        if self._goto_error:
-            raise RuntimeError(self._goto_error)
-        return _FakeResponse(headers={"content-type": self._content_type})
-
-    def evaluate(self, expression: str) -> str:
-        return self._text
-
-
-class _FakeRequest:
-    def __init__(self, body: bytes) -> None:
-        self._body = body
-
-    def get(self, url: str, timeout: int | None = None) -> _FakeResponse:
-        return _FakeResponse(headers={"content-type": "application/pdf"}, body=self._body)
-
-
-class _FakeContext:
-    def __init__(self, page: _FakePage) -> None:
-        self.pages = [page]
-        self.request = _FakeRequest(fake_pdf_bytes())
-
-    def new_page(self) -> _FakePage:
-        return self.pages[0]
-
-
-class _FakeCM:
-    def __init__(self, value) -> None:
-        self._value = value
-
-    def __enter__(self):
-        return self._value
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-
-class SocGlueTest(unittest.TestCase):
-    def _patch_soc(self, *, text: str = "", goto_error: str | None = None, content_type: str = "text/html", launch: dict | None = None, captcha=None):
-        page = _FakePage(text=text, goto_error=goto_error, content_type=content_type)
-        context = _FakeContext(page)
-
-        common = types.ModuleType("common")
-        common.connect_browser = lambda p: (object(), context)
-        common.get_or_create_page = lambda ctx: page
-        common.apply_stealth = lambda pg: None
-        common.human_pause = lambda lo=0.6, hi=1.8: None
-        common.looks_like_captcha = captcha if captcha is not None else (lambda body: "captcha-marker" in (body or ""))
-
-        browser = types.ModuleType("browser")
-        browser.launch = lambda: (launch or {"status": "already_running"})
-
-        download_calls: list[tuple] = []
-        download_pdf = types.ModuleType("download_pdf")
-
-        def _download_run(url, out_id, click_selector, use_current_page, out_path_override=None):
-            download_calls.append((url, out_id, click_selector, use_current_page, out_path_override))
-            Path(out_path_override).write_bytes(fake_pdf_bytes())
-            return {"status": "saved", "path": out_path_override, "size": lf.MIN_PDF_BYTES + 1024}
-
-        download_pdf.run = _download_run
-
-        playwright = types.ModuleType("playwright")
-        playwright_sync = types.ModuleType("playwright.sync_api")
-        playwright_sync.sync_playwright = lambda: _FakeCM(object())
-        playwright.sync_api = playwright_sync
-
-        modules = {
-            "browser": browser,
-            "common": common,
-            "download_pdf": download_pdf,
-            "playwright": playwright,
-            "playwright.sync_api": playwright_sync,
-        }
-        return modules, download_calls, page
-
-    def test_ensure_ready_maps_soc_launch_status(self) -> None:
-        modules, _, _ = self._patch_soc(launch={"status": "already_running"})
-        with patch.dict(sys.modules, modules):
-            fetcher = lf.SocBrowserFetcher({})
-            self.assertEqual(fetcher.ensure_ready()["status"], "ok")
-        modules, _, _ = self._patch_soc(launch={"status": "launch_timeout", "message": "CDP 未就绪"})
-        with patch.dict(sys.modules, modules):
-            fetcher = lf.SocBrowserFetcher({})
-            ready = fetcher.ensure_ready()
-            self.assertEqual(ready["status"], "error")
-            self.assertIn("CDP 未就绪", ready["message"])
-
-    def test_fetch_pdf_uses_out_path_override(self) -> None:
-        modules, download_calls, _ = self._patch_soc()
-        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, modules):
-            out_path = Path(temp) / "GSC-001.pdf"
-            fetcher = lf.SocBrowserFetcher({})
-            result = fetcher.fetch_pdf("https://example.org/a.pdf", out_path, {"per_paper_timeout_sec": 120})
-            self.assertEqual(result["status"], "saved")
-            self.assertEqual(download_calls, [("https://example.org/a.pdf", None, None, False, str(out_path))])
-            self.assertTrue(out_path.exists())
-
-    def test_fetch_page_reads_body_text(self) -> None:
-        modules, _, _ = self._patch_soc(text="正文 " * 100)
-        with patch.dict(sys.modules, modules):
-            fetcher = lf.SocBrowserFetcher({})
-            result = fetcher.fetch_page("https://example.org/article", {"per_paper_timeout_sec": 120})
-            self.assertEqual(result["status"], "ok")
-            self.assertEqual(result["text"], "正文 " * 100)
-
-    def test_fetch_page_detects_captcha_before_anything_else(self) -> None:
-        modules, _, _ = self._patch_soc(text="captcha-marker 人机验证")
-        with patch.dict(sys.modules, modules):
-            fetcher = lf.SocBrowserFetcher({})
-            self.assertEqual(fetcher.fetch_page("https://example.org/article", {})["status"], "captcha")
-
-    def test_fetch_page_returns_pdf_bytes_for_pdf_response(self) -> None:
-        modules, _, _ = self._patch_soc(content_type="application/pdf")
-        with patch.dict(sys.modules, modules):
-            fetcher = lf.SocBrowserFetcher({})
-            result = fetcher.fetch_page("https://example.org/download", {})
-            self.assertEqual(result["status"], "pdf_page")
-            self.assertTrue(result["bytes"].startswith(b"%PDF"))
-
-    def test_fetch_page_nav_error_is_reported(self) -> None:
-        modules, _, _ = self._patch_soc(goto_error="net::ERR_NAME_NOT_RESOLVED")
-        with patch.dict(sys.modules, modules):
-            fetcher = lf.SocBrowserFetcher({})
-            result = fetcher.fetch_page("https://example.org/missing", {})
-            self.assertEqual(result["status"], "nav_error")
-            self.assertIn("ERR_NAME_NOT_RESOLVED", result["error"])
-
-    def test_per_paper_timeout_bounds_navigation_timeout(self) -> None:
-        modules, _, page = self._patch_soc(text="正文 " * 100)
-        with patch.dict(sys.modules, modules):
-            fetcher = lf.SocBrowserFetcher({})
-            fetcher.fetch_page("https://example.org/article", {"per_paper_timeout_sec": 30})
-            self.assertEqual(page.goto_calls[0]["timeout"], 30000)
-            fetcher.fetch_page("https://example.org/article", {"per_paper_timeout_sec": 3600})
-            self.assertEqual(page.goto_calls[1]["timeout"], 60000)
+class ProductionFetcherAliasTest(unittest.TestCase):
+    def test_alias_and_factory_use_dedicated_fetcher(self) -> None:
+        from literature_fulltext_browser import FulltextBrowserFetcher
+        self.assertIs(lf.SocBrowserFetcher, FulltextBrowserFetcher)
+        with tempfile.TemporaryDirectory() as temp:
+            fetcher = lf.make_fetcher({}, Path(temp))
+            self.assertIsInstance(fetcher, FulltextBrowserFetcher)
+            self.assertEqual(fetcher.job_dir, Path(temp).resolve())
+            fetcher.close()
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +783,54 @@ class SocGlueTest(unittest.TestCase):
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args) -> None:  # keep the test output clean
         pass
+
+
+class _ArticleFixtureParser(HTMLParser):
+    """Local fixture adapter reads the actual article/heading/paragraph tree."""
+    def __init__(self):
+        super().__init__()
+        self.inside = False
+        self.title = ""
+        self.tag = ""
+        self.heading = ""
+        self.sections = []
+        self.parts = []
+        self.current = []
+
+    def _flush(self):
+        if self.heading:
+            self.sections.append({"heading": self.heading, "text": " ".join(self.current).strip()})
+        self.current = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tag = tag
+        if tag == "article":
+            self.inside = True
+        if self.inside and tag == "h2":
+            self._flush()
+            self.heading = ""
+
+    def handle_data(self, data):
+        if not self.inside or not data.strip():
+            return
+        self.parts.append(data.strip())
+        if self.tag == "h1":
+            self.title += data.strip()
+        elif self.tag == "h2":
+            self.heading += data.strip()
+        else:
+            self.current.append(data.strip())
+
+    def handle_endtag(self, tag):
+        if tag == "article":
+            self._flush()
+            self.inside = False
+        self.tag = ""
+
+    def evidence(self):
+        return {"origin": "dom_article_region", "container_verified": bool(self.parts),
+                "container": "article", "citation_title": self.title, "page_title": self.title,
+                "article_text": "\n".join(self.parts), "sections": self.sections}
 
 
 class UrllibFixtureFetcher:
@@ -912,7 +869,10 @@ class UrllibFixtureFetcher:
             return {"status": "nav_error", "error": str(exc), "url": url}
         if "pdf" in content_type.lower():
             return {"status": "pdf_page", "url": url, "bytes": blob}
-        return {"status": "ok", "text": blob.decode("utf-8", errors="replace"), "url": url}
+        html = blob.decode("utf-8", errors="replace")
+        parser = _ArticleFixtureParser()
+        parser.feed(html)
+        return {"status": "ok", "text": html, "url": url, "html_evidence": parser.evidence()}
 
 
 class LocalHttpFixtureTest(unittest.TestCase):
@@ -921,8 +881,11 @@ class LocalHttpFixtureTest(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         root = Path(cls.temp.name) / "site"
         root.mkdir(parents=True)
+        page = article_page("论文 GSC-002")
+        sections = "".join(f"<section><h2>{s['heading']}</h2><p>{s['text']}</p></section>"
+                           for s in page["html_evidence"]["sections"])
         (root / "article.html").write_text(
-            "<html><body><h1>土壤有机碳论文</h1><p>" + "研究全文正文内容 " * 400 + "</p></body></html>", encoding="utf-8"
+            "<html><body><nav>Site navigation</nav><article><h1>论文 GSC-002</h1>" + sections + "</article></body></html>", encoding="utf-8"
         )
         (root / "paper.pdf").write_bytes(fake_pdf_bytes())
         (root / "paywall.html").write_text(
@@ -973,7 +936,7 @@ class LocalHttpFixtureTest(unittest.TestCase):
             self.assertIn("待补充", items["GSC-003"]["reason"])
 
             self.assertEqual(items["GSC-004"]["status"], "unavailable")
-            self.assertIn("付费墙", items["GSC-004"]["reason"])
+            self.assertIn("权限", items["GSC-004"]["reason"])
 
             self.assertEqual(items["GSC-005"]["status"], "unavailable")
 

@@ -1,58 +1,28 @@
-"""Full-text acquisition stage (restricted) for the literature-mining pipeline.
+"""Sequential full-text acquisition with task-owned browser pages.
 
-Stage CLI (docs/literature-mining-stage2-design.md §2.4.3):
+The frozen candidates/dedupe input is kept unchanged. Only a validated PDF or
+identified article body counts as full text; metadata and abstracts are not
+accepted based on page length. HTML body proof and exact-file digests protect
+resume and extraction from old incorrectly labeled caches.
 
-    python -u tools/literature_fulltext.py --config C --output-dir D
-            [--resume] [--limit N] [--only id1,id2] [--retry-unavailable]
+One task page is reused while resolving a paper. After a confirmed file and
+its status are saved, the task page closes. Browser login/access/rate/page
+errors stop the batch and leave that page for the researcher. Requests use a
+fixed conservative interval; file downloads wait for the actual browser
+artifact, under the outer stage budget and explicit stop control.
 
-Behaviour:
+--review-only rechecks saved caches offline, preserving their files and the
+original status backup. --open-current only foregrounds an existing task page.
+Neither operation searches or downloads anything.
 
-- Input: prefers canonical groups from ``dedupe/dedupe.json``; falls back to the
-  cumulative ``candidates.json`` (deduplicated by ``canonical_id`` when present,
-  else ``candidate_id``; ``auto_excluded_duplicate`` records are skipped).
-- Target priority per paper (§2.4.3): (1) direct PDF in ``fulltext_links`` ->
-  (2) ``result_url`` ending in ``.pdf`` -> (3) ``result_url`` page navigation
-  (HTML text preferred). If every candidate fails the paper is ``unavailable``
-  (displayed as 待补充) with a reason.
-- Output (§3.5): ``fulltext/status.json`` + ``fulltext/files/<paper_id>.pdf|.txt``.
-- Human-in-the-loop: captcha -> ``attention(stage="verification")`` + exit 0;
-  the human completes the challenge in the persistent browser and the driver
-  resumes the stage with ``--resume``. Captchas are never bypassed.
-- Red line: no bypass of access restrictions. Paywalls, unreachable pages and
-  missing legal entry points are recorded as ``unavailable`` (待补充) with a
-  reason; no login simulation, no mirror scraping, no retry-bypass.
-- Retry policy (implementation decision; the design text is read as "resume
-  skips fetched_*; retrying unavailable items is opt-in"): items already
-  ``fetched_pdf``/``fetched_html`` whose file still exists are always kept and
-  never re-downloaded; ``pending``/``needs_attention`` items are attempted;
-  ``unavailable``/``abstract_only`` items are retried only with
-  ``--retry-unavailable``. The ``--resume`` flag is kept for CLI symmetry and
-  only changes the opening progress message.
-- Reuse (A-tier, design §5.2/§9.4): ``SOC-database-pipeline-clean/.codex/skills/
-  soc-paper-fetch/scripts`` is imported via ``sys.path`` (same pattern as
-  ``literature_search.py``): ``browser.launch``, ``common.connect_browser`` /
-  ``get_or_create_page`` / ``apply_stealth`` / ``looks_like_captcha``, and
-  ``download_pdf.run(..., out_path_override=<job>/fulltext/files/<id>.pdf)``.
-  The persistent CDP Chromium (with whatever login state the human established)
-  is shared with the discover stage.
-- V2 (per-paper connection overhead): first version calls ``download_pdf.run``
-  once per paper, and each call starts its own Playwright driver process and
-  attaches once to CDP 9222 (fixed cost per paper, dominated by ``page.goto``).
-  Two lightweight paths avoid that cost entirely without touching the SOC
-  contract: (a) items whose target file already exists on disk are settled by a
-  plain ``Path.exists()`` check with zero browser calls; (b) a run where nothing
-  is eligible never launches the browser at all. A future batch-friendly
-  optimisation (hoisting one ``sync_playwright``/CDP connection across papers by
-  inlining the selector loop) is deliberately not done in this stage to keep the
-  A-tier ``download_pdf`` reuse untouched.
-
-Events: NDJSON on stdout (``stage``/``attention``/``error``/``result``, §2.2);
-one run ends with exactly one of ``result`` (exit 0), ``attention`` (exit 0) or
-``error`` (exit 1).
+Outputs: fulltext/status.json, fulltext/files/*, and optional fulltext/review.json.
+NDJSON events end in result, attention, or error. The persistent research
+browser and unrelated tabs remain owned by the researcher.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -61,6 +31,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+
+from literature_fulltext_evidence import (EVIDENCE_VERSION, assess_html, revalidate_saved_html, verified_saved_html)
+from literature_fulltext_browser import FulltextBrowserFetcher
 
 ROOT = Path(__file__).resolve().parents[1]
 SOC_FETCH = ROOT / "SOC-database-pipeline-clean" / ".codex" / "skills" / "soc-paper-fetch" / "scripts"
@@ -108,13 +81,18 @@ PAYWALL_MARKERS = [
 _STDOUT_UTF8 = False
 
 
-class CaptchaPause(Exception):
-    """Raised when the persistent browser hits a captcha; the stage pauses."""
+class FulltextPause(Exception):
+    """A real page issue: preserve the tab and stop the current batch."""
 
+    def __init__(self, paper_id: str, url: str = "", *, reason="page_error", message="") -> None:
+        super().__init__(message or reason)
+        self.paper_id, self.url, self.reason = paper_id, safe_url(url), reason
+        self.message = message or "全文页面需要核对，已暂停；已有成果保留，请查看原页面后继续。"
+
+
+class CaptchaPause(FulltextPause):
     def __init__(self, paper_id: str, url: str = "") -> None:
-        super().__init__("captcha")
-        self.paper_id = paper_id
-        self.url = url
+        super().__init__(paper_id, url, reason="verification", message=ATTENTION_VERIFICATION_MESSAGE)
 
 
 def emit(kind: str, **values: object) -> None:
@@ -215,6 +193,10 @@ def candidate_urls(record: dict) -> list[tuple[str, str]]:
     seen: set[str] = set()
 
     def add(kind: str, url: str) -> None:
+        parsed = urlparse(url)
+        if ((parsed.hostname or "").lower().endswith(".cnki.net")
+                and parsed.path.rstrip("/").lower() == "/kcms2/article/abstract" and not parsed.query):
+            return  # Missing article identity: never repeatedly open this 404 entry.
         if url and url not in seen:
             seen.add(url)
             out.append((kind, url))
@@ -249,18 +231,11 @@ def classify_target(record: dict) -> dict:
     return {"kind": "none", "url": "", "reason": "无合法全文入口"}
 
 
-def assess_html_text(text: str) -> tuple[str, str]:
-    """Judge navigation text: ("fulltext"|"abstract"|"unavailable", reason)."""
-    cleaned = (text or "").strip()
-    low = cleaned.lower()
-    for marker in PAYWALL_MARKERS:
-        if marker.lower() in low:
-            return "unavailable", "付费墙/访问受限，仅摘要可见，不绕过访问控制（待补充）"
-    if len(cleaned) < HTML_MIN_TEXT_CHARS:
-        return "unavailable", f"页面无可提取正文（可见文本不足 {HTML_MIN_TEXT_CHARS} 字符）（待补充）"
-    if len(cleaned) < HTML_MIN_FULLTEXT_CHARS:
-        return "abstract", f"页面仅含摘要级文本（不足 {HTML_MIN_FULLTEXT_CHARS} 字符），全文待补充"
-    return "fulltext", ""
+def assess_html_text(text: str, url: str = "", evidence=None, expected_title="", expected_doi="") -> tuple[str, str]:
+    verdict, reason = assess_html(text, url=url, evidence=evidence, expected_title=expected_title, expected_doi=expected_doi)
+    if verdict != "fulltext" and "待补充" not in reason:
+        reason += "（全文待补充）"
+    return verdict, reason
 
 
 def validate_pdf_bytes(blob: bytes) -> tuple[bool, str, int]:
@@ -278,82 +253,13 @@ def validate_pdf_bytes(blob: bytes) -> tuple[bool, str, int]:
 # Real fetcher: persistent CDP browser + SOC scripts (A-tier reuse)
 # ---------------------------------------------------------------------------
 
-class SocBrowserFetcher:
-    """Drives the persistent Chromium via the SOC soc-paper-fetch scripts."""
-
-    def __init__(self, config: dict | None = None) -> None:
-        self._soc: tuple | None = None
-
-    def _soc_modules(self):
-        if self._soc is None:
-            if str(SOC_FETCH) not in sys.path:
-                sys.path.insert(0, str(SOC_FETCH))
-            import browser as soc_browser  # noqa: PLC0415 - SOC reuse, lazy import
-            import common as soc_common  # noqa: PLC0415
-            import download_pdf as soc_download_pdf  # noqa: PLC0415
-            self._soc = (soc_browser, soc_common, soc_download_pdf)
-        return self._soc
-
-    def ensure_ready(self) -> dict:
-        soc_browser, _, _ = self._soc_modules()
-        try:
-            launched = soc_browser.launch() or {}
-        except Exception as exc:  # playwright / chromium missing, CDP errors
-            return {"status": "error", "message": f"浏览器启动失败：{exc}"}
-        if launched.get("status") not in {"already_running", "launched"}:
-            return {"status": "error", "message": str(launched.get("message") or launched.get("status") or "浏览器启动失败")}
-        return {"status": "ok", "detail": str(launched.get("status"))}
-
-    def fetch_pdf(self, url: str, out_path: Path, opts: dict) -> dict:
-        _, _, soc_download_pdf = self._soc_modules()
-        try:
-            result = soc_download_pdf.run(url, None, None, False, str(out_path))
-        except Exception as exc:
-            return {"status": "fetch_error", "error": f"{exc}"}
-        return result if isinstance(result, dict) else {"status": "fetch_error", "error": "download_pdf 未返回结果"}
-
-    def fetch_page(self, url: str, opts: dict) -> dict:
-        _, soc_common, _ = self._soc_modules()
-        try:
-            from playwright.sync_api import sync_playwright  # noqa: PLC0415 - lazy import
-        except Exception as exc:
-            return {"status": "nav_error", "error": f"playwright 不可用：{exc}", "url": url}
-        timeout_ms = max(5000, min(60000, int(opts.get("per_paper_timeout_sec") or 120) * 1000))
-        try:
-            with sync_playwright() as p:
-                _, context = soc_common.connect_browser(p)
-                page = soc_common.get_or_create_page(context)
-                soc_common.apply_stealth(page)
-                try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-                except Exception as exc:
-                    return {"status": "nav_error", "error": str(exc), "url": url}
-                try:
-                    soc_common.human_pause(0.8, 1.6)
-                except Exception:
-                    pass
-                try:
-                    text = page.evaluate("() => document.body && document.body.innerText || ''")
-                except Exception:
-                    text = ""
-                if soc_common.looks_like_captcha(text):
-                    return {"status": "captcha", "url": page.url}
-                content_type = ""
-                if response is not None:
-                    content_type = str((response.headers or {}).get("content-type", "")).lower()
-                if "pdf" in content_type:
-                    try:
-                        blob = context.request.get(page.url, timeout=timeout_ms).body()
-                    except Exception as exc:
-                        return {"status": "nav_error", "error": f"PDF 响应读取失败：{exc}", "url": page.url}
-                    return {"status": "pdf_page", "url": page.url, "bytes": blob}
-                return {"status": "ok", "text": text, "url": page.url}
-        except Exception as exc:
-            return {"status": "nav_error", "error": str(exc), "url": url}
+# Backwards import name retained for callers; all production fetching now uses
+# one task-bound page rather than SOC's blank-page-only helper.
+SocBrowserFetcher = FulltextBrowserFetcher
 
 
-def make_fetcher(config: dict) -> SocBrowserFetcher:  # test seam
-    return SocBrowserFetcher(config)
+def make_fetcher(config: dict, job_dir: Path | None = None) -> FulltextBrowserFetcher:
+    return FulltextBrowserFetcher(config, job_dir, on_progress=lambda message: emit("stage", stage="fulltext", message=message))
 
 
 # ---------------------------------------------------------------------------
@@ -496,117 +402,114 @@ def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int)
     return item
 
 
-def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
-    """Fetch one paper's full text; returns a §3.5 item. Raises CaptchaPause.
+def _raise_page_attention(result: dict, paper_id: str, url: str) -> None:
+    if result.get("status") == "captcha":
+        raise CaptchaPause(paper_id, result.get("url") or url)
+    if result.get("status") == "attention":
+        raise FulltextPause(paper_id, result.get("url") or url,
+                            reason=str(result.get("reason") or "page_error"),
+                            message=str(result.get("message") or ""))
 
-    ``out_dir`` is the job directory; files land in ``<job>/fulltext/files/``.
+
+def _settle_html(item, job_dir, text, url, verdict, reason, evidence):
+    name = _sanitize_stem(item["paper_id"]) + ".txt"
+    path = job_dir / "fulltext" / "files" / name
+    saved = text.strip() + "\n"
+    atomic_write_text(path, saved)
+    item.update(fulltext_url=safe_url(url), kind="html",
+                status="fetched_html" if verdict == "fulltext" else "abstract_only",
+                path=f"fulltext/files/{name}", size=path.stat().st_size, retrieved_at=now_iso(),
+                evidence_level="fulltext_html" if verdict == "fulltext" else "abstract_only", reason=reason)
+    if verdict == "fulltext":
+        # Keep structural proof, not a duplicate of the entire article/HTML.
+        proof = {key: evidence.get(key) for key in
+                 ("origin", "container", "container_verified", "page_title", "citation_title", "citation_doi", "headings")}
+        proof["sections"] = [{"heading": str(section.get("heading") or "")[:300],
+                               "text": str(section.get("text") or "")[:250]}
+                              for section in (evidence.get("sections") or []) if isinstance(section, dict)]
+        item.update(evidence_version=EVIDENCE_VERSION, html_evidence=proof,
+                    content_sha256=hashlib.sha256(saved.encode("utf-8")).hexdigest())
+    return item
+
+
+def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
+    """Fetch one paper, following only its observed legal entry links.
+
+    An abstract is retained as a fallback while observed full-text links are
+    tried. Any access/loading issue stops the batch immediately.
     """
-    fetcher = opts["fetcher"]
-    job_dir = Path(out_dir)
+    fetcher, job_dir = opts["fetcher"], Path(out_dir)
     files_dir = job_dir / "fulltext" / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
     paper_id = str(record.get("paper_id") or "")
-    stem = _sanitize_stem(paper_id)
-    item = _item_skeleton(record)
-
+    stem, item = _sanitize_stem(paper_id), _item_skeleton(record)
     attempts = candidate_urls(record)
     if not attempts:
         if str(record.get("snippet") or "").strip():
-            item.update(
-                kind="abstract",
-                status="abstract_only",
-                evidence_level="search_result_snippet",
-                reason="无合法全文入口，仅有检索片段（待补充）",
-            )
+            item.update(kind="abstract", status="abstract_only", evidence_level="search_result_snippet",
+                        reason="无合法全文入口，仅有检索片段（待补充）")
         else:
-            item.update(status="unavailable", reason="无合法全文入口（待补充）")
+            missing_cnki = urlparse(_record_result_url(record)).path.rstrip("/").lower() == "/kcms2/article/abstract"
+            item.update(status="unavailable", reason=("知网入口缺少单篇文献标识，请从官方页面补充有效入口（待补充）" if missing_cnki else "无合法全文入口（待补充）"))
         return item
-
-    failures: list[str] = []
+    failures, seen, abstract = [], set(), None
     for kind, url in attempts:
+        if url in seen:
+            continue
+        if len(seen) >= 8:
+            break
+        seen.add(url)
         if kind == "pdf":
-            file_name = f"{stem}.pdf"
-            out_path = files_dir / file_name
-            files_rel = f"fulltext/files/{file_name}"
-            if out_path.exists() and out_path.stat().st_size >= MIN_PDF_BYTES:
-                # Lightweight fast path: file already on disk, zero browser calls.
-                return _settle_pdf(item, out_path, files_rel, url, out_path.stat().st_size)
-            result = fetcher.fetch_pdf(url, out_path, opts)
-            status = str(result.get("status") or "")
-            if status == "captcha":
-                raise CaptchaPause(paper_id, url)
-            if status in {"saved", "already_exists"}:
-                if not out_path.exists():
-                    failures.append(f"PDF 保存结果缺失文件（{url}）")
+            name = f"{stem}.pdf"
+            path, relative = files_dir / name, f"fulltext/files/{name}"
+            if path.exists() and _looks_like_valid_pdf(path):
+                return _settle_pdf(item, path, relative, url, path.stat().st_size)
+            result = fetcher.fetch_pdf(url, path, opts)
+            _raise_page_attention(result, paper_id, url)
+            if result.get("status") in {"saved", "already_exists"}:
+                if not _looks_like_valid_pdf(path):
+                    failures.append("PDF 校验失败（需 %PDF 魔数且 ≥50KB）")
+                    # Only this fetch attempt's invalid artifact is discarded.
+                    if path.exists():
+                        path.unlink(missing_ok=True)
                     continue
-                size = out_path.stat().st_size
-                if not _looks_like_valid_pdf(out_path):
-                    failures.append(f"PDF 校验失败（需 %PDF 魔数且 ≥50KB）（{url}）")
-                    try:
-                        out_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    continue
-                return _settle_pdf(item, out_path, files_rel, url, size)
-            detail = str(result.get("error") or result.get("message") or "").strip()
-            failures.append(f"PDF 获取失败（{url}）：{status}{' ' + _short(detail, 120) if detail else ''}")
+                return _settle_pdf(item, path, relative, url, path.stat().st_size)
+            failures.append(f"PDF 获取失败（{url}）：{result.get('status') or '未知'}")
             continue
-
-        # kind == "html"
         result = fetcher.fetch_page(url, opts)
-        status = str(result.get("status") or "")
-        if status == "captcha":
-            raise CaptchaPause(paper_id, url)
-        if status == "pdf_page":
+        _raise_page_attention(result, paper_id, url)
+        if result.get("status") == "pdf_page":
             blob = result.get("bytes") or b""
-            ok, why, size = validate_pdf_bytes(blob)
-            if not ok:
-                failures.append(f"页面返回的 PDF 校验失败（{url}）：{why}")
+            valid, why, size = validate_pdf_bytes(blob)
+            if not valid:
+                failures.append(f"页面返回的 PDF 校验失败：{why}")
                 continue
-            file_name = f"{stem}.pdf"
-            out_path = files_dir / file_name
-            atomic_write_bytes(out_path, blob)
-            return _settle_pdf(item, out_path, f"fulltext/files/{file_name}", str(result.get("url") or url), size)
-        if status == "ok":
-            text = str(result.get("text") or "")
-            verdict, reason = assess_html_text(text)
-            page_url = str(result.get("url") or url)
-            if verdict in {"fulltext", "abstract"}:
-                file_name = f"{stem}.txt"
-                out_path = files_dir / file_name
-                atomic_write_text(out_path, text.strip() + "\n")
-                if verdict == "fulltext":
-                    item.update(
-                        fulltext_url=page_url,
-                        kind="html",
-                        status="fetched_html",
-                        path=f"fulltext/files/{file_name}",
-                        size=out_path.stat().st_size,
-                        retrieved_at=now_iso(),
-                        evidence_level="fulltext_html",
-                        reason="",
-                    )
-                else:
-                    item.update(
-                        fulltext_url=page_url,
-                        kind="html",
-                        status="abstract_only",
-                        path=f"fulltext/files/{file_name}",
-                        size=out_path.stat().st_size,
-                        retrieved_at=now_iso(),
-                        evidence_level="abstract_only",
-                        reason=reason,
-                    )
-                return item
-            failures.append(f"页面不可用（{url}）：{reason}")
+            name, path = f"{stem}.pdf", files_dir / f"{stem}.pdf"
+            atomic_write_bytes(path, blob)
+            return _settle_pdf(item, path, f"fulltext/files/{name}", result.get("url") or url, size)
+        if result.get("status") == "ok":
+            text, page_url = str(result.get("text") or ""), safe_url(result.get("url") or url)
+            proof = result.get("html_evidence") if isinstance(result.get("html_evidence"), dict) else {}
+            verdict, reason = assess_html_text(text, page_url, proof, record.get("title") or "", record.get("doi") or "")
+            if verdict == "fulltext":
+                return _settle_html(item, job_dir, str(proof.get("article_text") or text), page_url, verdict, reason, proof)
+            if verdict == "abstract" and abstract is None:
+                abstract = (str(proof.get("article_text") or text), page_url, verdict, reason, proof)
+            # These are visible page links, never guessed database/session URLs.
+            for link in (proof.get("links") or result.get("fulltext_links") or [])[:8]:
+                if not isinstance(link, dict):
+                    continue
+                linked = safe_url(link.get("url"))
+                if linked and linked not in seen and all(other != linked for _, other in attempts):
+                    attempts.append(("pdf" if _url_looks_pdf(linked) else "html", linked))
+            if verdict == "unavailable":
+                failures.append(f"页面不可用（{url}）：{reason}")
             continue
-        detail = str(result.get("error") or "").strip()
-        failures.append(f"页面导航失败（{url}）：{status}{' ' + _short(detail, 120) if detail else ''}")
-
+        failures.append(f"页面导航失败（{url}）：{result.get('status') or '未知'}")
+    if abstract:
+        return _settle_html(item, job_dir, *abstract)
     reason = "；".join(failures)[:600] or "全部获取路径失败"
-    if "待补充" not in reason:
-        reason = f"{reason}（待补充）"
-    item.update(status="unavailable", reason=reason)
+    item.update(status="unavailable", reason=reason if "待补充" in reason else reason + "（待补充）")
     return item
 
 
@@ -641,9 +544,15 @@ def _carry_previous(target: dict, prev: dict | None, job_dir: Path) -> dict:
     item = _item_skeleton(target)
     if not prev:
         return item
-    for key in ("fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason"):
+    for key in ("fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "evidence_version", "html_evidence", "content_sha256", "reviewed_at"):
         if key in prev:
             item[key] = prev[key]
+    if item["status"] == "fetched_html":
+        path = _safe_cache_path(job_dir, item.get("path") or "")
+        if path is not None:
+            valid, reason = verified_saved_html(item, path.read_text(encoding="utf-8", errors="replace"))
+            if not valid:
+                item.update(status="unavailable", evidence_level="unverified_cache", reason=reason)
     if item["status"] in FETCHED_STATUSES:
         rel = str(item.get("path") or "")
         if not rel or not (job_dir / rel).exists():
@@ -693,6 +602,70 @@ def _write_status(job_dir: Path, items: list[dict]) -> dict:
     return counts
 
 
+def _safe_cache_path(job_dir: Path, relative: str) -> Path | None:
+    base = (job_dir / "fulltext" / "files").resolve()
+    target = (job_dir / str(relative)).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return None
+    return target if target.is_file() and not target.is_symlink() else None
+
+
+def review_saved_fulltext(job_dir: Path, *, emit_result=True) -> dict:
+    """Offline evidence review: keep every cached file and the original status."""
+    job_dir = Path(job_dir)
+    for name in ("extraction", "validation", "export"):
+        folder = job_dir / name
+        if folder.exists() and any(folder.rglob("*")):
+            raise ValueError("已有下游提取/校验/导出成果，请先核对，不能自动复核改写全文依据")
+    status_path = job_dir / "fulltext" / "status.json"
+    original = status_path.read_bytes()
+    document = json.loads(original.decode("utf-8"))
+    if not isinstance(document, dict) or not isinstance(document.get("items"), list):
+        raise ValueError("全文状态文件无效，无法复核")
+    items, changes, reviewed = document["items"], [], 0
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("全文条目无效，无法复核")
+        prior = str(item.get("status") or "")
+        if prior not in FETCHED_STATUSES:
+            continue
+        reviewed += 1
+        path = _safe_cache_path(job_dir, item.get("path") or "")
+        if path is None:
+            verdict, reason = "unavailable", "已保存文件缺失或路径无效（待补充）"
+        elif prior == "fetched_pdf":
+            if _looks_like_valid_pdf(path):
+                continue
+            verdict, reason = "unavailable", "缓存PDF未通过格式校验（待补充）"
+        else:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            verdict, reason = revalidate_saved_html(item, text)
+            if verdict == "fulltext":
+                continue
+        item.update(status="abstract_only" if verdict == "abstract" else "unavailable",
+                    evidence_level="abstract_only" if verdict == "abstract" else "unverified_cache",
+                    reason=reason, reviewed_at=now_iso())
+        changes.append({"paper_id": str(item.get("paper_id") or ""), "previous_status": prior,
+                        "status": item["status"], "reason": reason})
+    backup_name = "fulltext/backups/status-" + hashlib.sha256(original).hexdigest() + ".json"
+    backup = job_dir / backup_name
+    if not backup.exists():
+        atomic_write_bytes(backup, original)
+    counts = _write_status(job_dir, items)
+    counts.update(reviewed=reviewed, changed=len(changes), fetched=counts["fetched_pdf"] + counts["fetched_html"])
+    report = {"version": 1, "evidence_version": EVIDENCE_VERSION, "reviewed_at": now_iso(),
+              "offline_only": True, "backup": backup_name, "counts": counts, "changes": changes,
+              "note": "仅复核已保存文件；未访问网站、未重试下载。摘要和待补充项不自动重复请求。"}
+    atomic_write_json(job_dir / "fulltext" / "review.json", report)
+    if emit_result:
+        emit("result", stage="fulltext_review", count=counts["fetched"], counts=counts,
+             message=f"缓存已复核：正文/PDF {counts['fetched']} 篇，摘要 {counts['abstract_only']} 篇，待补充 {counts['unavailable']} 篇；尚未继续获取全文。",
+             files=["fulltext/status.json", "fulltext/review.json"])
+    return report
+
+
 def _parse_only(only: object) -> list[str] | None:
     if only is None:
         return None
@@ -706,7 +679,7 @@ def _parse_only(only: object) -> list[str] | None:
     return values
 
 
-def run(
+def _run_fulltext(
     config: dict,
     job_dir: Path,
     *,
@@ -824,7 +797,7 @@ def run(
         return 0
 
     if fetcher is None:
-        fetcher = make_fetcher(config)
+        fetcher = make_fetcher(config, job_dir)
     try:
         ready = fetcher.ensure_ready()
     except Exception as error:
@@ -844,7 +817,7 @@ def run(
         )
         try:
             updated = fetch_one(target, job_dir, opts)
-        except CaptchaPause as pause:
+        except FulltextPause as pause:
             item.update(
                 fulltext_url=pause.url or str(item.get("fulltext_url") or ""),
                 kind="none",
@@ -853,13 +826,17 @@ def run(
                 size=0,
                 retrieved_at="",
                 evidence_level="",
-                reason="人机验证未完成，等待人工处理后继续（待补充）",
+                reason=pause.message,
             )
             _write_status(job_dir, items)
-            emit("attention", stage="verification", message=ATTENTION_VERIFICATION_MESSAGE)
+            emit("attention", stage="verification", reason=pause.reason, paper_id=pause.paper_id, message=pause.message)
             return 0
         items[position[item["paper_id"]]] = updated
         _write_status(job_dir, items)
+        if updated.get("status") in FETCHED_STATUSES:
+            complete = getattr(fetcher, "complete_paper", None)
+            if callable(complete):
+                complete()  # Close only our page, after validated file and status are saved.
 
     counts = _write_status(job_dir, items)
     fetched = counts["fetched_pdf"] + counts["fetched_html"]
@@ -886,6 +863,30 @@ def run(
     return 0
 
 
+def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, fetcher=None):
+    job_dir = Path(job_dir)
+    # Recheck legacy successes before any network access. An unverified cache
+    # must not silently become extraction input on a normal resume.
+    status_path = job_dir / "fulltext" / "status.json"
+    if status_path.exists():
+        try:
+            saved = json.loads(status_path.read_text(encoding="utf-8"))
+            if any(item.get("status") == "fetched_html" and item.get("evidence_version") != EVIDENCE_VERSION
+                   for item in saved.get("items", []) if isinstance(item, dict)):
+                review_saved_fulltext(job_dir, emit_result=False)
+        except (OSError, ValueError) as error:
+            emit("error", stage="fulltext", message=f"全文缓存需复核，已暂停：{error}")
+            return 1
+    actual = fetcher if fetcher is not None else make_fetcher(config, job_dir)
+    try:
+        return _run_fulltext(config, job_dir, resume=resume, limit=limit, only=only,
+                             retry_unavailable=retry_unavailable, fetcher=actual)
+    finally:
+        close = getattr(actual, "close", None)
+        if callable(close):
+            close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="文献挖掘·全文获取阶段（受限，不绕过访问控制）")
     parser.add_argument("--config", type=Path, required=True, help="任务 run_config.json 路径")
@@ -894,12 +895,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, help="本次最多获取的篇数")
     parser.add_argument("--only", help="仅处理指定论文标识，逗号分隔（如 GSC-001,GSC-002）")
     parser.add_argument("--retry-unavailable", action="store_true", help="重试此前标为待补充（unavailable/abstract_only）的项")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--review-only", action="store_true", help="仅离线复核缓存，不访问网站")
+    mode.add_argument("--open-current", action="store_true", help="只显示任务已绑定的全文页面")
     args = parser.parse_args(argv)
 
     try:
         config = json.loads(args.config.read_text(encoding="utf-8"))
         if not isinstance(config, dict):
             raise ValueError("运行配置无效")
+        if args.review_only:
+            review_saved_fulltext(args.output_dir)
+            return 0
+        if args.open_current:
+            fetcher = make_fetcher(config, args.output_dir)
+            try:
+                result = fetcher.open_current()
+                if not result.get("opened"):
+                    raise ValueError(result.get("message") or "尚无该任务绑定的全文页面")
+                emit("result", stage="fulltext_browser", opened=True, message="已显示原任务全文页面")
+                return 0
+            finally:
+                fetcher.close()
         return run(
             config,
             args.output_dir,

@@ -131,7 +131,7 @@ const context = vm.createContext({
 });
 const configCode = codex.slice(codex.indexOf('  const LITERATURE_CONFIG_KEYS'), codex.indexOf('  async function prepareLiterature'));
 const labelsCode = codex.slice(codex.indexOf('  const LITERATURE_STAGE_ORDER'), codex.indexOf('  function literatureFileLabel'));
-vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'continueAvailableLiterature', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureProcessingBasisMessage', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
+vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureProcessingBasisMessage', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
   + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, continueAvailableLiterature, openLiteratureBrowser, literatureAttentionMessage, literatureProcessingBasisMessage, literatureStageLabel, literatureStageBar, literaturePanel };', context);
 const subject = context.subject;
 
@@ -451,6 +451,31 @@ async function multiSourceTests() {
   container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
   assert.equal(scrolls.length, 2, 'Deferred-only state never reopens the timeout attention card');
   assert.ok(codex.includes("'processing-basis.json': '本次处理依据'"));
+  const fulltextJob = { ...deferralJob, deferredOnly: false, deferredSources: [], status: 'cancelled', stage: 'cancelled',
+    resumeStage: null, canReviewFulltext: true, attention: null, files: ['fulltext/status.json'],
+    message: '任务已停止', stages: { discover: 'done', dedupe: 'done', fulltext: 'running', extract: 'pending' } };
+  current.literatureJob = fulltextJob; current.literatureUntil = 'export';
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.ok(elements(container).some(item => item.tag === 'button' && item.textContent === '复核已保存全文'), 'Stopped fulltext jobs offer offline review');
+  assert.ok(!elements(container).some(item => item.tag === 'button' && item.textContent === '继续获取全文'), 'A cancelled job must be reviewed before it is resumed');
+  current.literatureJob = { ...fulltextJob, status: 'needs_attention', stage: 'fulltext_review', resumeStage: 'fulltext',
+    message: '缓存已复核，尚未继续获取全文。' };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  const fulltextNodes = elements(container);
+  assert.ok(fulltextNodes.some(item => item.textContent === '当前需要处理：全文获取'));
+  assert.ok(fulltextNodes.some(item => item.tag === 'button' && item.textContent === '查看原全文任务页'));
+  assert.ok(fulltextNodes.some(item => item.textContent.includes('同篇文献复用任务页') && item.textContent.includes('已保存后关闭') && item.textContent.includes('不自动重复请求')));
+  assert.ok(!fulltextNodes.some(item => item.tag === 'button' && item.textContent === '暂缓此来源，继续其他来源'));
+  calls.length = 0; responseJob = { id: fulltextJob.id };
+  await fulltextNodes.find(item => item.tag === 'button' && item.textContent === '继续获取全文').onclick();
+  assert.equal(calls[0].url, '/api/literature/advance'); assert.equal(calls[0].body.until, 'fulltext');
+  assert.ok(!calls.some(call => call.url === '/api/literature/search'));
+  current.literatureJob = { ...fulltextJob, status: 'needs_attention', stage: 'verification', resumeStage: 'fulltext',
+    message: '全文页面加载超过1分钟或设定时限，已暂停；已有材料保留，请在原页面核对后继续。', events: [{ at: 'fulltext-timeout' }] };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.equal(scrolls.length, 3, 'A fulltext navigation timeout also reveals the attention card');
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  assert.equal(scrolls.length, 3, 'Polling the same fulltext timeout does not steal scroll again');
   console.log('LITERATURE_UI_STAGE2_TESTS_PASS');
 }
 multiSourceTests().catch(error => { console.error(error); process.exitCode = 1; });

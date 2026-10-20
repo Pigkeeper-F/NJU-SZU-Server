@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from literature_fulltext_evidence import EVIDENCE_VERSION, verified_saved_html
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -276,6 +278,21 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
     except json.JSONDecodeError as error:
         raise StageError(f"全文状态文件损坏：{error}") from None
     items = [item for item in (status.get("items") or []) if isinstance(item, dict)]
+    # Older whole-page text was sometimes mislabeled as full text. Validate
+    # HTML evidence before reusing any old input bundle or calling a model.
+    for item in items:
+        if item.get("status") not in FULLTEXT_READY:
+            paper_id = str(item.get("paper_id") or "")
+            if safe_paper_id(paper_id) and (job_dir / "extraction" / "inputs" / f"{paper_id}.json").exists():
+                raise StageError("全文状态已变化，旧提取输入不再适用（" + paper_id + "）；请核对旧输入，不能继续沿用摘要缓存")
+            continue
+        if item.get("status") != "fetched_html":
+            continue
+        text, reason = read_fulltext_text(job_dir, item)
+        valid, proof_reason = verified_saved_html(item, text)
+        if reason or not valid:
+            raise StageError("全文缓存尚未通过正文复核（" + str(item.get("paper_id") or "未知")
+                             + "）：请先点击“复核已保存全文”，摘要/题录不能进入数据提取")
     max_chars = max_chars_per_paper(config)
     keys = schema_keys(schema)
     conditions = condition_keys(schema)
@@ -315,6 +332,10 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
             continue
         relative = f"extraction/inputs/{paper_id}.json"
         bundle_path = inputs_dir / f"{paper_id}.json"
+        item_status = str(item.get("status") or "")
+        if item_status not in FULLTEXT_READY:
+            skipped.append({"paper_id": paper_id, "reason": f"全文状态为 {item_status or '未知'}，不生成提取输入包"})
+            continue
         if bundle_path.is_file() and not force:
             existing = None
             try:
@@ -322,6 +343,9 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
             except json.JSONDecodeError:
                 existing = None
             if isinstance(existing, dict) and existing.get("schema_sha256") == schema["sha256"]:
+                if item_status == "fetched_html" and (existing.get("fulltext", {}).get("content_sha256") != item.get("content_sha256")
+                        or existing.get("fulltext", {}).get("evidence_version") != EVIDENCE_VERSION):
+                    raise StageError("提取输入与当前正文证据不一致（" + paper_id + "）；请使用 --force 重建后重跑")
                 reused.append(paper_id)
                 files.append(relative)
                 continue
@@ -347,6 +371,8 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
                 "text": text,
                 "chars": len(text),
                 "truncated": truncated,
+                "evidence_version": item.get("evidence_version"),
+                "content_sha256": item.get("content_sha256"),
             },
             "field_definitions": schema["fields"],
             "condition_keys": conditions,

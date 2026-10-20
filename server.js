@@ -300,6 +300,13 @@ async function handleLiterature(req, res, url) {
       }
       return sendJson(res, 200, scholar.continueAvailable(data.id, { until: data.until }));
     }
+    if (req.method === 'POST' && route === '/api/literature/review-fulltext') {
+      const data = JSON.parse(await readBody(req, 4 * 1024));
+      if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => key !== 'id')) {
+        throw new Error('只需提供当前全文任务标识');
+      }
+      return sendJson(res, 202, scholar.reviewFulltext(data.id));
+    }
     if (req.method === 'POST' && route === '/api/literature/browser') {
       const data = JSON.parse(await readBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Object.keys(data).some(key => key !== 'id')) throw new Error('只需提供当前检索任务标识');

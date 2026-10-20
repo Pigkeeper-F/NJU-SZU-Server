@@ -316,6 +316,12 @@ async function main() {
     const advance = await post('/api/literature/advance', { id: jobId }, { 'X-Workbench': '1' });
     assert.equal(advance.status, 200);
     snap = await waitTerminal(jobId);
+    assert.equal(snap.status, 'needs_attention');
+    assert.equal(snap.stage, 'fulltext_ready');
+    assert.equal(snap.resumeStage, 'extract');
+    assert.equal(snap.stages.extract, 'pending');
+    assert.equal((await post('/api/literature/advance', { id: jobId }, { 'X-Workbench': '1' })).status, 200);
+    snap = await waitTerminal(jobId);
     // P0 注入点护栏：server.js 真实注入的 extract 适配器必须能跑起来并停在字段确认关口；
     // 若 runExtractStage 再次丢 jobDir/config，这里会是 failed『提取阶段缺少必要参数…』。
     assert.equal(snap.status, 'needs_attention', `expected awaiting_confirmation gate, got status=${snap.status} error=${snap.error}`);

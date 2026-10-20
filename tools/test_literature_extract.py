@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -77,6 +78,9 @@ def write_job(root: Path, *, fields=FIELDS, max_chars=120000, statuses=None, htm
             "records": [{"at": "2026-10-15T00:00:00Z", "by": "researcher", "kind": "fieldDefinitions",
                          "fields": fields, "note": ""}],
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    intro = "The study describes soil properties and the experimental setting. " * 8
+    methods = "Measurements used a consistent protocol across sites and treatments. " * 8
+    html_text = html_text + "\nIntroduction\n" + intro + "\nMethods\n" + methods
     (job / "fulltext" / "files" / "GSC-001.txt").write_text(html_text, encoding="utf-8")
     (job / "fulltext" / "files" / "GSC-002.pdf").write_bytes(make_pdf())
     (job / "fulltext" / "files" / "GSC-003.pdf").write_bytes(b"%PDF-1.4\nthis is not a real pdf\n")
@@ -98,6 +102,10 @@ def write_job(root: Path, *, fields=FIELDS, max_chars=120000, statuses=None, htm
          "path": "", "size": 0, "retrieved_at": "2026-10-15T00:00:00Z",
          "evidence_level": "search_result_snippet", "reason": "付费墙"},
     ]
+    if statuses is None:
+        items[0].update(evidence_version="fulltext-evidence-v1", content_sha256=hashlib.sha256(html_text.encode("utf-8")).hexdigest(),
+                        html_evidence={"origin":"dom_article_region", "container_verified":True, "citation_title":"A",
+                                       "sections":[{"heading":"Introduction","text":intro},{"heading":"Methods","text":methods}]})
     (job / "fulltext" / "status.json").write_text(json.dumps({
         "version": 1, "generated_at": "2026-10-15T00:00:00Z", "policy": "…", "items": items,
         "counts": {"total": len(items)},

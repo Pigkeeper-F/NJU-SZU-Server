@@ -47,6 +47,7 @@ const DELIVERABLE_PATTERNS = [
   /^processing-basis\.json$/,
   /^dedupe\/dedupe\.(?:json|csv)$/,
   /^fulltext\/status\.json$/,
+  /^fulltext\/review\.json$/,
   /^fulltext\/files\/[^/\\]+\.(?:pdf|txt)$/,
   /^extraction\/inputs\/[^/\\]+\.json$/,
   /^extraction\/[^/\\]+\.json$/,
@@ -150,10 +151,31 @@ function executionOrder(config, queue) {
   return [...selectedSources(config).filter(source => !queue.includes(source)), ...queue];
 }
 
+function fulltextReviewEligible(job, dir) {
+  if (!job || job.deletedAt || job.status === 'running' || job.child || job.browserOpening) return false;
+  const status = loadJsonFile(path.join(dir, 'fulltext', 'status.json'));
+  const dedupe = loadJsonFile(path.join(dir, 'dedupe', 'dedupe.json'));
+  if (!Array.isArray(status?.items) || !Array.isArray(dedupe?.groups) || !dedupe.groups.length) return false;
+  if (!(job.resumeStage === 'fulltext' || job.activeStage === 'fulltext' || job.stage === 'fulltext_review'
+      || ['running', 'done', 'failed'].includes(job.stages?.fulltext))) return false;
+  // A cache correction must never silently invalidate saved downstream work.
+  for (const relative of ['extraction', 'validation', 'export']) {
+    const directory = path.join(dir, relative);
+    try { if (fs.readdirSync(directory).length) return false; } catch (error) { if (error.code !== 'ENOENT') return false; }
+  }
+  return true;
+}
+
+function existingPython(root, job) {
+  const python = job.python || path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+  if (!fs.existsSync(python)) throw new Error('本地 Python 环境尚未准备；全文缓存复核不会联网安装依赖。');
+  return python;
+}
+
 function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     if (options.job?.status === 'cancelled') { reject(new Error('检索已停止')); return; }
-    const child = spawn(command, args, { cwd: options.cwd, env: pythonEnv(), windowsHide: true });
+    const child = spawn(command, args, { cwd: options.cwd, env: { ...pythonEnv(), ...options.environment }, windowsHide: true });
     if (options.job) options.job.child = child;
     let output = '';
     let settled = false;
@@ -438,6 +460,18 @@ class LiteratureConnector {
     this.prepare = options.prepare || ((job, progress) => preparePython(root, job, progress));
     this.search = options.search || null;
     this.extract = options.extract || null;
+    this.prepareOffline = options.prepareOffline || (async job => existingPython(this.root, job));
+    this.openFulltext = options.openFulltext || (async (job, python) => {
+      const spec = await stagePythonProcessSpec(this.root, python);
+      if (job.status !== 'needs_attention' || job.resumeStage !== 'fulltext') throw new Error('任务状态已变化，请刷新后再操作');
+      const raw = await runCommand(spec.executable, ['-u', path.join(this.root, 'tools', 'literature_fulltext.py'),
+        '--config', path.join(job.dir, 'run_config.json'), '--output-dir', job.dir, '--open-current'],
+      { cwd: this.root, timeout: 15000, environment: spec.environment });
+      let result;
+      try { result = JSON.parse(raw); } catch (_) { throw new Error('全文任务页未返回有效状态，请重试'); }
+      if (result?.opened !== true) throw new Error('全文任务页尚未打开，请先显式继续获取全文');
+      return result;
+    });
     this.openSource = options.openSource || (async (job, python, source) => {
       const raw = await runCommand(python, ['-u', path.join(this.root, 'tools', 'literature_browser.py'), '--open-source', source, '--output-dir', job.dir], { cwd: this.root, timeout: 45000 });
       let result;
@@ -451,9 +485,10 @@ class LiteratureConnector {
     const queue = checkpointDeferredSources(job.dir, job.config, job.deferredSources);
     return { id: job.id, status: job.status, stage: job.stage, message: job.message,
       count: job.count, config: job.config, files: job.files, events: job.events, error: job.error,
-      stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters,
+      stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters, activeStage: job.activeStage || null,
       attention: sourceAttention(job.attention), deferredSources: queue, deferredOnly: checkpointDeferredOnly(job.dir, job.config),
-      executionOrder: executionOrder(job.config, queue), processingBasis: job.processingBasis || null, deletedAt: job.deletedAt || null };
+      executionOrder: executionOrder(job.config, queue), processingBasis: job.processingBasis || null, deletedAt: job.deletedAt || null,
+      canReviewFulltext: fulltextReviewEligible(job, job.dir) };
   }
 
   persist(job) {
@@ -501,14 +536,30 @@ class LiteratureConnector {
     this.registerFiles(job, items.map(item => item && item.path).filter(Boolean));
   }
 
+  syncFulltextSnapshot(job) {
+    const status = loadJsonFile(path.join(job.dir, 'fulltext', 'status.json'));
+    if (!Array.isArray(status?.items)) return;
+    const counts = Object.fromEntries(['fetched_pdf', 'fetched_html', 'abstract_only', 'unavailable', 'needs_attention', 'pending'].map(key => [key, 0]));
+    for (const item of status.items) if (item && Object.hasOwn(counts, item.status)) counts[item.status]++;
+    const count = counts.fetched_pdf + counts.fetched_html;
+    job.count = count; this.mergeCounters(job, 'fulltext', { count, counts });
+    this.registerFiles(job, ['fulltext/status.json']); this.registerFulltextFiles(job);
+  }
+
   mergeCounters(job, stage, event) {
     const counters = job.counters || (job.counters = {});
     const counts = event && typeof event.counts === 'object' && event.counts ? event.counts : {};
     const integer = value => (Number.isInteger(value) ? value : null);
     if (stage === 'discover' && integer(event.count) !== null) counters.candidates = event.count;
     if (stage === 'dedupe' && integer(counts.groups) !== null) counters.uniqueGroups = counts.groups;
-    if (stage === 'fulltext' && (integer(event.count) !== null || integer(counts.fetched) !== null)) {
+    if (['fulltext', 'fulltext_review'].includes(stage) && (integer(event.count) !== null || integer(counts.fetched) !== null)) {
       counters.fulltextFetched = integer(event.count) !== null ? event.count : counts.fetched;
+    }
+    if (['fulltext', 'fulltext_review'].includes(stage)) {
+      for (const [field, key] of Object.entries({ fetched_pdf: 'fulltextPdf', fetched_html: 'fulltextHtml',
+        abstract_only: 'fulltextAbstract', unavailable: 'fulltextUnavailable', needs_attention: 'fulltextAttention', pending: 'fulltextPending' })) {
+        if (integer(counts[field]) !== null) counters[key] = counts[field];
+      }
     }
     if (stage === 'extract' && integer(event.count) !== null) counters.extractedPapers = event.count;
     if (stage === 'validate' && integer(counts.parameters_total) !== null) counters.parameterRows = counts.parameters_total;
@@ -550,10 +601,11 @@ class LiteratureConnector {
     if (event.type === 'attention') {
       job.status = 'needs_attention';
       job.resumeStage = stageKey;
-      if (stageKey === 'discover' && job.stages) job.stages.discover = 'pending';
+      if (job.stages && event.stage !== 'awaiting_confirmation') job.stages[stageKey] = 'pending';
       job.attention = sourceAttention(event);
       this.registerFiles(job, event.files);
       if (Number.isInteger(event.count)) { job.count = event.count; this.mergeCounters(job, stageKey, event); }
+      if (stageKey === 'fulltext') this.syncFulltextSnapshot(job);
       const label = String(event.stage || (stageKey === 'discover' ? 'verification' : stageKey));
       this.update(job, label, String(event.message || '需要人工处理'));
       return;
@@ -659,6 +711,13 @@ class LiteratureConnector {
           this.update(job, 'failed', job.error);
           return;
         }
+        if (stage === 'fulltext' && index < STAGES.indexOf(until)) {
+          job.status = 'needs_attention';
+          job.resumeStage = 'extract';
+          job.attention = null;
+          this.update(job, 'fulltext_ready', '全文获取阶段已结束；请核对正文、摘要及待补充明细，确认提取字段后显式继续提取。');
+          return;
+        }
       }
       const next = STAGES.find(stage => job.stages[stage] !== 'done') || null;
       job.status = 'completed';
@@ -752,6 +811,53 @@ class LiteratureConnector {
     this.update(job, 'queued', job.message);
     void this.run(job, 'dedupe', until);
     return this.public(job);
+  }
+
+  reviewFulltext(id) {
+    if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) {
+      throw new Error('已有文献任务正在运行，请先停止或等待结束后复核');
+    }
+    const dir = path.join(this.base, id);
+    const saved = this.jobs.get(id) || loadJsonFile(path.join(dir, 'job.json'));
+    if (!saved) throw new Error('检索任务不存在');
+    if (!fulltextReviewEligible(saved, dir)) throw new Error('只能复核已停止的全文任务；需有全文状态和去重输入，且尚未生成提取、校验或导出成果');
+    const job = this.jobs.get(id) || this.loadPersisted(id);
+    job.status = 'running'; job.error = null; job.activeStage = 'fulltext'; job.resumeStage = 'fulltext';
+    const runId = (Number.isInteger(job.runId) ? job.runId : 0) + 1; job.runId = runId;
+    this.update(job, 'fulltext_review', '正在离线复核已保存全文；不重新检索或下载。');
+    void this.runFulltextReview(job, runId);
+    return this.public(job);
+  }
+
+  async runFulltextReview(job, runId) {
+    let reviewed = false, reviewError = null;
+    try {
+      const python = await this.prepareOffline(job);
+      if (job.runId !== runId || job.status !== 'running') return;
+      job.python = python;
+      await this.runStage(STAGE_SCRIPTS.fulltext, ['--review-only'], job, event => {
+        if (!event || typeof event !== 'object') return;
+        this.appendEventLog(job, event);
+        if (job.runId !== runId || job.status === 'cancelled') return;
+        if (event?.type === 'result' && event.stage === 'fulltext_review') {
+          reviewed = true;
+          this.registerFiles(job, event.files); this.registerFulltextFiles(job);
+          if (Number.isInteger(event.count)) job.count = event.count;
+          this.mergeCounters(job, 'fulltext_review', event);
+        } else if (event.type === 'error') reviewError = String(event.message || '全文缓存复核失败');
+      });
+      if (job.runId !== runId || job.status === 'cancelled') return;
+      if (reviewError) throw new Error(reviewError);
+      if (!reviewed) throw new Error('全文缓存复核未返回有效结果');
+      job.status = 'needs_attention'; job.resumeStage = 'fulltext'; job.activeStage = null; job.attention = null;
+      job.stages = { ...(job.stages || {}), fulltext: 'pending' };
+      this.update(job, 'fulltext_review', '缓存已复核，尚未继续获取全文。请核对复核报告，点击“继续获取全文”才会按原任务获取缺少材料；不会自动进入提取。');
+    } catch (error) {
+      if (job.runId !== runId || job.status === 'cancelled') return;
+      job.status = 'failed'; job.resumeStage = 'fulltext'; job.activeStage = null; job.error = String(error.message || '全文缓存复核失败');
+      this.update(job, 'fulltext_review', job.error);
+    }
   }
 
   //: 从磁盘装载历史任务（advance 续跑用）；interrupted（服务重启遗留 running）在此重写。
@@ -861,15 +967,21 @@ class LiteratureConnector {
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const job = this.jobs.get(id) || this.loadPersisted(id);
     if (job.deletedAt) throw new Error('该任务已删除，请先恢复后再打开检索页面');
-    if (job.status !== 'needs_attention' || job.resumeStage !== 'discover') throw new Error('当前任务没有等待登录或验证的检索来源');
+    if (job.status !== 'needs_attention' || !['discover', 'fulltext'].includes(job.resumeStage)) throw new Error('当前任务没有等待处理的检索或全文页面');
     if ([...this.jobs.values()].some(item => item.status === 'running' || item.browserOpening)) throw new Error('检索浏览器正在使用，请稍后再打开');
     const attention = sourceAttention(job.attention);
     const source = attention && job.config?.sources?.includes(attention.source) ? attention.source : null;
-    if (!source) throw new Error('缺少当前等待来源，请先继续任务以重新检查');
+    const fulltext = job.resumeStage === 'fulltext';
+    if (!fulltext && !source) throw new Error('缺少当前等待来源，请先继续任务以重新检查');
     job.browserOpening = true;
     try {
-      const python = job.python || await this.prepare(job, () => {});
+      const python = fulltext ? await this.prepareOffline(job) : job.python || await this.prepare(job, () => {});
       if (job.status !== 'needs_attention') throw new Error('任务状态已变化，请刷新后再操作');
+      if (fulltext) {
+        const result = await this.openFulltext(job, python);
+        if (!result || result.opened !== true) throw new Error('全文任务页打开失败');
+        return { opened: true, stage: 'fulltext', label: '原全文任务页' };
+      }
       const result = await this.openSource(job, python, source);
       if (!result || result.opened !== true || result.source !== source) throw new Error('检索页面打开失败');
       return { opened: true, source, label: executableSources().find(item => item.key === source).label };
@@ -910,6 +1022,7 @@ class LiteratureConnector {
     saved.deferredOnly = checkpointDeferredOnly(dir, frozenConfig);
     saved.processingBasis = processingBasisFor(dir, frozenConfig);
     saved.executionOrder = executionOrder(frozenConfig, saved.deferredSources);
+    saved.canReviewFulltext = fulltextReviewEligible(saved, dir);
     if (saved.status === 'running') {
       saved.status = 'failed'; saved.stage = 'interrupted';
       saved.error = '本地服务已重启，检索中断；已保存的文件仍可下载。';
@@ -948,6 +1061,7 @@ class LiteratureConnector {
       saved.deferredOnly = checkpointDeferredOnly(path.join(this.base, name), config);
       saved.processingBasis = processingBasisFor(path.join(this.base, name), config);
       saved.executionOrder = executionOrder(config, saved.deferredSources);
+      saved.canReviewFulltext = fulltextReviewEligible(saved, path.join(this.base, name));
       entries.push({ mtime: stat.mtimeMs, job: saved });
     }
     entries.sort((a, b) => b.mtime - a.mtime);

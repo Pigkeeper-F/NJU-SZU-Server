@@ -25,6 +25,10 @@ const BACKEND_FILES = [
   'tools/literature_source_runner.py',
   'tools/literature_source_worker.py',
   'tools/literature_source_guard.py',
+  'tools/literature_fulltext.py',
+  'tools/literature_fulltext_browser.py',
+  'tools/literature_fulltext_evidence.py',
+  'tools/literature_extract.py',
   'tools/scholar-flow.js',
   'tools/source-download.js'
 ];

@@ -430,6 +430,12 @@ else:
     assert.equal(failed.stages.dedupe, 'failed');
 
     advanced = stub.advance(jobA.id);
+    const fulltextReady = await waitDone(stub, jobA.id);
+    assert.equal(fulltextReady.status, 'needs_attention');
+    assert.equal(fulltextReady.stage, 'fulltext_ready');
+    assert.equal(fulltextReady.resumeStage, 'extract');
+    assert.equal(fulltextReady.stages.extract, 'pending', 'fulltext completion requires an explicit next action');
+    stub.advance(jobA.id);
     const paused = await waitDone(stub, jobA.id);
     assert.equal(paused.status, 'needs_attention');
     assert.equal(paused.stage, 'awaiting_confirmation');

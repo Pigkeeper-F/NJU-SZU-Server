@@ -23,7 +23,7 @@ function functionSource(name) {
   return source.slice(start, end + 4);
 }
 const FUNCTIONS = ['checkLiteratureRuntime', 'autoOpenLiteratureBrowser', 'watchLiterature', 'startLiterature',
-  'continueLiterature', 'continueAvailableLiterature', 'openLiteratureBrowser', 'confirmLiteratureFields', 'literatureAttentionMessage', 'literatureCompletedMessage', 'literatureProcessingBasisMessage'];
+  'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'confirmLiteratureFields', 'literatureAttentionMessage', 'literatureCompletedMessage', 'literatureProcessingBasisMessage'];
 function job(overrides = {}) {
   return { id: 'original-job', status: 'needs_attention', stage: 'verification', resumeStage: 'discover', until: 'discover',
     config: { topic: 'fixture topic', query: 'fixture query', sources: ['cnki'], limit: 10,
@@ -51,6 +51,11 @@ function harness(savedSnapshot) {
       calls.push({ url, method: options.method || 'GET', body });
       if (url === '/api/literature/runtime') { if (runtimeError) throw runtimeError; return copy(runtime); }
       if (url === '/api/literature/browser') { if (browserError) throw browserError; return { opened: true, source: activeJob.attention?.source }; }
+      if (url === '/api/literature/review-fulltext') {
+        activeJob = { ...activeJob, status: 'needs_attention', stage: 'fulltext_review', resumeStage: 'fulltext',
+          attention: null, message: '缓存已复核，尚未继续获取全文。', counters: { fulltextAbstract: 1 } };
+        return copy(activeJob);
+      }
       if (url === '/api/literature/search') {
         activeJob = job({ id: 'new-job', config: copy(body.config), status: 'completed', stage: 'completed', until: body.until, attention: null });
         return copy(activeJob);
@@ -261,6 +266,17 @@ async function main() {
     assert.equal(noPopup.count('/api/literature/runtime'), 0, 'Read-only job viewing is not gated by a runtime check');
     assert.ok(noPopup.messages.length, 'Read-only watch still reports task status');
   }
+  const review = harness(); review.setJob(job({ status: 'cancelled', resumeStage: null, stage: 'cancelled', canReviewFulltext: true }));
+  await review.subject.reviewLiteratureFulltext(mod);
+  assert.deepEqual(review.posts().map(call => call.url), ['/api/literature/review-fulltext']);
+  assert.deepEqual(review.posts()[0].body, { id: 'original-job' });
+  assert.equal(review.current.literatureJob.resumeStage, 'fulltext');
+  assert.ok(review.messages.some(args => String(args[1]).includes('尚未继续获取全文')));
+  review.current.literatureUntil = 'export';
+  await review.subject.continueLiterature(mod, { until: 'fulltext' });
+  assert.equal(review.posts().find(call => call.url === '/api/literature/advance').body.until, 'fulltext', 'The explicit fulltext button cannot advance into extraction');
+  const fulltextError = job({ status: 'needs_attention', resumeStage: 'fulltext', attention: { source: 'cnki', reason: 'login' }, message: '知网页面404；已有材料保留' });
+  assert.equal(review.subject.literatureAttentionMessage(fulltextError), fulltextError.message, 'Fulltext errors retain their exact reason without a generic login instruction');
   console.log('LITERATURE_RUNTIME_UI_TESTS_PASS');
 }
 
