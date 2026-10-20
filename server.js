@@ -35,12 +35,40 @@ const WORKFLOW_FILES = Object.freeze({
   'activity-data-update': 'activity-data-update-workflow-draft.md',
   'literature-mining': 'literature-mining-workflow.md',
   'manual-review': 'manual-review-workflow-draft.md',
-  'plotting': 'plotting-workflow-draft.md'
+  'plotting': 'plotting-workflow-draft.md',
+  // 【九步研究流程 · 2026-10-20】本轮新补的六个环节契约（①②⑥⑦⑧⑨）。
+  // ③④⑤ 复用上面已有的 download-data / clean-data / calculation / plotting。
+  'literature-research': 'literature-research-workflow-draft.md',
+  'question-formation': 'question-formation-workflow-draft.md',
+  'writing': 'writing-workflow-draft.md',
+  'submit': 'submit-workflow-draft.md',
+  'rebuttal': 'rebuttal-workflow-draft.md',
+  'proof': 'proof-workflow-draft.md'
 });
 
+// 【研究流程环节 · 2026-10-15】九步研究流（FLOW_STEPS）的环节模块没有专属 workflow 文件：
+// 由共享草稿 + 模块自身规格（目标/要做的事/产出/验收）合成环节指令，使 API / 本机 Codex 两种对话都可用。
+const FLOW_STEP_KEYS = Object.freeze(['literature', 'question', 'data', 'model', 'chart', 'writing', 'submit', 'rebuttal', 'proof']);
+
+function flowStepInstructions(module) {
+  if (!module || typeof module !== 'object' || !FLOW_STEP_KEYS.includes(module.step)) return null;
+  const spec = (module.spec && typeof module.spec === 'object' && !Array.isArray(module.spec)) ? module.spec : {};
+  const lines = ['## 当前研究环节（九步研究流程）', '环节：' + (typeof module.name === 'string' ? module.name : '（未命名）')];
+  if (spec.goal) lines.push('环节目标：' + String(spec.goal));
+  if (spec.output) lines.push('本环节产出：' + String(spec.output));
+  if (spec.acceptance) lines.push('验收要点：' + String(spec.acceptance));
+  if (Array.isArray(spec.todo) && spec.todo.length) lines.push('要做的事：\n- ' + spec.todo.map(String).join('\n- '));
+  return lines.join('\n');
+}
+
 function workflowPrompt(module, executor = 'api') {
-  if (!module || !Object.hasOwn(WORKFLOW_FILES, module.type)) return null;
-  const workflow = fs.readFileSync(path.join(ROOT, 'docs', WORKFLOW_FILES[module.type]), 'utf8');
+  if (!module || typeof module !== 'object') return null;
+  const hasFile = Object.hasOwn(WORKFLOW_FILES, module.type);
+  const stepDoc = hasFile ? '' : flowStepInstructions(module);
+  if (!hasFile && !stepDoc) return null;
+  const workflow = hasFile
+    ? fs.readFileSync(path.join(ROOT, 'docs', WORKFLOW_FILES[module.type]), 'utf8')
+    : fs.readFileSync(path.join(ROOT, 'docs', 'workflow-drafts.md'), 'utf8') + '\n\n' + stepDoc;
   const shared = fs.readFileSync(path.join(ROOT, 'docs', 'workflow-drafts.md'), 'utf8');
   const literatureAlignment = module.type === 'literature-mining'
     ? fs.readFileSync(path.join(ROOT, 'docs', 'literature-mining-alignment.md'), 'utf8')
@@ -194,7 +222,7 @@ async function handleCodex(req, res, url) {
     }
     if (req.method === 'POST' && route === '/api/codex/run') {
       const data = JSON.parse(await readBody(req));
-      if (!Object.hasOwn(WORKFLOW_FILES, data.module?.type)) throw new Error('未知工作流模块');
+      if (!Object.hasOwn(WORKFLOW_FILES, data.module?.type) && !flowStepInstructions(data.module)) throw new Error('未知工作流模块');
       if (!['clean-data', 'calculation'].includes(data.module.type) && data.execute === true) throw new Error('当前模块仅支持拟方案');
       if (data.module.type === 'calculation' && !['direct', 'modify'].includes(data.module.mode)) throw new Error('请先选择直接计算或修改计算');
       const messages = normalizeMessages(data.messages);
@@ -890,6 +918,20 @@ function normalizeFiles(rawFiles) {
 }
 
 // ============================================================================
+// 【环节参数 · 2026-10-20】body.params：模块参数（如文章撰写环节的「目标期刊」）。
+// 归一化后写成 params.json 落在执行目录，脚本用 json 读即可。
+// ============================================================================
+function normalizeParams(rawParams) {
+  if (rawParams === undefined || rawParams === null) return { ok: true, file: null };
+  if (typeof rawParams !== 'object' || Array.isArray(rawParams)) return { ok: false, error: 'params 必须是对象。' };
+  const clean = {};
+  for (const key of Object.keys(rawParams)) {
+    if (typeof rawParams[key] === 'string') clean[key] = rawParams[key].slice(0, 2000);
+  }
+  return { ok: true, file: { name: 'params.json', content: JSON.stringify(clean, null, 2) } };
+}
+
+// ============================================================================
 // 【X1 · 2026-10-14】exec URL 下载（body.urls，契约见 §20.3）
 // ----------------------------------------------------------------------------
 // 每条 URL 独立处理，单条失败不影响其余（结果记入响应的 downloaded 数组）：
@@ -1003,6 +1045,117 @@ function createRunDir() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 【上游产物汇聚 · 2026-10-20】
+// ----------------------------------------------------------------------------
+// 九步研究流程的「文章撰写」等环节要基于上游模块产出的图表 / 数据 / 文稿来干活，
+// 但模块上下文只带 400 字环节文档、产物文件本身不流动。这里让前端把上游产物的
+// 目录传上来，服务端在脚本启动前把它们复制进本次执行目录的 upstream/<模块名>/，
+// 并写一份 upstream_manifest.json 说明映射关系。
+// 安全约束：只允许读取本工作台自己的产物根目录（.workbench / 执行根目录 / 系统临时目录），
+// 其它路径一律丢弃——避免把执行接口变成任意文件读取口。
+// ---------------------------------------------------------------------------
+const UPSTREAM_MAX_DIRS = 10;
+const UPSTREAM_MAX_FILES_PER_DIR = 200;
+const UPSTREAM_MAX_FILE_BYTES = 20 * 1024 * 1024;
+const UPSTREAM_MAX_TOTAL_BYTES = 60 * 1024 * 1024;
+
+function upstreamRoots() {
+  const roots = [path.join(ROOT, '.workbench')];
+  const envDir = (typeof process.env[EXEC_RUN_DIR_ENV] === 'string') ? process.env[EXEC_RUN_DIR_ENV].trim() : '';
+  roots.push(envDir || path.join(os.homedir(), 'yanxu-runs'));
+  roots.push(os.tmpdir());
+  return roots;
+}
+
+function isInsideDir(candidate, root) {
+  const rel = path.relative(path.resolve(root), path.resolve(candidate));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+// 解析 body.upstream：[{ name, dir }]。结构非法项丢弃；目录不在允许根内 → 丢弃（不放行），
+// 被丢弃的项记入 dropped，如实回传给调用方（不静默）。
+function normalizeUpstream(rawUpstream) {
+  if (rawUpstream === undefined || rawUpstream === null) return { ok: true, items: [], dropped: [] };
+  if (!Array.isArray(rawUpstream)) return { ok: false, error: 'upstream 必须是数组。' };
+  if (rawUpstream.length > UPSTREAM_MAX_DIRS) {
+    return { ok: false, error: '上游目录最多 ' + UPSTREAM_MAX_DIRS + ' 个。' };
+  }
+  const roots = upstreamRoots();
+  const items = [];
+  const dropped = [];
+  for (const item of rawUpstream) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      dropped.push({ dir: '', reason: '结构非法' });
+      continue;
+    }
+    if (typeof item.dir !== 'string' || !item.dir.trim()) {
+      dropped.push({ dir: '', reason: '缺少目录' });
+      continue;
+    }
+    const dir = path.resolve(item.dir.trim());
+    const allowed = roots.some((root) => isInsideDir(dir, root));
+    if (!allowed) {
+      dropped.push({ dir, reason: '不在允许的产物根目录内' });
+      continue;
+    }
+    let stat;
+    try { stat = fs.statSync(dir); } catch (error) {
+      dropped.push({ dir, reason: '目录不存在或不可读' });
+      continue;
+    }
+    if (!stat.isDirectory()) {
+      dropped.push({ dir, reason: '不是目录' });
+      continue;
+    }
+    const fallback = path.basename(dir);
+    const name = sanitizeFileName(typeof item.name === 'string' ? item.name : fallback) || fallback;
+    items.push({ name, dir });
+  }
+  return { ok: true, items, dropped };
+}
+
+// 把上游产物复制进本次执行目录：<runDir>/upstream/<模块名>/原文件名
+// 返回 { copied: [...], manifest: 'upstream_manifest.json' }。
+function copyUpstreamArtifacts(runDir, items) {
+  const copied = [];
+  const manifest = [];
+  let total = 0;
+  for (const item of items || []) {
+    let entries = [];
+    try { entries = fs.readdirSync(item.dir, { withFileTypes: true }); } catch (error) { continue; }
+    const target = path.join(runDir, 'upstream', item.name);
+    let count = 0;
+    for (const entry of entries) {
+      if (count >= UPSTREAM_MAX_FILES_PER_DIR) break;
+      if (!entry.isFile()) continue;
+      const src = path.join(item.dir, entry.name);
+      let size = 0;
+      try { size = fs.statSync(src).size; } catch (error) { continue; }
+      if (size > UPSTREAM_MAX_FILE_BYTES) continue;
+      if (total + size > UPSTREAM_MAX_TOTAL_BYTES) break;
+      try {
+        fs.mkdirSync(target, { recursive: true });
+        fs.copyFileSync(src, path.join(target, entry.name));
+      } catch (error) { continue; }
+      total += size;
+      count += 1;
+      copied.push({ module: item.name, name: entry.name, size });
+      manifest.push({ module: item.name, file: entry.name, size, path: 'upstream/' + item.name + '/' + entry.name });
+    }
+  }
+  if (manifest.length) {
+    try {
+      fs.writeFileSync(
+        path.join(runDir, 'upstream_manifest.json'),
+        JSON.stringify({ items: manifest }, null, 2),
+        'utf8'
+      );
+    } catch (error) { /* 清单写不出也不影响脚本运行 */ }
+  }
+  return { copied, manifest: 'upstream_manifest.json' };
+}
+
 // python 解释器探测（异步 spawn，避免同步 spawn 在被托管/沙箱环境里的 EBUSY）：
 // 依次试 python / python3 / py，任一 `--version` 退出码为 0 即认为可用；结果缓存为 Promise。
 let pythonInterpreter = null; // null=未探测；Promise<命令名|null>
@@ -1077,7 +1230,8 @@ function listArtifacts(dir, scriptName) {
 
 // 【X1 · 2026-10-14】产物预览（契约见 §20.4）：文本类产物（.csv/.txt/.json/.md）且 ≤200KB 时，
 // 读前 50 行、截 10KB（超出补「…」）填入 preview 字段；其余文件 / 读取失败不带 preview。
-const PREVIEW_EXTS = new Set(['.csv', '.txt', '.json', '.md']);
+// 【2026-10-20】新增 .tex：文章撰写环节的稿件产物，界面上要能直接看到开头。
+const PREVIEW_EXTS = new Set(['.csv', '.txt', '.json', '.md', '.tex']);
 const PREVIEW_MAX_FILE_BYTES = 200 * 1024;
 const PREVIEW_MAX_LINES = 50;
 const PREVIEW_MAX_CHARS = 10 * 1024;
@@ -1097,7 +1251,7 @@ function addArtifactsPreview(dir, artifacts) {
   }
 }
 
-function runScript(lang, code, command, files) {
+function runScript(lang, code, command, files, upstream) {
   return new Promise((resolve) => {
     let created;
     try {
@@ -1123,6 +1277,10 @@ function runScript(lang, code, command, files) {
       resolve({ ok: false, error: '写入执行目录失败：' + error.message, stdout: '', stderr: '', artifacts: listArtifacts(dir, scriptName), dir, ms: Date.now() - start, fallback });
       return;
     }
+
+    // 【上游产物汇聚 · 2026-10-20】脚本启动前把上游模块的产物复制进 upstream/<模块名>/，
+    // 这样「文章撰写」这类环节的脚本能直接读到上游的图表 / 数据 / 文稿文件。
+    const upstreamInfo = copyUpstreamArtifacts(dir, upstream);
 
     let child;
     try {
@@ -1158,6 +1316,7 @@ function runScript(lang, code, command, files) {
       }
       const ok = exitCode === 0;
       const result = { ok, stdout: out.text(), stderr: err.text(), artifacts, dir, ms, code: exitCode, fallback };
+      if (upstreamInfo.copied.length) result.upstream = upstreamInfo;
       if (!ok) result.error = '执行失败（退出码 ' + exitCode + '）';
       finish(result);
     });
@@ -1201,6 +1360,27 @@ async function handleExec(req, res) {
     sendJson(res, 400, { error: urlsResult.error });
     return;
   }
+  // 【上游产物汇聚 · 2026-10-20】上游模块产物目录：结构非法 → 400；不在允许根内的项丢弃并如实回报。
+  const upstreamResult = normalizeUpstream(payload.upstream);
+  if (!upstreamResult.ok) {
+    sendJson(res, 400, { error: upstreamResult.error });
+    return;
+  }
+  // 【环节参数 · 2026-10-20】模块参数落成 params.json 供脚本读取。
+  const paramsResult = normalizeParams(payload.params);
+  if (!paramsResult.ok) {
+    sendJson(res, 400, { error: paramsResult.error });
+    return;
+  }
+  // 文献挖掘作业目录：按作业 id 解析（只认 uuid 形式，避免路径穿越）。
+  const upstreamJobItems = [];
+  if (Array.isArray(payload.upstreamJobs)) {
+    for (const jobId of payload.upstreamJobs.slice(0, UPSTREAM_MAX_DIRS)) {
+      if (typeof jobId !== 'string') continue;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) continue;
+      upstreamJobItems.push({ name: '文献挖掘', dir: path.join(ROOT, '.workbench', 'literature', jobId) });
+    }
+  }
   const downloaded = [];
   const downloadedFiles = [];
   for (const item of urlsResult.urls) {
@@ -1220,9 +1400,12 @@ async function handleExec(req, res) {
   }
 
   try {
-    const result = await runScript(lang, payload.code, command, filesResult.files.concat(downloadedFiles));
+    const allFiles = filesResult.files.concat(downloadedFiles);
+    if (paramsResult.file) allFiles.push(paramsResult.file);
+    const result = await runScript(lang, payload.code, command, allFiles, upstreamResult.items.concat(upstreamJobItems));
     addArtifactsPreview(result.dir, result.artifacts);
     if (downloaded.length) result.downloaded = downloaded;
+    if (upstreamResult.dropped.length) result.upstreamDropped = upstreamResult.dropped;
     sendJson(res, 200, result);
   } catch (error) {
     console.error('[server] uncaught error in /api/code/exec:', error);

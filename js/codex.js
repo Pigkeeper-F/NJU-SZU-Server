@@ -568,7 +568,7 @@
     t.busy = true; t.error = ''; t.job = null; render();
     try {
       const sid = await session(module.id);
-      const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, mode: module.mode }, messages, execute: executeRequested, model: t.model || null }) });
+      const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, step: module.step || null, mode: module.mode }, messages, execute: executeRequested, model: t.model || null }) });
       saved[module.id].jobId = job.id; persist();
       await watch(module.id, job.id);
     } finally { t.busy = false; render(); }
@@ -753,7 +753,7 @@
     if (t.job?.events.length) { const log = node('details'); log.open = t.logOpen; log.ontoggle = () => { t.logOpen = log.open; }; log.append(node('summary', '执行进度')); log.append(node('pre', t.job.events.join('\n'))); panel.append(log); }
     if (t.error) panel.append(node('p', t.error, 'codex-error'));
   }
-  root.CodexUI = { render, reply, prepareConfirmedExecution, cancelPreparedExecution, useCodex: mod => !!mod && task(mod.id).backend === 'codex', busy: id => task(id).busy };
+  root.CodexUI = { render, reply, prepareConfirmedExecution, cancelPreparedExecution, useCodex: mod => !!mod && task(mod.id).backend === 'codex', busy: id => task(id).busy, literatureJobId: id => (saved[id] && saved[id].literatureJobId) || '' };
   function closeFiles() {
     const files = panel.querySelector('.codex-attachments[open]');
     if (!files) return;

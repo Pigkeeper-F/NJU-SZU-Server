@@ -1143,3 +1143,98 @@ awaiting_confirmation 表单与继续流程（保留既有文案断言）。
 全套 node/python 回归（check-contract、test-merge-store、test-server-exec、test-literature-sources、
 test-literature-guidance、test-literature-extract、`python -m unittest discover -s tools -p "test_literature_*.py"`）
 实测全通过，0 失败。
+
+---
+
+## 22. 九步研究流程（2026-10-20 · 业务两阶段九步落地）
+
+### 22.1 背景与定位
+
+业务侧的科研流程分两阶段、共九步：
+
+- **阶段一 · 开展研究并形成论文（六步）**：① 文献调研 → ② 科学问题凝练与提取 → ③ 数据获取、清洗与处理
+  → ④ 模型选择与运行 → ⑤ 图表绘制 → ⑥ 文章撰写与修改
+- **阶段二 · 投稿到最终发表（三步）**：⑦ 投稿前的核验与投稿 → ⑧ 回复审稿意见、修改与复核
+  → ⑨ 接收后的校稿核验
+
+其中 ③④⑤（数据获取与清洗 / 模型选择与运行 / 图表绘制）**复用既有能力节点**（`download-data` /
+`clean-data` / `calculation` / `plotting`），本轮新补 ①②⑥⑦⑧⑨ 六个环节。
+
+### 22.2 数据模型：`step` 与 `type` 合流
+
+模块同时带两个字段：
+
+| 字段 | 含义 | 取值 |
+|---|---|---|
+| `step` | 业务环节（九步中的第几步） | `literature`/`question`/`data`/`model`/`chart`/`writing`/`submit`/`rebuttal`/`proof` |
+| `type` | 能力节点类型 | 既有 `FIXED_MODULES` 九类 + 新增 `RESEARCH_TYPES` 六类 |
+
+- `Store.RESEARCH_TYPES`：`literature-research`（文献调研）、`question-formation`（科学问题凝练）、
+  `writing`（文章撰写）、`submit`（投稿前核验与投稿）、`rebuttal`（回复审稿意见）、`proof`（校稿核验）。
+- `Store.RESEARCH_STEP_IMPL`：业务环节 → 能力模块展开（如 `data` → `['download-data','clean-data']`，
+  展开的模块在链上依次串联）。
+- `Store.RESEARCH_STEP_WORKFLOW`：业务环节 → 契约文档名（与 `server.js` 的 `WORKFLOW_FILES` 同名）。
+- **旧数据兼容**：读取时凡带 `step` 的模块，其 `type` 若不在 `RESEARCH_TYPES ∪ FIXED_MODULES` 内，
+  仍落到 `legacy-writing`（只作历史展示，不丢数据）；此前是无条件改写，现改为有条件保留。
+
+### 22.3 Store API 新增 / 变更
+
+| API | 签名 | 说明 |
+|---|---|---|
+| `startFlow` | `() => { ok, id, name, step, created }` | **语义变更**：现在按第 ① 步的 `impl` 展开建模块（文献调研），返回新增模块数 |
+| `initFlowModules` | `() => { created, firstId }` | 一次性建满九步（已存在的能力类型跳过） |
+| `setModuleParam` | `(id, key, value) => boolean` | 写环节参数（只接受字符串，单值截断 500 字符） |
+| `RESEARCH_TYPES` / `RESEARCH_STEP_IMPL` / `RESEARCH_STEP_WORKFLOW` | 只读快照 | 供 UI 与服务端对齐 |
+
+`approveModule` 的补链逻辑按 `step` 分流：带 `step` 的模块按业务环节推进（先补齐本环节剩余能力模块，
+再推进下一环节）；无 `step` 的固定模块仍走 `addModule()`。两条链互不干扰。
+
+### 22.4 模块字段：`params`
+
+模块新增 `params`（对象，键值均为字符串），归一化时保留（否则刷新即丢）。当前唯一用途：
+**文章撰写环节的「目标期刊」**——在模块说明卡里手填，随对话上下文与执行参数传到 AI 与执行脚本。
+
+### 22.5 服务端：`WORKFLOW_FILES` 新增六个键
+
+新增 `literature-research` / `question-formation` / `writing` / `submit` / `rebuttal` / `proof`
+六个键，分别指向 `docs/` 下同名契约文档（格式：定义 / 输入 / 执行 / 交付 / 检查 / 异常 / 需对齐内容）。
+`flowStepInstructions()` 的合成指令降级为**兜底**（仅对认不出 type 的历史写作流模块生效）。
+
+### 22.6 执行内核：上游产物汇聚（`/api/code/exec`）
+
+文章撰写等环节要基于上游模块产出的图表 / 数据 / 文稿工作，而此前模块上下文只带 400 字环节文档、
+**产物文件不向下游流动**。本轮新增三条入参：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `upstream` | `[{ name, dir }]` | 上游模块的产物目录。**只允许读取本工作台自己的产物根目录**（`<项目>/.workbench`、执行根目录 `YANXU_RUN_DIR` 或 `~/yanxu-runs`、系统临时目录）；不在根内 → 该项丢弃并在响应 `upstreamDropped` 里说明原因 |
+| `upstreamJobs` | `[jobId]` | 文献挖掘作业 id（uuid 形式），服务端解析为 `<项目>/.workbench/literature/<jobId>` |
+| `params` | object | 环节参数（如 `{"journal":"…"}`），归一化后写成 `params.json` 落在执行目录 |
+
+行为：脚本启动**前**把上游产物复制进 `<执行目录>/upstream/<模块名>/`，并写 `upstream_manifest.json`
+（`{items:[{module,file,size,path}]}`）说明映射关系。响应新增 `upstream: { copied:[…], manifest }`。
+上限：目录 ≤10、单目录文件 ≤200、单文件 ≤20MB、总量 ≤60MB。
+
+### 22.7 文章撰写环节（⑥）产物
+
+`tools/writing_build.py`（纯标准库）在执行内核里运行，读取 `params.json` / `upstream_manifest.json` /
+`upstream/**` / 可选的 `manuscript.md`，产出：
+
+| 产物 | 说明 |
+|---|---|
+| `manuscript.tex` | LaTeX 主稿：目标期刊写在注释里；章节按草稿的二级标题切分；每张上游图生成一个 `figure` 环境（`figures/<名>`） |
+| `references.bib` | 上游有 `.bib` 就并入，没有则写占位条目（并进待补清单） |
+| `manuscript.md` | 正文副本（便于通读评审） |
+| `<图表文件>` | 从上游收拢的图表，**平铺落在执行目录根下**（执行内核的产物清单只收顶层文件，放子目录就下载不到；`\includegraphics` 直接引用平铺后的文件名） |
+| `build_report.md` | 生成报告：目标期刊 / 草稿来源 / 收拢了哪些上游产物 / 待补清单 |
+
+### 22.8 手工验收清单（本轮）
+
+1. 侧栏点「按业务流程初始化」→ 只出现 ①文献调研 一个模块；通过审核后依次出现 ②科学问题凝练、
+   ③数据获取（展开为 下载数据 + 数据清洗）、④计算、⑤绘图、⑥文章撰写、⑦投稿、⑧回复审稿、⑨校稿。
+2. 刷新页面：上述链条与各环节的 `step` / `type` / `spec` / 审核状态全部保留（不再退化成 legacy-writing）。
+3. 文章撰写模块的说明卡底部出现「目标期刊」输入框；填「XXX」后刷新仍在。
+4. 在文章撰写模块执行 `tools/writing_build.py`（lang=python）→ 产物列表出现 `manuscript.tex` /
+   `references.bib` / `build_report.md`；上游有图时 `figures/` 里有图。
+5. 上游有产物目录时，响应 `upstream.copied` 非空，且执行目录里存在 `upstream/<模块名>/` 与
+   `upstream_manifest.json`；传入不在允许根内的目录 → `upstreamDropped` 里有记录且未复制。

@@ -323,7 +323,7 @@
     var state = Store ? Store.getState() : null;
     var modules = (state && state.modules) ? state.modules : [];
     var mod = findModule(modules, moduleId);
-    if (!mod) return { name: '', spec: specOf(null), upstream: [] };
+    if (!mod) return { name: '', spec: specOf(null), upstream: [], params: {} };
 
     var upstream = [];
     var visited = {};
@@ -337,7 +337,7 @@
       }
       cursor = up.dependsOn;
     }
-    return { name: mod.name, spec: specOf(mod), upstream: upstream };
+    return { name: mod.name, spec: specOf(mod), upstream: upstream, params: (mod.params && typeof mod.params === 'object') ? mod.params : {} };
   }
 
   function requestReply(moduleId) {
@@ -359,7 +359,7 @@
         messages: messagesFor(moduleId),
         credential: credential,
         settings: readLlmSettings(),
-        module: Object.assign(moduleContextFor(moduleId), { type: module.type, mode: module.mode || null })
+        module: Object.assign(moduleContextFor(moduleId), { type: module.type, step: module.step || null, mode: module.mode || null })
       })
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
@@ -419,7 +419,55 @@
     }
     if (spec.output) card.appendChild(specRow('产出', spec.output));
     if (spec.acceptance) card.appendChild(specRow('验收要点', spec.acceptance));
+    // 【文章撰写 · 2026-10-20】目标期刊：本环节开始时手填，存进 module.params，
+    // 随对话上下文与执行参数（params.json）传到 AI 与执行脚本。
+    if (mod.type === 'writing') {
+      var params = (mod.params && typeof mod.params === 'object') ? mod.params : {};
+      var field = el('label', 'spec-row spec-field');
+      field.appendChild(el('div', 'spec-label', '目标期刊'));
+      var input = el('input', 'spec-input');
+      input.type = 'text';
+      input.placeholder = '例如：IEEE Transactions on Sustainable Systems（留空则按通用结构起草并标注未按期刊约束）';
+      input.value = params.journal || '';
+      input.addEventListener('change', function () {
+        var Store = getStore();
+        if (Store && Store.setModuleParam) Store.setModuleParam(mod.id, 'journal', input.value);
+      });
+      field.appendChild(input);
+      card.appendChild(field);
+    }
     return card;
+  }
+
+  /**
+   * 【上游产物汇聚 · 2026-10-20】沿 dependsOn 链向上收集上游模块的产物目录与文献作业 id。
+   * 服务端会把这些目录复制进本次执行目录的 upstream/<模块名>/，脚本即可直接读到
+   * 上游的图表 / 数据 / 文稿（文章撰写环节靠它拿到上游产物）。
+   */
+  function collectUpstreamArtifacts(moduleId) {
+    var dirs = [];
+    var jobs = [];
+    var Store = getStore();
+    var state = Store ? Store.getState() : null;
+    var modules = (state && state.modules) ? state.modules : [];
+    var self = findModule(modules, moduleId);
+    var visited = {};
+    var cursor = self ? self.dependsOn : null;
+    while (cursor && !visited[cursor]) {
+      visited[cursor] = true;
+      var up = findModule(modules, cursor);
+      if (!up) break;
+      if (up.run && typeof up.run.dir === 'string' && up.run.dir) {
+        dirs.push({ name: up.name || '上游模块', dir: up.run.dir });
+      }
+      var jobId = '';
+      if (root.CodexUI && typeof root.CodexUI.literatureJobId === 'function') {
+        try { jobId = root.CodexUI.literatureJobId(up.id) || ''; } catch (error) { jobId = ''; }
+      }
+      if (jobId) jobs.push(jobId);
+      cursor = up.dependsOn;
+    }
+    return { dirs: dirs, jobs: jobs };
   }
 
   function actionButton(text, kind, onClick) {
@@ -772,6 +820,14 @@
     }
     var execPayload = { lang: 'node', code: ui.code, confirm: true, files: files };
     if (urlPayload.length) execPayload.urls = urlPayload;
+    // 【上游产物汇聚 · 2026-10-20】把上游模块的产物目录与文献作业 id 一并带上，
+    // 服务端会在脚本启动前复制进 upstream/<模块名>/（文章撰写环节靠它取上游图表与数据）。
+    var upstream = collectUpstreamArtifacts(mod.id);
+    if (upstream.dirs.length) execPayload.upstream = upstream.dirs;
+    if (upstream.jobs.length) execPayload.upstreamJobs = upstream.jobs;
+    // 【环节参数 · 2026-10-20】模块参数（如文章撰写的目标期刊）落成 params.json 供脚本读取。
+    var modParams = (mod.params && typeof mod.params === 'object') ? mod.params : null;
+    if (modParams && Object.keys(modParams).length) execPayload.params = modParams;
     fetch('/api/code/exec', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

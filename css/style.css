@@ -730,6 +730,20 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
 .spec-row { display: flex; gap: 8px; margin-top: 4px; font-size: 12.5px; line-height: 1.55; }
 .spec-label { flex: 0 0 62px; color: var(--muted); }
 .spec-value { flex: 1 1 auto; color: var(--text); white-space: pre-line; }
+/* 【文章撰写 · 2026-10-20】目标期刊输入：说明卡里的一行可填字段 */
+.spec-field { align-items: flex-start; }
+.spec-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.spec-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .status-bar {
   display: flex;

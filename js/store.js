@@ -84,6 +84,42 @@
     { id: 'parameter-update', name: '参数更新' },
     { id: 'activity-data-update', name: '活动数据更新' }
   ];
+  // 【九步研究流程 · 2026-10-20】九步业务环节对应的新增能力节点类型。
+  // 其中 ③④⑤（数据获取与清洗 / 模型选择与运行 / 图表绘制）复用既有 FIXED_MODULES 能力，
+  // 下面这六个是本轮新补的环节。
+  var RESEARCH_TYPES = [
+    { id: 'literature-research', name: '文献调研' },
+    { id: 'question-formation', name: '科学问题凝练' },
+    { id: 'writing', name: '文章撰写' },
+    { id: 'submit', name: '投稿前核验与投稿' },
+    { id: 'rebuttal', name: '回复审稿意见' },
+    { id: 'proof', name: '校稿核验' }
+  ];
+  // 业务环节 → 展开成哪些能力模块（按链上顺序串联）。一个环节可对应多个模块
+  // （如「数据获取、清洗处理」= 下载数据 + 数据清洗）。
+  var RESEARCH_STEP_IMPL = {
+    literature: ['literature-research'],
+    question: ['question-formation'],
+    data: ['download-data', 'clean-data'],
+    model: ['calculation'],
+    chart: ['plotting'],
+    writing: ['writing'],
+    submit: ['submit'],
+    rebuttal: ['rebuttal'],
+    proof: ['proof']
+  };
+  // 业务环节 → 环节契约文档（文件名与 server.js 的 WORKFLOW_FILES 键一致）。
+  var RESEARCH_STEP_WORKFLOW = {
+    literature: 'literature-research-workflow-draft.md',
+    question: 'question-formation-workflow-draft.md',
+    data: 'download-data-workflow-draft.md',
+    model: 'calculation-workflow-draft.md',
+    chart: 'plotting-workflow-draft.md',
+    writing: 'writing-workflow-draft.md',
+    submit: 'submit-workflow-draft.md',
+    rebuttal: 'rebuttal-workflow-draft.md',
+    proof: 'proof-workflow-draft.md'
+  };
   // 【安全修复 · 2026-10-13】单条记录上限。原来不限长，超长输入（MB 级）会撑爆 localStorage
   // 配额，persist() 静默失败降级为纯内存，刷新即丢且用户无感知。2 万字远超日常单条记录，
   // 又远离配额红线；超长时 appendMessage 返回 null，由 UI 层给出明确提示。
@@ -179,6 +215,14 @@
     // 流程字段（v4 新增）：step / spec / status / approvedAt 必须在归一化时保留，
     // 否则刷新页面后流程说明与审核状态会被丢掉。
     var step = (typeof raw.step === 'string' && raw.step) ? raw.step : null;
+    // 环节参数（2026-10-20）：如文章撰写环节的「目标期刊」。必须归一化保留，否则刷新即丢。
+    var params = {};
+    if (raw.params && typeof raw.params === 'object' && !Array.isArray(raw.params)) {
+      for (var pk in raw.params) {
+        if (!Object.prototype.hasOwnProperty.call(raw.params, pk)) continue;
+        if (typeof raw.params[pk] === 'string') params[pk] = raw.params[pk].slice(0, 500);
+      }
+    }
     var approvedAt = (typeof raw.approvedAt === 'string' && raw.approvedAt) ? raw.approvedAt : null;
     var spec = null;
     if (raw.spec && typeof raw.spec === 'object' && !Array.isArray(raw.spec)) {
@@ -239,7 +283,8 @@
     var out = {
       id: id, name: name, dependsOn: dependsOn, createdAt: createdAt,
       type: type, mode: mode, messages: messages,
-      status: normalizeStatus(raw.status), doc: doc, run: run
+      status: normalizeStatus(raw.status), doc: doc, run: run,
+      params: params
     };
     if (step) out.step = step;
     if (spec) out.spec = spec;
@@ -277,9 +322,15 @@
       for (var j = 0; j < raw.modules.length; j++) {
         var mod = normalizeModule(raw.modules[j], seen);
         if (mod) {
-          // 保留贡献版既有的写作流程记录；它不属于当前固定数据模块，但不能在升级时丢失。
+          // 【九步研究流程 · 2026-10-20】带 step 的模块现在允许携带自己的 type：
+          // ①②⑥⑦⑧⑨ 是新环节类型，③④⑤ 复用既有能力节点（download-data / clean-data /
+          // calculation / plotting）。认不出的（老版本遗留的写作流记录）仍落到 legacy-writing，
+          // 只作历史展示，不丢数据。
           if (mod.step) {
-            mod.type = 'legacy-writing';
+            if (!RESEARCH_TYPES.some(function (item) { return item.id === mod.type; })
+                && !FIXED_MODULES.some(function (item) { return item.id === mod.type; })) {
+              mod.type = 'legacy-writing';
+            }
             modules.push(mod);
             seen[mod.id] = true;
             continue;
@@ -736,47 +787,34 @@
   }
 
   /**
-   * 开始业务流程：**只建第 1 步**，后续步骤在每一步通过审核后由 approveModule 自动补齐。
-   * （原 initFlowModules 一次性建 9 个的行为保留，供需要一次铺满的场景使用。）
-   * -> { ok, id, name, created }
+   * 开始九步研究流程：**只建第 1 个环节（文献调研）**，后续环节在每一步通过审核后自动补齐。
+   * 一个业务环节可展开成多个能力模块（如「数据获取、清洗处理」= 下载数据 + 数据清洗）。
+   * -> { ok, id, name, step, created }
    */
   function startFlow() {
     if (!FLOW_STEPS.length) return { ok: false, reason: '流程未定义' };
-    var existed = false;
-    for (var i = 0; i < state.modules.length; i++) {
-      if (state.modules[i].step === FLOW_STEPS[0].key) { existed = true; break; }
-    }
-    var first = ensureFlowModule(FLOW_STEPS[0]);
-    if (!findModule(state.activeModuleId)) state.activeModuleId = first.id;
-    emit('flow:start', { id: first.id, name: first.name, created: !existed });
-    return { ok: true, id: first.id, name: first.name, created: !existed };
+    var step = FLOW_STEPS[0];
+    var created = ensureStepModules(step);
+    var first = created[0] || findModuleByStep(step.key);
+    if (first && !findModule(state.activeModuleId)) state.activeModuleId = first.id;
+    emit('flow:start', {
+      id: first ? first.id : null, name: first ? first.name : '',
+      step: step.key, created: created.length
+    });
+    return {
+      ok: true, id: first ? first.id : null, name: first ? first.name : '',
+      step: step.key, created: created.length
+    };
   }
 
-  /** 按流程一次性创建缺失的 9 个模块（已存在同 key 的跳过），并选中第一个新建模块 */
+  /**
+   * 按九步研究流程一次性创建全部环节（已存在的能力类型跳过），并选中第一个新建模块。
+   * 与 startFlow 的区别：一次性铺满整条链，便于先看全貌。
+   */
   function initFlowModules() {
     var created = [];
     for (var i = 0; i < FLOW_STEPS.length; i++) {
-      var step = FLOW_STEPS[i];
-      var exists = null;
-      for (var j = 0; j < state.modules.length; j++) {
-        if (state.modules[j].step === step.key) { exists = state.modules[j]; break; }
-      }
-      if (exists) continue;
-      var last = state.modules.length ? state.modules[state.modules.length - 1] : null;
-      var mod = {
-        id: uid('mod_'),
-        name: step.name,
-        step: step.key,
-        spec: deepClone(step.spec),
-        status: 'todo',
-        dependsOn: last ? last.id : null,
-        createdAt: nowISO(),
-        messages: [],
-        doc: null,
-        run: null
-      };
-      state.modules.push(mod);
-      created.push(deepClone(mod));
+      created = created.concat(ensureStepModules(FLOW_STEPS[i]));
     }
     if (!created.length) return { created: 0, firstId: null };
     if (!findModule(state.activeModuleId)) state.activeModuleId = created[0].id;
@@ -813,9 +851,10 @@
     mod.status = 'approved';
     mod.approvedAt = nowISO();
     if (!next) {
-      // 【本地修复 · 2026-09-24】按步解锁：链上还没有下一个模块时，
-      // 若还有后续步骤就现场建一个（名字与说明取自 FLOW_STEPS），再跳过去。
-      created = mod.type ? addModule() : buildNextFlowModule(mod);
+      // 【本地修复 · 2026-09-24】按步解锁：链上还没有下一个模块时现场建一个再跳过去。
+      // 【九步研究流程 · 2026-10-20】带 step 的模块（九步业务环节）按业务环节推进；
+      // 数据链的固定模块（无 step）仍走 addModule 的老路，两条链互不干扰。
+      created = (mod.step || !mod.type) ? buildNextFlowModule(mod) : addModule();
       next = created;
     }
     if (next) state.activeModuleId = next.id;
@@ -831,37 +870,90 @@
     };
   }
 
+  /**
+   * 设置环节参数（如文章撰写环节的「目标期刊」）。
+   * 只接受字符串键值，单值截断 500 字符；非法入参返回 false，不改状态。
+   */
+  function setModuleParam(id, key, value) {
+    var mod = findModule(id);
+    if (!mod) return false;
+    if (typeof key !== 'string' || !key) return false;
+    if (!mod.params || typeof mod.params !== 'object' || Array.isArray(mod.params)) mod.params = {};
+    mod.params[key] = (typeof value === 'string') ? value.slice(0, 500) : '';
+    emit('module:param', { id: id, key: key });
+    return true;
+  }
+
   /** 该模块的 step 在 FLOW_STEPS 里的下标；不是流程模块返回 -1 */
   function flowIndexOf(stepKey) {
     for (var i = 0; i < FLOW_STEPS.length; i++) if (FLOW_STEPS[i].key === stepKey) return i;
     return -1;
   }
 
-  /** 把某个步骤建成模块并追加到链尾；已存在同 step 的则直接返回它 */
-  function ensureFlowModule(step) {
+  /** 链上第一个属于该业务环节的模块 */
+  function findModuleByStep(stepKey) {
     for (var i = 0; i < state.modules.length; i++) {
-      if (state.modules[i].step === step.key) return state.modules[i];
+      if (state.modules[i].step === stepKey) return state.modules[i];
     }
-    var last = state.modules.length ? state.modules[state.modules.length - 1] : null;
-    var mod = {
-      id: uid('mod_'),
-      name: step.name,
-      step: step.key,
-      spec: deepClone(step.spec),
-      status: 'todo',
-      dependsOn: last ? last.id : null,
-      createdAt: nowISO(),
-      messages: []
-    };
-    state.modules.push(mod);
-    return mod;
+    return null;
   }
 
-  /** 审核通过后该出现的那一步：非流程模块或已是最后一步则返回 null */
+  /** 能力类型 → 显示名（既有 FIXED_MODULES 与新增 RESEARCH_TYPES） */
+  function typeName(typeId, mode) {
+    if (typeId === 'calculation' && mode === 'direct') return '直接计算';
+    if (typeId === 'calculation' && mode === 'modify') return '修改计算';
+    var hit = FIXED_MODULES.filter(function (item) { return item.id === typeId; })[0]
+      || RESEARCH_TYPES.filter(function (item) { return item.id === typeId; })[0];
+    return hit ? hit.name : typeId;
+  }
+
+  /**
+   * 把一个业务环节展开成能力模块并追加到链尾；已存在同类型的跳过，只返回新建的。
+   * 单模块的环节用环节名（如「① 文献调研」），多模块的环节用各能力模块名（如「下载数据」「数据清洗」）。
+   */
+  function ensureStepModules(step) {
+    var impl = RESEARCH_STEP_IMPL[step.key] || [];
+    var created = [];
+    for (var i = 0; i < impl.length; i++) {
+      var typeId = impl[i];
+      var exists = false;
+      for (var j = 0; j < state.modules.length; j++) {
+        if (state.modules[j].type === typeId) { exists = true; break; }
+      }
+      if (exists) continue;
+      var last = state.modules.length ? state.modules[state.modules.length - 1] : null;
+      var mod = {
+        id: uid('mod_'),
+        name: impl.length === 1 ? step.name : typeName(typeId),
+        type: typeId,
+        step: step.key,
+        spec: deepClone(step.spec),
+        status: 'todo',
+        dependsOn: last ? last.id : null,
+        createdAt: nowISO(),
+        messages: [],
+        doc: null,
+        run: null,
+        params: {}
+      };
+      state.modules.push(mod);
+      created.push(deepClone(mod));
+    }
+    return created;
+  }
+
+  /**
+   * 审核通过后该出现的下一个模块：
+   * 先补齐当前业务环节里还没建的能力模块；当前环节齐了才推进到下一个业务环节。
+   */
   function buildNextFlowModule(approved) {
     var i = flowIndexOf(approved.step);
-    if (i < 0 || i + 1 >= FLOW_STEPS.length) return null;
-    return ensureFlowModule(FLOW_STEPS[i + 1]);
+    if (i < 0) return null;
+    var pending = ensureStepModules(FLOW_STEPS[i]);
+    if (pending.length) return pending[0];
+    if (i + 1 >= FLOW_STEPS.length) return null;
+    var nextCreated = ensureStepModules(FLOW_STEPS[i + 1]);
+    return nextCreated[0] || null;
   }
 
   /** 人工审核打回（review -> doing），可附一句原因（写入系统消息） */
@@ -1368,6 +1460,8 @@
     submitModule: submitModule,
     approveModule: approveModule,
     rejectModule: rejectModule,
+    // —— 环节参数（2026-10-20：文章撰写环节的「目标期刊」等）
+    setModuleParam: setModuleParam,
     // —— 环节文档（用户与 AI 协商的标准文档 + 人工审核）
     saveDoc: saveDoc,
     approveDoc: approveDoc,
@@ -1421,6 +1515,10 @@
     },
     // 流程规格（只读快照）：9 步的 key / 名称 / 说明
     FLOW_STEPS: deepClone(FLOW_STEPS),
+    // 九步研究流程的能力映射（2026-10-20）：环节 → 能力模块 / 契约文档
+    RESEARCH_TYPES: deepClone(RESEARCH_TYPES),
+    RESEARCH_STEP_IMPL: deepClone(RESEARCH_STEP_IMPL),
+    RESEARCH_STEP_WORKFLOW: deepClone(RESEARCH_STEP_WORKFLOW),
     // 存储键常量（项目管理用）
     PROJECTS_KEY: PROJECTS_KEY,
     PROJECT_META_KEY: PROJECT_META_KEY,
