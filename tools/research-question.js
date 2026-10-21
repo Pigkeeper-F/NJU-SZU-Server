@@ -71,6 +71,85 @@ function parseJsonLoose(text) {
   return null;
 }
 
+
+/**
+ * 判定一条"检索式"是否合格：不含 JSON 噪声、长度合理、像检索式。
+ * 免费模型经常不按格式输出（把整个 JSON 片段塞进 query 字段），不校验就会把
+ * 一串 JSON 碎片原样渲染到界面上——所以这里要挡一道。
+ */
+function looksLikeQuery(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (text.length < 8 || text.length > 600) return false;
+  if (text.indexOf('{') >= 0 || text.indexOf('}') >= 0) return false;
+  if (text.indexOf('": "') >= 0 || text.indexOf('":"') >= 0) return false;
+  if (text.indexOf('":') >= 0 && text.indexOf('"') >= 0) return false;
+  return /[A-Za-z一-龥]/.test(text);
+}
+
+/** 从模型原文里抠出检索式（JSON 解析失败时的兜底，手工扫描避免复杂正则） */
+function salvageQueries(rawText) {
+  const found = [];
+  const text = String(rawText || '');
+  const key = '"query"';
+  let at = 0;
+  while (found.length < 5) {
+    const k = text.indexOf(key, at);
+    if (k < 0) break;
+    const colon = text.indexOf(':', k + key.length);
+    if (colon < 0) break;
+    const q1 = text.indexOf('"', colon);
+    if (q1 < 0) break;
+    let out = '';
+    let i = q1 + 1;
+    while (i < text.length) {
+      const ch = text.charAt(i);
+      if (ch === String.fromCharCode(92)) { out += text.charAt(i + 1) || ''; i += 2; continue; }
+      if (ch === '"') break;
+      out += ch;
+      i += 1;
+    }
+    const value = out.split(String.fromCharCode(10)).join(' ').trim();
+    if (looksLikeQuery(value)) found.push(value);
+    at = i + 1;
+  }
+  return found;
+}
+
+/** 从模型原文里按行抠出"像检索式"的行（最后一道兜底） */
+function salvageByLine(rawText) {
+  const found = [];
+  const lines = String(rawText || '').split(String.fromCharCode(10));
+  const lead = '-*.、)0123456789';
+  for (const line of lines) {
+    let value = line.trim();
+    if (value.length > 1 && lead.indexOf(value.charAt(0)) >= 0) value = value.slice(1).trim();
+    if (value.length > 1 && (value.charAt(0) === '"' || value.charAt(0) === "'" || value.charAt(0) === '`')) {
+      value = value.slice(1);
+    }
+    if (value.length > 1 && (value.charAt(value.length - 1) === '"' || value.charAt(value.length - 1) === "'" || value.charAt(value.length - 1) === '`')) {
+      value = value.slice(0, value.length - 1);
+    }
+    value = value.trim();
+    const hasLogic = value.indexOf(' AND ') >= 0 || value.indexOf(' OR ') >= 0 || value.indexOf('"') >= 0;
+    if (looksLikeQuery(value) && hasLogic && found.indexOf(value) < 0) found.push(value);
+    if (found.length >= 5) break;
+  }
+  return found;
+}
+
+/** 清洗说明文字：去掉控制字符、压缩空白、限长 */
+function cleanNote(value, maxLen) {
+  if (typeof value !== 'string') return '';
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    out += (code < 32) ? ' ' : value.charAt(i);
+  }
+  const parts = out.split(' ').filter(function (part) { return part.length > 0; });
+  return parts.join(' ').slice(0, maxLen || 300);
+}
+
 function asList(value, limit) {
   const out = [];
   if (!Array.isArray(value)) return out;
@@ -119,16 +198,28 @@ async function planQueries({ idea, callModel, modelCfg } = {}) {
   if (typeof callModel !== 'function') throw new Error('缺少模型调用入口');
   const reply = await callModel(modelCfg, [{ role: 'user', content: planPrompt(text) }], 120000);
   const parsed = parseJsonLoose(reply);
-  if (!parsed || typeof parsed !== 'object') throw new Error('选题拆解没有返回可解析的结果');
-  const dimensions = asList(parsed.dimensions, 6).map((item) => ({
-    name: String((item && item.name) || '').trim(),
-    keywords: asList(item && item.keywords, 8).map(String)
-  })).filter((item) => item.name);
-  const queries = asList(parsed.queries, 5).map((item) => ({
-    query: String((item && item.query) || '').trim(),
-    rationale: String((item && item.rationale) || '').trim()
-  })).filter((item) => item.query);
-  if (!queries.length) throw new Error('选题拆解没有给出可用的检索式');
+  const dimensions = (parsed && typeof parsed === 'object')
+    ? asList(parsed.dimensions, 6).map((item) => ({
+      name: cleanNote((item && item.name) || '', 60),
+      keywords: asList(item && item.keywords, 8).map((k) => cleanNote(String(k), 40))
+    })).filter((item) => item.name)
+    : [];
+  let queries = (parsed && typeof parsed === 'object')
+    ? asList(parsed.queries, 5).map((item) => ({
+      query: cleanNote((item && item.query) || '', 600),
+      rationale: cleanNote((item && item.rationale) || '', 300)
+    })).filter((item) => looksLikeQuery(item.query))
+    : [];
+  // 模型没按格式输出时的兜底：先正则抠，再按行抠
+  if (!queries.length) {
+    const salvaged = salvageQueries(reply);
+    if (salvaged.length) queries = salvaged.map((q) => ({ query: q, rationale: '' }));
+  }
+  if (!queries.length) {
+    const byLine = salvageByLine(reply);
+    if (byLine.length) queries = byLine.map((q) => ({ query: q, rationale: '' }));
+  }
+  if (!queries.length) throw new Error('选题拆解没有给出可用的检索式（模型输出无法解析）');
   return { idea: text, dimensions, queries };
 }
 

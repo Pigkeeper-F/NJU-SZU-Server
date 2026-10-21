@@ -37,10 +37,11 @@ const STATIC_NODES = ["composer-input", "btn-send", "btn-add-module", "btn-sideb
 // 【集成 · 2026-10-13】账号系统上工作台：index.html 在数据层之前先加载账号配置/存储与守卫
 const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.js", "js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/workspace.js", "js/tasks.js"];
 // 账号系统独立文件（登录/注册页自带脚本，不进工作台 index.html 的渲染链）
-const AUTH_FILES = ["js/auth-config.js", "js/auth-storage.js", "js/auth-pages.js", "js/guard.js", "login.html", "register.html", "css/auth.css"];
+const AUTH_FILES = ["js/auth-config.js", "js/auth-storage.js", "js/auth-pages.js", "js/guard.js", "login.html", "register.html", "css/auth.css", "debug.html", "js/debug.js"];
 // 契约 §2「两种运行模式」：前端只允许 js/chat.js 里对同源 /api/… 的 fetch；其余脚本零联网。
 // 【模型分组 · 2026-10-15】js/sidebar.js 获准发起同源 POST /api/ai/test（设置页「测试连通」，契约 §15.7）。
-const FETCH_ALLOWED = ["js/chat.js", "js/codex.js", "js/workspace.js", "js/tasks.js", "js/sidebar.js"];
+const FETCH_ALLOWED = ["js/chat.js", "js/codex.js", "js/workspace.js", "js/tasks.js", "js/sidebar.js", "js/debug.js"];
+// 【调试台 · 2026-10-20】js/debug.js 只访问 /api/debug/*（只读）；debug.html 是独立工具页，不进 index.html。
 
 // ---------- 读取 ----------
 for (const f of JS_FILES.concat(AUTH_FILES, ["index.html", "css/style.css", "docs/contract.md"])) {

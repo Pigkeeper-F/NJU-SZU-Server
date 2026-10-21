@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>研序 · 调试台</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/workspace.css">
+<style>
+  body { background: #f4f5f7; color: #111827; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 20px; }
+  .dbg-wrap { max-width: 1180px; margin: 0 auto; }
+  .dbg-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .dbg-head h1 { font-size: 20px; margin: 0; }
+  .dbg-head .dbg-sub { font-size: 13px; color: #6b7280; }
+  .dbg-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .dbg-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; }
+  .dbg-card .k { font-size: 11.5px; color: #6b7280; }
+  .dbg-card .v { font-size: 14px; margin-top: 3px; word-break: break-all; }
+  .dbg-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 14px; overflow: hidden; }
+  .dbg-panel > h2 { font-size: 14px; margin: 0; padding: 9px 12px; border-bottom: 1px solid #e5e7eb; background: #fafbfc; display: flex; align-items: center; gap: 10px; }
+  .dbg-panel > h2 .dbg-count { font-size: 12px; color: #6b7280; font-weight: 400; }
+  .dbg-panel > h2 button { margin-left: auto; font: inherit; font-size: 12px; padding: 4px 10px; border: 1px solid #d1d5db; background: #fff; border-radius: 6px; cursor: pointer; }
+  .dbg-panel > h2 button:hover { background: #f3f4f6; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #f0f1f3; vertical-align: top; }
+  th { color: #6b7280; font-weight: 600; background: #fcfcfd; position: sticky; top: 0; }
+  tr.dbg-err td { background: #fef2f2; }
+  .dbg-lvl { font-weight: 600; }
+  .dbg-lvl-error { color: #b91c1c; }
+  .dbg-lvl-info { color: #6b7280; }
+  .dbg-num { text-align: right; white-space: nowrap; color: #6b7280; }
+  .dbg-err-text { color: #991b1b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; }
+  .dbg-empty { padding: 16px; color: #9ca3af; font-size: 12.5px; }
+  .dbg-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .dbg-bar label { font-size: 12.5px; color: #6b7280; display: flex; align-items: center; gap: 5px; }
+  .dbg-bar button { font: inherit; font-size: 12.5px; padding: 5px 12px; border: 1px solid #d1d5db; background: #fff; border-radius: 6px; cursor: pointer; }
+  .dbg-bar button:hover { background: #f3f4f6; }
+  a.dbg-back { font-size: 12.5px; color: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="dbg-wrap">
+  <div class="dbg-head">
+    <h1>研序 · 调试台</h1>
+    <span class="dbg-sub">服务端请求记录、未捕获异常、前端错误——出问题时先看这里</span>
+    <a class="dbg-back" href="index.html">← 回到工作台</a>
+  </div>
+
+  <div class="dbg-bar">
+    <button id="dbg-refresh" type="button">刷新</button>
+    <label><input type="checkbox" id="dbg-auto" checked> 自动刷新（3 秒）</label>
+    <span id="dbg-updated" class="dbg-sub"></span>
+  </div>
+
+  <div class="dbg-cards" id="dbg-cards"></div>
+
+  <div class="dbg-panel">
+    <h2>错误 <span class="dbg-count" id="dbg-err-count"></span>
+      <button type="button" id="dbg-clear-errors">只看最近 100 条</button></h2>
+    <div id="dbg-errors"></div>
+  </div>
+
+  <div class="dbg-panel">
+    <h2>最近请求 <span class="dbg-count" id="dbg-req-count"></span></h2>
+    <div id="dbg-requests"></div>
+  </div>
+</div>
+<script src="js/debug.js"></script>
+</body>
+</html>

@@ -1396,3 +1396,39 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 
 实测（内置浏览器 8124 实例）：新建九步任务 → 只有 1 个模块（①文献调研）；
 通过①的审核门 → 变 2 个并自动选中②。
+
+---
+
+## 25. 调试台（2026-10-20）
+
+出问题时不用猜：服务端把最近的请求与异常记在内存环形缓冲里，调试页一把拉出来。
+
+### 25.1 服务端
+
+- **环形缓冲** `debugLog`（上限 200 条，只在内存、进程重启即清、不落盘、不含请求体与密钥）：
+  每条 `/api/…` 请求记一行 `{ seq, at, level, kind, method, path, status, ms }`；
+  `level=error` 的行（HTTP ≥400、uncaughtException、unhandledRejection、前端上报）会额外带
+  `error` / `stack` 摘要。**Key 一律脱敏**（`Bearer ***` / `apiKey=***`）。
+- **未捕获异常**：`process.on('uncaughtException' | 'unhandledRejection')` 只记录不退出——
+  本地开发工具要一直活着。
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/api/debug/state?limit=` | GET | 服务状态、运行时长、Node 版本、当前 `.env` 模型、文献作业数、错误计数、最近请求与错误 |
+| `/api/debug/logs?limit=` | GET | 原始日志数组 |
+| `/api/debug/client-error` | POST | 前端 JS 错误上报 `{ where, message, stack }` |
+
+### 25.2 前端
+
+- **`debug.html` + `js/debug.js`**：独立工具页（`http://localhost:8123/debug.html`），**不进
+  index.html 的脚本列表**，不污染主界面。侧栏底部有一个「调试台」小链接指向它。
+- `js/debug.js` 的联网权限**仅限 `/api/debug/*` 只读**（已加入契约自检的 `FETCH_ALLOWED`）。
+- **主界面错误上报**：`js/chat.js` 装 `window.onerror` 与 `unhandledrejection`，
+  统一 POST 到 `/api/debug/client-error`（失败静默，不影响主流程）。
+
+### 25.3 验收
+
+1. 打开 `/debug.html`：显示服务状态、运行时长、`.env` 模型、Key 有无、文献作业数、请求/错误计数。
+2. 「最近请求」表逐条显示 时间 / 级别 / 类型 / 方法 / 路径 / 状态 / 耗时。
+3. 在主界面制造一个 JS 错误 → 调试页「错误」表出现该条（中文正常显示）。
+4. 侧栏底部「调试台」链接可跳转到该页。

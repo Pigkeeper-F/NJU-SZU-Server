@@ -289,6 +289,38 @@ function researchErrorStatus(message) {
   return 400;
 }
 
+/**
+ * 【调试工具】GET /api/debug/state：服务状态 + 当前生效模型 + 最近的请求与错误。
+ */
+async function handleDebug(req, res, url) {
+  const route = url.pathname;
+  if (req.method === 'GET' && route === '/api/debug/state') {
+    const cfg = resolveModelConfig({});
+    return sendJson(res, 200, Object.assign(debugSnapshot(url.searchParams.get('limit')), {
+      envModel: { baseUrl: cfg.baseUrl, model: cfg.model, protocol: cfg.protocol, source: 'server-env' },
+      hasEnvKey: Boolean(process.env.AI_API_KEY),
+      workbench: { dir: path.join(ROOT, '.workbench'), literatureJobs: (function () {
+        try { return fs.readdirSync(path.join(ROOT, '.workbench', 'literature')).length; } catch (error) { return 0; }
+      })() }
+    }));
+  }
+  if (req.method === 'GET' && route === '/api/debug/logs') {
+    return sendJson(res, 200, { logs: debugLog.slice(-Number(url.searchParams.get('limit')) || 100) });
+  }
+  if (req.method === 'POST' && route === '/api/debug/client-error') {
+    let payload = {};
+    try { payload = JSON.parse(await readBody(req, 32 * 1024)); } catch (error) { payload = {}; }
+    debugRecord({
+      level: 'error', kind: 'client-error', where: (payload && payload.where) || 'window',
+      error: debugSafe((payload && payload.message) || 'unknown'),
+      stack: debugSafe((payload && payload.stack) || '')
+    });
+    return sendJson(res, 200, { ok: true });
+  }
+  res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify({ error: '未知的调试接口' }));
+}
+
 async function handleResearch(req, res, url) {
   const route = url.pathname;
   if (req.method === 'POST' && route === '/api/research/questions') {
@@ -610,6 +642,82 @@ function configInfo(cfg, source) {
     protocol: cfg.protocol || '',
     source: source || 'server-env'
   };
+}
+
+// ==================================================================
+// 【调试工具 · 2026-10-20】服务端可观测性
+// ----------------------------------------------------------------------------
+// 目的：出问题时不用猜。服务端把最近的请求（方法/路径/状态/耗时/错误摘要）
+// 与未捕获异常记在环形缓冲里，调试页 /api/debug/state 一把拉出来；
+// 前端的 JS 错误也通过 /api/debug/client-error 回传到这里。
+// 缓冲只在内存里，进程重启即清空，不落盘、不含请求体与密钥。
+// ==================================================================
+const DEBUG_LOG_LIMIT = 200;
+const debugLog = [];
+let debugStartedAt = Date.now();
+let debugSeq = 0;
+
+function debugRecord(entry) {
+  debugSeq += 1;
+  const row = Object.assign({ seq: debugSeq, at: new Date().toISOString() }, entry);
+  debugLog.push(row);
+  while (debugLog.length > DEBUG_LOG_LIMIT) debugLog.shift();
+  return row;
+}
+
+/** 脱敏：日志里不出现 API Key */
+function debugSafe(text) {
+  const s = String(text === null || text === undefined ? '' : text);
+  return s.replace(/(Bearer\s+)[A-Za-z0-9._-]{8,}/gi, '$1***')
+          .replace(/(apiKey["']?\s*[:=]\s*["']?)[A-Za-z0-9._-]{8,}/gi, '$1***')
+          .slice(0, 500);
+}
+
+function debugSnapshot(limit) {
+  const n = Math.max(1, Math.min(DEBUG_LOG_LIMIT, Number(limit) || 60));
+  const errors = debugLog.filter(function (row) { return row.level === 'error'; });
+  return {
+    startedAt: new Date(debugStartedAt).toISOString(),
+    uptimeSeconds: Math.round((Date.now() - debugStartedAt) / 1000),
+    node: process.version,
+    pid: process.pid,
+    total: debugLog.length,
+    errors: errors.length,
+    recent: debugLog.slice(-n).reverse(),
+    recentErrors: errors.slice(-20).reverse()
+  };
+}
+
+/** 未捕获异常：记进缓冲（不退出进程——本地开发工具，服务要一直活着） */
+process.on('uncaughtException', function (error) {
+  debugRecord({ level: 'error', kind: 'uncaughtException', where: 'process', error: debugSafe(error && error.stack ? error.stack : error) });
+  console.error('[server] uncaughtException:', error);
+});
+process.on('unhandledRejection', function (reason) {
+  debugRecord({ level: 'error', kind: 'unhandledRejection', where: 'process', error: debugSafe(reason && reason.stack ? reason.stack : reason) });
+  console.error('[server] unhandledRejection:', reason);
+});
+
+
+/** 给每个 /api/ 请求记一条调试日志（方法、路径、状态、耗时） */
+function debugWrapApi(req, res) {
+  if (!String(req.url || '').startsWith('/api/')) return;
+  const started = Date.now();
+  const method = req.method;
+  const path = String(req.url || '').split('?')[0];
+  const finish = function () {
+    const status = res.statusCode || 0;
+    debugRecord({
+      level: status >= 400 ? 'error' : 'info',
+      kind: 'request',
+      method: method,
+      path: path,
+      status: status,
+      ms: Date.now() - started
+    });
+  };
+  res.on('finish', finish);
+  res.on('close', finish);
 }
 
 async function handleChat(req, res) {
@@ -1662,7 +1770,7 @@ function serveStatic(req, res) {
   const filePath = path.resolve(ROOT, relative);
   if (!filePath.startsWith(ROOT + path.sep) && filePath !== ROOT) { res.writeHead(403); res.end(); return; }
   // Only public assets are served. Uploaded files and local credentials use no static route.
-  if (!(relative === 'index.html' || relative === 'login.html' || relative === 'register.html' ||
+  if (!(relative === 'index.html' || relative === 'login.html' || relative === 'register.html' || relative === 'debug.html' ||
     /^(?:css|js)\/[\w\-/]+\.(?:css|js|svg)$/.test(relative))) { res.writeHead(403); res.end(); return; }
   fs.readFile(filePath, (error, data) => {
     if (error) { res.writeHead(error.code === 'ENOENT' ? 404 : 500); res.end(); return; }
@@ -1679,6 +1787,7 @@ function serveStatic(req, res) {
 if (require.main === module) {
   const server = http.createServer((req, res) => {
     if (String(req.url || '').startsWith('/api/') && !checkRequestGuards(req, res)) return;
+    debugWrapApi(req, res);
     if ((String(req.url || '').startsWith('/api/codex/') || String(req.url || '').startsWith('/api/literature/') || String(req.url || '').startsWith('/api/research/') || req.url === '/api/dependencies/open') &&
       req.method === 'POST' && req.headers['x-workbench'] !== '1') {
       return sendJson(res, 403, { error: '请从工作台发起请求' });
@@ -1696,6 +1805,8 @@ if (require.main === module) {
       handleCodex(request, response, new URL(request.url, 'http://localhost')));
     if (String(req.url || '').startsWith('/api/literature/')) return guarded('/api/literature', (request, response) =>
       handleLiterature(request, response, new URL(request.url, 'http://localhost')));
+    if (String(req.url || '').startsWith('/api/debug/')) return guarded('/api/debug', (request, response) =>
+      handleDebug(request, response, new URL(request.url, 'http://localhost')));
     if (String(req.url || '').startsWith('/api/research/')) return guarded('/api/research', (request, response) =>
       handleResearch(request, response, new URL(request.url, 'http://localhost')));
     if (req.method === 'POST' && req.url === '/api/dependencies/open') return guarded('/api/dependencies/open', (_, response) => openDependencies(response));

@@ -478,6 +478,31 @@
     return (config.model || '?') + ' · ' + source;
   }
 
+  /**
+   * 【调试台 · 2026-10-20】前端错误上报：JS 异常与未处理的 Promise 拒绝
+   * 送到服务端的调试缓冲，调试页能直接看到（不必开 DevTools 手工复制）。
+   * 上报失败绝不影响主流程。
+   */
+  function reportClientError(where, message, stack) {
+    try {
+      fetch('/api/debug/client-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Workbench': '1' },
+        body: JSON.stringify({ where: where, message: message, stack: stack || '' })
+      }).catch(function () { /* 上报失败忽略 */ });
+    } catch (error) { /* 忽略 */ }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('error', function (event) {
+      reportClientError('window.onerror', event && event.message, event && event.error && event.error.stack);
+    });
+    window.addEventListener('unhandledrejection', function (event) {
+      var reason = event && event.reason;
+      reportClientError('unhandledrejection', (reason && reason.message) || String(reason), reason && reason.stack);
+    });
+  }
+
   function researchStatusText(state) {
     var phase = state.phase || '处理中';
     var sec = state.startedAt ? Math.round((Date.now() - state.startedAt) / 1000) : 0;

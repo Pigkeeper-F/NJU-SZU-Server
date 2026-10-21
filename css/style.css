@@ -810,16 +810,34 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
 .research-model { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
 
 /* 冷启动：候选检索式 */
-.research-plans { margin: 4px 0 6px; }
+/* 调试台入口（侧栏底部小链接，指向独立的 debug.html） */
+.sidebar-debug-link {
+  display: block;
+  margin: 0 12px 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.sidebar-debug-link:hover { color: var(--text); text-decoration: underline; }
+
+.research-plans { margin: 4px 0 6px; width: 100%; }
 .research-plan {
   display: flex;
+  flex-wrap: wrap;            /* 必须换行：否则 rationale 的 100% 基准会把检索式挤成一列 */
   align-items: baseline;
   gap: 8px;
   padding: 5px 0;
   border-bottom: 1px dashed var(--border);
 }
-.research-plan-query { flex: 1 1 auto; font-size: 12px; color: var(--text); word-break: break-all; }
-.research-plan-why { flex: 0 0 100%; font-size: 11.5px; color: var(--muted); }
+.research-plan-query {
+  flex: 1 1 240px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-word;     /* 正常断词，不要 break-all 把长串切碎 */
+  overflow-wrap: anywhere;
+}
+.research-plan-why { flex: 1 1 100%; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
 
 /* 人工初筛 */
 .research-screening { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
