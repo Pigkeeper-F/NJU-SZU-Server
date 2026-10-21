@@ -461,12 +461,75 @@
    * 流程：检索（/api/literature/search）→ 轮询作业 → 要点抽取与空白归纳（/api/literature/research）。
    * 产物落在检索作业目录的 research/ 下（notes.csv / synthesis.md / gaps.md），可从作业面板下载。
    */
+  /**
+   * 调研面板的状态条：阶段文案 + 已等待秒数 + 取消按钮。
+   * 计时每秒局部更新（只改这段文字），不整页重绘——重绘会打断主人正在输入的内容。
+   */
+  var researchTimer = null;
+
+  /** 当前生效的模型（脱敏）：给主人看"到底在用哪个通道、为什么慢" */
+  function modelLabel(config) {
+    if (!config) return '';
+    var source = {
+      'browser-credential': '浏览器「添加 API」',
+      'browser-settings': '网页设置',
+      'server-env': '服务端 .env'
+    }[config.source] || config.source;
+    return (config.model || '?') + ' · ' + source;
+  }
+
+  function researchStatusText(state) {
+    var phase = state.phase || '处理中';
+    var sec = state.startedAt ? Math.round((Date.now() - state.startedAt) / 1000) : 0;
+    return phase + '… 已等待 ' + sec + ' 秒（模型通道慢时可能需要 1–4 分钟）';
+  }
+
+  function buildResearchStatusBar(mod, state) {
+    if (!state.busy && !state.planBusy && !state.screeningBusy) return null;
+    var bar = el('div', 'research-statusbar');
+    bar.appendChild(el('span', 'research-dot'));
+    var text = el('span', 'research-statusbar-text', researchStatusText(state));
+    text.id = 'research-status-text-' + mod.id;
+    bar.appendChild(text);
+    var cancel = el('button', 'quiet-button', '取消');
+    cancel.type = 'button';
+    cancel.addEventListener('click', function () { cancelResearch(mod); });
+    bar.appendChild(cancel);
+    return bar;
+  }
+
+  function startResearchTimer(mod) {
+    stopResearchTimer();
+    researchTimer = setInterval(function () {
+      var node = document.getElementById('research-status-text-' + mod.id);
+      var st = uiOf(mod.id).research;
+      if (!node || !st) { stopResearchTimer(); return; }
+      node.textContent = researchStatusText(st);
+    }, 1000);
+  }
+
+  function stopResearchTimer() {
+    if (researchTimer) { clearInterval(researchTimer); researchTimer = null; }
+  }
+
+  function cancelResearch(mod) {
+    var st = uiOf(mod.id).research;
+    if (st && st.abort) { try { st.abort.abort(); } catch (error) { /* 忽略 */ } }
+    stopResearchTimer();
+    if (st) {
+      st.busy = false; st.planBusy = false; st.screeningBusy = false;
+      st.phase = ''; st.startedAt = 0; st.message = '已取消';
+    }
+    render();
+  }
+
   function buildResearchPanel(mod) {
     if (!mod || mod.type !== 'literature-research') return null;
     var state = uiOf(mod.id).research || (uiOf(mod.id).research = {
       topic: '', query: '', busy: false, message: '', result: null,
       plan: null, planBusy: false, planMessage: '',
-      candidates: null, keep: null, screeningBusy: false, jobId: ''
+      candidates: null, keep: null, screeningBusy: false, jobId: '',
+      phase: '', startedAt: 0, abort: null, model: ''
     });
     // 刷新后恢复：作业 id 记在模块参数上，候选清单按它重新拉回（否则初筛界面会丢）
     if (!state.jobId && mod.params && typeof mod.params.researchJobId === 'string') {
@@ -480,6 +543,10 @@
       }).catch(function () { /* 拉不到就留空，用户可重新检索 */ });
     }
     var box = el('div', 'research-panel');
+
+    // 状态条放在面板最上面：长等待时必须一眼看得见（免费通道单次调用可能 1–4 分钟）
+    var statusBar = buildResearchStatusBar(mod, state);
+    if (statusBar) box.appendChild(statusBar);
 
     var topicRow = el('label', 'research-field');
     topicRow.appendChild(el('span', 'research-label', '想法'));
@@ -532,6 +599,8 @@
       box.appendChild(planBox);
     }
     if (state.planMessage) box.appendChild(el('div', 'research-status', state.planMessage));
+    // 当前用的哪个模型通道（慢的时候主人一眼能看出是不是走了慢通道）
+    if (state.model) box.appendChild(el('div', 'research-model', '当前模型：' + state.model));
 
     var actions = el('div', 'research-actions');
     var runBtn = el('button', 'status-btn status-btn-primary', state.busy ? '调研中…' : '检索');
@@ -611,11 +680,12 @@
     return box;
   }
 
-  function researchPost(url, body) {
+  function researchPost(url, body, signal) {
     return fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Workbench': '1' },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: signal
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
         if (!response.ok) throw new Error((data && data.error) || ('服务返回 HTTP ' + response.status));
@@ -643,20 +713,33 @@
       return;
     }
     state.planBusy = true;
+    state.phase = '正在拆解想法、生成候选检索式';
+    state.startedAt = Date.now();
     state.planMessage = '拆解中…';
+    state.abort = new AbortController();
     render();
-    researchPost('/api/literature/research-plan', { idea: state.topic, settings: readLlmSettings() || {} })
+    startResearchTimer(mod);
+    researchPost('/api/literature/research-plan', { idea: state.topic, settings: readLlmSettings() || {} }, state.abort.signal)
       .then(function (plan) {
+        stopResearchTimer();
         state.planBusy = false;
+        state.phase = '';
+        state.startedAt = 0;
         state.plan = plan;
+        state.model = modelLabel(plan && plan.config);
         state.planMessage = plan && plan.dimensions && plan.dimensions.length
           ? ('检索维度：' + plan.dimensions.map(function (d) { return d.name; }).join('、'))
           : '';
         render();
       })
       .catch(function (error) {
+        stopResearchTimer();
         state.planBusy = false;
-        state.planMessage = '拆解失败：' + ((error && error.message) || '未知错误');
+        state.phase = '';
+        state.startedAt = 0;
+        state.planMessage = (error && error.name === 'AbortError')
+          ? '已取消'
+          : '拆解失败：' + ((error && error.message) || '未知错误');
         render();
       });
   }
@@ -674,16 +757,20 @@
       return;
     }
     state.busy = true;
+    state.phase = '正在检索 Google Scholar';
+    state.startedAt = Date.now();
     state.message = '检索中…';
     state.result = null;
     state.candidates = null;
     state.keep = null;
+    state.abort = new AbortController();
     render();
+    startResearchTimer(mod);
 
     var jobId = '';
     researchPost('/api/literature/search', {
       config: { topic: state.topic, query: state.query, sources: ['google-scholar'], limit: 10 }
-    }).then(function (started) {
+    }, state.abort.signal).then(function (started) {
       jobId = started && started.id ? started.id : '';
       if (!jobId) throw new Error('检索作业没有返回标识');
       state.message = '检索中（作业 ' + jobId.slice(0, 8) + '…）…';
@@ -711,7 +798,10 @@
       state.jobId = jobId;
       return researchGet('/api/literature/candidates?id=' + encodeURIComponent(jobId));
     }).then(function (data) {
+      stopResearchTimer();
       state.busy = false;
+      state.phase = '';
+      state.startedAt = 0;
       state.candidates = (data && data.candidates) || [];
       state.keep = state.candidates.map(function (c) { return c.id; });
       state.message = state.candidates.length
@@ -719,8 +809,13 @@
         : '检索没有结果——换条检索式或放宽条件';
       render();
     }).catch(function (error) {
+      stopResearchTimer();
       state.busy = false;
-      state.message = '失败：' + ((error && error.message) || '未知错误');
+      state.phase = '';
+      state.startedAt = 0;
+      state.message = (error && error.name === 'AbortError')
+        ? '已取消'
+        : '失败：' + ((error && error.message) || '未知错误');
       render();
     });
   }
@@ -734,15 +829,23 @@
     var excluded = all.filter(function (id) { return keep.indexOf(id) < 0; })
       .map(function (id) { return { id: id, reason: '初筛未勾选' }; });
     state.screeningBusy = true;
+    state.phase = '正在抽取要点、共识分歧与研究空白';
+    state.startedAt = Date.now();
     state.message = '抽取要点与研究空白中…';
+    state.abort = new AbortController();
     render();
-    researchPost('/api/literature/research-screen', { jobId: state.jobId, keep: keep, exclude: excluded })
+    startResearchTimer(mod);
+    researchPost('/api/literature/research-screen', { jobId: state.jobId, keep: keep, exclude: excluded }, state.abort.signal)
       .then(function () {
-        return researchPost('/api/literature/research', { jobId: state.jobId, settings: readLlmSettings() || {} });
+        return researchPost('/api/literature/research', { jobId: state.jobId, settings: readLlmSettings() || {} }, state.abort.signal);
       })
       .then(function (result) {
+        stopResearchTimer();
         state.screeningBusy = false;
+        state.phase = '';
+        state.startedAt = 0;
         state.result = result;
+        state.model = modelLabel(result && result.config);
         state.message = result && result.ok
           ? ('完成：' + ((result.notes || []).length) + ' 篇要点、' + ((result.gaps || []).length) + ' 条研究空白')
           : ('部分完成：' + ((result && result.error) || '模型返回异常'));
@@ -753,8 +856,13 @@
         render();
       })
       .catch(function (error) {
+        stopResearchTimer();
         state.screeningBusy = false;
-        state.message = '失败：' + ((error && error.message) || '未知错误');
+        state.phase = '';
+        state.startedAt = 0;
+        state.message = (error && error.name === 'AbortError')
+          ? '已取消'
+          : '失败：' + ((error && error.message) || '未知错误');
         render();
       });
   }
@@ -1116,6 +1224,23 @@
     s += '#' + templateOf(mod.id) + '#' + ((docFiles[mod.id] && docFiles[mod.id].length) || 0);
     // 【X2】URL 清单 + 产物预览展开数（模块级瞬态，变更后需全量重建）
     s += '#' + ((urlList[mod.id] && urlList[mod.id].length) || 0);
+    // 【调研面板 · 2026-10-21】环节①/② 的面板状态也纳入签名。
+    // 原因：render() 有「增量快速路径」——只在消息变化时做增量，不重建模块空间。
+    // 面板状态（进度条、按钮禁用、候选清单、检索式回填）不在 docSig 里时，
+    // 状态一变就被快速路径吞掉，界面看起来"点了完全没反应"。
+    var rs = uiOf(mod.id).research;
+    if (rs) {
+      s += '#R' + (rs.busy ? 1 : 0) + (rs.planBusy ? 1 : 0) + (rs.screeningBusy ? 1 : 0)
+        + '|' + (rs.phase || '') + '|' + (rs.topic || '') + '|' + (rs.query || '')
+        + '|' + (rs.plan ? (rs.plan.queries || []).length : 0)
+        + '|' + (rs.result ? 1 : 0) + '|' + ((rs.candidates || []).length) + '|' + ((rs.keep || []).length)
+        + '|' + (rs.message || '') + '|' + (rs.planMessage || '') + '|' + (rs.model || '');
+    }
+    var qs = uiOf(mod.id).question;
+    if (qs) {
+      s += '#Q' + (qs.busy ? 1 : 0) + '|' + (qs.idea || '') + '|' + ((qs.candidates || []).length)
+        + '|' + (qs.spec ? String(qs.spec).length : 0) + '|' + (qs.message || '');
+    }
     var pvOpen = previewOpen[mod.id];
     var pvCount = 0;
     for (var pk in pvOpen) { if (Object.prototype.hasOwnProperty.call(pvOpen, pk)) pvCount += 1; }

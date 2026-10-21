@@ -255,20 +255,26 @@ async function handleCodex(req, res, url) {
  * 候选问题那步 4 次里失败 3 次、第 4 次才成功），让前端重试成本高，
  * 所以在服务端这一层做退避重试。
  */
-async function callModelWithRetry(cfg, messages, timeoutMs, attempts = 4) {
+async function callModelWithRetry(cfg, messages, timeoutMs, attempts = 3, budgetMs = 240000) {
+  // attempts 与 budgetMs 都是为了"别让人干等"：免费通道拥塞时每次调用可能耗满超时，
+  // 叠加几次重试就是 8 分钟以上，界面上看着像卡死。3 次 + 4 分钟总预算后快速失败，
+  // 由使用者决定重试还是换模型。
+  const started = Date.now();
   let lastError = null;
   for (let attempt = 0; attempt < attempts; attempt++) {
+    const left = budgetMs - (Date.now() - started);
+    if (left <= 5000) break;
     try {
-      return await callModel(cfg, messages, timeoutMs);
+      return await callModel(cfg, messages, Math.min(timeoutMs, left));
     } catch (error) {
       lastError = error;
       const text = String((error && error.message) || '');
       const transient = /temporarily unavailable|insufficient credits|无法连接|Invalid input|overload|rate|too many|timeout|超时|服务不可用/i.test(text);
       if (!transient || attempt === attempts - 1) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 2000 * (attempt + 1)));
+      await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
     }
   }
-  throw lastError;
+  throw lastError || new Error('模型调用超时');
 }
 
 /**
@@ -313,7 +319,7 @@ async function handleResearch(req, res, url) {
         return sendJson(res, 200, { ok: true, ...spec });
       }
       const result = await rq.buildCandidates({ idea, gaps, notes, modelCfg: cfg, callModel: callModelWithRetry });
-      return sendJson(res, 200, { ok: true, ...result });
+      return sendJson(res, 200, { ok: true, ...result, config: configInfo(cfg, configSource(data.settings, normalizeCredential(data.credential))) });
     } catch (error) {
       const message = (error && error.message) || '问题凝练失败';
       return sendJson(res, researchErrorStatus(message), { error: message });
@@ -383,7 +389,7 @@ async function handleLiterature(req, res, url) {
       if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
       try {
         const plan = await require('./tools/research-question').planQueries({ idea: data.idea, modelCfg: cfg, callModel: callModelWithRetry });
-        return sendJson(res, 200, plan);
+        return sendJson(res, 200, { ...plan, config: configInfo(cfg, configSource(data.settings, normalizeCredential(data.credential))) });
       } catch (error) {
         const message = (error && error.message) || '选题拆解失败';
         return sendJson(res, researchErrorStatus(message), { error: message });
