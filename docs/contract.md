@@ -1421,7 +1421,10 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 ### 25.2 前端
 
 - **`debug.html` + `js/debug.js`**：独立工具页（`http://localhost:8123/debug.html`），**不进
-  index.html 的脚本列表**，不污染主界面。侧栏底部有一个「调试台」小链接指向它。
+  index.html 的脚本列表**，不污染主界面。
+  **可见性约定**：这个页面主要是给维护者（AI）用的，所以侧栏入口**默认不出现**——
+  只有地址栏带 `?debug=1` 时才显示「调试台」链接。维护者日常用 `node tools/debug-report.js`
+  拿命令行摘要，不必开页面。
 - `js/debug.js` 的联网权限**仅限 `/api/debug/*` 只读**（已加入契约自检的 `FETCH_ALLOWED`）。
 - **主界面错误上报**：`js/chat.js` 装 `window.onerror` 与 `unhandledrejection`，
   统一 POST 到 `/api/debug/client-error`（失败静默，不影响主流程）。

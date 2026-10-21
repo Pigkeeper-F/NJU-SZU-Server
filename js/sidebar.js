@@ -144,7 +144,10 @@
   }
 
   /** 侧栏底部小字提示：只创建一次，之后仅更新文案（折叠时 CSS 自动隐藏） */
-  /** 侧栏底部的「调试台」小链接：打开独立的调试页（请求记录 / 错误 / 当前模型） */
+  /**
+   * 侧栏底部的「调试台」小链接：打开独立的调试页（请求记录 / 错误 / 当前模型）。
+   * 默认不显示——只有 ?debug=1 时才挂上（见 render 里的判断）。
+   */
   function ensureDebugLink() {
     var link = elSidebar.querySelector ? elSidebar.querySelector('.sidebar-debug-link') : null;
     if (link) return link;
@@ -942,8 +945,9 @@
     // 4) 底部小字提示
     ensureHint();
 
-    // 4.5) 调试台入口：独立页面（/debug.html），不进主界面布局，出问题时有地方看日志。
-    ensureDebugLink();
+    // 4.5) 调试台入口：独立页面（/debug.html），默认**不出现**——它主要是给维护者（AI）用的。
+    //      只有地址栏带 ?debug=1 时才显示这个链接，不打扰正常使用。
+    if (String(root.location && root.location.search || '').indexOf('debug=1') >= 0) ensureDebugLink();
 
     // 5) 侧栏「按业务流程初始化 9 个模块」按钮：九步研究流程的入口。
     //    历史上这个入口被移除过、只留在"空模块空间"里，找入口很费劲（2026-10-21 放回侧栏）。
