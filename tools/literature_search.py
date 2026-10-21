@@ -69,6 +69,18 @@ def parse_byline(byline: str) -> dict:
     return {"authors": authors, "venue": venue, "year": year}
 
 
+def candidate_prefix(source_key: str, batch_index: int) -> str:
+    """候选 id 前缀：Google Scholar 保持历史行为（GSC / GSC-B<n>），
+    其它来源按来源注册表里的 idPrefix 取（PMD / PMC / OAX / EPM …）。"""
+    key = str(source_key or "google-scholar")
+    if key == "google-scholar":
+        return "GSC" if batch_index <= 1 else f"GSC-B{batch_index}"
+    registered = _sources.id_prefix_of(key)
+    if registered:
+        return str(registered)
+    return re.sub(r"[^A-Za-z0-9]", "", key).upper()[:4] or "SRC"
+
+
 def normalize_candidates(
     raw: list[dict],
     query: str,
@@ -80,7 +92,6 @@ def normalize_candidates(
 ) -> list[dict]:
     records: list[dict] = []
     seen: set[str] = set()
-    prefix = "GSC" if batch_index <= 1 else f"GSC-B{batch_index}"
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -99,8 +110,15 @@ def normalize_candidates(
         item_source_key = str(item.get("source_key") or source_key)
         byline = str(item.get("byline") or "").strip()[:500]
         parsed = parse_byline(byline)
+        # 结构化来源（PubMed / OpenAlex / Europe PMC）本身就带 year/authors/venue，
+        # 优先用它们；只有 Scholar 的题录片段才需要从 byline 字符串里猜。
+        item_year = item.get("year")
+        if item_year in (None, ""):
+            item_year = parsed["year"]
+        item_authors = str(item.get("authors") or "").strip() or parsed["authors"]
+        item_venue = str(item.get("venue") or "").strip() or parsed["venue"]
         records.append({
-            "candidate_id": f"{prefix}-{len(records) + 1:03d}",
+            "candidate_id": f"{candidate_prefix(item_source_key, batch_index)}-{len(records) + 1:03d}",
             "source": _sources.label_of(item_source_key) or source_label,
             "query": query,
             "retrieved_at": retrieved_at,
@@ -112,13 +130,79 @@ def normalize_candidates(
             "screening_status": "pending_review",
             "evidence_level": "search_result_snippet",
             "doi": normalize_doi(item.get("doi")),
-            "year": parsed["year"],
-            "authors": parsed["authors"],
-            "venue": parsed["venue"],
+            "year": item_year,
+            "authors": item_authors,
+            "venue": item_venue,
             "source_key": item_source_key,
             "batch_index": batch_index,
         })
     return records
+
+
+def open_source_keys(sources: list[str]) -> list[str]:
+    """给定的来源里，哪些由开放 API 模块负责（PubMed / PMC / OpenAlex / Europe PMC）。"""
+    try:
+        open_mod = importlib.import_module("literature_search_open")
+    except Exception:
+        return []
+    return [key for key in (sources or []) if open_mod.supports(key)]
+
+
+def _open_item_to_raw(item: dict, source_key: str) -> dict:
+    """开放 API 的结果 → 候选记录构造器认识的原始形状。"""
+    authors = str(item.get("authors") or "").strip()
+    venue = str(item.get("venue") or "").strip()
+    year = item.get("year")
+    parts = [part for part in (authors, venue, str(year) if year else "") if part]
+    return {
+        "title": str(item.get("title") or ""),
+        "byline": ". ".join(parts),
+        "snippet": str(item.get("abstract") or item.get("snippet") or ""),
+        "doi": str(item.get("doi") or ""),
+        "year": item.get("year"),
+        "authors": authors,
+        "venue": venue,
+        "result_url": str(item.get("result_url") or ""),
+        "fulltext_links": item.get("fulltext_links") or [],
+        "source_key": source_key,
+    }
+
+
+def collect_open_results(config: dict, query: str) -> tuple[list[dict], list[dict]]:
+    """跑配置里的开放 API 来源。
+
+    返回 ``(原始条目列表, 各源检索元信息)``。单个源失败不拖垮整批：
+    失败记进元信息的 error 字段，其余源照常。
+    """
+    open_mod = importlib.import_module("literature_search_open")
+    limit = int(config.get("limit") or 10)
+    year_from = config.get("publicationYearFrom")
+    year_to = config.get("publicationYearTo")
+    items: list[dict] = []
+    metas: list[dict] = []
+    for key in open_source_keys(list(config.get("sources") or [])):
+        try:
+            outcome = open_mod.run(key, query, limit, year_from, year_to)
+        except Exception as error:  # 单源失败不影响其它源
+            metas.append({
+                "source_key": key,
+                "label": _sources.label_of(key),
+                "url": "",
+                "count": 0,
+                "status": "error",
+                "error": str(error)[:300],
+            })
+            continue
+        for raw in outcome.get("results") or []:
+            items.append(_open_item_to_raw(raw, key))
+        metas.append({
+            "source_key": key,
+            "label": _sources.label_of(key),
+            "url": outcome.get("url") or "",
+            "count": int(outcome.get("count") or 0),
+            "status": outcome.get("status") or "ok",
+        })
+    return items, metas
 
 
 def applied_filters(config: dict | None) -> list[str]:
@@ -204,7 +288,17 @@ def batch_size(config: dict) -> int:
     return int(config["limit"])
 
 
-def write_results(output_dir: Path, query: str, search: dict, config: dict | None = None, *, batch_index: int = 1) -> dict:
+def write_results(
+    output_dir: Path,
+    query: str,
+    search: dict,
+    config: dict | None = None,
+    *,
+    batch_index: int = 1,
+    source_label: str = "Google Scholar",
+    scope: str = "first_page_candidates_only",
+    source_metas: list[dict] | None = None,
+) -> dict:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     retrieved_at = datetime.now(timezone.utc).isoformat()
@@ -238,19 +332,21 @@ def write_results(output_dir: Path, query: str, search: dict, config: dict | Non
     all_records = [record for index in sorted(grouped) for record in grouped[index]]  # 批次升序 + 批内原序
     report = {
         "version": 2,
-        "source": "Google Scholar",
+        "source": source_label,
         "query": query,
         "run_config": config,
         "search_url": batch["search_url"],
         "retrieved_at": retrieved_at,
         "count": len(all_records),
-        "scope": "first_page_candidates_only",
+        "scope": scope,
         "applied_filters": batch["applied_filters"],
         "deferred_rules": batch["deferred_rules"],
         "caution": "Search snippets are not verified abstracts or full text; all records await screening.",
         "batches": batches,
         "records": all_records,
     }
+    if source_metas:
+        report["sources"] = source_metas
     paths = _common.job_paths(output_dir)
     _common.atomic_write_json(paths["candidates_json"], report)
     buffer = io.StringIO()
@@ -303,6 +399,35 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
     if index > max_batches:
         emit("error", message=f"检索失败：已达本任务批数上限（{max_batches}）；如需追加批次请新建任务并调整批数上限")
         return 1
+
+    sources = list(config.get("sources") or ["google-scholar"])
+    query = str(config.get("query") or "").strip()
+    open_keys = open_source_keys(sources)
+    scholar_keys = [key for key in sources if key not in open_keys]
+
+    # 纯开放 API 组合：完全不碰浏览器（不启动持久 Chromium，不需要过验证码）。
+    if open_keys and not scholar_keys:
+        items, metas = collect_open_results(config, query)
+        if not items:
+            emit("error", message="检索没有结果：开放来源均未返回候选")
+            return 1
+        search_payload = {
+            "results": items,
+            "url": metas[0].get("url") if metas else "",
+        }
+        labels = [str(meta.get("label") or meta.get("source_key")) for meta in metas]
+        write_results(
+            output_dir,
+            query,
+            search_payload,
+            config,
+            batch_index=index,
+            source_label="、".join(labels) or "开放 API 来源",
+            scope="open_api_candidates",
+            source_metas=metas,
+        )
+        emit("stage", stage="search", message="开放 API 检索完成：" + "、".join(labels))
+        return 0
 
     sys.path.insert(0, str(SOC_FETCH))
     import browser  # noqa: PLC0415 - reuse SOC discovery implementation

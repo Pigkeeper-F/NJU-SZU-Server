@@ -408,8 +408,24 @@ class CommonHelpersTest(unittest.TestCase):
 
 class SourcesRegistryTest(unittest.TestCase):
     def test_registry_contents(self) -> None:
-        self.assertEqual(sources.all_keys(), ["google-scholar", "cnki", "wanfang", "web-of-science", "scopus", "pubmed"])
-        self.assertEqual(sources.executable_keys(), ["google-scholar"])
+        # 来源注册表随能力扩展（2026-10-21）：1 个浏览器源 + 4 个开放 API 源 + 4 个人工类源。
+        self.assertEqual(sources.all_keys(), [
+            "google-scholar", "pubmed", "pmc", "openalex", "europe-pmc",
+            "cnki", "wanfang", "web-of-science", "scopus",
+        ])
+        # 人工类源：必须保持"不可执行 + 说清原因 + 给出人工步骤"（不绕过验证码、不代持订阅凭据）
+        for key in ("cnki", "wanfang", "web-of-science", "scopus"):
+            self.assertFalse(sources.is_executable(key), key + " 不应可自动执行")
+            self.assertTrue(sources.reason_of(key), key + " 应给出不可执行原因")
+            self.assertTrue(sources.manual_steps_of(key), key + " 应给出人工步骤")
+            self.assertTrue(sources.import_formats_of(key), key + " 应给出可导入的清单格式")
+        # 开放 API 源：可执行，且都能给出 id 前缀（下游候选 id 依赖它）
+        for key in ("pubmed", "pmc", "openalex", "europe-pmc"):
+            self.assertTrue(sources.is_executable(key), key + " 应可执行")
+            self.assertTrue(sources.id_prefix_of(key), key + " 应有 id 前缀")
+        # 可执行源 = 浏览器源（Scholar）+ 4 个开放 API 源；人工类源一律不在其中
+        self.assertEqual(sources.executable_keys(),
+                         ["google-scholar", "pubmed", "pmc", "openalex", "europe-pmc"])
         self.assertTrue(sources.is_known("pubmed"))
         self.assertFalse(sources.is_known("arxiv"))
         self.assertFalse(sources.is_executable("cnki"))

@@ -3,6 +3,9 @@
 单一真相 = ``tools/literature-sources.json``（JS 与 Python 共用读取）。
 ``state`` 取值：``executable``（允许进入执行链）| ``registered``（已登记、明确拒绝）。
 
+``access`` 取值：``browser``（浏览器自动化，如 Google Scholar）| ``api``（开放 API，
+无人工）| ``manual``（订阅/验证码来源，只能人工检索后导入清单）。
+
     from literature_sources import executable_keys, is_known, unconnected_message
 """
 from __future__ import annotations
@@ -33,12 +36,12 @@ def list_sources() -> list[dict]:
 
 
 def all_keys() -> list[str]:
-    """全部来源 key（六源冻结集合，顺序同注册表）。"""
+    """全部来源 key（按注册表顺序）。"""
     return [str(item.get("key") or "") for item in list_sources() if item.get("key")]
 
 
 def executable_keys() -> list[str]:
-    """state=executable 的来源 key（阶段二仅 google-scholar）。"""
+    """state=executable 的来源 key（浏览器来源 + 开放 API 来源）。"""
     return [str(item["key"]) for item in list_sources() if item.get("state") == "executable" and item.get("key")]
 
 
@@ -73,6 +76,67 @@ def label_of(key: object) -> str:
     return str(item.get("label") or "") if item else ""
 
 
+def id_prefix_of(key: object) -> str:
+    """候选清单 id 前缀（如 ``GSC``/``PMD``/``OAX``）；未登记时返回空串。"""
+    item = get_source(key)
+    return str(item.get("idPrefix") or "") if item else ""
+
+
+def adapter_of(key: object) -> dict:
+    """适配器描述（``kind`` ∈ soc-script / open-api）；未登记时返回空 dict。"""
+    item = get_source(key)
+    adapter = item.get("adapter") if item else None
+    return dict(adapter) if isinstance(adapter, dict) else {}
+
+
+def access_of(key: object) -> str:
+    """接入方式（``browser`` / ``api`` / ``manual``）；未登记时返回空串。"""
+    item = get_source(key)
+    return str(item.get("access") or "") if item else ""
+
+
+def reason_of(key: object) -> str:
+    """未接通来源的拒绝原因（注册表 ``reason`` 字段）；未登记时返回空串。"""
+    item = get_source(key)
+    return str(item.get("reason") or "") if item else ""
+
+
+def manual_steps_of(key: object) -> list[str]:
+    """人工来源的操作步骤（注册表 ``manualSteps``）。"""
+    item = get_source(key)
+    steps = item.get("manualSteps") if item else None
+    return [str(step) for step in steps] if isinstance(steps, list) else []
+
+
+def import_formats_of(key: object) -> list[str]:
+    """人工来源支持的清单导入格式（ris / bibtex / csv）。"""
+    item = get_source(key)
+    formats = item.get("importFormats") if item else None
+    return [str(value) for value in formats] if isinstance(formats, list) else []
+
+
+def manual_keys() -> list[str]:
+    """access=manual 的来源 key（知网/万方/WoS/Scopus 等，需人工检索后导入）。"""
+    return [str(item["key"]) for item in list_sources() if item.get("access") == "manual" and item.get("key")]
+
+
 def unconnected_message(sources: list[str]) -> str:
     """生成与 literatur-config.js 原实现逐字一致的拒绝文案。"""
     return REJECT_TEMPLATE.format(sources="、".join(str(item) for item in sources))
+
+
+def unconnected_details(sources: list[str]) -> str:
+    """补充说明：每个未接通来源的原因 + 人工接入步骤（供网页端与文档展示）。
+
+    冻结的拒绝文案（:func:`unconnected_message`）保持原样，本函数只在其后追加细节。
+    """
+    lines: list[str] = []
+    for key in sources:
+        reason = reason_of(key)
+        steps = manual_steps_of(key)
+        if not reason and not steps:
+            continue
+        lines.append(f"· {label_of(key) or key}：{reason or '尚未接通'}")
+        for step in steps:
+            lines.append(f"    - {step}")
+    return "\n".join(lines)

@@ -6,6 +6,7 @@ pypdf degrade paths, and --check skeleton rules (7 keys, paper_id==stem,
 row field legality, traceable evidence, provenance format).
 """
 from __future__ import annotations
+import importlib.util
 
 import contextlib
 import io
@@ -151,7 +152,7 @@ class PrepareTests(unittest.TestCase):
         expected_sha = extract.load_effective_schema(self.job)["sha256"]
         self.assertEqual(html_bundle["schema_sha256"], expected_sha)
 
-    @unittest.skipUnless(__import__("importlib").util.find_spec("pypdf"), "pypdf 未安装")
+    @unittest.skipUnless(importlib.util.find_spec("pypdf"), "pypdf 未安装")
     def test_prepare_extracts_pdf_text(self):
         run_cli(extract.main, ["--config", str(self.job / "run_config.json"), "--output-dir", str(self.job), "--prepare"])
         bundle = json.loads((self.job / "extraction" / "inputs" / "GSC-002.json").read_text(encoding="utf-8"))

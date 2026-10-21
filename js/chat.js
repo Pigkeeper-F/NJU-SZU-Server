@@ -1341,7 +1341,10 @@
     return body;
   }
 
-  /** POST /api/ai/compose，返回 text；网络/404/非 ok/空响应都转成语义化 Error（调用方降级显示） */
+  /** POST /api/ai/compose，返回 {text, modelUsed, fallbackUsed}；
+   *  网络/404/非 ok/空响应都转成语义化 Error（调用方降级显示）。
+   *  【2026-10-21】服务端会在主通道拥塞时自动切到同网关的其它免费通道，
+   *  modelUsed / fallbackUsed 用来把「这次实际是哪个模型出的结果」如实告诉用户。 */
   function postCompose(mode, mod, template, extra) {
     return fetch('/api/ai/compose', {
       method: 'POST',
@@ -1351,9 +1354,19 @@
       return response.json().catch(function () { return {}; }).then(function (data) {
         if (!response.ok) throw new Error((data && data.error) || ('服务返回 HTTP ' + response.status));
         if (!data || typeof data.text !== 'string' || !data.text.trim()) throw new Error('服务返回内容为空');
-        return data.text;
+        return {
+          text: data.text,
+          modelUsed: (typeof data.modelUsed === 'string') ? data.modelUsed : '',
+          fallbackUsed: data.fallbackUsed === true
+        };
       });
     });
+  }
+
+  /** 降级提示语：只有在真的换了模型时才提示，正常通道下不打扰用户 */
+  function modelNote(result) {
+    if (!result || !result.fallbackUsed || !result.modelUsed) return '';
+    return '（主通道拥塞，已自动改用 ' + result.modelUsed + ' 生成）';
   }
 
   function enterDocEdit(mod) {
@@ -1371,12 +1384,12 @@
     if (ui.gen) return;
     ui.gen = true; ui.genErr = ''; ui.notice = '';
     render();
-    postCompose('doc', mod, templateOf(mod.id)).then(function (text) {
+    postCompose('doc', mod, templateOf(mod.id)).then(function (result) {
       ui.gen = false;
-      var saved = getStore().saveDoc(mod.id, text);
+      var saved = getStore().saveDoc(mod.id, result.text);
       if (!saved) throw new Error('生成内容为空或超过 ' + MAX_DOC_CHARS + ' 字，未写入');
       ui.code = null; ui.exec = null; ui.codeErr = ''; ui.execErr = '';
-      ui.notice = '已生成标准文档（草稿），可直接审核或继续编辑。';
+      ui.notice = '已生成标准文档（草稿），可直接审核或继续编辑。' + modelNote(result);
     }).catch(function (err) {
       ui.gen = false;
       ui.genErr = errorText('AI 生成失败', err);
@@ -1396,9 +1409,10 @@
     ui.codeLoading = true; ui.codeErr = ''; ui.code = null; ui.exec = null; ui.execErr = ''; ui.notice = '';
     ui.genErr = '';
     render();
-    postCompose('code', mod, null, feedback ? { feedback: feedback } : null).then(function (text) {
+    postCompose('code', mod, null, feedback ? { feedback: feedback } : null).then(function (result) {
       ui.codeLoading = false;
-      ui.code = text;
+      ui.code = result.text;
+      ui.notice = '代码已生成（草稿），确认后再执行。' + modelNote(result);
     }).catch(function (err) {
       ui.codeLoading = false;
       ui.codeErr = errorText('生成代码失败', err);

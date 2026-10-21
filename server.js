@@ -242,37 +242,161 @@ async function handleCodex(req, res, url) {
 }
 
 // ==================================================================
-// 【环节② · 2026-10-20】handleResearch：科学问题的凝练
+// 【上游调用健壮化 · 2026-10-21】错误分类 + 同网关模型降级链
 // ----------------------------------------------------------------------------
-//   action='candidates' → 由上游空白与文献要点生成 3–5 个候选科学问题（带依据与可行性初判）
-//   action='specify'   → 把人选定的那条展开成结构化「科学问题说明书」
-// 上游产物由服务端自己读（upstreamJobIds → .workbench/literature/<id>/research/），
-// 前端不需要也不应该把文件内容原样回传。
+// 背景（2026-10-21 对 commandcode 网关的实测结论）：
+//   1) 免费通道 minimax/minimax-m3.1-flash:free 会间歇性回 429 rate_limit_error，
+//      报文正是 "Upstream model provider is temporarily unavailable. Please try again
+//      in a moment."；长文档请求还会在 ~126s 被网关以 524 掐断。旧实现把这类拥塞
+//      当成普通 4xx 直接抛给浏览器，「AI 生成标准文档」一点就红字失败。
+//   2) 付费通道（minimax/minimax-m3.1-flash、MiniMaxAI/MiniMax-M3/M2.7/M2.5）在同一
+//      Key 下全部回 "insufficient credits"（无额度），重试无用 → 必须快速失败，
+//      并提示主人去「设置」里换 Key。
+//   3) 同一网关上另有 4 个免费通道实测可用（能出完整四小节文档），拥塞时切过去即可出结果。
+// 因此把「退避重试 + 同网关换模型」收敛到一处：callModelWithRetry 统一处理，
+// 由调用方决定是否启用降级链（compose / chat 启用，research 端点维持单模型行为）。
 // ==================================================================
+
+// 分类关键词（对上游 error.message / error.type 做匹配）
+const UPSTREAM_CREDITS_RE = /insufficient credit|insufficient_balance|insufficient quota|额度不足|余额不足/i;
+const UPSTREAM_AUTH_RE = /invalid api key|incorrect api key|invalid_api_key|unauthorized|authentication_error|forbidden|密钥无效/i;
+const UPSTREAM_TRANSIENT_RE = /temporarily unavailable|rate limit|rate_limit|overload|too many requests|timeout|timed out|service unavailable|bad gateway|gateway timeout|无法连接|超时|服务不可用|拥塞/i;
+
+// 同一网关上实测可用的免费通道（2026-10-21 实测：能出完整《环节标准文档》四小节）。
+// 全部来自网关 GET /models 真实目录（96 个模型），且支持 /chat/completions。
+// 实测出《环节标准文档》的耗时（四小节齐全）：
+//   minimax/minimax-m3.1-flash:free   45.8s（主人当前主通道，内容最充实，偏慢）
+//   reflection/beam:free               4.8s（最快最稳，降级首选）
+//   ornith/ornith-1.5-122b:free       36.9s
+//   stealth/glyph-cluster:free         63.1s（最慢，最后兜底）
+// 付费通道（minimax/minimax-m3.1-flash、MiniMaxAI/MiniMax-M3/M2.7/M2.5）实测全部回
+// "insufficient credits"（同一 Key 无余额），重试无用，因此**绝不**进降级链。
+// poolside/laguna-s-2.1-free 虽也在免费目录里，但在 /chat/completions 下实测多次直接
+// 429 限流（1228ms / 1454ms 就拒，仅 1/3 成功），派不上用场，同样不进 chat-completions 链
+// （少一条死路 = 少等几秒）。
+// 【2026-10-21 复测】两条链按协议分开，因为网关对模型的支持是按端点分的：
+//   /chat/completions 全部 4 条都可用；/responses 下 minimax:free 与 ornith:free 明确回
+//   400 "not available on this endpoint"，stealth/glyph-cluster:free 打 /responses 60s 无响应
+//   （不可用），而 poolside/laguna-s-2.1-free 在 /responses 下反而稳定（实测 200 / 1.7s）。
+//   所以 responses 链用 reflection + poolside，不带 stealth。
+const GATEWAY_FREE_MODEL_CHAINS = {
+  'commandcode': {
+    'chat-completions': [
+      'minimax/minimax-m3.1-flash:free',
+      'reflection/beam:free',
+      'ornith/ornith-1.5-122b:free',
+      'stealth/glyph-cluster:free'
+    ],
+    'responses': [
+      'reflection/beam:free',
+      'poolside/laguna-s-2.1-free'
+    ]
+  }
+};
+
 /**
- * 上游临时不可用时自动重试。
+ * 解析当前配置该用哪条降级链。
+ * 规则：
+ *   - 环境变量 AI_FALLBACK_MODELS 优先（逗号分隔），主人可显式指定任意网关的备用模型；
+ *   - 否则按 baseUrl 命中内置网关（目前只有 commandcode），取该协议下已实测可用的免费通道；
+ *   - 命中不了就没有降级链（只做同模型重试），绝不擅自把模型名塞给不认识它的网关。
+ */
+function resolveFallbackModels(cfg) {
+  const env = String(process.env.AI_FALLBACK_MODELS || '').trim();
+  if (env) return env.split(',').map((s) => s.trim()).filter(Boolean);
+  const baseUrl = String((cfg && cfg.baseUrl) || '').toLowerCase();
+  if (baseUrl.indexOf('api.commandcode.ai') === -1) return [];
+  const chains = GATEWAY_FREE_MODEL_CHAINS.commandcode;
+  const list = chains[cfg.protocol] || chains['chat-completions'];
+  const primary = String((cfg && cfg.model) || '');
+  return list.filter((model) => model && model !== primary);
+}
+
+/**
+ * 把「这次实际用上了哪个模型」告诉调用方。
+ * 只回模型名与是否降级，绝不回 apiKey（主人要求：降级成功时说明最终用了哪个模型）。
+ */
+function modelUsedInfo(trace) {
+  if (!trace || !trace.usedModel) return {};
+  return { modelUsed: trace.usedModel, fallbackUsed: trace.fallback === true };
+}
+
+/**
+ * 上游临时不可用时自动重试，并在必要时切换同网关的其它可用模型。
  * 实测：免费通道会间歇性回 "temporarily unavailable"（2026-10-20 真链路连跑，
  * 候选问题那步 4 次里失败 3 次、第 4 次才成功），让前端重试成本高，
  * 所以在服务端这一层做退避重试。
+ *
+ * @param {object} cfg        模型配置（apiKey / baseUrl / model / protocol）
+ * @param {Array}  messages   消息体
+ * @param {number} timeoutMs  单次调用超时
+ * @param {number} attempts   每个模型最多尝试几次
+ * @param {number} budgetMs   整个调用的总预算（别让人干等）
+ * @param {object} [options]  { fallbacks: string[], trace: object }
+ *        fallbacks —— 降级链（模型名数组）；不传表示不降级、只重试同一模型。
+ *        trace     —— 回填 { usedModel, fallback, attempts }，供响应里报告实际用的模型。
  */
-async function callModelWithRetry(cfg, messages, timeoutMs, attempts = 3, budgetMs = 240000) {
+async function callModelWithRetry(cfg, messages, timeoutMs, attempts = 3, budgetMs = 240000, options = {}) {
   // attempts 与 budgetMs 都是为了"别让人干等"：免费通道拥塞时每次调用可能耗满超时，
   // 叠加几次重试就是 8 分钟以上，界面上看着像卡死。3 次 + 4 分钟总预算后快速失败，
   // 由使用者决定重试还是换模型。
   const started = Date.now();
+  const deadline = started + budgetMs;
+  const fallbacks = Array.isArray(options.fallbacks) ? options.fallbacks.filter(Boolean) : [];
+  const trace = options.trace && typeof options.trace === 'object' ? options.trace : null;
+  const models = [cfg.model].concat(fallbacks.filter((model) => model !== cfg.model));
   let lastError = null;
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    const left = budgetMs - (Date.now() - started);
-    if (left <= 5000) break;
-    try {
-      return await callModel(cfg, messages, Math.min(timeoutMs, left));
-    } catch (error) {
-      lastError = error;
-      const text = String((error && error.message) || '');
-      const transient = /temporarily unavailable|insufficient credits|无法连接|Invalid input|overload|rate|too many|timeout|超时|服务不可用/i.test(text);
-      if (!transient || attempt === attempts - 1) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
+
+  for (let mi = 0; mi < models.length; mi++) {
+    const model = models[mi];
+    const modelCfg = Object.assign({}, cfg, { model: model });
+    const canSwitch = mi < models.length - 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const left = deadline - Date.now();
+      if (left <= 5000) break;
+      const callStarted = Date.now();
+      try {
+        const text = await callModel(modelCfg, messages, Math.min(timeoutMs, left));
+        if (trace) {
+          trace.usedModel = model;
+          trace.fallback = mi > 0;
+          trace.attempts = attempt + 1;
+        }
+        debugRecord({
+          level: 'info', kind: 'ai-call', model: model, attempt: attempt + 1,
+          ms: Date.now() - callStarted, ok: true, fallback: mi > 0
+        });
+        return text;
+      } catch (error) {
+        lastError = error;
+        const kind = (error && error.kind) || 'unknown';
+        // 每次尝试都留痕：出问题时一眼看出「试了哪个模型、耗时多久、失败类型是什么」
+        debugRecord({
+          level: 'error', kind: 'ai-call', model: model, attempt: attempt + 1,
+          ms: Date.now() - callStarted, ok: false, errorKind: kind,
+          error: debugSafe((error && error.message) || 'unknown')
+        });
+        // Key 无效 / 网络不通：换模型也没用，立刻失败（快速失败 + 人话提示）
+        if (kind === 'fatal-auth' || kind === 'fatal-network') throw error;
+        // 该模型没额度 / 请求本身不合法：同一模型重试无意义 —— 换下一个模型（可能免费通道可用）
+        if (kind === 'fatal-credits' || kind === 'invalid-request') break;
+        // 可重试错误（拥塞 / 限流 / 超时 / 空回复）：
+        //   · 慢失败（耗了 30s 以上，多半是网关超时或模型太慢）→ 别在同一个模型上耗，直接换模型
+        //   · 快失败（429 之类，毫秒级返回）→ 退避后重试同一模型，往往第二次就通
+        const spent = Date.now() - callStarted;
+        if (canSwitch && spent > 30000) break;
+        if (attempt === attempts - 1) break;
+        const wait = Math.min(6000, 1200 * Math.pow(2, attempt));
+        if (Date.now() + wait >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
     }
+  }
+
+  if (lastError && lastError.kind === 'transient') {
+    // 拥塞到把降级链都试完了：说清楚试过哪些通道（只报模型名，绝不含 Key）
+    const tried = models.join('、');
+    lastError.message = 'AI 上游暂时不可用（拥塞或限流）：已重试并依次尝试 ' + tried + ' 仍未成功。请稍后再试，或在「设置」里换一个模型。';
   }
   throw lastError || new Error('模型调用超时');
 }
@@ -321,6 +445,14 @@ async function handleDebug(req, res, url) {
   res.end(JSON.stringify({ error: '未知的调试接口' }));
 }
 
+// ==================================================================
+// 【环节② · 2026-10-20】handleResearch：科学问题的凝练
+// ----------------------------------------------------------------------------
+//   action='candidates' → 由上游空白与文献要点生成 3–5 个候选科学问题（带依据与可行性初判）
+//   action='specify'   → 把人选定的那条展开成结构化「科学问题说明书」
+// 上游产物由服务端自己读（upstreamJobIds → .workbench/literature/<id>/research/），
+// 前端不需要也不应该把文件内容原样回传。
+// ==================================================================
 async function handleResearch(req, res, url) {
   const route = url.pathname;
   if (req.method === 'POST' && route === '/api/research/questions') {
@@ -570,12 +702,55 @@ function resolveModelConfig(rawSettings) {
 
 // 上游调用错误：带上要回给浏览器的 HTTP 状态码，语义与 handleChat 原有分支一致
 // （上游 4xx → 400；网络失败 / 上游 5xx / 空回复 → 502）。
+// 【2026-10-21】新增 kind 字段：区分「可重试的拥塞」与「重试无用的额度/Key 问题」，
+// 让调用方能分别走「退避重试 + 换模型」和「立刻失败 + 人话提示」两条路。
+// kind 取值：
+//   transient      —— 拥塞 / 限流 / 网关超时 / 空回复：重试或换模型有用
+//   fatal-credits  —— 额度不足：重试无用，提示去设置里换 Key
+//   fatal-auth     —— Key 无效 / 无权限：重试无用，提示去设置里换 Key
+//   fatal-network  —— 连不上：重试无用，提示检查地址与网络
+//   invalid-request—— 上游判定请求本身不合法：重试与换模型都未必有用，快速失败
 class UpstreamError extends Error {
-  constructor(status, message) {
+  constructor(status, message, kind) {
     super(message || 'AI 服务暂时不可用');
     this.name = 'UpstreamError';
     this.status = status;
+    this.kind = kind || 'transient';
   }
+}
+
+/**
+ * 把上游返回的英文报错翻成人话 + 判定错误类别。
+ * 上游原文一律保留在 message 里（便于排查），但对「额度不足 / Key 无效」这类
+ * 重试无用的错误，额外给一句明确告诉主人下一步该做什么的话。
+ */
+function describeUpstreamError(rawMessage, upstreamStatus) {
+  const text = String(rawMessage || '');
+  if (UPSTREAM_CREDITS_RE.test(text)) {
+    return {
+      kind: 'fatal-credits',
+      message: 'API Key 额度不足：上游拒绝继续调用。请到左下角「设置」里换一个有余额的 Key（或充值后再试）。上游原文：' + text
+    };
+  }
+  if (UPSTREAM_AUTH_RE.test(text) || upstreamStatus === 401 || upstreamStatus === 403) {
+    return {
+      kind: 'fatal-auth',
+      message: 'API Key 无效或没有该模型的权限：请到左下角「设置」里检查 Key 与模型名是否匹配。上游原文：' + text
+    };
+  }
+  if (UPSTREAM_TRANSIENT_RE.test(text) || upstreamStatus === 429 || upstreamStatus === 502 || upstreamStatus === 503 || upstreamStatus === 504 || upstreamStatus === 524) {
+    return {
+      kind: 'transient',
+      message: text || 'AI 上游暂时不可用（拥塞或限流），正在重试。'
+    };
+  }
+  if (upstreamStatus === 400 || upstreamStatus === 422) {
+    return {
+      kind: 'invalid-request',
+      message: '上游判定请求本身不被接受（HTTP ' + upstreamStatus + '）。请检查模型名、协议与输入内容。上游原文：' + text
+    };
+  }
+  return { kind: 'transient', message: text || 'AI 上游暂时不可用，正在重试。' };
 }
 
 // 统一的模型调用：负责拼 URL / 请求体、发请求、解析文本。两个端点共用。
@@ -606,19 +781,29 @@ async function callModel(cfg, messages, timeoutMs) {
       signal: AbortSignal.timeout(timeoutMs || 60000)
     });
   } catch (error) {
-    throw new UpstreamError(502, '无法连接 AI 服务，请检查 AI_API_BASE_URL 与网络。');
+    // 超时（AbortError/TimeoutError）是"上游太慢/拥塞"，重试或换模型都有用 → transient；
+    // 其余（连不上、地址写错、DNS 失败）是配置问题，重试没用 → 快速失败并说人话。
+    const aborted = error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+    if (aborted) {
+      throw new UpstreamError(502, 'AI 服务响应超时（超过 ' + Math.round((timeoutMs || 60000) / 1000) + ' 秒未返回），正在重试。', 'transient');
+    }
+    throw new UpstreamError(502, '无法连接 AI 服务（' + (cfg.baseUrl || '未配置地址') + '）：请检查「设置」里的接口地址与网络。', 'fatal-network');
   }
 
   let result;
   try { result = await upstream.json(); } catch (error) { result = null; }
   if (!upstream.ok) {
-    throw new UpstreamError(upstream.status >= 400 && upstream.status < 500 ? 400 : 502, errorText(result));
+    const described = describeUpstreamError(errorText(result), upstream.status);
+    // 状态码语义：拥塞/限流（transient）算上游故障 → 502（前端提示"稍后重试"）；
+    // 额度不足 / Key 无效 / 请求不合法是配置问题 → 400（提示去设置里改）。
+    const status = described.kind === 'transient' ? 502 : 400;
+    throw new UpstreamError(status, described.message, described.kind);
   }
   const text = cfg.protocol === 'chat-completions'
     ? result && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content
     : result && result.output_text;
   if (typeof text !== 'string' || !text.trim()) {
-    throw new UpstreamError(502, 'AI 服务没有返回可显示的文本。');
+    throw new UpstreamError(502, 'AI 服务没有返回可显示的文本。', 'transient');
   }
   return text.trim();
 }
@@ -720,6 +905,18 @@ function debugWrapApi(req, res) {
   res.on('close', finish);
 }
 
+// ==================================================================
+// 【2026-10-21】聊天端点的独立时间预算
+// ----------------------------------------------------------------------------
+// 聊天与 compose 的耗时特征完全不同，必须分开给：
+//   compose 是长输出任务（整篇《环节标准文档》），要 180s 单次 + 420s 总预算；
+//   聊天是一问一答，回复短，但要给慢通道留出余量（旧实现 60s 硬超时，一抖就红字）。
+//   单次 90s / 每模型 2 次 / 总预算 150s：慢失败会自动切到下一个免费通道，
+//   快速失败（429）会退避后重试同一模型，通常第二次就通。
+const CHAT_TIMEOUT_MS = 90000;
+const CHAT_ATTEMPTS = 2;
+const CHAT_BUDGET_MS = 150000;
+
 async function handleChat(req, res) {
   let payload;
   try {
@@ -762,8 +959,14 @@ async function handleChat(req, res) {
   const moduleContext = buildChatModuleContext(payload.module);
   cfg.sysPrompt = [instructions, moduleContext, cfg.sysPrompt].filter(Boolean).join('\n\n');
   try {
-    const text = await callModel(cfg, messages);
-    sendJson(res, 200, { text, config: activeConfig });
+    // 【2026-10-21】聊天同样接入「退避重试 + 同网关免费模型降级链」：
+    // 旧实现只调一次 callModel，免费通道一抖动（429 temporarily unavailable）就红字。
+    // 聊天有独立的超时预算（比 compose 短），但重试与降级逻辑与 compose 完全一致。
+    const trace = {};
+    const text = await callModelWithRetry(cfg, messages,
+      CHAT_TIMEOUT_MS, CHAT_ATTEMPTS, CHAT_BUDGET_MS,
+      { fallbacks: resolveFallbackModels(cfg), trace: trace });
+    sendJson(res, 200, Object.assign({ text, config: activeConfig }, modelUsedInfo(trace)));
   } catch (error) {
     sendJson(res, (error && error.status) || 500, { error: (error && error.message) || '服务端内部错误', config: activeConfig });
   }
@@ -819,6 +1022,15 @@ async function handleAiTest(req, res) {
 // ============================================================================
 // 【X1 · 2026-10-14】新增 diagnose：AI 自动定位问题层级（data/align/code），契约见 §20.2。
 const COMPOSE_MODES = new Set(['doc', 'code', 'diagnose']);
+
+// 【2026-10-21】compose 的三档时间预算（与普通聊天分开，compose 是长输出任务）：
+//   单次上游调用 180s —— 实测免费通道出《环节标准文档》要 9–126s，网关在 ~126s 会 524，
+//   给到 180s 让慢通道有机会跑完；单次超时不再像旧代码那样被 300s 兜底后仍被网关掐断。
+//   每个模型试 2 次（429 这类快失败重试一次常常就通；慢失败会直接换模型，不空耗）。
+//   整个调用总预算 420s —— 覆盖"主模型失败 + 换 1–2 个备用通道"的常见路径，又不至于让人干等到放弃。
+const COMPOSE_TIMEOUT_MS = 180000;
+const COMPOSE_ATTEMPTS = 2;
+const COMPOSE_BUDGET_MS = 420000;
 
 const COMPOSE_DOC_TEMPLATE = [
   '你是资深流程架构师。请把下面给出的「环节信息」与「对话记录」整理成一份《环节标准文档》。',
@@ -1159,12 +1371,18 @@ async function handleCompose(req, res) {
     const prompt = payload.mode === 'diagnose'
       ? buildDiagnosePrompt(payload)
       : buildComposePrompt(payload);
-    const text = await callModel(cfg, [{ role: 'user', content: prompt }], 300000);
+    // 【2026-10-21】compose 是长输出任务：单次调用给足 180s，且启用「同网关免费模型降级链」
+    // ——免费通道会间歇性 429/524，主人点一次就该拿到结果，而不是看到红字。
+    // trace 回填实际用上的模型（只回模型名，绝不回 apiKey）。
+    const trace = {};
+    const text = await callModelWithRetry(cfg, [{ role: 'user', content: prompt }],
+      COMPOSE_TIMEOUT_MS, COMPOSE_ATTEMPTS, COMPOSE_BUDGET_MS,
+      { fallbacks: resolveFallbackModels(cfg), trace: trace });
     if (payload.mode === 'diagnose') {
       // 【X1 · 2026-10-14】diagnose：解析成功返回 {level, reason}，失败返回 {text}（§20.2）。
-      sendJson(res, 200, parseDiagnoseJson(text));
+      sendJson(res, 200, Object.assign(parseDiagnoseJson(text), modelUsedInfo(trace)));
     } else {
-      sendJson(res, 200, { text });
+      sendJson(res, 200, Object.assign({ text }, modelUsedInfo(trace)));
     }
   } catch (error) {
     sendJson(res, (error && error.status) || 500, { error: (error && error.message) || '服务端内部错误' });
