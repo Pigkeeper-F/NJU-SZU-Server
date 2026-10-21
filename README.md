@@ -63,4 +63,18 @@ python3 -m unittest tools/test_literature_dedupe.py tools/test_literature_fullte
 
 `tools/smoke-*.js` 会调用模型并消耗额度，需自行确认账号和运行环境后再执行。
 
-更多说明见 `docs/user-guide.md`、`docs/workflow-drafts.md`、`docs/开发交接.md`。早期说明存于 `docs/README-历史版本.md`；其中的静态演示限制已过时。
+## 调试
+
+出问题时不用猜、不用截图来回传——服务端的请求记录、异常与前端错误都收在内存缓冲里，
+用一条命令拿到人读的中文诊断摘要：
+
+```bash
+node tools/debug-report.js              # 服务状态、模型、失败请求、慢请求、错误明细
+node tools/debug-report.js --port 8124 # 指定端口
+node tools/debug-report.js --json       # 原始 JSON
+```
+
+也可以开 <http://localhost:8123/debug.html> 用眼睛看（侧栏入口默认隐藏，地址栏加 `?debug=1` 才出现）。
+日志只在内存、进程重启即清、不含请求体、API Key 一律脱敏。用途与排查手册见 `docs/debug-tool.md`。
+
+更多说明见 `docs/user-guide.md`、`docs/debug-tool.md`、`docs/workflow-drafts.md`、`docs/开发交接.md`。早期说明存于 `docs/README-历史版本.md`；其中的静态演示限制已过时。

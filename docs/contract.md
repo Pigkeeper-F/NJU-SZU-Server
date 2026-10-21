@@ -1429,7 +1429,12 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 - **主界面错误上报**：`js/chat.js` 装 `window.onerror` 与 `unhandledrejection`，
   统一 POST 到 `/api/debug/client-error`（失败静默，不影响主流程）。
 
-### 25.3 验收
+### 25.3 文档
+
+用途、边界与**排查手册**（看到什么 → 什么意思 → 怎么办）见 `docs/debug-tool.md`；
+README 的「调试」段给了一条命令的用法。
+
+### 25.4 验收
 
 1. 打开 `/debug.html`：显示服务状态、运行时长、`.env` 模型、Key 有无、文献作业数、请求/错误计数。
 2. 「最近请求」表逐条显示 时间 / 级别 / 类型 / 方法 / 路径 / 状态 / 耗时。
