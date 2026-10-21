@@ -156,9 +156,15 @@
     var task = { id: id(), name: name.slice(0, 80), createdAt: new Date().toISOString(), rulesByModule: {} };
     switching = true;
     root.Store.resetAll();
-    root.Store.addModule('下载数据');
-    if (start === 'clean' || start === 'calculation') root.Store.addModule('数据清洗');
-    if (start === 'calculation') root.Store.addModule('计算');
+    if (start === 'research') {
+      // 【九步研究流程 · 2026-10-21】九步链（①文献调研 … ⑨校稿核验）整体建一次。
+      // 与数据链互斥：新建任务时只走其中一条，别把两条链混在一个任务里。
+      if (typeof root.Store.initFlowModules === 'function') root.Store.initFlowModules();
+    } else {
+      root.Store.addModule('下载数据');
+      if (start === 'clean' || start === 'calculation') root.Store.addModule('数据清洗');
+      if (start === 'calculation') root.Store.addModule('计算');
+    }
     index.tasks.push(task);
     index.activeTaskId = task.id;
     saveIndex();
