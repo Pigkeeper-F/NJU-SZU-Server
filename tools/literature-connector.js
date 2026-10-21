@@ -45,7 +45,7 @@ const DELIVERABLE_PATTERNS = [
   /^validation\/validation\.(?:json|md)$/,
   // 【文献调研 · 2026-10-20】环节①的调研产物：逐篇要点、共识分歧、研究空白、人工初筛记录。
   /^research\/(?:notes|synthesis|gaps)\.(?:json|csv|md)$/,
-  /^research\/screening\.json$/,
+  /^research\/screening(?:_result)?\.json$/,
   /^export\/[^/\\]+\.(?:csv|xlsx|md)$/
 ];
 

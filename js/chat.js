@@ -575,8 +575,20 @@
         '文献 ' + (meta2.candidate_count || 0) + ' 篇（有全文 ' + (meta2.with_fulltext || 0) + ' 篇）'
         + '｜要点 ' + ((state.result.notes || []).length) + ' 条'
         + '｜空白 ' + ((state.result.gaps || []).length) + ' 条'));
-      var files = (state.result.files || []).join('、');
-      if (files) sum.appendChild(el('div', 'research-summary-line research-files', '产物：' + files));
+      // 产物可直接下载（服务端只放行已登记的 research/* 文件）
+      var files = state.result.files || [];
+      if (files.length && state.jobId) {
+        var links = el('div', 'research-files');
+        for (var fi = 0; fi < files.length; fi++) {
+          (function (name) {
+            var a = el('a', 'research-file-link', name.replace(/^research\//, ''));
+            a.href = '/api/literature/download?id=' + encodeURIComponent(state.jobId) + '&name=' + encodeURIComponent(name);
+            a.setAttribute('download', '');
+            links.appendChild(a);
+          })(files[fi]);
+        }
+        sum.appendChild(links);
+      }
       box.appendChild(sum);
     }
     return box;

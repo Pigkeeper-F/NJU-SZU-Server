@@ -46,7 +46,7 @@
   var DEFAULT_W = (typeof LIMITS.SIDEBAR_DEFAULT === 'number') ? LIMITS.SIDEBAR_DEFAULT : 240;
 
   var HINT_TEXT = '流程智能体 · 演示版';
-  var FLOW_BTN_TEXT = '按业务流程初始化 9 个模块';
+  var FLOW_BTN_TEXT = '按业务流程开始（九步研究流程）';
 
   // 拖拽会话：active 为真时 render() 不写宽度（否则会与跟手值互相打架产生抖动）
   var drag = { active: false, pointerId: null, width: DEFAULT_W };
