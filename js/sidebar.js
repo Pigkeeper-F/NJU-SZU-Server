@@ -46,7 +46,7 @@
   var DEFAULT_W = (typeof LIMITS.SIDEBAR_DEFAULT === 'number') ? LIMITS.SIDEBAR_DEFAULT : 240;
 
   var HINT_TEXT = '流程智能体 · 演示版';
-  var FLOW_BTN_TEXT = '按业务流程初始化 9 个模块';
+  var FLOW_BTN_TEXT = '按业务流程开始（九步研究流程）';
 
   // 拖拽会话：active 为真时 render() 不写宽度（否则会与跟手值互相打架产生抖动）
   var drag = { active: false, pointerId: null, width: DEFAULT_W };
@@ -130,8 +130,9 @@
           }
           return;
         }
-        if (typeof Store.initFlowModules === 'function') Store.initFlowModules();
-        else if (typeof Store.startFlow === 'function') Store.startFlow();
+        // 逐步解锁：只建第①步（文献调研），之后每过一个审核门自动补出下一个。
+        if (typeof Store.startFlow === 'function') Store.startFlow();
+        else if (typeof Store.initFlowModules === 'function') Store.initFlowModules();
       });
       // 插在底部工具区（＋添加 API / ✎编辑依赖）之前，而不是追加到最末尾——
       // 追加会跑到「个人工作空间」下面，既不显眼也不合布局。

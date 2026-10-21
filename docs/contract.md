@@ -1375,3 +1375,24 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 - **错误状态码区分** `researchErrorStatus(message)`：上游类问题 → **502**（前端提示"稍后重试"），
   输入/前置条件类问题 → **400**（前端提示"先做 XX"）。不区分的话，上游抖一下会被前端
   当成"你填错了"，误导使用者。
+
+### 24.9 逐步解锁语义（2026-10-21 修正）
+
+主人在界面上验收时指出：「流程多智能体要求的是先有 1 再有 2，先有一个模块后才有下一个模块」。
+此前入口误用了 `initFlowModules()`（一次铺满十环），把流程的强依赖语义抹平了。已改回：
+
+| 入口 | 行为 |
+|---|---|
+| `Store.startFlow()` | **只建第①步**（文献调研），这是正常推进路径 |
+| `Store.initFlowModules()` | 一次铺满九步——仅"先看全貌"用，不是推进路径 |
+| `Store.approveModule(id)` | 该模块通过审核门时，**只补出下一个**模块 |
+
+实现：`ensureStepModules(step, onlyOne)` 增加 `onlyOne` 开关——为真时建完一个就停；
+`buildNextFlowModule()` 先补本环节剩下的（一次一个），本环节齐了才推进下一业务环节（同样一次一个）。
+于是链条严格线性：1 → 2 → … → 10，每过一个审核门才长出一个。
+
+三个入口统一走 `startFlow()`：`新建任务`对话框的 research 分支（js/tasks.js）、
+侧栏「按业务流程开始（九步研究流程）」按钮（js/sidebar.js）、空模块空间里的流程入口（js/chat.js）。
+
+实测（内置浏览器 8124 实例）：新建九步任务 → 只有 1 个模块（①文献调研）；
+通过①的审核门 → 变 2 个并自动选中②。

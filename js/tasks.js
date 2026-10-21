@@ -159,7 +159,8 @@
     if (start === 'research') {
       // 【九步研究流程 · 2026-10-21】九步链（①文献调研 … ⑨校稿核验）整体建一次。
       // 与数据链互斥：新建任务时只走其中一条，别把两条链混在一个任务里。
-      if (typeof root.Store.initFlowModules === 'function') root.Store.initFlowModules();
+      // 逐步解锁：先只建第①步，后面每过一个审核门再自动补出下一个。
+      if (typeof root.Store.startFlow === 'function') root.Store.startFlow();
     } else {
       root.Store.addModule('下载数据');
       if (start === 'clean' || start === 'calculation') root.Store.addModule('数据清洗');

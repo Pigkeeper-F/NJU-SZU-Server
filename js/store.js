@@ -794,7 +794,7 @@
   function startFlow() {
     if (!FLOW_STEPS.length) return { ok: false, reason: '流程未定义' };
     var step = FLOW_STEPS[0];
-    var created = ensureStepModules(step);
+    var created = ensureStepModules(step, true);
     var first = created[0] || findModuleByStep(step.key);
     if (first && !findModule(state.activeModuleId)) state.activeModuleId = first.id;
     emit('flow:start', {
@@ -814,7 +814,7 @@
   function initFlowModules() {
     var created = [];
     for (var i = 0; i < FLOW_STEPS.length; i++) {
-      created = created.concat(ensureStepModules(FLOW_STEPS[i]));
+      created = created.concat(ensureStepModules(FLOW_STEPS[i], false));
     }
     if (!created.length) return { created: 0, firstId: null };
     if (!findModule(state.activeModuleId)) state.activeModuleId = created[0].id;
@@ -911,7 +911,7 @@
    * 把一个业务环节展开成能力模块并追加到链尾；已存在同类型的跳过，只返回新建的。
    * 单模块的环节用环节名（如「① 文献调研」），多模块的环节用各能力模块名（如「下载数据」「数据清洗」）。
    */
-  function ensureStepModules(step) {
+  function ensureStepModules(step, onlyOne) {
     var impl = RESEARCH_STEP_IMPL[step.key] || [];
     var created = [];
     for (var i = 0; i < impl.length; i++) {
@@ -939,6 +939,9 @@
       };
       state.modules.push(mod);
       created.push(deepClone(mod));
+      // 流程语义是"先有 1 再有 2"：一次只放一个模块出来，等它过审核门再放下一个。
+      // onlyOne 为真时（正常推进路径）到此为止；initFlowModules 传 false 才会一次铺满。
+      if (onlyOne) break;
     }
     return created;
   }
@@ -950,10 +953,10 @@
   function buildNextFlowModule(approved) {
     var i = flowIndexOf(approved.step);
     if (i < 0) return null;
-    var pending = ensureStepModules(FLOW_STEPS[i]);
+    var pending = ensureStepModules(FLOW_STEPS[i], true);
     if (pending.length) return pending[0];
     if (i + 1 >= FLOW_STEPS.length) return null;
-    var nextCreated = ensureStepModules(FLOW_STEPS[i + 1]);
+    var nextCreated = ensureStepModules(FLOW_STEPS[i + 1], true);
     return nextCreated[0] || null;
   }
 
