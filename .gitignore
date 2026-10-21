@@ -20,3 +20,7 @@ SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/state/
 Thumbs.db
 *.swp
 *~
+
+# 自动生成的项目上下文文档（每次会话由 project-context-hook.py 刷新，会污染 diff）
+# 手写内容请放 docs/project-notes.md（已进版本库）
+PROJECT-CONTEXT.md
