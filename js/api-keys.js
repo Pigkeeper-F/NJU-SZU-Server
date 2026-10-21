@@ -152,6 +152,30 @@
     });
   }
 
+  /**
+   * 移除已存密钥（2026-10-21）。
+   * 「添加 API」原来只能存不能删，删不掉就会一直盖住「设置」里的模型分组——
+   * 症状是「测试连通」通过、AI 对话却报"无法连接 AI 服务"。这里给一条正常的清除入口。
+   */
+  function removeKey() {
+    var data = readStore();
+    var provider = data.activeProvider;
+    var existed = Boolean(data.providers[provider]);
+    if (!existed) {
+      // 该 provider 本来就没有凭证：直接清掉整条记录，避免留下半截状态
+      try { root.localStorage.removeItem(STORAGE_KEY); } catch (error) { /* 忽略 */ }
+      toast('没有可移除的密钥');
+      return;
+    }
+    delete data.providers[provider];
+    if (!Object.keys(data.providers).length) {
+      try { root.localStorage.removeItem(STORAGE_KEY); } catch (error) { /* 忽略 */ }
+    } else {
+      writeStore(data);
+    }
+    toast(provider === 'openai' ? '已移除 OpenAI 密钥，改用设置里的模型配置' : '已移除 DeepSeek 密钥，改用设置里的模型配置');
+  }
+
   function bind() {
     var button = $('add-api-button');
     var menu = $('api-provider-menu');
@@ -177,6 +201,8 @@
     $('api-close-dialog').addEventListener('click', function () { dialog.close(); });
     $('api-cancel-dialog').addEventListener('click', function () { dialog.close(); });
     $('api-copy-key').addEventListener('click', copyKey);
+    var removeBtn = $('api-remove-key');
+    if (removeBtn) removeBtn.addEventListener('click', function () { removeKey(); });
     $('api-paste-key').addEventListener('click', pasteKey);
   }
 

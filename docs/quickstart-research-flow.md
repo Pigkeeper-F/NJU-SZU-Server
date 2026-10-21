@@ -173,7 +173,7 @@ minimax/minimax-m3.1-flash:free
 
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
-| 报「无法连接 AI 服务」 | 浏览器里存着旧的「添加 API」凭证（会覆盖设置里的分组） | F12 → Console 执行 `localStorage.removeItem('research_api_keys_v1'); location.reload();` |
+| 报「无法连接 AI 服务」 | 浏览器里存着旧的「添加 API」凭证（会覆盖设置里的分组） | 报错括号里会写明**当前配置与来源**（2026-10-21 起）：来源写「浏览器「添加 API」里的凭证」就是这个原因。修法二选一：① F12 → Console 执行 `localStorage.removeItem('research_api_keys_v1'); location.reload();`；② 左侧「添加 API」→ 弹窗里点「**移除已存密钥**」（2026-10-21 新增，原来只能存不能删） |
 | 报「额度不足 / insufficient credits」 | 模型填成了付费通道 | 改成 `minimax/minimax-m3.1-flash:free`，点「测试连通」 |
 | 报「请从工作台发起请求」 | 直接用 curl 打接口缺 `X-Workbench: 1` 头 | 加上该头；网页里不会遇到 |
 | 一直「检索中」不动 | Scholar 弹了验证码 | 在自动打开的浏览器里手动过验证码 |

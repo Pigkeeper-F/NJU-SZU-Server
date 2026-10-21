@@ -363,14 +363,31 @@
       })
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
-        if (!response.ok) throw new Error(data.error || 'AI 服务请求失败');
+        if (!response.ok) {
+          var failure = new Error(data.error || 'AI 服务请求失败');
+          failure.config = (data && data.config) ? data.config : null;
+          throw failure;
+        }
         if (!data || typeof data.text !== 'string') throw new Error('AI 服务返回了无效响应');
         return data.text;
       });
     }).then(function (text) {
       getStore().appendMessage(moduleId, text, 'assistant');
     }).catch(function (error) {
-      getStore().appendMessage(moduleId, 'AI 回复失败：' + (error && error.message ? error.message : '未知错误'), 'system');
+      var detail = (error && error.message) ? error.message : '未知错误';
+      // 失败时把「当前生效的是哪份配置」一并说清——最常见的原因是浏览器里残留的
+      // 「添加 API」旧凭证盖住了设置里的模型分组，光看报错是猜不出来的。
+      var activeCfg = (error && error.config) ? error.config : null;
+      if (activeCfg) {
+        var sourceText = {
+          'browser-credential': '浏览器「添加 API」里的凭证',
+          'browser-settings': '网页设置里的模型分组',
+          'server-env': '服务端 .env'
+        }[activeCfg.source] || activeCfg.source;
+        detail += '（当前配置：' + (activeCfg.baseUrl || '-') + ' | ' + (activeCfg.model || '-')
+          + ' | 来源：' + sourceText + '）';
+      }
+      getStore().appendMessage(moduleId, 'AI 回复失败：' + detail, 'system');
     }).finally(function () {
       delete pendingModules[moduleId];
       render();

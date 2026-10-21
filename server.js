@@ -585,6 +585,27 @@ async function callModel(cfg, messages, timeoutMs) {
   return text.trim();
 }
 
+/**
+ * 判断当前生效的模型配置来自哪一份（用于报错时告诉用户"你正在用哪份配置"）。
+ * 优先级与 resolveModelConfig + normalizeCredential 一致：凭证 > 网页设置分组 > 服务端 .env。
+ * 「添加 API」存的旧凭证会盖住网页设置——这正是"测试连通通过、聊天失败"的常见原因。
+ */
+function configSource(settings, credential) {
+  if (credential) return 'browser-credential';
+  if (settings && typeof settings.apiKey === 'string' && settings.apiKey.trim()) return 'browser-settings';
+  return 'server-env';
+}
+
+/** 脱敏后的生效配置（绝不含 apiKey），随聊天/测试的响应一起回给前端。 */
+function configInfo(cfg, source) {
+  return {
+    baseUrl: cfg.baseUrl || '',
+    model: cfg.model || '',
+    protocol: cfg.protocol || '',
+    source: source || 'server-env'
+  };
+}
+
 async function handleChat(req, res) {
   let payload;
   try {
@@ -615,7 +636,9 @@ async function handleChat(req, res) {
     sendJson(res, 400, { error: '请选择有效的工作流模块后发送消息。' });
     return;
   }
-  const cfg = Object.assign(resolveModelConfig(payload.settings), normalizeCredential(payload.credential) || {});
+  const credential = normalizeCredential(payload.credential) || null;
+  const cfg = Object.assign(resolveModelConfig(payload.settings), credential || {});
+  const activeConfig = configInfo(cfg, configSource(payload.settings, credential));
   if (!cfg.apiKey) {
     sendJson(res, 503, { error: '尚未配置 API Key。请点击左侧「添加 API」选择 DeepSeek 或 OpenAI，或使用设置中的模型配置。' });
     return;
@@ -626,9 +649,9 @@ async function handleChat(req, res) {
   cfg.sysPrompt = [instructions, moduleContext, cfg.sysPrompt].filter(Boolean).join('\n\n');
   try {
     const text = await callModel(cfg, messages);
-    sendJson(res, 200, { text });
+    sendJson(res, 200, { text, config: activeConfig });
   } catch (error) {
-    sendJson(res, (error && error.status) || 500, { error: (error && error.message) || '服务端内部错误' });
+    sendJson(res, (error && error.status) || 500, { error: (error && error.message) || '服务端内部错误', config: activeConfig });
   }
 }
 
