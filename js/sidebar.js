@@ -46,7 +46,7 @@
   var DEFAULT_W = (typeof LIMITS.SIDEBAR_DEFAULT === 'number') ? LIMITS.SIDEBAR_DEFAULT : 240;
 
   var HINT_TEXT = '流程智能体 · 演示版';
-  var FLOW_BTN_TEXT = '按业务流程开始（九步研究流程）';
+  var FLOW_BTN_TEXT = '按业务流程初始化 9 个模块';
 
   // 拖拽会话：active 为真时 render() 不写宽度（否则会与跟手值互相打架产生抖动）
   var drag = { active: false, pointerId: null, width: DEFAULT_W };
@@ -120,11 +120,24 @@
       elFlowBtn.textContent = FLOW_BTN_TEXT;
       elFlowBtn.addEventListener('click', function () {
         if (!Store) return;
-        // 【本地修复 · 2026-09-24】只建第 1 步；后续步骤在通过审核时自动出现
-        if (typeof Store.startFlow === 'function') Store.startFlow();
-        else if (typeof Store.initFlowModules === 'function') Store.initFlowModules();
+        var state = Store.getState ? Store.getState() : null;
+        var modules = (state && state.modules) ? state.modules : [];
+        // 当前任务已经有流程链时不再往里塞九步链（两条链混在一起会看不清），
+        // 直接告诉使用者去新建一个空任务。
+        if (modules.length) {
+          if (root.alert) {
+            root.alert('当前任务已有流程链（' + modules.length + ' 个模块）。九步研究流程要放在一个空任务里：点顶部「+ 新建任务」，再点这个按钮。');
+          }
+          return;
+        }
+        if (typeof Store.initFlowModules === 'function') Store.initFlowModules();
+        else if (typeof Store.startFlow === 'function') Store.startFlow();
       });
-      elSidebar.appendChild(elFlowBtn);   // 追加到 #sidebar 末尾
+      // 插在底部工具区（＋添加 API / ✎编辑依赖）之前，而不是追加到最末尾——
+      // 追加会跑到「个人工作空间」下面，既不显眼也不合布局。
+      var footer = elSidebar.querySelector ? elSidebar.querySelector('.sidebar-footer') : null;
+      if (footer && footer.parentNode === elSidebar) elSidebar.insertBefore(elFlowBtn, footer);
+      else elSidebar.appendChild(elFlowBtn);
     }
     return elFlowBtn;
   }
@@ -915,9 +928,9 @@
     // 4) 底部小字提示
     ensureHint();
 
-    // 5) 侧栏不再放「开始业务流程」按钮（入口在欢迎页）；顺手清掉旧会话里已创建的按钮
-    var staleFlow = elSidebar.querySelector ? elSidebar.querySelector('.sidebar-flow-btn') : null;
-    if (staleFlow && staleFlow.parentNode) staleFlow.parentNode.removeChild(staleFlow);
+    // 5) 侧栏「按业务流程初始化 9 个模块」按钮：九步研究流程的入口。
+    //    历史上这个入口被移除过、只留在"空模块空间"里，找入口很费劲（2026-10-21 放回侧栏）。
+    ensureFlowButton();
 
     // 本工作台使用独立研究任务（js/tasks.js）；旧版项目列表不在此界面展示。
 
