@@ -1085,7 +1085,14 @@
     var chip = el('span', 'status-chip', STATUS_META[st].glyph + ' ' + STATUS_META[st].text);
     chip.setAttribute('data-status', st);
     bar.appendChild(chip);
-    bar.appendChild(el('span', 'status-hint', STATUS_HINT[st] || ''));
+    // 【2026-10-21】文档批准 ≠ 环节通过。两处都叫"审核通过"会让人以为点完文档就该跳模块，
+    // 所以这里在文档已批准时把路径写清楚：先提交本环节，再确认通过才会进入下一模块。
+    var hint = STATUS_HINT[st] || '';
+    var docApproved = !!(mod.doc && mod.doc.status === 'approved');
+    if (docApproved && (st === 'todo' || st === 'doing')) {
+      hint = '文档已批准（验收标准已生效）→ 点「完成并提交审核」提交本环节 → 再点「通过本环节」进入下一模块';
+    }
+    bar.appendChild(el('span', 'status-hint', hint));
 
     var actions = el('div', 'status-actions');
     if (st === 'todo' || st === 'doing') {
@@ -1093,7 +1100,7 @@
         getStore().submitModule(mod.id);
       }));
     } else if (st === 'review') {
-      actions.appendChild(actionButton('确定（通过）', 'primary', function () {
+      actions.appendChild(actionButton('通过本环节 → 下一模块', 'primary', function () {
         getStore().approveModule(mod.id);      // 内部已把选中切到下一模块
       }));
       actions.appendChild(actionButton('打回重做', 'ghost', function () {
@@ -1967,12 +1974,17 @@
     if (metaParts.length) body.appendChild(el('div', 'doc-meta', metaParts.join(' · ')));
 
     if (ui.notice) body.appendChild(el('div', 'doc-notice', ui.notice));
+    // 【2026-10-21】说清这份文档的职责：它是本环节的验收标准，批准后下游按它执行；
+    // 环节本身是否完成、要不要进入下一模块，由上方状态条决定。
+    body.appendChild(el('div', 'doc-role-hint',
+      '这份文档是本环节的「标准与验收的契约」：批准后它就成为下游环节的输入。'
+      + '批准文档 ≠ 环节通过——环节要在上方状态条里「完成并提交审核」→「通过本环节」才会进入下一模块。'));
     if (ui.reject) buildDocRejectBox(body, mod, ui);
 
     var actions = el('div', 'doc-actions');
     actions.appendChild(docButton('编辑', '', false, function () { enterDocEdit(mod); }));
     if (st === 'draft') {
-      actions.appendChild(docButton('审核通过', 'primary', false, function () {
+      actions.appendChild(docButton('批准这份文档', 'primary', false, function () {
         getStore().approveDoc(mod.id);
         render();
       }));

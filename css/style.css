@@ -780,6 +780,14 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
   text-decoration: underline;
 }
 
+/* 文档卡的职责说明：区分「批准文档」与「环节通过」两件事 */
+.doc-role-hint {
+  margin: 6px 0 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
 /* 调研状态条：长等待时必须显眼（阶段 + 已等待秒数 + 取消） */
 .research-statusbar {
   display: flex;
