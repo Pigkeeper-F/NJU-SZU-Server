@@ -14,8 +14,11 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import sys
+import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
@@ -53,12 +56,12 @@ for key in ("google-scholar", "pubmed", "pmc", "openalex", "europe-pmc"):
     ok(bool(_sources.id_prefix_of(key)), "有 id 前缀：" + key)
 
 for key in ("cnki", "wanfang", "web-of-science", "scopus"):
-    ok(_sources.is_known(key), "已登记（人工类）：" + key)
-    ok(not _sources.is_executable(key), "不可自动执行：" + key)
-    ok(bool(_sources.reason_of(key)), "给出不可执行原因：" + key)
-    ok(bool(_sources.manual_steps_of(key)), "给出人工步骤：" + key)
+    ok(_sources.is_known(key), "已登记（浏览器来源）：" + key)
+    ok(_sources.is_executable(key), "可进入执行链：" + key)
+    ok(_sources.access_of(key) == "browser", "接入方式为浏览器：" + key)
+    ok(bool(_sources.label_of(key)), "有显示名：" + key)
 
-ok("cnki" in _sources.manual_keys(), "人工类来源单独可查")
+ok(set(_sources.executable_keys()) == set(_sources.all_keys()), "全部登记来源均可执行")
 
 
 # ---------------------------------------------------------------- S2 请求构造
@@ -158,7 +161,7 @@ if rows:
 section("S4 候选 id 前缀与结构化字段优先")
 ok(_search.candidate_prefix("google-scholar", 1) == "GSC", "Scholar 第 1 批前缀 GSC")
 ok(_search.candidate_prefix("google-scholar", 2) == "GSC-B2", "Scholar 第 2 批前缀 GSC-B2")
-ok(_search.candidate_prefix("pubmed", 1) == "PMD", "PubMed 前缀")
+ok(_search.candidate_prefix("pubmed", 1) == "PMID", "PubMed 前缀")
 ok(_search.candidate_prefix("openalex", 1) == "OAX", "OpenAlex 前缀")
 
 records = _search.normalize_candidates(
@@ -177,7 +180,7 @@ records = _search.normalize_candidates(
 ok(len(records) == 1, "生成一条候选")
 if records:
     rec = records[0]
-    ok(rec["candidate_id"] == "PMD-001", "候选 id 带来源前缀：" + rec["candidate_id"])
+    ok(rec["candidate_id"] == "PMID-001", "候选 id 带来源前缀：" + rec["candidate_id"])
     ok(rec["year"] == 2022, "年份取结构化字段：" + str(rec["year"]))
     ok(rec["authors"] == "Real Author", "作者取结构化字段")
     ok(rec["venue"] == "Real Venue", "期刊取结构化字段")
@@ -218,6 +221,36 @@ try:
     ok(any(m.get("error") for m in metas), "失败源带错误说明")
 finally:
     _open.run = original_run
+
+print("\nS6 调度器接入开放 API")
+def fake_open_run(source_key, query, limit, year_from=None, year_to=None):
+    return {
+        "status": "ok", "url": "https://api.example/" + source_key, "count": 1,
+        "results": [{"title": "Open paper", "abstract": "A", "authors": "X", "year": 2021,
+                     "venue": "J", "doi": "10.1/o", "result_url": "https://x"}],
+    }
+
+
+original = _open.run
+_open.run = fake_open_run
+try:
+    page = _search._run_source("openalex", "q", False, 10, 2020, 2024,
+                               job_dir=Path("."), page_index=0, full_page=True)
+    ok(page["status"] == "ok" and len(page["results"]) == 1, "调度器直接调用开放 API")
+    ok(page["results"][0]["snippet"] == "A", "摘要映射到 snippet")
+    ok(page["has_next"] is False and page["transport"] == "api", "单页来源如实标记")
+finally:
+    _open.run = original
+
+with tempfile.TemporaryDirectory() as temp:
+    out = io.StringIO()
+    cfg = {"topic": "t", "query": "q", "sources": ["openalex"], "limit": 10,
+           "searchMode": "formal", "stopMode": "end", "perSourceLimit": None}
+    with redirect_stdout(out):
+        code = _search.run(cfg, Path(temp))
+    events = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    ok(code == 1 and events and events[-1]["type"] == "error", "正式检索到末页时开放 API 源明确报错")
+    ok("暂不支持" in events[-1]["message"], "报错说明原因")
 
 print("\n结果：%d 通过 / %d 失败" % (PASS, FAIL))
 if FAIL:

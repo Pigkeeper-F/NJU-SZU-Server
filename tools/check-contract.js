@@ -26,21 +26,22 @@ const passed = [];
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
 
 // 【集成 · 2026-10-13】js/auth-pages.js 纳入检查（其 DOM id / CSS 类引用落在账号页，见 htmlIds / css 的扩展源）
-const JS_FILES = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/workspace.js", "js/tasks.js", "js/auth-pages.js"];
+const JS_FILES = ["js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/literature.js", "js/workspace.js", "js/tasks.js", "js/auth-pages.js"];
 const UI_MODULES = [
   ["Sidebar", "js/sidebar.js"],
   ["ModuleTabs", "js/tabs.js"],
   ["ModuleSpace", "js/chat.js"],
   ["App", "js/app.js"]
+  , ["LiteratureUI", "js/literature.js"]
 ];
 const STATIC_NODES = ["composer-input", "btn-send", "btn-add-module", "btn-sidebar-toggle", "sidebar-resizer"];
 // 【集成 · 2026-10-13】账号系统上工作台：index.html 在数据层之前先加载账号配置/存储与守卫
-const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.js", "js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/workspace.js", "js/tasks.js"];
+const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.js", "js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/literature.js", "js/workspace.js", "js/tasks.js"];
 // 账号系统独立文件（登录/注册页自带脚本，不进工作台 index.html 的渲染链）
 const AUTH_FILES = ["js/auth-config.js", "js/auth-storage.js", "js/auth-pages.js", "js/guard.js", "login.html", "register.html", "css/auth.css", "debug.html", "js/debug.js"];
 // 契约 §2「两种运行模式」：前端只允许 js/chat.js 里对同源 /api/… 的 fetch；其余脚本零联网。
 // 【模型分组 · 2026-10-15】js/sidebar.js 获准发起同源 POST /api/ai/test（设置页「测试连通」，契约 §15.7）。
-const FETCH_ALLOWED = ["js/chat.js", "js/codex.js", "js/workspace.js", "js/tasks.js", "js/sidebar.js", "js/debug.js"];
+const FETCH_ALLOWED = ["js/chat.js", "js/codex.js", "js/literature.js", "js/workspace.js", "js/tasks.js", "js/sidebar.js", "js/debug.js"];
 // 【调试台 · 2026-10-20】js/debug.js 只访问 /api/debug/*（只读）；debug.html 是独立工具页，不进 index.html。
 
 // ---------- 读取 ----------
@@ -152,9 +153,11 @@ for (const f of JS_FILES.concat(["index.html"])) {
   // XML 命名空间（http://www.w3.org/2000/svg）被误判；JS 只认非 data: 的字符串字面量。
   let ext = null;
   if (f.slice(-5) === ".html") {
-    ext = noData.match(/(?:src|href)\s*=\s*["']https?:\/\//) ||
-          noData.match(/url\(\s*["']?https?:\/\//) ||
-          noData.match(/fetch\(\s*["']https?:\/\//);
+    // Fixed user-clicked official help navigation; it neither embeds a resource nor calls an external API.
+    const resources = f === "index.html" ? noData.replace('<a id="download-faostat-link" href="https://www.fao.org/faostat/en/#data/TM" target="_blank" rel="noopener noreferrer">打开 FAOSTAT 贸易矩阵官方页面 ↗</a>', '') : noData;
+    ext = resources.match(/(?:src|href)\s*=\s*["']https?:\/\//) ||
+          resources.match(/url\(\s*["']?https?:\/\//) ||
+          resources.match(/fetch\(\s*["']https?:\/\//);
   } else {
     for (const m of noData.matchAll(/["'`]([^"'`\n]{0,200})["'`]/g)) {
       if (m[1].indexOf("data:") === -1 && /https?:\/\//.test(m[1])) {

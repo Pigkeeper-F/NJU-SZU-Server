@@ -87,7 +87,7 @@ emit({"type": "result", "stage": "discover", "count": out["count"], "files": out
       "message": "已保存 %d 条候选（stub）" % out["count"]})
 `;
 
-const STUB_FULLTEXT = `import json, pathlib, sys
+const STUB_FULLTEXT = `import hashlib, json, pathlib, sys
 
 args = sys.argv[1:]
 def value(name):
@@ -128,7 +128,13 @@ def build_pdf():
 files = job / "fulltext" / "files"
 files.mkdir(parents=True, exist_ok=True)
 (files / "GSC-001.pdf").write_bytes(build_pdf())
-text = "Stub HTML fulltext for GSC-002. " + ("试验处理描述：免耕与翻耕对比正文。") * 200
+section_blocks = [
+    ("Introduction", "长期施肥对土壤有机碳的影响是本研究关注的核心问题。" * 6),
+    ("Materials and Methods", "试验设置免耕与翻耕两个处理，每个处理三次重复，取样深度为零至二十厘米。" * 6),
+    ("Results", "免耕处理的土壤有机碳含量高于翻耕处理，差异具有统计学意义。" * 6),
+    ("Conclusion", "长期免耕有助于提高表层土壤有机碳储量，仍需多年定位试验验证。" * 6),
+]
+text = "\\n".join(heading + "\\n" + body for heading, body in section_blocks)
 (files / "GSC-002.txt").write_text(text, encoding="utf-8")
 items = [
     {"paper_id": "GSC-001", "title": "Fixture A: long-term fertilization effects on SOC",
@@ -140,7 +146,15 @@ items = [
      "doi": "10.1000/b2", "source_url": "https://example.test/b2",
      "fulltext_url": "https://example.test/b2", "kind": "html", "status": "fetched_html",
      "path": "fulltext/files/GSC-002.txt", "size": (files / "GSC-002.txt").stat().st_size,
-     "retrieved_at": "2026-10-15T00:00:00+00:00", "evidence_level": "fulltext_html", "reason": ""},
+     "retrieved_at": "2026-10-15T00:00:00+00:00", "evidence_level": "fulltext_html",
+     "evidence_version": "fulltext-evidence-v1",
+     "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+     "final_url": "https://example.test/b2",
+     "html_evidence": {"origin": "dom_article_region", "container_verified": True,
+                       "citation_title": "Fixture B: SOC stocks under tillage practices",
+                       "citation_doi": "10.1000/b2",
+                       "sections": [{"heading": heading, "text": body} for heading, body in section_blocks]},
+     "reason": ""},
 ]
 status = {
     "version": 1, "generated_at": "2026-10-15T00:00:00+00:00",
@@ -315,6 +329,12 @@ async function main() {
 
     const advance = await post('/api/literature/advance', { id: jobId }, { 'X-Workbench': '1' });
     assert.equal(advance.status, 200);
+    snap = await waitTerminal(jobId);
+    assert.equal(snap.status, 'needs_attention', `expected fulltext_ready, got status=${snap.status} error=${snap.error} stage=${snap.stage} stages=${JSON.stringify(snap.stages)}`);
+    assert.equal(snap.stage, 'fulltext_ready');
+    assert.equal(snap.resumeStage, 'extract');
+    assert.equal(snap.stages.extract, 'pending');
+    assert.equal((await post('/api/literature/advance', { id: jobId }, { 'X-Workbench': '1' })).status, 200);
     snap = await waitTerminal(jobId);
     // P0 注入点护栏：server.js 真实注入的 extract 适配器必须能跑起来并停在字段确认关口；
     // 若 runExtractStage 再次丢 jobDir/config，这里会是 failed『提取阶段缺少必要参数…』。

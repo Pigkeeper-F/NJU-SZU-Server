@@ -16,7 +16,7 @@ from pathlib import Path
 REGISTRY_PATH = Path(__file__).resolve().parent / "literature-sources.json"
 
 #: 拒绝文案（与 literature-config.js 原 L32–35 逐字一致，设计 §7/§10 不回归）
-REJECT_TEMPLATE = "尚未接通以下检索来源：{sources}；请明确改为仅检索 Google Scholar，或等待相应连接器。"
+REJECT_TEMPLATE = "尚未接通以下检索来源：{sources}；请选择已接通来源，或等待相应连接器。"
 
 
 def load_registry() -> dict:
@@ -41,7 +41,7 @@ def all_keys() -> list[str]:
 
 
 def executable_keys() -> list[str]:
-    """state=executable 的来源 key（浏览器来源 + 开放 API 来源）。"""
+    """state=executable 的来源 key（浏览器来源 + 开放 API 来源）；以共享注册表为准。"""
     return [str(item["key"]) for item in list_sources() if item.get("state") == "executable" and item.get("key")]
 
 

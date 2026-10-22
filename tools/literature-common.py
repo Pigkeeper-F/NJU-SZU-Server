@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,19 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, target)
+        # Windows readers and security scanners can briefly deny replacement.
+        # Retry the same closed, fully flushed temporary file; never remove or
+        # write directly over the existing checkpoint to work around a lock.
+        retry_delays = (0.05, 0.1, 0.2, 0.4, 0.8)
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                os.replace(temp, target)
+                break
+            except OSError as error:
+                transient_access = isinstance(error, PermissionError) or getattr(error, "winerror", None) in {32, 33}
+                if not transient_access or attempt == len(retry_delays):
+                    raise
+                time.sleep(retry_delays[attempt])
     except BaseException:
         try:
             temp.unlink()
@@ -170,6 +183,17 @@ def append_event_log(job_dir: Path, event: dict) -> None:
 def resolve_limits(config: dict | None) -> dict:
     """合并 run_config.limits 与默认超时表（设计 §3.1/§8.3）。"""
     limits = dict(DEFAULT_LIMITS)
+    if isinstance(config, dict):
+        sources = config.get("sources")
+        source_count = len(sources) if isinstance(sources, list) else 1
+        if config.get("searchMode") == "formal" and config.get("stopMode") == "end":
+            limits["discover"] = 86400
+        else:
+            target = config.get("perSourceLimit", 100) if config.get("searchMode") == "formal" else 10
+            if not isinstance(target, int) or isinstance(target, bool) or not 1 <= target <= 1000:
+                target = 100 if config.get("searchMode") == "formal" else 10
+            pages = (target + 9) // 10
+            limits["discover"] = min(86400, 180 * min(6, max(1, source_count)) * pages)
     if isinstance(config, dict) and isinstance(config.get("limits"), dict):
         for stage, value in config["limits"].items():
             if stage in limits and isinstance(value, int) and not isinstance(value, bool) and value > 0:
@@ -227,7 +251,7 @@ def detect_completed_stages(job_dir: Path) -> dict:
 
     candidates = load_json(paths["candidates_json"])
     batches = candidates.get("batches") if isinstance(candidates, dict) else None
-    detected["discover"] = "done" if isinstance(batches, list) and batches else "pending"
+    detected["discover"] = "done" if isinstance(batches, list) and batches and candidates.get("discovery_complete") is not False else "pending"
 
     dedupe = load_json(paths["dedupe_json"])
     dedupe_ok = (

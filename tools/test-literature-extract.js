@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { buildExtractPrompt, parseExtractionJson, runExtractStage } = require('./literature-extract');
 
 const python = process.env.WORKBENCH_PYTHON || 'python';
@@ -27,15 +28,20 @@ function makeJob(dir, { confirmations = true, fields = FIELDS, maxChars = 120000
       records: [{ at: '2026-10-15T00:00:00Z', by: 'researcher', kind: 'fieldDefinitions', fields, note: '' }],
     }, null, 2));
   }
-  fs.writeFileSync(path.join(dir, 'fulltext', 'files', 'GSC-001.txt'),
-    'Site A, 2018 maize field. Soil organic carbon was 12.4 g/kg in the 0-30 cm layer (Table 3).');
+  const sections = ['Introduction', 'Materials and methods', 'Results'].map(heading => ({ heading,
+    text: ('Site A, 2018 maize field. Soil organic carbon was 12.4 g/kg in the 0-30 cm layer (Table 3). ').repeat(4).trim() }));
+  const articleText = sections.map(section => section.heading + '\n' + section.text).join('\n\n') + '\n';
+  fs.writeFileSync(path.join(dir, 'fulltext', 'files', 'GSC-001.txt'), articleText);
   fs.writeFileSync(path.join(dir, 'fulltext', 'status.json'), JSON.stringify({
     version: 1,
     items: [
       { paper_id: 'GSC-001', title: 'A study', doi: '10.1/a', source_url: 'https://example.org/a',
         fulltext_url: 'https://example.org/a', kind: 'html', status: 'fetched_html',
-        path: 'fulltext/files/GSC-001.txt', size: 120, retrieved_at: '2026-10-15T00:00:00Z',
-        evidence_level: 'fulltext_html', reason: '' },
+        path: 'fulltext/files/GSC-001.txt', size: Buffer.byteLength(articleText), retrieved_at: '2026-10-15T00:00:00Z',
+        evidence_level: 'fulltext_html', reason: '', evidence_version: 'fulltext-evidence-v1',
+        content_sha256: createHash('sha256').update(articleText).digest('hex'),
+        html_evidence: { origin: 'dom_article_region', container_verified: true, container: 'article .body',
+          page_title: 'A study', citation_title: 'A study', citation_doi: '10.1/a', sections } },
       { paper_id: 'GSC-002', title: 'B study', doi: '', source_url: 'https://example.org/b',
         fulltext_url: '', kind: 'pdf', status: 'fetched_pdf',
         path: 'fulltext/files/GSC-002.pdf', size: 0, retrieved_at: '2026-10-15T00:00:00Z',
@@ -108,6 +114,22 @@ test('buildExtractPrompt carries schema, instructions version and full text', ()
   assert.match(prompt, /"key": "soc"/);
   assert.match(prompt, /SOC 12\.4 g\/kg/);
   assert.match(prompt, /GSC-001\.txt/);
+  const expanded = Array.from({ length: 200 }, (_, index) => ({ key: `expanded_${index}`, label: `变量${index}` }));
+  const expandedPrompt = buildExtractPrompt({ ...bundle, field_definitions: expanded });
+  for (const field of expanded) assert.ok(expandedPrompt.includes(`"key": "${field.key}"`), 'Expanded schema cannot be truncated in model input');
+});
+
+test('buildExtractPrompt includes native supplementary tables and explicit partial reading', () => {
+  const prompt = buildExtractPrompt({ paper_id: 'P1', title: 'Study', fulltext: { kind: 'pdf', text: '' },
+    degraded: { reason: '正文为扫描件' }, materials_check: { manifest_present: true, supplement_check: { status: 'checked' } },
+    materials: [{ material_id: 'S1', role: 'supplement', filename: 'Table_S1.xlsx', format: 'xlsx',
+      download_status: 'downloaded', read_status: 'partial', read_reason: '仅当前输入部分；原件完整保留',
+      content: { text: 'Sheet=Growth B4=12.4 g/kg', locations: [{ sheet: 'Growth', cell: 'B4' }] } }] });
+  assert.match(prompt, /Table_S1\.xlsx/);
+  assert.match(prompt, /Growth B4=12\.4/);
+  assert.match(prompt, /"read_status": "partial"/);
+  assert.match(prompt, /正文 degraded 但补充表格有真实报告值时可从该材料提取/);
+  assert.match(prompt, /evidence.where 必须写出材料文件名/);
 });
 
 test('missing confirmations pauses at awaiting_confirmation', async () => {

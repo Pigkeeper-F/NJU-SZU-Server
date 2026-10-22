@@ -55,7 +55,7 @@ async function main() {
     assert.equal(response.status, 403, 'browser write header is required');
     response = await post('/api/literature/search', { query: '' }, { 'X-Workbench': '1' });
     assert.equal(response.status, 400, 'missing config cannot start a job');
-    response = await post('/api/literature/search', { config: { topic: 'test', query: 'test', sources: ['google-scholar', 'scopus'] } }, { 'X-Workbench': '1' });
+    response = await post('/api/literature/search', { config: { topic: 'test', query: 'test', sources: ['google-scholar', 'arxiv'] } }, { 'X-Workbench': '1' });
     assert.equal(response.status, 400, 'unsupported source must not silently run Scholar only');
     response = await fetch(BASE + '/api/literature/job?id=bad');
     assert.equal(response.status, 400, 'invalid job id must be rejected');
@@ -66,6 +66,37 @@ async function main() {
     response = await post('/api/literature/search', { config: { topic: 't', query: 'q', sources: ['google-scholar'] }, until: 'bogus' }, { 'X-Workbench': '1' });
     assert.equal(response.status, 400, 'invalid until must be rejected');
     assert.match((await response.json()).error, /阶段边界/);
+
+    // 六来源各 2000 字的中文检索式应进入配置校验，不被原 16KiB 请求体上限截断；非法阶段确保不启动任何真实搜索。
+    const sixSources = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
+    response = await post('/api/literature/search', { config: { topic: '六来源请求体', query: 'q', sources: sixSources,
+      sourceQueries: Object.fromEntries(sixSources.map(source => [source, '温'.repeat(2000)])) }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /阶段边界/, '36KB 来源配置应通过请求体读取和配置检查');
+
+    // 新模式先校验目标数量；使用非法阶段验证合法模式，不触发真实数据库访问。
+    response = await post('/api/literature/search', { config: { topic: '正式到末页', query: 'q', sources: ['pubmed'],
+      searchMode: 'formal', stopMode: 'end', perSourceLimit: 1001 }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /阶段边界/, '到末页忽略遗留数量，合法配置进入阶段校验');
+    response = await post('/api/literature/search', { config: { topic: '非法测试到末页', query: 'q', sources: ['pubmed'],
+      searchMode: 'test', stopMode: 'end' }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /只适用于正式模式/);
+    for (const target of [0, 1001, true]) {
+      response = await post('/api/literature/search', { config: { topic: '正式检索', query: 'q', sources: ['pubmed'],
+        searchMode: 'formal', perSourceLimit: target } }, { 'X-Workbench': '1' });
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /每来源检索数量/);
+    }
+    response = await post('/api/literature/search', { config: { topic: '正式检索', query: 'q', sources: ['pubmed'],
+      searchMode: 'formal', perSourceLimit: 25 }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /阶段边界/);
+    response = await post('/api/literature/search', { config: { topic: '测试检索', query: 'q', sources: ['pubmed'],
+      searchMode: 'test', perSourceLimit: 999, limit: 999 }, until: 'bogus' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /阶段边界/, '测试模式固定十条并忽略遗留正式数量');
 
     // ---- 新增：advance 路由 ----
     response = await post('/api/literature/advance', { id: FAKE_ID });
@@ -79,6 +110,21 @@ async function main() {
     response = await post('/api/literature/advance', { id: FAKE_ID }, { 'X-Workbench': '1' });
     assert.equal(response.status, 400, 'completed job without resumeStage must not advance');
     assert.equal((await response.json()).error, '该任务已完成全部阶段');
+
+    // 登录浏览器入口沿用写请求防护，且不接受任意 URL 或非等待任务。
+    response = await post('/api/literature/browser', { id: FAKE_ID });
+    assert.equal(response.status, 403);
+    response = await post('/api/literature/browser', { id: FAKE_ID }, { 'X-Workbench': '1', Origin: 'https://untrusted.test' });
+    assert.equal(response.status, 403);
+    response = await post('/api/literature/browser', { id: 'bad' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /无效检索任务标识/);
+    response = await post('/api/literature/browser', { id: FAKE_ID, url: 'file:///private' }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /只需提供/);
+    response = await post('/api/literature/browser', { id: FAKE_ID }, { 'X-Workbench': '1' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /没有等待/);
 
     // ---- 新增：jobs 列表 ----
     response = await fetch(BASE + '/api/literature/jobs?limit=50');

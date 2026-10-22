@@ -1,0 +1,136 @@
+{
+  "paper_id": "PMID-002",
+  "source_pdf": "PMID-002.txt",
+  "status": "partial",
+  "classification_reason": "本文为综述，可提取其二次报告的热应激肉鸡品系和番茄红素添加量，但缺少可关联至具体处理组的定量结局及温度暴露参数。",
+  "rows": [
+    {
+      "row_id": "PMID-002-R001",
+      "field": "title",
+      "value_raw": "Lycopene in Feed as Antioxidant and Immuno-Modulator Improves Broiler Chicken's Performance under Heat-Stress Conditions.",
+      "unit_raw": "",
+      "value_normalized": "Lycopene in Feed as Antioxidant and Immuno-Modulator Improves Broiler Chicken's Performance under Heat-Stress Conditions.",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "输入题录：title"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-002-R002",
+      "field": "doi",
+      "value_raw": "10.1155/2023/5418081",
+      "unit_raw": "",
+      "value_normalized": "10.1155/2023/5418081",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "输入题录：doi"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-002-R003",
+      "field": "bibliographic_url",
+      "value_raw": "https://pubmed.ncbi.nlm.nih.gov/37426426/",
+      "unit_raw": "",
+      "value_normalized": "https://pubmed.ncbi.nlm.nih.gov/37426426/",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "输入题录：source_url"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-002-R004",
+      "field": "study_type",
+      "value_raw": "review",
+      "unit_raw": "",
+      "value_normalized": "review",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-002.txt，第1节 Introduction，第4行"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-002-R005",
+      "field": "strain",
+      "value_raw": "Ross 308",
+      "unit_raw": "",
+      "value_normalized": "Ross 308",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-002.txt，Table 1，Sahin et al. [20]行，Animals列，第85行；综述二次报告"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-002-R006",
+      "field": "additive",
+      "value_raw": "200, 400",
+      "unit_raw": "mg/kg",
+      "value_normalized": "200, 400",
+      "unit_normalized": "mg/kg",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-002.txt，Table 1，Sahin et al. [20]行，Supplemental dose列，第85–88行；番茄红素，综述二次报告"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-002-R007",
+      "field": "additive",
+      "value_raw": "5%",
+      "unit_raw": "%",
+      "value_normalized": "5%",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-002.txt，第5节，第106行，Hosseini-vashan [8]相关叙述；番茄红素，综述二次报告"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-002-R008",
+      "field": "additive",
+      "value_raw": "20, 50, and 100",
+      "unit_raw": "mg/kg food",
+      "value_normalized": "20, 50, and 100",
+      "unit_normalized": "mg/kg food",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-002.txt，第5节，第106行，Sahin et al. [20]相关叙述；番茄红素，综述二次报告"
+      },
+      "conditions": {},
+      "provenance": ""
+    }
+  ],
+  "warnings": [
+    "本文明确为综述，所提取实验信息均为二次报告；未取得或核查被引原始研究，不得将其合并为本文开展的单一实验。",
+    "Sahin et al. [20]的番茄红素剂量存在来源冲突：Table 1为200、400 mg/kg，第5节为20、50、100 mg/kg food；分别保留，待回原始研究核查。",
+    "Hosseini-vashan [8]的添加量在Table 1写为“5% lycopene/kg in feed”，第5节写为“5% lycopene supplementation”；百分比基准未明确，未换算。",
+    "材料清单标记main_pdf_status=missing；补充材料核查状态unknown，因权限问题暂停，未提供可读取补材，不能宣称补充材料已核查。",
+    "正文区标记truncated=false，但main-html读取记录为partial且定位摘录止于12000字符；本次仅依据实际提供文本，未验证原始HTML、PDF及完整参考文献。",
+    "study_id、experiment_id、treatment_id、control_id及related_reports：无法据综述确定原始研究间关系和处理编号，未自行生成或合并。",
+    "set_temperature、measured_temperature、control_temperature、humidity、thi_value、thi_name、thi_definition、exposure_age、daily_exposure_duration、total_exposure_duration、exposure_pattern及exposure_term：所提供热应激研究叙述未给出可核实参数。",
+    "sex、housing、feeding_control、experimental_unit、independent_replicates、birds_per_replicate、birds_per_group及result_sample_size：未提供可对应热应激研究具体处理与结果的报告值。",
+    "original_value、central_value、variation_value、variation_type及置信区间字段：热应激相关结局仅报告变化方向，未提供可用于提取的定量结局、变异或置信区间；添加剂剂量未当作结局值。",
+    "condition_keys为空，所有conditions均为空对象；不同被引研究及相互冲突的剂量仅通过证据位置区分。",
+    "authors、publication_year及publication_source未由所给题录或正文明确提供；未从DOI中的年份片段推定发表年份。",
+    "统一单位方案未确认，未执行单位换算，也未填写standardized_value或standardized_unit；人工回原件核查尚未完成。"
+  ],
+  "skip_reason": "",
+  "publication_note": "Source quotations omitted for repository distribution; verify against the linked originals. This snapshot does not grant scientific approval."
+}

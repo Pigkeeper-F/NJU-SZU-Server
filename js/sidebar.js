@@ -415,9 +415,13 @@
     var modelPane = doc.createElement('div');
     modelPane.className = 'settings-pane is-active';
     modelPane.setAttribute('data-settings-pane', 'model');
+    var codexConnection = doc.getElementById('codex-connection');
+    if (codexConnection) { modelPane.appendChild(codexConnection); codexConnection.hidden = false; }
 
     var body = doc.createElement('div');
     body.className = 'settings-body';
+    body.setAttribute('data-api-settings', '');
+    body.hidden = !!codexConnection && codexConnection.querySelector('select').value !== 'api';
 
     // 【模型分组 · 2026-10-15】一个地址 + 一个 Key = 一个分组；切换/新建/删除都在这一行
     var groupWrap = doc.createElement('label');
@@ -532,6 +536,8 @@
 
     var actions = doc.createElement('div');
     actions.className = 'settings-actions';
+    actions.setAttribute('data-api-settings', '');
+    actions.hidden = !!codexConnection && codexConnection.querySelector('select').value !== 'api';
     // 【模型分组 · 2026-10-15】测试连通：用表单当前值（未保存也生效；留空回落 .env）走同源 /api/ai/test
     var testBtn = doc.createElement('button');
     testBtn.type = 'button';
@@ -862,7 +868,7 @@
     activateSettingsTab('model');          // 每次打开回到「模型」页
     if (typeof elSettingsDialog.showModal === 'function') elSettingsDialog.showModal();
     else elSettingsDialog.setAttribute('open', '');
-    if (doc.getElementById('llm-base-url')) doc.getElementById('llm-base-url').focus();
+    if (doc.getElementById('ai-backend')) doc.getElementById('ai-backend').focus();
   }
 
   /**

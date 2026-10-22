@@ -78,6 +78,8 @@
 
   /** 依赖来源文案：首模块「起点」，其余「← 上游模块名」 */
   function depLabel(list, module) {
+    if (['download-data', 'clean-data', 'literature-mining'].indexOf(module.type) >= 0) return '并列准备 → 模型调整与计算';
+    if (module.type === 'calculation') return '下载数据 / 数据清洗 / 文献挖掘按需汇入';
     if (!module.dependsOn) return '起点';
     var up = findModule(list, module.dependsOn);
     return up ? '← ' + up.name : '起点';
@@ -285,6 +287,8 @@
     }).slice(-25).map(function (message) {
       return { role: message.role, text: message.text };
     });
+    var executionContext = root.LiteratureUI && root.LiteratureUI.context(moduleId);
+    if (executionContext) recent.unshift({ role: 'user', text: executionContext });
     var rules = root.TaskManager && root.TaskManager.confirmedRules();
     if (!rules) return recent;
     var chunks = [];
@@ -327,15 +331,17 @@
 
     var upstream = [];
     var visited = {};
-    var cursor = mod.dependsOn;
-    while (cursor && !visited[cursor]) {
-      visited[cursor] = true;
-      var up = findModule(modules, cursor);
-      if (!up) break;
-      if (up.doc && up.doc.status === 'approved' && typeof up.doc.content === 'string') {
-        upstream.push({ name: up.name, doc: up.doc.content.slice(0, 400) });
+    var queue = Store.getUpstreamModules(mod.id);
+    while (queue.length) {
+      var up = queue.shift();
+      if (visited[up.id]) continue;
+      visited[up.id] = true;
+      var rules = root.TaskManager && root.TaskManager.rulesForModule(up.id);
+      var approvedText = rules && rules.text || (up.doc && up.doc.status === 'approved' && up.doc.content);
+      if (approvedText) {
+        upstream.push({ name: up.name, doc: approvedText.slice(0, 400) });
       }
-      cursor = up.dependsOn;
+      queue = queue.concat(Store.getUpstreamModules(up.id));
     }
     return { name: mod.name, spec: specOf(mod), upstream: upstream, params: (mod.params && typeof mod.params === 'object') ? mod.params : {} };
   }
@@ -1329,15 +1335,19 @@
     bar.appendChild(chip);
     // 【2026-10-21】文档批准 ≠ 环节通过。两处都叫"审核通过"会让人以为点完文档就该跳模块，
     // 所以这里在文档已批准时把路径写清楚：先提交本环节，再确认通过才会进入下一模块。
+    var downloadPending = mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed');
     var hint = STATUS_HINT[st] || '';
     var docApproved = !!(mod.doc && mod.doc.status === 'approved');
-    if (docApproved && (st === 'todo' || st === 'doing')) {
+    if (!downloadPending && docApproved && (st === 'todo' || st === 'doing')) {
       hint = '文档已批准（验收标准已生效）→ 点「完成并提交审核」提交本环节 → 再点「通过本环节」进入下一模块';
     }
-    bar.appendChild(el('span', 'status-hint', hint));
+    bar.appendChild(el('span', 'status-hint', downloadPending ? '审核下载方案 → 平台自动获取 → 核查成果后交接' : hint));
+    if (mod.type === 'manual-review') bar.appendChild(el('span', 'status-hint', '这是成果审核：由你查看结果和核查报告，在对话中记录审核对象、通过或退回理由，再提交并选择通过或打回。退回上游修改需手动切换对应模块。'));
 
     var actions = el('div', 'status-actions');
-    if (st === 'todo' || st === 'doing') {
+    if (downloadPending) {
+      // Actual download and handoff provide this module's completion gate.
+    } else if (st === 'todo' || st === 'doing') {
       actions.appendChild(actionButton('完成并提交审核', 'primary', function () {
         getStore().submitModule(mod.id);
       }));
@@ -1349,9 +1359,9 @@
         getStore().rejectModule(mod.id, '需要补充后再提交');
       }));
     } else if (st === 'approved') {
-      var idx = -1;
-      for (var i = 0; i < modules.length; i++) if (modules[i].id === mod.id) { idx = i; break; }
-      var next = (idx >= 0 && idx + 1 < modules.length) ? modules[idx + 1] : null;
+      var next = modules.filter(function (candidate) {
+        return getStore().getUpstreamModules(candidate.id).some(function (up) { return up.id === mod.id; });
+      })[0] || null;
       if (next) {
         actions.appendChild(actionButton('进入下一模块：' + next.name + ' →', 'primary', function () {
           getStore().selectModule(next.id);
@@ -1406,6 +1416,21 @@
     { value: 'mining', label: '参数挖掘' }
   ];
   var TEMPLATE_DEFAULT = 'standard';
+  function docProfile(mod) {
+    var type = mod && mod.type;
+    var title = '', hint = '', options;
+    if (type === 'download-data') { title = '数据下载方案'; hint = '确定数据来源、年份与范围、获取方式、保存格式，以及下载完整性的检查方法。'; }
+    if (type === 'clean-data') { title = '数据清洗规则'; hint = '确定字段、单位、缺失和异常处理及验收要求；需要统一国家、品类或统计口径时选择数据对齐规则。'; options = [{ value: 'standard', label: '数据清洗规则' }, { value: 'align', label: '数据对齐规则' }]; }
+    if (type === 'calculation') {
+      title = mod.mode === 'direct' ? '现有代码运行说明' : mod.mode === 'modify' ? '计算修改方案' : '计算方案';
+      hint = mod.mode === 'direct' ? '确定现有代码入口、输入文件、运行参数、输出和检查要求。' : mod.mode === 'modify' ? '确定修改目标、公式或参数变更、影响范围及验证办法。' : '先选择直接计算或修改计算，再确定对应方案。';
+    }
+    if (type === 'literature-mining') { title = '文献数据提取规则'; hint = '确定文献范围、提取字段、原文位置、缺失处理与人工核查要求。'; options = [{ value: 'mining', label: '文献数据提取规则' }]; }
+    if (type === 'result-audit') { title = '结果核查原则'; hint = '确定核查的运行版本、指标、判定依据、通过条件和问题定位办法。'; }
+    if (type === 'manual-review') { title = '人工审核要求'; hint = '确定审核对象、证据清单、通过与退回条件。'; }
+    if (type === 'plotting') { title = '绘图方案'; hint = '确定要表达的问题、数据来源、图型、单位、样式和交付格式。'; }
+    return { title: title || DOC_TITLE, hint: hint || DOC_EMPTY_HINT, options: options || (title ? [{ value: 'standard', label: title }] : TEMPLATE_OPTIONS) };
+  }
   var MAX_FILES_TOTAL = 1024 * 1024;   // 数据文件总量上限 1MB（前端先拦，不发送）
   var FILE_ACCEPT = '.csv,.txt,.json,.tsv,.md';
   var RUN_CAUSES = [
@@ -1452,11 +1477,19 @@
   }
 
   function templateOf(id) {
-    return docTemplate[id] || TEMPLATE_DEFAULT;
+    var state = getStore().getState();
+    var mod = findModule(state.modules, id);
+    var options = docProfile(mod).options;
+    var selected = docTemplate[id] || options[0].value || TEMPLATE_DEFAULT;
+    return options.some(function (option) { return option.value === selected; }) ? selected : options[0].value;
   }
 
   function filesOf(id) {
     return docFiles[id] || (docFiles[id] = []);
+  }
+  function templateLabel(mod) {
+    var selected = templateOf(mod.id);
+    return docProfile(mod).options.filter(function (option) { return option.value === selected; })[0].label;
   }
 
   /** 【X2】待下载 URL 清单（模块级，跨 render 保留） */
@@ -1490,6 +1523,7 @@
     if (!mod) return 'none';
     var d = mod.doc;
     var s = d ? (d.status + '|' + (d.updatedAt || '') + '|' + (d.approvedAt || '') + '|' + d.content.length) : 'none';
+    s += '#' + (mod.type || '') + '#' + (mod.mode || '');
     s += '#' + ((docEditingId === mod.id) ? 'E' : '-');
     // 执行记录（结果确认门）：状态/时间/产物任一变化都要全量重建（否则快速路径吞掉徽标翻转）
     var r = mod.run;
@@ -1575,6 +1609,9 @@
       mode: mode,
       module: {
         name: (mod && mod.name) ? mod.name : '',
+        type: mod && mod.type,
+        mode: mod && mod.mode,
+        doc: mod && mod.doc && mod.doc.status === 'approved' ? mod.doc : null,
         spec: {
           goal: spec.goal || '',
           todo: Array.isArray(spec.todo) ? spec.todo : [],
@@ -1587,7 +1624,7 @@
       credential: root.ApiKeys && typeof root.ApiKeys.getActiveCredential === 'function'
         ? root.ApiKeys.getActiveCredential() : null
     };
-    // 模板仅在生成标准文档时叠加（生成代码不传，服务端忽略未知字段亦安全）
+    // 文档与代码沿用同一适用模板。
     if (template) body.template = template;
     if (extra) {
       for (var key in extra) {
@@ -1595,6 +1632,12 @@
           body[key] = extra[key];
         }
       }
+    }
+    if (root.CodexUI && root.CodexUI.useCodex(mod)) {
+      body.backend = 'codex';
+      body.codexModel = root.CodexUI.getModel(mod);
+      body.settings = null;
+      body.credential = null;
     }
     return body;
   }
@@ -1637,21 +1680,28 @@
   }
 
   /** AI 生成标准文档：按所选模板调 compose；按钮 disable + 文案「生成中…」；失败卡片内 textContent 显示错误 */
-  function generateDoc(mod) {
+  function generateDoc(mod, revise) {
     var ui = uiOf(mod.id);
-    if (ui.gen) return;
+    if (ui.gen || isBusy()) return;
+    mod = findModule(getStore().getState().modules, mod.id);
+    if (!mod) return;
+    if (revise && inputEl && inputEl.value.trim()) { ui.genErr = '请先发送输入框中的修改意见，再点击“AI 总结并修改方案”。'; render(); return; }
+    var basis = JSON.stringify(mod.doc || null);
+    var discussionBasis = JSON.stringify((mod.messages || []).filter(function (message) { return message.role === 'user' || message.role === 'assistant'; }));
     ui.gen = true; ui.genErr = ''; ui.notice = '';
     render();
-    postCompose('doc', mod, templateOf(mod.id)).then(function (result) {
+    return postCompose('doc', mod, templateOf(mod.id), revise ? { revision: { baseDoc: mod.doc } } : null).then(function (result) {
       ui.gen = false;
+      var current = findModule(getStore().getState().modules, mod.id);
+      if (!current || JSON.stringify(current.doc || null) !== basis) throw new Error('方案已发生变化，AI 返回内容未覆盖当前方案，请按当前版本重试。');
+      if (revise && JSON.stringify((current.messages || []).filter(function (message) { return message.role === 'user' || message.role === 'assistant'; })) !== discussionBasis) throw new Error('讨论中又有新内容，AI 返回内容未覆盖当前方案，请按最新讨论重试。');
       var saved = getStore().saveDoc(mod.id, result.text);
-      if (!saved) throw new Error('生成内容为空或超过 ' + MAX_DOC_CHARS + ' 字，未写入');
+      if (!saved) throw new Error('内容为空、超过 ' + MAX_DOC_CHARS + ' 字，或历史版本无法保存；原方案未改动。');
       ui.code = null; ui.exec = null; ui.codeErr = ''; ui.execErr = '';
-      ui.notice = '已生成标准文档（草稿），可直接审核或继续编辑。' + modelNote(result);
+      ui.notice = (revise ? '已生成修订草稿，请核对并重新审核。原版本可在“历史方案”中查看。' : '已生成标准文档（草稿），可直接审核或继续编辑。') + modelNote(result);
     }).catch(function (err) {
-      ui.gen = false;
       ui.genErr = errorText('AI 生成失败', err);
-    }).then(function () { render(); });
+    }).then(function () { ui.gen = false; render(); });
   }
 
   /** 生成代码：先 compose(code) 拿到代码，进入确认层（不自动执行）。
@@ -1667,7 +1717,7 @@
     ui.codeLoading = true; ui.codeErr = ''; ui.code = null; ui.exec = null; ui.execErr = ''; ui.notice = '';
     ui.genErr = '';
     render();
-    postCompose('code', mod, null, feedback ? { feedback: feedback } : null).then(function (result) {
+    postCompose('code', mod, templateOf(mod.id), feedback ? { feedback: feedback } : null).then(function (result) {
       ui.codeLoading = false;
       ui.code = result.text;
       ui.notice = '代码已生成（草稿），确认后再执行。' + modelNote(result);
@@ -1802,17 +1852,21 @@
   /** 生成区模板下拉：标准文档 / 对齐文档 / 参数挖掘，默认标准；切换写模块级变量（不触发重建） */
   function buildTemplateRow(mod) {
     var row = el('div', 'doc-template-row');
-    row.appendChild(el('label', 'doc-template-label', '生成模板'));
+    var options = docProfile(mod).options;
+    row.appendChild(el('label', 'doc-template-label', '规则类型'));
+    if (options.length === 1) { row.appendChild(el('span', 'doc-template-label', options[0].label)); return row; }
     var sel = el('select', 'doc-template-select');
+    sel.setAttribute('aria-label', '规则类型');
     var cur = templateOf(mod.id);
-    for (var i = 0; i < TEMPLATE_OPTIONS.length; i++) {
-      var opt = el('option', 'doc-template-option', TEMPLATE_OPTIONS[i].label);
-      opt.value = TEMPLATE_OPTIONS[i].value;
-      if (TEMPLATE_OPTIONS[i].value === cur) opt.selected = true;
+    for (var i = 0; i < options.length; i++) {
+      var opt = el('option', 'doc-template-option', options[i].label);
+      opt.value = options[i].value;
+      if (options[i].value === cur) opt.selected = true;
       sel.appendChild(opt);
     }
     sel.addEventListener('change', function () {
       docTemplate[mod.id] = sel.value;
+      render();
     });
     row.appendChild(sel);
     return row;
@@ -2016,6 +2070,7 @@
 
   /** 结果确认门：run 存在时渲染护栏（ran→[确认结果]/[有问题]；confirmed→已确认徽标） */
   function buildRunGate(body, mod, ui) {
+    if (mod.type === 'download-data') { body.appendChild(el('span', 'status-hint', '在上方下载区域核对文件与来源，确认后交给清洗。')); return; }
     var run = mod && mod.run;
     if (!run) return;
     var gate = el('div', 'doc-run-gate');
@@ -2062,7 +2117,7 @@
   /** 标题行：标题 + 状态徽标（data-doc-status + 语义类名）+ 执行状态徽标（data-run-status） */
   function buildDocHead(mod, st) {
     var head = el('div', 'doc-card-head');
-    head.appendChild(el('div', 'doc-card-title', DOC_TITLE));
+    head.appendChild(el('div', 'doc-card-title', docProfile(mod).title));
     var meta = DOC_STATUS_META[st] || DOC_STATUS_META.none;
     var badge = el('span', 'doc-badge ' + meta.cls, meta.text);
     badge.setAttribute('data-doc-status', st);
@@ -2079,10 +2134,10 @@
   }
 
   function buildDocEmpty(body, mod, ui) {
-    body.appendChild(el('div', 'doc-empty-hint', DOC_EMPTY_HINT));
+    body.appendChild(el('div', 'doc-empty-hint', docProfile(mod).hint + ' 先讨论，确定后再起草和审核。'));
     body.appendChild(buildTemplateRow(mod));
     var actions = el('div', 'doc-actions');
-    actions.appendChild(docButton(ui.gen ? '生成中…（长任务可能需数分钟）' : 'AI 生成标准文档', 'primary', ui.gen, function () {
+    actions.appendChild(docButton(ui.gen ? '生成中…（长任务可能需数分钟）' : 'AI 起草' + templateLabel(mod), 'primary', ui.gen, function () {
       generateDoc(mod);
     }));
     actions.appendChild(docButton('手动编写', '', false, function () {
@@ -2233,24 +2288,28 @@
     if (ui.reject) buildDocRejectBox(body, mod, ui);
 
     var actions = el('div', 'doc-actions');
-    actions.appendChild(docButton('编辑', '', false, function () { enterDocEdit(mod); }));
+    actions.appendChild(docButton('编辑', '', isBusy(), function () { enterDocEdit(mod); }));
+    actions.appendChild(docButton(ui.gen ? 'AI 正在修订方案…' : 'AI 总结并修改方案', '', isBusy(), function () { generateDoc(mod, true); }));
     if (st === 'draft') {
-      actions.appendChild(docButton('批准这份文档', 'primary', false, function () {
+      actions.appendChild(docButton('批准这份文档', 'primary', isBusy(), function () {
         getStore().approveDoc(mod.id);
         render();
       }));
-      actions.appendChild(docButton('打回', '', false, function () {
+      actions.appendChild(docButton('打回', '', isBusy(), function () {
         ui.reject = true; render();
-      }));
-      actions.appendChild(docButton(ui.gen ? '生成中…（长任务可能需数分钟）' : '重新生成', '', ui.gen, function () {
-        generateDoc(mod);
       }));
     } else if (st === 'approved') {
       // run.status === 'confirmed'（本环节产出已确认）时不再提供重新执行入口，引导进入下一步 / 下一模块
       if (mod.run && mod.run.status === 'confirmed') {
         actions.appendChild(el('span', 'status-hint', '本环节产出已确认，请进入下一步或下一个模块'));
+      } else if (mod.type === 'literature-mining') {
+        actions.appendChild(el('span', 'status-hint', '方案已审核；在上方“文献任务”中核对本次检索设置，再开始执行。'));
+      } else if (mod.type === 'download-data') {
+        actions.appendChild(docButton('按方案开始下载', 'primary', isBusy(), function () { root.CodexUI.openDownload(mod); }));
+      } else if (mod.type === 'calculation' && mod.mode === 'direct') {
+        actions.appendChild(el('span', 'status-hint', '按上方“运行现有代码”执行，使用已有代码与输入数据。'));
       } else if (mod.type === 'clean-data' || mod.type === 'calculation') {
-        actions.appendChild(docButton(ui.codeLoading ? '生成代码中…（长任务可能需数分钟）' : '生成代码并执行', 'primary', ui.codeLoading, function () {
+        actions.appendChild(docButton(ui.codeLoading ? '生成代码中…（长任务可能需数分钟）' : '生成代码并执行', 'primary', isBusy(), function () {
           composeCode(mod);
         }));
       } else {
@@ -2258,6 +2317,8 @@
       }
     }
     body.appendChild(actions);
+    body.appendChild(el('div', 'doc-meta', '先在下方对话说明修改要求，再点击“AI 总结并修改方案”。AI 只整理方案，修订后需重新审核。'));
+    buildDocHistory(body, mod, ui);
 
     // 【2026-10-22】文档已批准后，把「环节推进」的操作**就近**放进卡片里。
     // 文档卡常常很长、内部还有滚动，而状态条在模块空间顶部——批准完要往上滚才点得到，很别扭。
@@ -2316,6 +2377,25 @@
     if (ui.execErr) body.appendChild(el('div', 'doc-error', ui.execErr));
   }
 
+  function buildDocHistory(body, mod, ui) {
+    var versions = getStore().getDocHistory(mod.id);
+    if (!versions.length) return;
+    var details = el('details', 'doc-plan-history');
+    details.appendChild(el('summary', '', '历史方案 · ' + versions.length + ' 个版本'));
+    versions.slice().reverse().forEach(function (version, index) {
+      var entry = el('div', 'doc-plan-version');
+      entry.appendChild(el('div', 'doc-meta', '版本 ' + (versions.length - index) + ' · ' + (version.status === 'approved' ? '曾审核通过' : '草稿') + ' · ' + formatDateTime(version.updatedAt)));
+      entry.appendChild(el('div', 'doc-content', version.content));
+      entry.appendChild(docButton('恢复为草稿', '', isBusy(), function () {
+        if (!getStore().saveDoc(mod.id, version.content)) { ui.genErr = '历史版本无法保存，当前方案未改动。'; render(); return; }
+        ui.genErr = ''; ui.notice = '历史方案已恢复为草稿；请核对并重新审核。';
+        ui.code = null; ui.exec = null; render();
+      }));
+      details.appendChild(entry);
+    });
+    body.appendChild(details);
+  }
+
   function buildDocEditor(body, mod) {
     var ta = el('textarea', 'doc-editor');
     ta.maxLength = MAX_DOC_CHARS;
@@ -2331,7 +2411,7 @@
       if (!String(text).trim()) { ui.genErr = '保存失败：内容不能为空'; render(); return; }
       if (String(text).length > MAX_DOC_CHARS) { ui.genErr = '保存失败：超过 ' + MAX_DOC_CHARS + ' 字'; render(); return; }
       var saved = getStore().saveDoc(mod.id, text);
-      if (!saved) { ui.genErr = '保存失败：内容无效'; render(); return; }
+      if (!saved) { ui.genErr = '保存失败：内容无效或历史版本无法保存，原方案未改动。'; render(); return; }
       ui.genErr = ''; ui.code = null; ui.exec = null; ui.codeErr = ''; ui.execErr = '';
       ui.notice = '文档已保存为草稿。';
       docEditingId = null; docDraftText = '';
@@ -2375,6 +2455,7 @@
    * 无模块 / 未选中模块时禁用输入框，并给出对应占位提示。
    */
   function render() {
+    if (root.TaskManager && root.TaskManager.refreshControls) root.TaskManager.refreshControls();
     if (!spaceEl) spaceEl = document.getElementById('module-space');
     if (!spaceEl) return;
 
@@ -2404,7 +2485,7 @@
 
     // ---- 增量快速路径：纯消息追加（含 AI pending 指示翻转），其余一律全量 ----
     // 文档卡任一变化（内容/状态/编辑态/生成与执行瞬态）都会使 docSigOf 改变 -> 强制全量重建。
-    var pendingNow = active ? !!pendingModules[active.id] : false;
+    var pendingNow = active ? !!pendingModules[active.id] || !!uiOf(active.id).gen : false;
     var canFast = !!active && !fallback &&
       msgListState.moduleId === active.id &&
       msgListState.count >= 0 &&
@@ -2477,7 +2558,7 @@
       if (researchPanel) spaceEl.appendChild(researchPanel);
       var questionPanel = buildQuestionPanel(active);
       if (questionPanel) spaceEl.appendChild(questionPanel);
-      spaceEl.appendChild(buildDocCard(active));
+      if (!(active.type === 'calculation' && active.mode === 'modify') && active.type !== 'plotting') spaceEl.appendChild(buildDocCard(active));
 
       var list = el('div', 'msg-list');
       if (!messages.length) {
@@ -2524,7 +2605,7 @@
     if (!inputEl) return;
     var id = activeModuleId();
     if (!id) return;                                    // 无选中模块 / 模块不存在 -> 忽略
-    if (pendingModules[id] || (root.CodexUI && root.CodexUI.busy(id))) return;
+    if (pendingModules[id] || (root.CodexUI && root.CodexUI.busy(id)) || docUi[id] && docUi[id].gen) return;
     var raw = inputEl.value;
     if (String(raw).trim().length > MAX_INPUT_CHARS) {  // 超长拦截（Store 同样会拒绝，这里提前给提示）
       if (root.alert) root.alert('单条记录最长 ' + MAX_INPUT_CHARS + ' 字，请拆分后再发送。');
@@ -2547,9 +2628,11 @@
   }
 
   function isBusy() {
+    if (root.LiteratureUI && root.LiteratureUI.isBusy()) return true;
     var state = getStore().getState();
     return (state.modules || []).some(function (mod) {
-      return !!(pendingModules[mod.id] || (root.CodexUI && root.CodexUI.busy(mod.id)));
+      var ui = docUi[mod.id];
+      return !!(pendingModules[mod.id] || (root.CodexUI && root.CodexUI.busy(mod.id)) || ui && (ui.gen || ui.codeLoading || ui.execLoading));
     });
   }
 

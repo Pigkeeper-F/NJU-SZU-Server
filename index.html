@@ -29,7 +29,7 @@
       <div class="module-tabs-bar">
         <div id="module-tabs" class="module-tabs" role="tablist" aria-label="研究模块" aria-orientation="vertical"></div>
         <div id="module-chain" class="module-chain" hidden></div>
-        <button id="btn-add-module" class="module-tab-add" type="button" title="添加流程中的下一步" aria-label="添加下一步">＋ 添加下一步</button>
+        <button id="btn-add-module" class="module-tab-add" type="button" title="添加环节" aria-label="添加环节">＋ 添加环节</button>
         <span id="fixed-module-menu" class="fixed-module-next" hidden></span>
       </div>
       <div id="sidebar-tabs" class="sidebar-tabs" hidden></div>
@@ -64,11 +64,39 @@
       </section></div>
     </main>
   </div>
+
   <dialog id="api-dialog"><form id="api-form"><div class="dialog-top"><span id="api-dialog-eyebrow" class="eyebrow">API KEY</span><button class="icon-btn" id="api-close-dialog" type="button" aria-label="关闭">×</button></div><h2 id="api-dialog-title">添加 API</h2><p id="api-dialog-description">密钥会保存在当前浏览器，并通过本地服务代理请求模型。</p><label for="api-key-input" id="api-key-label">API Key</label><div class="api-key-row"><input id="api-key-input" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 API Key"><button id="api-paste-key" class="quiet-button" type="button">粘贴</button><button id="api-copy-key" class="quiet-button" type="button">复制</button></div><label for="api-model-input">模型</label><input id="api-model-input" autocomplete="off" placeholder="例如：deepseek-flash"><div class="dialog-actions"><button id="api-remove-key" class="quiet-button" type="button">移除已存密钥</button><button id="api-cancel-dialog" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">保存</button></div></form></dialog>
-  <dialog id="task-dialog"><form id="task-form"><div class="dialog-top"><span class="eyebrow">NEW TASK</span><button class="icon-btn" id="task-dialog-close" type="button" aria-label="关闭">×</button></div><h2>新建任务</h2><p>新任务有独立的模块对话与文件会话；当前练习保留，可随时切回。</p><label for="task-name">任务名称</label><input id="task-name" maxlength="80" required placeholder="例如：1992 年模型计算"><label for="task-start">从哪一步开始</label><select id="task-start"><option value="research">文献调研（完整九步研究流程）</option><option value="download">下载数据</option><option value="clean">数据清洗（已有原始文件）</option><option value="calculation">计算（已有代码和输入数据）</option></select><div class="dialog-actions"><button id="task-dialog-cancel" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">创建任务</button></div></form></dialog>
-  <dialog id="rules-dialog"><div class="dialog-top"><span class="eyebrow">TASK RULES</span><button class="icon-btn" id="rules-dialog-close" type="button" aria-label="关闭">×</button></div><h2>执行规则</h2><p>这里只放你决定要执行的规则。可以自己填写，或让 AI 从对话中提取候选规则；AI 草稿须经你核对并确认。</p><div id="task-summary-confirmed" class="task-summary-confirmed" hidden></div><label for="task-summary-draft">规则草稿</label><textarea id="task-summary-draft" rows="12" placeholder="处理范围、输入文件、具体清洗/转换规则、异常处理、验收标准、输出文件……只写已经确定的内容。"></textarea><div class="task-summary-actions"><select id="task-summary-history" aria-label="查看规则历史版本"><option value="">历史版本</option></select><button id="task-summary-ai" class="quiet-button" type="button">AI 提取候选规则</button><button id="task-summary-save" class="primary-button" type="button">确认规则</button><button id="task-rules-execute" class="primary-button" type="button">按规则执行清洗</button></div><div id="task-summary-message" role="status"></div></dialog>
+  <dialog id="task-dialog"><form id="task-form"><div class="dialog-top"><span class="eyebrow">NEW TASK</span><button class="icon-btn" id="task-dialog-close" type="button" aria-label="关闭">×</button></div><h2>新建任务</h2><p>新任务有独立的模块对话与文件会话；当前练习保留，可随时切回。</p><label for="task-name">任务名称</label><input id="task-name" maxlength="80" required placeholder="例如：1992 年模型计算"><label for="task-start">从哪一步开始</label><select id="task-start"><option value="research">文献调研（完整九步研究流程）</option><option value="download">下载数据</option><option value="clean">数据清洗（已有原始文件）</option><option value="literature">文献挖掘</option><option value="calculation">模型调整与计算（已有代码和输入数据）</option></select><div class="dialog-actions"><button id="task-dialog-cancel" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">创建任务</button></div></form></dialog>
+  <dialog id="rules-dialog"><div class="dialog-top"><span class="eyebrow">TASK RULES</span><button class="icon-btn" id="rules-dialog-close" type="button" aria-label="关闭">×</button></div><h2>执行规则</h2><p>这里只放你决定要执行的规则。可以自己填写，或让 AI 从对话中提取候选规则；AI 草稿须经你核对并确认。</p><div id="task-summary-confirmed" class="task-summary-confirmed" hidden></div><label for="task-summary-draft">规则草稿</label><textarea id="task-summary-draft" rows="12" placeholder="处理范围、输入文件、具体清洗/转换规则、异常处理、验收标准、输出文件……只写已经确定的内容。"></textarea><div class="task-rules-footer"><div id="task-rules-execution-status" role="status"></div><div class="task-summary-actions"><select id="task-summary-history" aria-label="查看规则历史版本"><option value="">历史版本</option></select><button id="task-rules-discuss" class="quiet-button" type="button">继续讨论完善规则</button><button id="task-summary-ai" class="quiet-button" type="button">AI 提取候选规则</button><button id="task-summary-save" class="primary-button" type="button">确认规则</button><button id="task-rules-execute" class="primary-button" type="button">按规则执行清洗</button></div><div id="task-summary-message" role="status"></div></div></dialog>
+
   <div id="toast" class="toast" role="status" hidden></div>
   <input id="import-file" type="file" accept=".json,application/json" hidden>
+  <dialog id="download-dialog">
+    <div class="dialog-top"><span class="eyebrow">DOWNLOAD DATA</span><button id="download-close" class="icon-btn" type="button" aria-label="关闭下载窗口">×</button></div>
+    <h2>核对文件地址并下载</h2>
+    <p>方案说明要下载什么；这里还需要填写文件实际存放的地址。当前不会自动把文字方案转成数据库查询或导出请求。</p>
+    <div id="download-basis" class="task-summary-confirmed"></div>
+    <div id="download-site-help" hidden>
+      <strong>FAOSTAT 贸易矩阵需要先导出文件</strong>
+      <p>在官网选择已确认的年份、国家、商品和指标后导出。查询页不能当文件地址；全库 ZIP 包含多个年份，也可能超过 20MB。</p>
+      <a id="download-faostat-link" href="https://www.fao.org/faostat/en/#data/TM" target="_blank" rel="noopener noreferrer">打开 FAOSTAT 贸易矩阵官方页面 ↗</a>
+      <p>已有本地文件：关闭此窗口，在本模块“选择文件”中上传。每个文件上限 20MB。</p>
+    </div>
+    <label for="download-sources">实际文件下载地址（必填）</label>
+    <p id="download-sources-hint">每行一个公开文件地址，可在后面加“ | 文件名”。最多 5 个文件，每个不超过 20MB。填写后仍需核对年份、范围和版本。</p>
+    <textarea id="download-sources" rows="3" aria-describedby="download-sources-hint download-status" placeholder="在这里粘贴真实的文件下载地址；灰色提示不是下载地址。"></textarea>
+    <p id="download-status" role="status"></p>
+    <div class="dialog-actions"><button id="download-start" class="primary-button" type="button" disabled>开始下载</button></div>
+  </dialog>
+  <section id="codex-connection" class="codex-connection" aria-label="AI 连接" hidden>
+    <p>当前模块的助手与模型；未选模块时设置新模块默认值。</p>
+    <label>对话助手 <select id="ai-backend"><option value="codex">本机 Codex（无需 API Key）</option><option value="api">API 对话</option></select></label>
+    <button id="codex-login" class="primary-button" type="button">登录本机 Codex</button>
+    <button id="codex-refresh" class="quiet-button" type="button">检查连接</button>
+    <span id="codex-status" role="status">尚未检查连接</span>
+    <label>Codex 模型 <select id="codex-model" disabled><option value="">账号默认模型</option></select></label>
+    <a id="codex-login-link" target="_blank" rel="noopener noreferrer" hidden>打开官方登录页面</a>
+  </section>
 
   <!-- 脚本顺序不可调整：账号 -> 守卫 -> 数据层 -> 三个 UI 模块 -> 装配 -->
   <script src="js/auth-config.js"></script>
@@ -81,6 +109,7 @@
   <script src="js/app.js"></script>
   <script src="js/api-keys.js"></script>
   <script src="js/codex.js"></script>
+  <script src="js/literature.js"></script>
   <script src="js/workspace.js"></script>
   <script src="js/tasks.js"></script>
 </body>

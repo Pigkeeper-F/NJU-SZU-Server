@@ -17,13 +17,14 @@ def main() -> None:
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(os.environ.get("LITERATURE_UI_URL", "http://127.0.0.1:8123/"), wait_until="domcontentloaded")
             page.evaluate("""() => {
-              Store.addModule(); Store.addModule();
-              const calc = Store.addModule(); Store.setModuleMode(calc.id, 'direct');
-              Store.addModule(); Store.addModule();
+              Store.addModule('下载数据'); Store.addModule('数据清洗');
+              const lit = Store.addModule('文献挖掘');
+              const calc = Store.addModule('模型调整与计算'); Store.setModuleMode(calc.id, 'direct');
+              Store.selectModule(lit.id);
             }""")
             page.get_by_role("button", name="从对话整理规则").wait_for(timeout=5000)
             assert page.get_by_role("button", name="确认配置并检索").is_disabled()
-            assert page.get_by_text("当前仅 Google Scholar 已接通", exact=False).count() >= 1
+            assert page.get_by_text("文献任务", exact=False).count() >= 1
             config = {"topic": "中国水产养殖与气候变化", "query": "China aquaculture climate change",
                       "sources": ["google-scholar"], "publicationYearFrom": 2015, "publicationYearTo": 2023,
                       "geography": "中国", "language": "", "studyTypes": [], "inclusion": [],
@@ -41,6 +42,7 @@ def main() -> None:
             page.get_by_label("发表年份起").wait_for(timeout=5000)
             assert page.get_by_label("发表年份起").input_value() == "2015"
             page.get_by_role("button", name="确认配置并检索").click()
+            page.wait_for_timeout(800)  # startLiterature 先核对后台运行时，再发检索请求
             assert captured and captured[0]["config"]["publicationYearFrom"] == 2015
 
             # 【第二阶段】字段确认关口：任务停在 needs_attention + awaiting_confirmation
@@ -65,12 +67,13 @@ def main() -> None:
 
             page.route("**/api/literature/advance", on_advance)
             page.get_by_role("button", name="确认配置并检索").click()
-            page.get_by_role("button", name="确认并继续提取").wait_for(timeout=5000)
+            page.get_by_role("button", name="设置提取字段").click()
+            page.get_by_role("button", name="核对表格并开始提取").first.wait_for(timeout=5000)
             assert page.get_by_text("下一阶段：提取参数", exact=False).count() >= 1, "阶段条应显示 resumeStage"
             assert page.get_by_text("去重结果 JSON", exact=False).count() >= 1, "下载区应按 job 快照渲染产物"
-            assert page.get_by_label("字段 key").first.input_value() == "soc", "确认表单应预填 fieldDefinitions"
+            assert page.get_by_label("表头名称").first.input_value() == "SOC", "确认表单应预填字段表头"
             assert page.get_by_label("单位").first.input_value() == "g/kg", "确认表单应预填字段单位"
-            page.get_by_role("button", name="确认并继续提取").click()
+            page.get_by_role("button", name="核对表格并开始提取").first.click()
             page.wait_for_timeout(400)
             assert advance and advance[0]["id"] == "test-gate", "确认后应调用 advance"
             assert advance[0]["confirmations"]["fields"][0]["key"] == "soc", "确认记录应包含字段定义"

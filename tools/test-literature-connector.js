@@ -242,9 +242,20 @@ async function main() {
         onEvent({ type: 'result', count: 0, files: ['candidates.json', 'candidates.csv'], message: 'mock complete' });
       }
     });
+    const expanded = Array.from({ length: 200 }, (_, index) => ({
+      key: `field_${index}`, label: `变量${index}`, meaning: '讨论整理后的独立变量', unit: '原文单位', valueType: 'text', required: false
+    }));
+    const schemaFixture = { dir: path.join(root, 'expanded-field-checkpoint') };
+    fs.mkdirSync(schemaFixture.dir);
+    connector.appendConfirmations(schemaFixture, { fields: expanded });
+    const expandedCheckpoint = fs.readFileSync(path.join(schemaFixture.dir, 'confirmations.json'), 'utf8');
+    assert.deepEqual(JSON.parse(expandedCheckpoint).records[0].fields, expanded, 'All200 confirmed variables reach the checkpoint unchanged');
+    assert.throws(() => connector.appendConfirmations(schemaFixture, { fields: [...expanded, { key: 'overflow' }] }), /字段确认内容无效/);
+    assert.equal(fs.readFileSync(path.join(schemaFixture.dir, 'confirmations.json'), 'utf8'), expandedCheckpoint,
+      'An oversized schema cannot partially overwrite the last confirmed schema');
     assert.throws(() => connector.start({ ...config, topic: '' }), /研究主题/);
     assert.throws(() => connector.start({ ...config, limit: 11 }), /1–10/);
-    assert.throws(() => connector.start({ ...config, sources: ['google-scholar', 'scopus'] }), /尚未接通/);
+    assert.throws(() => connector.start({ ...config, sources: ['google-scholar', 'arxiv'] }), /检索来源/);
     assert.throws(() => normalizeConfig({ ...config, publicationYearFrom: 2026, publicationYearTo: 2000 }), /不能晚于/);
     const started = connector.start(config);
     const done = await waitDone(connector, started.id);
@@ -262,6 +273,106 @@ async function main() {
     assert.ok(done.events.some(event => event.stage === 'search'));
     assert.ok(fs.readFileSync(path.join(root, '.workbench', 'literature', done.id, 'events.jsonl'), 'utf8').includes('mock search'));
 
+    // 正式分页的进度计数、登录暂停、服务重启与原冻结数量续跑。
+    let pageAttempt = 0;
+    let progressSnapshot;
+    let paged;
+    const pagedOptions = {
+      prepare: async () => 'mock-python',
+      search: async (job, _python, onEvent) => {
+        pageAttempt += 1;
+        assert.equal(job.config.searchMode, 'formal');
+        assert.equal(job.config.perSourceLimit, 25);
+        assert.equal(job.limits.discover, 540);
+        const count = pageAttempt === 1 ? 10 : 25;
+        fs.writeFileSync(path.join(job.dir, 'candidates.json'), JSON.stringify({ version: 2, count, discovery_complete: pageAttempt !== 1,
+          batches: [{ batch_index: 1 }], records: [{ candidate_id: 'GSC-001' }] }));
+        fs.writeFileSync(path.join(job.dir, 'candidates.csv'), 'candidate_id\nGSC-001\n');
+        onEvent({ type: 'stage', stage: 'search', count, message: `Google Scholar 第 ${pageAttempt} 页，已保留 ${count}/25 条` });
+        progressSnapshot = paged.snapshot(job.id);
+        onEvent({ type: 'stage', stage: 'search', count: -10, message: '无效负数不得覆盖候选计数' });
+        assert.equal(paged.snapshot(job.id).count, count);
+        if (pageAttempt === 1) onEvent({ type: 'attention', stage: 'verification', source: 'google-scholar', reason: 'verification', count,
+          message: '请完成验证后检查并继续', files: ['candidates.json', 'candidates.csv'] });
+        else onEvent({ type: 'result', count, files: ['candidates.json', 'candidates.csv'], message: '已保存25条候选' });
+      }
+    };
+    paged = new LiteratureConnector(root, pagedOptions);
+    const pagedStarted = paged.start({ ...config, searchMode: 'formal', perSourceLimit: 25 });
+    const pagedPaused = await waitDone(paged, pagedStarted.id);
+    assert.equal(progressSnapshot.count, 10);
+    assert.equal(progressSnapshot.counters.candidates, 10, '逐页stage事件应即时更新候选计数');
+    assert.equal(pagedPaused.status, 'needs_attention');
+    assert.equal(pagedPaused.resumeStage, 'discover');
+    const frozen = paged.download(pagedStarted.id, 'run_config.json');
+    const frozenBytes = fs.readFileSync(frozen, 'utf8');
+    assert.equal(__internals.detectStagedArtifacts(path.dirname(frozen)).stages.discover, 'pending');
+    paged = new LiteratureConnector(root, pagedOptions);
+    assert.equal(paged.snapshot(pagedStarted.id).count, 10, '重启保留已完成页的计数');
+    assert.equal(paged.snapshot(pagedStarted.id).config.perSourceLimit, 25);
+    paged.advance(pagedStarted.id);
+    const pagedCompleted = await waitDone(paged, pagedStarted.id);
+    assert.equal(pagedCompleted.id, pagedStarted.id);
+    assert.equal(pagedCompleted.until, 'discover');
+    assert.equal(pagedCompleted.count, 25);
+    assert.equal(pagedCompleted.counters.candidates, 25);
+    assert.equal(pagedCompleted.status, 'completed');
+    assert.equal(fs.readFileSync(frozen, 'utf8'), frozenBytes, '继续执行不能回写原模式和目标');
+
+    // 到末页任务遇到运行问题暂停；保留已经落盘的候选、原 id 和执行边界。
+    const endConfig = { ...config, sources: ['pubmed'], searchMode: 'formal', stopMode: 'end', perSourceLimit: null };
+    for (const failure of ['event', 'process', 'empty']) {
+      let attempts = 0;
+      const endOptions = {
+        prepare: async () => 'mock-python',
+        search: async (job, _python, emit) => {
+          attempts++;
+          assert.equal(job.config.stopMode, 'end');
+          assert.equal(job.config.perSourceLimit, null);
+          if (attempts > 1) assert.equal(job.resumeRun, true);
+          fs.writeFileSync(path.join(job.dir, 'candidates.json'), JSON.stringify({ version: 2, count: 12, discovery_complete: attempts > 1,
+            batches: [{ batch_index: 1 }], records: Array.from({ length: 12 }, (_, index) => ({ candidate_id: `PMID-${index + 1}` })) }));
+          fs.writeFileSync(path.join(job.dir, 'candidates.csv'), 'candidate_id\nPMID-1\n');
+          if (attempts > 1) emit({ type: 'result', count: 12, files: ['candidates.json', 'candidates.csv'], message: '已核对真实末页' });
+          else if (failure === 'event') emit({ type: 'error', source: 'pubmed', message: '网络暂时不可用', count: 12, files: ['candidates.csv'] });
+          else if (failure === 'process') throw new Error('fixture process failed');
+        }
+      };
+      let endConnector = new LiteratureConnector(root, endOptions);
+      const started = endConnector.start(endConfig, false, 'discover');
+      const paused = await waitDone(endConnector, started.id);
+      assert.equal(paused.status, 'needs_attention', `${failure}不能误报到末页完成或不可续跑`);
+      assert.equal(paused.resumeStage, 'discover');
+      assert.equal(paused.stages.discover, 'pending');
+      assert.equal(paused.error, null);
+      assert.equal(paused.count, 12);
+      assert.equal(paused.counters.candidates, 12);
+      assert.ok(paused.files.includes('candidates.csv'));
+      assert.match(paused.message, /尚未确认末页.*检查并继续/);
+      if (failure === 'event') assert.deepEqual(paused.attention, { source: 'pubmed', reason: 'results_unrecognized' });
+      else assert.equal(paused.attention, null, '环境或通用进程问题不能伪造等待数据库登录');
+      const frozen = fs.readFileSync(endConnector.download(started.id, 'run_config.json'), 'utf8');
+      endConnector = new LiteratureConnector(root, endOptions);
+      endConnector.advance(started.id);
+      const resumed = await waitDone(endConnector, started.id);
+      assert.equal(resumed.status, 'completed');
+      assert.equal(resumed.id, started.id);
+      assert.equal(resumed.until, 'discover', '通用问题暂停后也保持原执行边界');
+      assert.equal(fs.readFileSync(endConnector.download(started.id, 'run_config.json'), 'utf8'), frozen);
+    }
+
+    let prepareFails = true;
+    const environmentConnector = new LiteratureConnector(root, {
+      prepare: async () => { if (prepareFails) throw new Error('fixture environment unavailable'); return 'mock-python'; },
+      search: async (_job, _python, emit) => emit({ type: 'result', count: 0, files: [], message: '明确零命中' })
+    });
+    const environment = await waitDone(environmentConnector, environmentConnector.start(endConfig).id);
+    assert.equal(environment.status, 'needs_attention');
+    assert.equal(environment.attention, null);
+    prepareFails = false;
+    environmentConnector.advance(environment.id);
+    assert.equal((await waitDone(environmentConnector, environment.id)).status, 'completed');
+
     // ---------- 桩阶段脚本场景（S1/S2/S3/S4/S7 共用同一工作区） ----------
     const python = findPython();
     if (!python) {
@@ -269,6 +380,46 @@ async function main() {
       console.log('LITERATURE_CONNECTOR_TESTS_PASS');
       return;
     }
+    // 显式短运行保护会杀停真实 Python 桩进程，但不等于文献末页；原任务可恢复。
+    const timeoutRoot = path.join(root, 'end-timeout-fixture');
+    fs.mkdirSync(path.join(timeoutRoot, 'tools'), { recursive: true });
+    fs.writeFileSync(path.join(timeoutRoot, 'tools', 'literature_search.py'), `import json, pathlib, sys, time
+args = sys.argv[1:]
+job = pathlib.Path(args[args.index("--output-dir") + 1])
+marker = job / "resume-test-marker"
+resumed = marker.exists()
+(job / "candidates.json").write_text(json.dumps({"count": 11, "discovery_complete": resumed, "batches": [{"batch_index": 1}], "records": [{"candidate_id": "PMID-1"}]}), encoding="utf-8")
+(job / "candidates.csv").write_text("candidate_id\\nPMID-1\\n", encoding="utf-8")
+if not resumed:
+    marker.write_text("saved", encoding="utf-8")
+    time.sleep(10)
+else:
+    assert "--resume" in args
+    print(json.dumps({"type": "result", "count": 11, "files": ["candidates.json", "candidates.csv"], "message": "actual end verified"}), flush=True)
+`);
+    let timeoutConnector = stubConnector(timeoutRoot, python);
+    const timedOut = await waitDone(timeoutConnector, timeoutConnector.start({ ...endConfig, limits: { discover: 1 } }).id);
+    assert.equal(timedOut.status, 'needs_attention');
+    assert.equal(timedOut.attention, null);
+    assert.equal(timedOut.count, 11);
+    assert.equal(timedOut.stages.discover, 'pending');
+    assert.match(timedOut.message, /运行时间保护.*尚未确认末页/);
+    assert.ok(timedOut.files.includes('candidates.csv'));
+    const timeoutJobFile = path.join(timeoutRoot, '.workbench', 'literature', timedOut.id, 'job.json');
+    const savedTimeoutJob = JSON.parse(fs.readFileSync(timeoutJobFile, 'utf8'));
+    fs.writeFileSync(timeoutJobFile, JSON.stringify({ ...savedTimeoutJob, status: 'running', stage: 'search' }));
+    timeoutConnector = stubConnector(timeoutRoot, python);
+    const restartedTimeout = timeoutConnector.snapshot(timedOut.id);
+    assert.equal(restartedTimeout.status, 'needs_attention', '服务重启中断的到末页检索可继续');
+    assert.equal(restartedTimeout.resumeStage, 'discover');
+    assert.equal(restartedTimeout.attention, null);
+    assert.match(restartedTimeout.message, /尚未确认末页/);
+    timeoutConnector.advance(timedOut.id);
+    const timeoutResumed = await waitDone(timeoutConnector, timedOut.id);
+    assert.equal(timeoutResumed.status, 'completed');
+    assert.equal(timeoutResumed.until, 'discover');
+    assert.equal(timeoutResumed.id, timedOut.id);
+
     writeStubScripts(root);
     const stub = stubConnector(root, python);
 
@@ -290,6 +441,12 @@ async function main() {
     assert.equal(failed.stages.dedupe, 'failed');
 
     advanced = stub.advance(jobA.id);
+    const fulltextReady = await waitDone(stub, jobA.id);
+    assert.equal(fulltextReady.status, 'needs_attention');
+    assert.equal(fulltextReady.stage, 'fulltext_ready');
+    assert.equal(fulltextReady.resumeStage, 'extract');
+    assert.equal(fulltextReady.stages.extract, 'pending', 'fulltext completion requires an explicit next action');
+    stub.advance(jobA.id);
     const paused = await waitDone(stub, jobA.id);
     assert.equal(paused.status, 'needs_attention');
     assert.equal(paused.stage, 'awaiting_confirmation');

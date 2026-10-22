@@ -11,6 +11,7 @@ import importlib.util
 import contextlib
 import io
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -78,6 +79,9 @@ def write_job(root: Path, *, fields=FIELDS, max_chars=120000, statuses=None, htm
             "records": [{"at": "2026-10-15T00:00:00Z", "by": "researcher", "kind": "fieldDefinitions",
                          "fields": fields, "note": ""}],
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    intro = "The study describes soil properties and the experimental setting. " * 8
+    methods = "Measurements used a consistent protocol across sites and treatments. " * 8
+    html_text = html_text + "\nIntroduction\n" + intro + "\nMethods\n" + methods
     (job / "fulltext" / "files" / "GSC-001.txt").write_text(html_text, encoding="utf-8")
     (job / "fulltext" / "files" / "GSC-002.pdf").write_bytes(make_pdf())
     (job / "fulltext" / "files" / "GSC-003.pdf").write_bytes(b"%PDF-1.4\nthis is not a real pdf\n")
@@ -99,6 +103,10 @@ def write_job(root: Path, *, fields=FIELDS, max_chars=120000, statuses=None, htm
          "path": "", "size": 0, "retrieved_at": "2026-10-15T00:00:00Z",
          "evidence_level": "search_result_snippet", "reason": "付费墙"},
     ]
+    if statuses is None:
+        items[0].update(evidence_version="fulltext-evidence-v1", content_sha256=hashlib.sha256(html_text.encode("utf-8")).hexdigest(),
+                        html_evidence={"origin":"dom_article_region", "container_verified":True, "citation_title":"A",
+                                       "sections":[{"heading":"Introduction","text":intro},{"heading":"Methods","text":methods}]})
     (job / "fulltext" / "status.json").write_text(json.dumps({
         "version": 1, "generated_at": "2026-10-15T00:00:00Z", "policy": "…", "items": items,
         "counts": {"total": len(items)},
@@ -200,6 +208,16 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(events[-1]["type"], "error")
         self.assertEqual(events[-1]["message"], "提取前需先在研究者确认参数字段含义与单位")
+
+    def test_prepare_preserves_expanded_individual_fields(self):
+        fields = [{"key": f"field_{index}", "label": f"变量{index}", "meaning": "讨论后拆开的独立变量",
+                   "unit": "原文单位", "valueType": "text", "required": False} for index in range(200)]
+        job = write_job(Path(self.tmp.name) / "expanded", fields=fields)
+        self.assertEqual(extract.load_effective_schema(job)["fields"], fields)
+        code, _ = run_cli(extract.main, ["--config", str(job / "run_config.json"), "--output-dir", str(job), "--prepare"])
+        self.assertEqual(code, 0)
+        bundle = json.loads((job / "extraction" / "inputs" / "GSC-001.json").read_text(encoding="utf-8"))
+        self.assertEqual(bundle["field_definitions"], fields, "Expanded schema must reach extraction without truncation")
 
     def test_prepare_stale_bundle_requires_force(self):
         argv = ["--config", str(self.job / "run_config.json"), "--output-dir", str(self.job), "--prepare"]

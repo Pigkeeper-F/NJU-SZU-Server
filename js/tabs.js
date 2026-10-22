@@ -23,8 +23,8 @@
  *   pointerdown(capture) 锁定的 .module-tab-del[disabled] → 同上提示（见下方「删除保护」）
  *   dblclick .module-tab-title     → prompt 重命名 → Store.renameModule(id, 输入)（取消/空值忽略）
  *
- * 依赖链规则（强依赖 A→B→C）：Store.addModule() 追加到链尾且 dependsOn = 前一模块 id，
- * 因此「任一模块的 dependsOn === 该 id」即存在下游 ⇒ 该卡删除键加 disabled + title 说明；
+ * 依赖规则：三条准备路径汇合到计算；通过 Store.getUpstreamModules 查询真实上游，
+ * 存在下游 ⇒ 该卡删除键加 disabled + title 说明；
  * Store.removeModule() 同样会拒绝（双保险，判定权始终在数据层）。
  *
  * 删除保护为什么要用 pointerdown（实测结论，Chrome 137 headless + Input.dispatchMouseEvent 真实点击）：
@@ -40,15 +40,16 @@
   var FIXED_MODULES = [
     { id: 'download-data', name: '下载数据' },
     { id: 'clean-data', name: '数据清洗' },
-    { id: 'calculation', name: '计算' },
+    { id: 'literature-mining', name: '文献挖掘' },
+    { id: 'calculation', name: '模型调整与计算' },
     { id: 'parameter-update', name: '参数更新', conditional: true },
     { id: 'activity-data-update', name: '活动数据更新', conditional: true },
+    { id: 'plotting', name: '绘图' },
     { id: 'result-audit', name: '结果核查与定位' },
-    { id: 'literature-mining', name: '文献挖掘' },
-    { id: 'manual-review', name: '人工审核' },
-    { id: 'plotting', name: '绘图' }
+    { id: 'manual-review', name: '人工审核' }
   ];
-  var EMPTY_HINT_TEXT = '从“下载数据”开始，按流程逐步添加模块';
+  var PREPARATION_TYPES = ['download-data', 'clean-data', 'literature-mining'];
+  var EMPTY_HINT_TEXT = '选择准备环节，或直接进入模型调整与计算';
   var DEP_FIRST_TEXT = '起点';          // 首模块（dependsOn === null）
   var DEP_ARROW = '← ';                 // 其余模块：← 上游模块名
   var DEP_UNKNOWN_TEXT = '未知上游';     // 仅容错：dependsOn 指向已不存在的模块
@@ -92,7 +93,7 @@
   /** 是否存在依赖该模块的下游模块（= 该卡不是链尾，不可删） */
   function hasDownstream(modules, id) {
     for (var i = 0; i < modules.length; i++) {
-      if (modules[i].dependsOn === id) return true;
+      if (getStore().getUpstreamModules(modules[i].id).some(function (item) { return item.id === id; })) return true;
     }
     return false;
   }
@@ -133,11 +134,18 @@
     // 依赖徽标：首模块「起点」，其余「← 上游模块名」
     var dep = doc.createElement('span');
     dep.className = 'module-dep';
-    if (!mod.dependsOn) {
+    var upstream = getStore().getUpstreamModules(mod.id);
+    if (PREPARATION_TYPES.indexOf(mod.type) >= 0) {
+      dep.textContent = '并列准备 · 成果供计算使用';
+      dep.setAttribute('title', '可独立开展；成果按需用于模型调整与计算');
+    } else if (mod.type === 'calculation') {
+      dep.textContent = '← 三条准备路径按需汇入';
+      dep.setAttribute('title', '下载数据、数据清洗、文献挖掘；不要求全部完成');
+    } else if (!upstream.length) {
       dep.textContent = DEP_FIRST_TEXT;
       dep.setAttribute('title', '依赖链起点（无上游模块）');
     } else {
-      var upName = findModuleName(modules, mod.dependsOn);
+      var upName = upstream.map(function (item) { return item.name; }).join(' / ');
       dep.textContent = DEP_ARROW + (upName || DEP_UNKNOWN_TEXT);
       dep.setAttribute('title', upName ? ('依赖上游模块：' + upName) : '上游模块已不存在');
     }
@@ -173,8 +181,7 @@
     var activeId = state.activeModuleId;
     var moduleTypes = modules.map(function (item) { return item.type; });
     var calculation = modules.filter(function (item) { return item.type === 'calculation'; })[0];
-    var legacyChild = calculation && ['parameter-update', 'activity-data-update'].indexOf(calculation.mode) >= 0;
-    var workflowLocked = !!calculation && (!calculation.mode || legacyChild && modules[modules.length - 1].type === 'calculation');
+    var workflowLocked = false;
 
     tabsEl.innerHTML = '';
 
@@ -187,7 +194,6 @@
         chainEl.textContent = '';
         chainEl.removeAttribute('title');
       }
-      return;
     }
 
     var calc = modules.filter(function (item) { return item.type === 'calculation'; })[0];
@@ -205,7 +211,7 @@
       if (calc.mode) {
         chooser.appendChild((function () {
           var text = doc.createElement('span');
-          text.textContent = '当前方式：' + (calc.mode === 'direct' ? '直接计算' : calc.mode === 'parameter-update' ? '参数更新' : '活动数据更新');
+          text.textContent = '当前方式：' + ({direct:'直接计算', modify:'修改计算', 'parameter-update':'参数更新', 'activity-data-update':'活动数据更新'})[calc.mode];
           return text;
         })());
         choices = [];
@@ -231,31 +237,54 @@
           ? { id: 'parameter-update', name: '参数更新' }
           : { id: 'activity-data-update', name: '活动数据更新' };
       }
-      addMenuEl.textContent = pendingCalculationModule ? '下一步：' + pendingCalculationModule.name : nextModule ? '下一步：' + nextModule.name : '流程已完成';
+      addMenuEl.textContent = pendingCalculationModule ? '可添加：' + pendingCalculationModule.name : nextModule ? '可添加：' + nextModule.name : '所有环节已添加';
       addMenuEl.hidden = !nextModule && !pendingCalculationModule;
     }
     if (addBtn) {
+      workflowLocked = !!nextModule && ['plotting', 'result-audit', 'manual-review'].indexOf(nextModule.id) >= 0 && (!calculation || !calculation.mode);
       var calculationSubmoduleNeeded = calculation && ['parameter-update', 'activity-data-update'].indexOf(calculation.mode) >= 0 && !modules.some(function (item) { return item.type === calculation.mode; });
       addBtn.disabled = workflowLocked || (!nextModule && !calculationSubmoduleNeeded);
       if (workflowLocked) addBtn.title = '先选择计算方式';
       else if (calculationSubmoduleNeeded) addBtn.title = '添加：' + (calculation.mode === 'parameter-update' ? '参数更新' : '活动数据更新');
       else if (!nextModule) addBtn.title = '固定流程已全部添加';
-      else addBtn.title = '添加下一步：' + nextModule.name;
+      else addBtn.title = '添加环节：' + nextModule.name;
     }
 
     var activeEl = null;
     var names = [];
+    var prepHeading = doc.createElement('div');
+    prepHeading.className = 'workflow-group-title';
+    prepHeading.textContent = '准备资料 · 三条并列路径';
+    tabsEl.appendChild(prepHeading);
+    var preparationsDone = false;
+    function finishPreparations() {
+      if (preparationsDone) return;
+      preparationsDone = true;
+      var options = doc.createElement('div'); options.className = 'workflow-preparation-actions';
+      FIXED_MODULES.filter(function (item) { return PREPARATION_TYPES.indexOf(item.id) >= 0 && moduleTypes.indexOf(item.id) < 0; }).forEach(function (item) {
+        var button = doc.createElement('button'); button.type = 'button'; button.className = 'quiet-button';
+        button.textContent = '+ ' + item.name; button.setAttribute('data-add-type', item.id); options.appendChild(button);
+      });
+      if (options.children.length) tabsEl.appendChild(options);
+      var heading = doc.createElement('div'); heading.className = 'workflow-group-title'; heading.textContent = '汇入模型 · 计算与结果'; tabsEl.appendChild(heading);
+      if (!calculation) {
+        var enter = doc.createElement('button'); enter.type = 'button'; enter.className = 'quiet-button';
+        enter.textContent = '进入模型调整与计算'; enter.setAttribute('data-add-type', 'calculation'); tabsEl.appendChild(enter);
+      }
+    }
     for (var i = 0; i < modules.length; i++) {
+      if (PREPARATION_TYPES.indexOf(modules[i].type) < 0) finishPreparations();
       var el = createTab(modules[i], activeId, modules);
       tabsEl.appendChild(el);
       names.push(modules[i].name);
       if (modules[i].id === activeId) activeEl = el;
     }
+    finishPreparations();
     if (chooser) tabsEl.appendChild(chooser);
 
     // 依赖链概览：模块1 → 模块2 → 模块3（无模块时上面已置空，CSS :empty 自动隐藏）
     if (chainEl) {
-      chainEl.textContent = names.join(' → ');
+      chainEl.textContent = '（下载数据 / 数据清洗 / 文献挖掘）→ 模型调整与计算 → 绘图 → 结果核查与定位 → 人工审核';
       chainEl.setAttribute('title', chainEl.textContent);
     }
 
@@ -308,6 +337,12 @@
   function onTabsClick(e) {
     if (!tabsEl) return;
     var S = getStore();
+    var addPath = closestWithin(e.target, '[data-add-type]', tabsEl);
+    if (addPath) {
+      var definition = FIXED_MODULES.filter(function (item) { return item.id === addPath.getAttribute('data-add-type'); })[0];
+      if (definition) S.addModule(definition.name);
+      return;
+    }
     if (!S) return;
 
     var modeButton = closestWithin(e.target, '.calculation-mode-option', tabsEl);

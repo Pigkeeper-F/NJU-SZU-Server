@@ -1,4 +1,4 @@
-"""Run one small Google Scholar discovery batch using the reusable SOC browser script.
+"""Run a small, resumable multi-source discovery batch in the persistent browser.
 
 This stage only collects search-result metadata. Snippets are not abstracts or
 full-text evidence, and no paper is automatically included in an analysis.
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import importlib
 import io
 import json
@@ -28,6 +29,64 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 _common = importlib.import_module("literature-common")  # 文件名含连字符，见 literature-common.py 头部说明
 _sources = importlib.import_module("literature_sources")
+_source_runner = importlib.import_module("literature_source_runner")
+
+# Explicit in-process unit-test injection only. No HTTP/config/CLI field sets
+# this seam; production always invokes the fixed, killable 60-second worker.
+injected_source_runner = None
+
+
+def _open_api_source(source: str, query: str, limit: int, year_from, year_to, page_index) -> dict:
+    """开放 API 源（PMC / OpenAlex / Europe PMC / Semantic Scholar）的单页检索。
+
+    走 ``literature_search_open`` 的官方 REST 适配器，不启动浏览器、不需要验证码。
+    这些源目前只取一页（最多 100 条），正式检索到末页请改用支持分页的来源。
+    """
+    adapter = _sources.adapter_of(source)
+    module = str(adapter.get("module") or source)
+    open_mod = importlib.import_module("literature_search_open")
+    try:
+        outcome = open_mod.run(module, query, limit, year_from, year_to)
+    except Exception as error:  # 单源失败不拖垮整批；由调度器记录并继续
+        return {"status": "error", "source_key": source, "results": [],
+                "message": f"{_sources.label_of(source)}检索失败：{error}"}
+    results = []
+    for item in outcome.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        results.append({
+            "title": item.get("title") or "",
+            "snippet": item.get("abstract") or item.get("snippet") or "",
+            "result_url": item.get("result_url") or "",
+            "fulltext_links": item.get("fulltext_links") or [],
+            "doi": item.get("doi") or "",
+            "year": item.get("year"),
+            "authors": item.get("authors") or "",
+            "venue": item.get("venue") or "",
+            "pmid": item.get("pmid") or "",
+            "transport": "api",
+        })
+    return {
+        "status": "ok" if results else "no_results",
+        "source_key": source,
+        "results": results,
+        "url": outcome.get("url") or "",
+        "transport": "api",
+        "has_next": False,
+        "page_index": int(page_index or 0),
+        "total_count": len(results),
+    }
+
+
+def _run_source(*args, **kwargs):
+    # 开放 API 适配器不经过 60 秒浏览器 worker（HTTP 请求快、无需附着浏览器）。
+    if args and _sources.adapter_of(args[0]).get("kind") == "open-api":
+        source, query, _scrape, limit = args[0], args[1], args[2], args[3]
+        year_from = args[4] if len(args) > 4 else kwargs.get("year_from")
+        year_to = args[5] if len(args) > 5 else kwargs.get("year_to")
+        return _open_api_source(source, query, limit, year_from, year_to, kwargs.get("page_index"))
+    runner = injected_source_runner or _source_runner.run_source
+    return runner(*args, **kwargs)
 
 emit = _common.emit
 safe_url = _common.safe_url
@@ -36,8 +95,20 @@ safe_csv_cell = _common.safe_csv_cell
 CSV_FIELDS = [
     "candidate_id", "source", "query", "retrieved_at", "title", "byline", "snippet",
     "result_url", "fulltext_links", "screening_status", "evidence_level",
-    "doi", "year", "authors", "venue", "source_key", "batch_index",
+    "doi", "year", "authors", "venue", "source_key", "batch_index", "pmid", "transport",
 ]
+SOURCE_PREFIXES = {"google-scholar": "GSC", "cnki": "CNKI", "web-of-science": "WOS",
+                   "wanfang": "WF", "scopus": "SCOPUS", "pubmed": "PMID",
+                   "pmc": "PMC", "openalex": "OAX", "europe-pmc": "EPMC",
+                   "semantic-scholar": "SS"}
+
+
+def candidate_prefix(source_key: str, batch_index: int) -> str:
+    """候选 id 前缀（导入清单等下游模块复用；第 n≥2 批加 -B<n>）。"""
+    key = str(source_key or "google-scholar")
+    prefix = SOURCE_PREFIXES.get(key, re.sub(r"[^A-Za-z0-9]", "", key).upper()[:6] or "SRC")
+    return prefix if batch_index <= 1 else f"{prefix}-B{batch_index}"
+ATTENTION_REASONS = {"login", "verification", "access_required", "results_unrecognized"}
 
 
 def normalize_doi(value: object) -> str:
@@ -63,22 +134,41 @@ def parse_byline(byline: str) -> dict:
     if len(parts) >= 2:
         second = parts[1]
         years = re.findall(r"\b(19\d{2}|20\d{2})\b", second)
-        if years:
+        if len(set(years)) == 1 and not re.search(r"\b(?:19|20)\d{2}\s*[-/]\s*\d{1,4}(?!\d)", second):
             year = int(years[-1])
         venue = re.sub(r"[,\s]*\b(19\d{2}|20\d{2})\b.*$", "", second).strip(" ,")[:300]
     return {"authors": authors, "venue": venue, "year": year}
 
 
-def candidate_prefix(source_key: str, batch_index: int) -> str:
-    """候选 id 前缀：Google Scholar 保持历史行为（GSC / GSC-B<n>），
-    其它来源按来源注册表里的 idPrefix 取（PMD / PMC / OAX / EPM …）。"""
-    key = str(source_key or "google-scholar")
-    if key == "google-scholar":
-        return "GSC" if batch_index <= 1 else f"GSC-B{batch_index}"
-    registered = _sources.id_prefix_of(key)
-    if registered:
-        return str(registered)
-    return re.sub(r"[^A-Za-z0-9]", "", key).upper()[:4] or "SRC"
+def result_year(item: dict) -> int | None:
+    """Use the explicit publication year first; never infer an experimental year."""
+    raw = item.get("year")
+    if isinstance(raw, str):
+        # Database publication-date cells commonly contain e.g. "JAN 2020" or
+        # "2020-01-05". A range/multiple years remains unknown, never guessed.
+        years = re.findall(r"(?<!\d)(1[89]\d{2}|20\d{2})(?!\d)", raw)
+        if len(years) == 1:
+            raw = int(years[0])
+    if isinstance(raw, int) and not isinstance(raw, bool) and 1800 <= raw <= datetime.now(timezone.utc).year + 1:
+        return raw
+    return parse_byline(str(item.get("byline") or ""))["year"]
+
+
+def metadata_text(value: object, maximum: int) -> str:
+    if isinstance(value, list):
+        value = "; ".join(str(entry) for entry in value if entry is not None)
+    return str(value or "").strip()[:maximum]
+
+
+def metadata_pmid(value: object) -> str:
+    """Preserve a reported numeric PMID; a candidate identifier is not a PMID."""
+    text = str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
+    return text if re.fullmatch(r"[1-9]\d{0,19}", text) else ""
+
+
+def metadata_transport(value: object) -> str:
+    """Only an adapter label may leave the process, never a URL or token."""
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value) else ""
 
 
 def normalize_candidates(
@@ -89,23 +179,21 @@ def normalize_candidates(
     batch_index: int = 1,
     source_key: str = "google-scholar",
     source_label: str = "Google Scholar",
+    transport: str = "",
 ) -> list[dict]:
     records: list[dict] = []
-    seen_titles: set[str] = set()
-    seen_dois: set[str] = set()
+    seen: set[tuple[str, str]] = set()
+    counters: dict[str, int] = {}
     for item in raw:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()[:500]
         key = re.sub(r"\W+", "", title).casefold()
-        doi_key = normalize_doi(item.get("doi"))
-        # 同一批内的跨源合并：DOI 相同或标题（去标点/大小写）相同都算同一篇。
-        # 调用方把结构化来源排在 Scholar 片段前面，所以保留的是元数据更全的那条。
-        if not title or not key or key in seen_titles or (doi_key and doi_key in seen_dois):
+        item_source_key = str(item.get("source_key") or source_key)
+        source_title = (item_source_key, key)
+        if not title or not key or source_title in seen:
             continue
-        seen_titles.add(key)
-        if doi_key:
-            seen_dois.add(doi_key)
+        seen.add(source_title)
         links = []
         for link in item.get("fulltext_links") or []:
             if not isinstance(link, dict):
@@ -113,21 +201,16 @@ def normalize_candidates(
             url = safe_url(link.get("url"))
             if url:
                 links.append({"label": str(link.get("label") or "")[:100], "url": url})
-        item_source_key = str(item.get("source_key") or source_key)
         byline = str(item.get("byline") or "").strip()[:500]
         parsed = parse_byline(byline)
-        # 结构化来源（PubMed / OpenAlex / Europe PMC）本身就带 year/authors/venue，
-        # 优先用它们；只有 Scholar 的题录片段才需要从 byline 字符串里猜。
-        item_year = item.get("year")
-        if item_year in (None, ""):
-            item_year = parsed["year"]
-        item_authors = str(item.get("authors") or "").strip() or parsed["authors"]
-        item_venue = str(item.get("venue") or "").strip() or parsed["venue"]
+        source_prefix = SOURCE_PREFIXES.get(item_source_key, item_source_key.upper())
+        prefix = source_prefix if batch_index <= 1 else f"{source_prefix}-B{batch_index}"
+        counters[item_source_key] = counters.get(item_source_key, 0) + 1
         records.append({
-            "candidate_id": f"{candidate_prefix(item_source_key, batch_index)}-{len(records) + 1:03d}",
+            "candidate_id": f"{prefix}-{counters[item_source_key]:03d}",
             "source": _sources.label_of(item_source_key) or source_label,
-            "query": query,
-            "retrieved_at": retrieved_at,
+            "query": str(item.get("_query") or query),
+            "retrieved_at": item.get("_retrieved_at") or retrieved_at,
             "title": title,
             "byline": byline,
             "snippet": str(item.get("snippet") or "").strip()[:2000],
@@ -136,11 +219,13 @@ def normalize_candidates(
             "screening_status": "pending_review",
             "evidence_level": "search_result_snippet",
             "doi": normalize_doi(item.get("doi")),
-            "year": item_year,
-            "authors": item_authors,
-            "venue": item_venue,
+            "year": result_year(item),
+            "authors": metadata_text(item.get("authors"), 500) or parsed["authors"],
+            "venue": metadata_text(item.get("venue"), 300) or parsed["venue"],
             "source_key": item_source_key,
             "batch_index": batch_index,
+            "pmid": metadata_pmid(item.get("pmid")),
+            "transport": metadata_transport(item.get("transport")) or metadata_transport(transport),
         })
     return records
 
@@ -256,6 +341,8 @@ def normalize_existing_record(record: dict) -> dict:
     record.setdefault("year", None)
     record.setdefault("authors", "")
     record.setdefault("venue", "")
+    record.setdefault("pmid", "")
+    record.setdefault("transport", "")
     if not record.get("source"):
         record["source"] = "Google Scholar"
     return record
@@ -326,19 +413,35 @@ def write_results(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    records = normalize_candidates(search.get("results") or [], query, retrieved_at, batch_index=batch_index)
+    records = normalize_candidates(search.get("results") or [], query, retrieved_at,
+                                   batch_index=batch_index, transport=metadata_transport(search.get("transport")))
+    source_status = search.get("source_status")
+    if not isinstance(source_status, dict):
+        source_status = {}
+    # Existing Scholar-only callers keep the v1 report keys and their semantics.
+    # Multi-source callers provide actual per-source execution and filter status.
+    if source_status:
+        completed = [entry for entry in source_status.values() if entry.get("status") in {"ok", "no_results"}]
+        applied = [name for name in applied_filters(config) if completed and all(name in entry.get("applied_filters", []) for entry in completed)]
+        deferred = list(dict.fromkeys(name for entry in source_status.values() for name in entry.get("deferred_rules", [])))
+    else:
+        applied, deferred = applied_filters(config), deferred_rules(config)
     batch = {
         "batch_index": batch_index,
         "query": query,
         "search_url": safe_url(search.get("url")),
         "retrieved_at": retrieved_at,
         "count": len(records),
-        "applied_filters": applied_filters(config),
-        "deferred_rules": deferred_rules(config),
-        "status": batch_status,
+        "applied_filters": applied,
+        "deferred_rules": deferred,
+        "status": "partial" if search.get("pending_source") or search.get("deferred_sources") else "complete",
     }
-    if source_metas:
-        batch["sources"] = source_metas
+    if source_status:
+        batch["source_status"] = source_status
+    if search.get("pending_source"):
+        batch["pending_source"] = search["pending_source"]
+    if "deferred_sources" in search:
+        batch["deferred_sources"] = list(search["deferred_sources"])
     existing = load_existing_report(output_dir)
     grouped: dict[int, list[dict]] = {}
     for record in existing.get("records") or []:
@@ -358,27 +461,27 @@ def write_results(
     all_records = [record for index in sorted(grouped) for record in grouped[index]]  # 批次升序 + 批内原序
     report = {
         "version": 2,
-        "source": source_label,
+        "source": " / ".join(_sources.label_of(key) or key for key in (config or {}).get("sources", [])) or "Google Scholar",
         "query": query,
         "run_config": config,
         "search_url": batch["search_url"],
         "retrieved_at": retrieved_at,
         "count": len(all_records),
-        "scope": scope,
+        "scope": ("accessible_pages_until_end" if (config or {}).get("stopMode") == "end" else "paged_candidates_up_to_source_limit")
+                 if (config or {}).get("searchMode") == "formal" else "first_page_candidates_only",
         "applied_filters": batch["applied_filters"],
         "deferred_rules": batch["deferred_rules"],
         "caution": "Search snippets are not verified abstracts or full text; all records await screening.",
         "batches": batches,
         "records": all_records,
+        "discovery_complete": not bool(search.get("pending_source") or search.get("deferred_sources")),
     }
-    if source_metas:
-        report["sources"] = source_metas
-        # 逐源命中数：前端直接显示「PubMed 10 条 / OpenAlex 8 条 / Europe PMC 失败」，
-        # 不用再自己数 records。
-        report["source_counts"] = {
-            str(meta.get("source_key") or ""): int(meta.get("count") or 0)
-            for meta in source_metas if isinstance(meta, dict)
-        }
+    if source_status:
+        report["source_status"] = source_status
+    if search.get("pending_source"):
+        report["pending_source"] = search["pending_source"]
+    if "deferred_sources" in search:
+        report["deferred_sources"] = list(search["deferred_sources"])
     paths = _common.job_paths(output_dir)
     _common.atomic_write_json(paths["candidates_json"], report)
     buffer = io.StringIO()
@@ -387,7 +490,10 @@ def write_results(
     for record in all_records:
         writer.writerow(csv_cells(record))
     _common.atomic_write_text(paths["candidates_csv"], buffer.getvalue(), encoding="utf-8-sig")
-    return {"count": len(records), "total": len(all_records), "batch_index": batch_index, "files": ["candidates.json", "candidates.csv"]}
+    result = {"count": len(records), "total": len(all_records), "batch_index": batch_index, "files": ["candidates.json", "candidates.csv"]}
+    if "deferred_sources" in search:
+        result["deferred_sources"] = list(search["deferred_sources"])
+    return result
 
 
 def validate_config(config: object) -> None:
@@ -398,10 +504,29 @@ def validate_config(config: object) -> None:
     limit = config.get("limit", 0)
     if not isinstance(query, str) or not query.strip() or not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10:
         raise ValueError("运行配置缺少检索式或包含未接通来源")
+    mode = config.get("searchMode")
+    stop_mode = config.get("stopMode", "count")
+    if stop_mode not in ("count", "end"):
+        raise ValueError("检索停止方式必须是 count 或 end")
+    if stop_mode == "end" and mode != "formal":
+        raise ValueError("只有正式检索可以检索到末页")
+    if mode is not None:
+        if mode not in ("test", "formal"):
+            raise ValueError("检索模式必须是 test 或 formal")
+        target = config.get("perSourceLimit", None if stop_mode == "end" else 10 if mode == "test" else 100)
+        if stop_mode == "end":
+            if target is not None:
+                raise ValueError("检索到末页不设置候选数量上限")
+        elif isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= 1000:
+            raise ValueError("每来源候选上限必须为 1–1000")
+        if mode == "test" and (target != 10 or limit != 10):
+            raise ValueError("测试运行固定每来源10条")
     for key in ("publicationYearFrom", "publicationYearTo"):
         value = config.get(key)
         if value is not None and (not isinstance(value, int) or isinstance(value, bool) or not 1800 <= value <= datetime.now(timezone.utc).year + 1):
             raise ValueError(f"{key} 无效")
+    if config.get("publicationYearFrom") and config.get("publicationYearTo") and config["publicationYearFrom"] > config["publicationYearTo"]:
+        raise ValueError("发表起始年份不能晚于截止年份")
     batch = config.get("batch")
     if isinstance(batch, dict) and batch.get("size") is not None:
         size = batch["size"]
@@ -419,49 +544,375 @@ def validate_config(config: object) -> None:
     blocked = [item for item in sources if not _sources.is_executable(item)]
     if blocked:
         raise ValueError(_sources.unconnected_message(blocked))
-    # 可选：按来源覆盖检索式（多源语法不同时用）。键必须是本次启用的来源。
     source_queries = config.get("sourceQueries")
-    if source_queries is not None:
-        if not isinstance(source_queries, dict):
-            raise ValueError("sourceQueries 必须是「来源 → 检索式」的对象")
-        for key, value in source_queries.items():
-            if key not in sources:
-                raise ValueError(f"sourceQueries 里的来源未在 sources 中启用：{key}")
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"来源 {key} 的检索式为空")
+    if source_queries is None:
+        source_queries = {}
+    if not isinstance(source_queries, dict):
+        raise ValueError("分来源检索式必须是对象")
+    for key, value in source_queries.items():
+        if not _sources.is_known(key):
+            raise ValueError(f"分来源检索式包含未知来源：{key}")
+        if not isinstance(value, str) or not value.strip() or len(value) > 2000:
+            raise ValueError(f"{key} 检索式不能为空或超过 2000 字")
 
 
-def _source_failure_detail(metas: list[dict]) -> str:
-    """把各源失败原因拼成一句人话（没有失败时返回空串）。"""
-    failures = []
-    for meta in metas:
-        if not isinstance(meta, dict):
+def config_fingerprint(config: dict) -> str:
+    """Only frozen discovery inputs; old tasks without sourceQueries equal {}."""
+    inputs = {key: config.get(key) for key in ("query", "sources", "publicationYearFrom", "publicationYearTo", "limit")}
+    inputs["sourceQueries"] = config.get("sourceQueries") or {}
+    inputs["batch"] = {"size": batch_size(config), "maxBatches": batch_max(config)}
+    if config.get("searchMode") is not None:
+        inputs["searchMode"] = config["searchMode"]
+        inputs["perSourceLimit"] = config.get("perSourceLimit", 10 if config["searchMode"] == "test" else 100)
+        if config.get("stopMode") == "end":
+            inputs["stopMode"] = "end"
+            inputs["perSourceLimit"] = None
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def filtered_source_results(search: dict, config: dict, source: str, query: str, *, full_page: bool = False) -> dict:
+    """Normalize metadata and honestly distinguish UI filters from post-filters."""
+    low, high = config.get("publicationYearFrom"), config.get("publicationYearTo")
+    retrieved_at = datetime.now(timezone.utc).isoformat()
+    raw = [item for item in search.get("results", []) if isinstance(item, dict)][:200 if full_page else batch_size(config)]
+    supplied_applied = search.get("applied_filters")
+    if isinstance(supplied_applied, dict):
+        supplied_applied = list(supplied_applied)
+    if not isinstance(supplied_applied, list):
+        supplied_applied = applied_filters(config) if source == "google-scholar" else ["query"]
+    applied = [name for name in supplied_applied if isinstance(name, str)]
+    if "query" not in applied:
+        applied.insert(0, "query")
+    deferred = list(dict.fromkeys(deferred_rules(config) + [name for name in search.get("deferred_rules", []) if isinstance(name, str)]))
+    requested_years = [name for name, value in (("publicationYearFrom", low), ("publicationYearTo", high)) if value is not None]
+    need_post_filter = any(name not in applied for name in requested_years)
+    results: list[dict] = []
+    unknown, excluded = 0, 0
+    for item in raw:
+        publication_year = result_year(item)
+        if need_post_filter and publication_year is not None and ((low is not None and publication_year < low) or (high is not None and publication_year > high)):
+            excluded += 1
             continue
-        if str(meta.get("status")) in {"ok", "no_results"}:
-            continue
-        label = str(meta.get("label") or meta.get("source_key") or "来源")
-        reason = str(meta.get("error") or meta.get("status") or "失败")
-        failures.append(f"{label}：{reason}")
-    return "；".join(failures)
-
-
-def _scholar_meta(source_key: str, source_query: str, url: str, count: int, status: str, error: str = "") -> dict:
-    meta = {
-        "source_key": source_key,
-        "label": _sources.label_of(source_key) or "Google Scholar",
-        "query": source_query,
-        "url": safe_url(url),
-        "count": int(count or 0),
-        "status": status,
+        if need_post_filter and publication_year is None:
+            unknown += 1
+        # Keep only the published metadata contract, never browser/debug state.
+        clean = {key: item.get(key) for key in ("title", "byline", "snippet", "result_url", "fulltext_links", "doi", "year", "authors", "venue", "pmid", "transport") if key in item}
+        clean["pmid"] = metadata_pmid(clean.get("pmid"))
+        clean["transport"] = metadata_transport(clean.get("transport")) or metadata_transport(search.get("transport"))
+        clean.update(source_key=source, _query=query, _retrieved_at=retrieved_at)
+        results.append(clean)
+    if need_post_filter:
+        if unknown:
+            deferred = list(dict.fromkeys(deferred + requested_years + ["unknown_publication_year_review"]))
+        else:
+            applied = list(dict.fromkeys(applied + requested_years))
+            deferred = [name for name in deferred if name not in requested_years]
+    return {
+        "status": search["status"], "query": query, "url": safe_url(search.get("url")),
+        "transport": metadata_transport(search.get("transport")),
+        "retrieved_at": retrieved_at,
+        "results": results, "count": len(results), "returned": len(raw),
+        "applied_filters": applied, "deferred_rules": deferred,
+        "year_filtering": {"mode": "post_filter_known_years" if need_post_filter else "source_ui" if requested_years else "not_requested",
+                           "excluded": excluded, "unknown_year_retained": unknown},
     }
-    if error:
-        meta["error"] = error[:300]
-    return meta
 
 
-def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_index: int | None = None, resume: bool = False) -> int:
+def checkpoint_report(output_dir: Path, config: dict, state: dict) -> dict:
+    """Persist cumulative results even when a later source needs a human."""
+    entries = state.get("sources", {})
+    raw, statuses, search_url = [], {}, ""
+    for source in config["sources"]:
+        entry = entries.get(source) or {"status": "pending", "query": (config.get("sourceQueries") or {}).get(source, config["query"]),
+                                      "applied_filters": [], "deferred_rules": deferred_rules(config)}
+        raw.extend(entry.get("results") or [])
+        search_url = search_url or safe_url(entry.get("url"))
+        statuses[source] = {key: value for key, value in entry.items() if key != "results"}
+    return write_results(output_dir, config["query"], {"url": search_url, "results": raw,
+                         "source_status": statuses, "pending_source": state.get("pending_source"),
+                         "deferred_sources": list(state.get("deferred_sources", []))},
+                         config, batch_index=state["batch_index"])
+
+
+def _prepare_source_schedule(config: dict, state: dict, *, resume: bool, scrape_current: bool,
+                             defer_source: str | None) -> tuple[list[str], str | None]:
+    """Validate the whole queue before mutating any scheduling state."""
+    selected, entries = config["sources"], state.get("sources")
+    queue = state.get("deferred_sources", [])
+    if (not isinstance(entries, dict) or not isinstance(queue, list)
+            or any(not isinstance(source, str) or source not in selected for source in queue)
+            or len(set(queue)) != len(queue)
+            or any(not isinstance(entries.get(source), dict) for source in queue)):
+        raise ValueError("暂缓来源检查点无效；请保留已有成果并核对原任务")
+    pending = state.get("pending_source")
+    if defer_source is not None:
+        if (not resume or not isinstance(defer_source, str) or defer_source not in selected
+                or pending != defer_source or not isinstance(entries.get(defer_source), dict)
+                or entries[defer_source].get("status") != "attention"):
+            raise ValueError("只能在原任务续跑时暂缓当前等待人工处理的已选来源")
+    queue = [source for source in queue if entries[source].get("status") not in {"ok", "no_results"}]
+    resumed_source = pending if (resume or scrape_current) and state.get("pending_reason") in ATTENTION_REASONS else None
+    if defer_source is not None:
+        queue = [source for source in queue if source != defer_source] + [defer_source]
+        resumed_source = None
+    elif (resume or scrape_current) and pending:
+        queue = [source for source in queue if source != pending]
+    if queue or "deferred_sources" in state or defer_source is not None:
+        state["deferred_sources"] = queue
+    return [source for source in selected if source not in queue], resumed_source
+
+
+def _next_pending_source(config: dict, state: dict) -> str | None:
+    queue = state.get("deferred_sources", [])
+    order = [source for source in config["sources"] if source not in queue] + queue
+    return next((source for source in order if (state["sources"].get(source) or {}).get("status") not in {"ok", "no_results"}), None)
+
+
+def _pause_deferred_sources(output_dir: Path, config: dict, state: dict) -> bool:
+    queue = [source for source in state.get("deferred_sources", [])
+             if (state["sources"].get(source) or {}).get("status") not in {"ok", "no_results"}]
+    if not queue:
+        return False
+    state["deferred_sources"] = queue
+    source = queue[0]
+    entry = state["sources"][source]
+    reason = entry.get("reason") if entry.get("reason") in ATTENTION_REASONS else "results_unrecognized"
+    entry["status"] = "attention"
+    state.update(pending_source=source, pending_reason=reason)
+    _common.atomic_write_json(output_dir / "discovery-state.json", state)
+    result = checkpoint_report(output_dir, config, state)
+    previous_message = str(entry.get("message") or "").strip()
+    emit("attention", stage="verification", source=source, reason=reason,
+         message="其余未暂缓来源已尝试；仍有待补检来源：" + "、".join(_sources.label_of(key) for key in queue)
+                 + "。已有成果保留。" + (previous_message + " " if previous_message else "")
+                 + "请处理当前来源后检查并继续，或继续暂缓。", **result)
+    return True
+
+
+def _record_keys(row: dict) -> set[str]:
+    """Source-local identities, including the legacy normalized-title key."""
+    keys = set()
+    title = re.sub(r"\W+", "", str(row.get("title") or "").strip()[:500]).casefold()
+    if title:
+        keys.add("title:" + title)
+    doi, pmid = normalize_doi(row.get("doi")), metadata_pmid(row.get("pmid"))
+    if doi:
+        keys.add("doi:" + doi)
+    if pmid:
+        keys.add("pmid:" + pmid)
+    url = safe_url(row.get("result_url"))
+    if url:
+        keys.add("url:" + url)
+    return keys
+
+
+def _page_fingerprint(rows: list[dict]) -> str:
+    # Ignore transient result-link tracking parameters and result order. A
+    # repeated page must not count toward the target after a failed Next click.
+    identities = [sorted(key for key in _record_keys(row) if not key.startswith("url:"))
+                  or sorted(_record_keys(row)) for row in rows]
+    return hashlib.sha256(json.dumps(sorted(identities), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
+               batch_index: int | None = None, resume: bool = False, defer_source: str | None = None) -> int:
+    """One discovery batch, many pages; commit every page before advancing."""
+
     output_dir = Path(output_dir)
+    validate_config(config)
+    to_end = config.get("stopMode") == "end"
+    target = None if to_end else config.get("perSourceLimit", 100)
+    # 开放 API 适配器目前只取单页（最多 100 条），不声称已到末页。
+    if to_end:
+        open_api_sources = [key for key in config["sources"] if _sources.adapter_of(key).get("kind") == "open-api"]
+        if open_api_sources:
+            emit("error", message="开放 API 来源（" + "、".join(_sources.label_of(key) for key in open_api_sources)
+                 + "）暂不支持“检索到末页”；请改用测试运行，或从本次正式检索中移除这些来源。")
+            return 1
+    checkpoint_path = output_dir / "discovery-state.json"
+    state = _common.load_json(checkpoint_path, default=None)
+    fingerprint = config_fingerprint(config)
+    if checkpoint_path.exists() and not isinstance(state, dict):
+        emit("error", message="检索检查点损坏；请新建任务，避免混用已有成果")
+        return 1
+    if state and state.get("config_fingerprint") != fingerprint:
+        emit("error", message="检索配置已更改；请新建任务，不能与已保存的来源结果混用")
+        return 1
     index = resolve_batch_index(output_dir, config, requested=batch_index, resume=resume)
+    if state and (resume or scrape_current) and batch_index is None:
+        index = state["batch_index"]
+    if state and state.get("pending_source") and not (resume or scrape_current):
+        emit("error", message="当前来源尚未完成；请继续原任务，不要创建新批次")
+        return 1
+    if state and state.get("pending_source") and index != state["batch_index"]:
+        emit("error", message="待处理来源属于原批次；请继续原批次或新建任务")
+        return 1
+    if index < 1 or index > batch_max(config):
+        emit("error", message=f"检索批次无效或已达本任务批数上限（{batch_max(config)}）")
+        return 1
+    if not state or state["batch_index"] != index:
+        state = {"version": 2, "config_fingerprint": fingerprint, "batch_index": index,
+                 "sources": {}, "pending_source": None, "pending_reason": None}
+    try:
+        scheduled_sources, resumed_source = _prepare_source_schedule(
+            config, state, resume=resume, scrape_current=scrape_current, defer_source=defer_source)
+    except ValueError as error:
+        emit("error", message=str(error))
+        return 1
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def persist():
+        _common.atomic_write_json(checkpoint_path, state)
+        return checkpoint_report(output_dir, config, state)
+
+    def stop(entry, source, *, reason="results_unrecognized", message="", error=False):
+        # Keep this source's completed pages as well as previous sources.
+        error = error and not to_end
+        entry.update(status="error" if error else "attention", reason=reason,
+                     stop_reason="error" if error else "needs_attention", message=message)
+        state.update(pending_source=source, pending_reason=None if error else reason)
+        result = persist()
+        emit("error" if error else "attention", stage="search" if error else "verification",
+             source=source, reason=reason,
+             message=message or "无法确认下一检索页；已有候选已保留，请核对官方页面后检查并继续。", **result)
+        return 1 if error else 0
+
+    if defer_source is not None:
+        state.update(pending_source=_next_pending_source(config, state), pending_reason=None)
+        persist()
+    for source in scheduled_sources:
+        entry = state["sources"].get(source)
+        if entry and entry.get("status") in {"ok", "no_results"}:
+            continue
+        query = (config.get("sourceQueries") or {}).get(source, config["query"])
+        if entry is None:
+            entry = {"status": "running", "query": query, "url": "", "results": [],
+                     "applied_filters": [], "deferred_rules": deferred_rules(config),
+                     "pages": [], "next_page": 0, "pages_fetched": 0, "retrieved_count": 0,
+                     "count": 0, "total_count": None, "stop_reason": None}
+            state["sources"][source] = entry
+        entry.update(status="running", stop_reason=None)
+        state.update(pending_source=source, pending_reason=None)
+        persist()
+        seen = set().union(*(_record_keys(row) for row in entry["results"])) if entry["results"] else set()
+        while target is None or len(entry["results"]) < target:
+            page_index = entry["next_page"]
+            if not to_end and page_index >= 1000:
+                return stop(entry, source, message="已达单来源1000页保护上限，已有结果保留。请缩小检索范围后新建任务。")
+            quantity = f"已保留{len(entry['results'])}条候选，检索到可访问末页" if to_end else f"已保留{len(entry['results'])}/{target}条候选"
+            emit("stage", stage="search", source=source,
+                 message=f"{_sources.label_of(source)}：正在获取第{page_index + 1}页，{quantity}",
+                 deferred_sources=list(state.get("deferred_sources", [])))
+            search = _run_source(source, query, source == resumed_source, batch_size(config),
+                                            config.get("publicationYearFrom"), config.get("publicationYearTo"),
+                                            job_dir=output_dir, page_index=page_index, full_page=True)
+            resumed_source = None  # only the paused page may read a manual tab
+            if search.get("status") in {"attention", "captcha"}:
+                reason = search.get("reason", "verification" if search.get("status") == "captcha" else "results_unrecognized")
+                if reason not in ATTENTION_REASONS:
+                    reason = "results_unrecognized"
+                return stop(entry, source, reason=reason, message=search.get("message") or "当前来源需要人工处理；登录或验证后检查并继续。")
+            if search.get("status") not in {"ok", "no_results"}:
+                return stop(entry, source, message=search.get("message") or "本页检索失败，已完成页已保留。", error=True)
+            previous_transport = entry.get("transport")
+            next_transport = metadata_transport(search.get("transport"))
+            if source == "pubmed" and entry["pages"] and previous_transport and next_transport and previous_transport != next_transport:
+                return stop(entry, source, message="PubMed获取方式发生变化，页大小可能不同；已保留已有候选，请按原方式重试本页。", error=True)
+            if search.get("page_index", page_index) != page_index:
+                return stop(entry, source, message="返回页码与当前等待页不一致，已有成果已保留，请核对后继续。")
+            raw = [row for row in search.get("results", []) if isinstance(row, dict)][:200]
+            signature = _page_fingerprint(raw)
+            if raw and any(page.get("fingerprint") == signature for page in entry["pages"]):
+                return stop(entry, source, message="检测到重复检索页，已停止累加。请核对下一页是否加载成功后检查并继续。")
+            if not raw and search.get("status") != "no_results" and search.get("has_next") is not False:
+                return stop(entry, source, message="本页没有可核对的题录，无法确认是末页；请核对后检查并继续。")
+            page = filtered_source_results(search, config, source, query, full_page=True)
+            for row in page["results"]:
+                keys = _record_keys(row)
+                if not keys or keys & seen:
+                    continue
+                seen.update(keys)
+                entry["results"].append(row)
+                if target is not None and len(entry["results"]) >= target:
+                    break
+            if not entry["pages"]:
+                entry["applied_filters"] = page["applied_filters"]
+            else:
+                entry["applied_filters"] = [name for name in entry["applied_filters"] if name in page["applied_filters"]]
+            entry["deferred_rules"] = list(dict.fromkeys(entry["deferred_rules"] + page["deferred_rules"]))
+            entry["url"] = page["url"]
+            entry["transport"] = page["transport"]
+            entry["retrieved_at"] = page["retrieved_at"]
+            filtering = entry.setdefault("year_filtering", {"mode": page["year_filtering"]["mode"], "excluded": 0, "unknown_year_retained": 0})
+            if filtering["mode"] != page["year_filtering"]["mode"]:
+                filtering["mode"] = "mixed_source_and_post_filter"
+            for key in ("excluded", "unknown_year_retained"):
+                filtering[key] += page["year_filtering"][key]
+            total_count = search.get("total_count")
+            if isinstance(total_count, int) and not isinstance(total_count, bool) and total_count >= 0:
+                entry["total_count"] = total_count
+            entry["pages"].append({"page_index": page_index, "fingerprint": signature, "returned": len(raw)})
+            entry["next_page"] = page_index + 1
+            entry["pages_fetched"] = len(entry["pages"])
+            entry["retrieved_count"] += len(raw)
+            entry["returned"] = entry["retrieved_count"]
+            entry["count"] = len(entry["results"])
+            source_limited = search.get("source_limit_reached") is True
+            ended = (search.get("has_next") is False or search.get("status") == "no_results") and not source_limited
+            if target is not None and entry["count"] >= target:
+                entry.update(status="ok", stop_reason="limit_reached")
+            elif ended:
+                entry.update(status="ok" if entry["count"] else "no_results", stop_reason="exhausted")
+            result = persist()
+            total_hint = f"，来源报告总命中{entry['total_count']}条" if entry["total_count"] is not None else ""
+            quantity = f"已保留{entry['count']}条候选" if to_end else f"已保留{entry['count']}/{target}条候选"
+            emit("stage", stage="search", source=source,
+                 message=f"{_sources.label_of(source)}：第{page_index + 1}页已保存，{quantity}{total_hint}", **result)
+            if entry["status"] in {"ok", "no_results"}:
+                break
+            if source_limited:
+                return stop(entry, source, message=str(search.get("source_limit_message") or "已触及来源可访问结果上限，已有结果已保存；尚不能确认主题文献已全部获取。请核对或缩小检索范围。"))
+            if search.get("has_next") is not True:
+                return stop(entry, source, message="本页已保存，但无法确认后续页。请核对官方分页控件后检查并继续。")
+        state.update(pending_source=_next_pending_source(config, state),
+                     pending_reason=None)
+        persist()
+    if _pause_deferred_sources(output_dir, config, state):
+        return 0
+    result = persist()
+    counts = "；".join((f"{_sources.label_of(source)} {state['sources'][source]['count']}条" if to_end
+                       else f"{_sources.label_of(source)} {state['sources'][source]['count']}/{target}条")
+                      + ("（已到末页）" if state["sources"][source].get("stop_reason") == "exhausted" else "（已达上限）")
+                      for source in config["sources"])
+    emit("result", stage="completed", message=("已检索到各来源可访问末页：" if to_end else "正式检索已保存：")
+         + counts + "；仍待人工筛选与跨来源去重。", **result)
+    return 0
+
+
+def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_index: int | None = None,
+        resume: bool = False, defer_source: str | None = None) -> int:
+    if config.get("searchMode") == "formal":
+        return run_formal(config, output_dir, scrape_current, batch_index=batch_index, resume=resume, defer_source=defer_source)
+    output_dir = Path(output_dir)
+    validate_config(config)
+    checkpoint_path = output_dir / "discovery-state.json"
+    state = _common.load_json(checkpoint_path, default=None)
+    fingerprint = config_fingerprint(config)
+    if checkpoint_path.exists() and not isinstance(state, dict):
+        emit("error", message="检索检查点损坏；请新建任务，避免混用已有成果")
+        return 1
+    if state and state.get("config_fingerprint") != fingerprint:
+        emit("error", message="检索配置已更改；请新建任务，不能与已保存的来源结果混用")
+        return 1
+    index = resolve_batch_index(output_dir, config, requested=batch_index, resume=resume)
+    if state and (resume or scrape_current) and batch_index is None:
+        index = state["batch_index"]
+    if state and state.get("pending_source") and not (resume or scrape_current):
+        emit("error", message="当前来源等待人工处理；请在原任务中检查并继续，不要创建新批次")
+        return 1
+    if state and state.get("pending_source") and index != state["batch_index"]:
+        emit("error", message="待处理来源属于原批次；请继续原批次或新建任务")
+        return 1
     if index < 1:
         emit("error", message="检索失败：批次号必须为正整数")
         return 1
@@ -470,157 +921,73 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
         emit("error", message=f"检索失败：已达本任务批数上限（{max_batches}）；如需追加批次请新建任务并调整批数上限")
         return 1
 
-    sources = list(config.get("sources") or ["google-scholar"])
-    query = str(config.get("query") or "").strip()
-    open_keys = open_source_keys(sources)
-    scholar_keys = [key for key in sources if key not in open_keys]
-    mixed = bool(open_keys and scholar_keys)
-
-    raw_results: list[dict] = []
-    metas: list[dict] = []
-
-    # ---- 1) 开放 API 来源：不碰浏览器，先跑（混合模式下它们不受 Scholar 验证码影响） ----
-    if open_keys:
-        open_labels = [_sources.label_of(key) or key for key in open_keys]
-        emit("stage", stage="search", message="开放 API 检索：" + "、".join(open_labels))
-        items, open_metas = collect_open_results(config, query)
-        raw_results.extend(items)
-        metas.extend(open_metas)
-        if not mixed:
-            if not items:
-                detail = _source_failure_detail(open_metas)
-                message = "检索没有结果：开放来源均未返回候选" + (f"（{detail}）" if detail else "")
-                emit("error", message=message)
-                return 1
-            search_payload = {
-                "results": items,
-                "url": open_metas[0].get("url") if open_metas else "",
-            }
-            labels = [str(meta.get("label") or meta.get("source_key")) for meta in open_metas]
-            result = write_results(
-                output_dir,
-                query,
-                search_payload,
-                config,
-                batch_index=index,
-                source_label="、".join(labels) or "开放 API 来源",
-                scope="open_api_candidates",
-                source_metas=open_metas,
-            )
-            emit("stage", stage="search", message="开放 API 检索完成：" + "、".join(labels))
-            # 必须发 result 收尾事件：作业管理器据此把 discover 标成 done，
-            # 只发 stage 会在干净退出后被判「检索脚本未返回结果」。
-            summary = f"已保存 {result['count']} 条待复核候选"
-            if len(open_metas) > 1:
-                per_source = "、".join(
-                    f"{meta.get('label') or meta.get('source_key')} {int(meta.get('count') or 0)} 条"
-                    for meta in open_metas
-                )
-                summary += f"（{per_source}，跨源重复已合并）"
-            emit("result", stage="completed", message=summary, **result)
+    if not state or state["batch_index"] != index:
+        state = {"version": 1, "config_fingerprint": fingerprint, "batch_index": index, "sources": {},
+                 "pending_source": None, "pending_reason": None}
+    try:
+        scheduled_sources, resumed_source = _prepare_source_schedule(
+            config, state, resume=resume, scrape_current=scrape_current, defer_source=defer_source)
+    except ValueError as error:
+        emit("error", message=str(error))
+        return 1
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if defer_source is not None:
+        state.update(pending_source=_next_pending_source(config, state), pending_reason=None)
+        _common.atomic_write_json(checkpoint_path, state)
+        checkpoint_report(output_dir, config, state)
+    for source in scheduled_sources:
+        if (state["sources"].get(source) or {}).get("status") in {"ok", "no_results"}:
+            continue
+        query = (config.get("sourceQueries") or {}).get(source, config["query"])
+        emit("stage", stage="search", source=source, message=f"按已确认配置检索 {_sources.label_of(source)}（第 {index} 批）",
+             deferred_sources=list(state.get("deferred_sources", [])))
+        state.update(pending_source=source, pending_reason=None)
+        _common.atomic_write_json(checkpoint_path, state)
+        search = _run_source(source, query, source == resumed_source, batch_size(config),
+                                        config.get("publicationYearFrom"), config.get("publicationYearTo"), job_dir=output_dir)
+        if search.get("status") in {"attention", "captcha"}:
+            reason = search.get("reason", "verification" if search.get("status") == "captcha" else "results_unrecognized")
+            if reason not in ATTENTION_REASONS:
+                reason = "results_unrecognized"
+            state["sources"][source] = {"status": "attention", "reason": reason, "query": query,
+                                         "message": str(search.get("message") or ""),
+                                         "url": safe_url(search.get("url")), "results": [],
+                                         "transport": metadata_transport(search.get("transport")),
+                                         "applied_filters": [], "deferred_rules": deferred_rules(config)}
+            state["pending_reason"] = reason
+            _common.atomic_write_json(checkpoint_path, state)
+            result = checkpoint_report(output_dir, config, state)
+            emit("attention", stage="verification", source=source, reason=reason,
+                 message=str(search.get("message") or f"{_sources.label_of(source)} 需要人工处理；请在官方页面完成后检查并继续"), **result)
             return 0
-        if not items:
-            detail = _source_failure_detail(open_metas)
-            emit("stage", stage="search", message="开放来源未返回候选" + (f"（{detail}）" if detail else "，继续 Google Scholar"))
-
-    # ---- 2) Google Scholar：需要浏览器；验证码/启动失败时，混合模式保留已拿到的开放源结果 ----
-    def save_partial_and_wait(message: str) -> int:
-        """把已拿到的开放源结果先落盘，再把「需要人工处理」交给上层。"""
-        if not raw_results:
-            emit("attention", stage="verification", message=message)
-            return 0
-        labels = [str(meta.get("label") or meta.get("source_key")) for meta in metas]
-        result = write_results(
-            output_dir,
-            query,
-            {"url": metas[0].get("url") if metas else "", "results": raw_results},
-            config,
-            batch_index=index,
-            source_label="、".join(label for label in labels if label) or "开放 API 来源",
-            scope="mixed_candidates",
-            source_metas=metas,
-            batch_status="partial",
-        )
-        emit(
-            "result",
-            stage="completed",
-            message=f"开放来源已先保存 {result['count']} 条候选（Scholar 待人工处理后补齐）",
-            **result,
-        )
-        emit("attention", stage="verification", message=message + "；开放来源的候选已先保存。")
-        return 0
-
-    if scholar_keys:
-        sys.path.insert(0, str(SOC_FETCH))
-        import browser  # noqa: PLC0415 - reuse SOC discovery implementation
-        import google_scholar_search  # noqa: PLC0415
-
-        emit("stage", stage="browser", message="连接 SOC 持久浏览器")
-        launched = browser.launch()
-        if launched.get("status") not in {"already_running", "launched"}:
-            reason = str(launched.get("message") or launched.get("status") or "浏览器启动失败")
-            for key in scholar_keys:
-                metas.append(_scholar_meta(key, query_for_source(config, key, query), "", 0, "error", reason))
-            if mixed:
-                return save_partial_and_wait("Google Scholar 浏览器启动失败：" + reason)
-            emit("error", message=reason)
+        if search.get("status") not in {"ok", "no_results"}:
+            # Keep the pending source and earlier completed sources for retry.
+            # A technical failure is retried normally, not as a verified page.
+            state["pending_reason"] = None
+            state["sources"][source] = {"status": "error", "query": query, "url": safe_url(search.get("url")),
+                                         "transport": metadata_transport(search.get("transport")),
+                                         "results": [], "applied_filters": [], "deferred_rules": deferred_rules(config)}
+            _common.atomic_write_json(checkpoint_path, state)
+            result = checkpoint_report(output_dir, config, state)
+            emit("error", source=source, message=str(search.get("message") or "检索失败"), **result)
             return 1
-        if scrape_current:
-            message = "读取验证后的结果页"
-        elif index > 1:
-            message = f"按已确认配置进行 Google Scholar 第 {index} 批检索"
-        else:
-            message = "按已确认配置进行 Google Scholar 首批检索"
-        emit("stage", stage="search", message=message)
+        state["sources"][source] = filtered_source_results(search, config, source, query)
+        state.update(pending_source=None, pending_reason=None)
+        _common.atomic_write_json(checkpoint_path, state)
+        # Sources not attempted yet make this a partial artifact after interruption.
+        state["pending_source"] = _next_pending_source(config, state)
+        _common.atomic_write_json(checkpoint_path, state)
+        checkpoint_report(output_dir, config, state)
 
-        limit = batch_size(config)
-        search_url = ""
-        for source in _sources.executable_sources():
-            if source["key"] not in config["sources"] or source["key"] in open_keys:
-                continue
-            source_query = query_for_source(config, source["key"], query)
-            search = google_scholar_search.run(source_query, scrape_current, limit, config.get("publicationYearFrom"), config.get("publicationYearTo"))
-            if search.get("status") == "captcha":
-                metas.append(_scholar_meta(source["key"], source_query, search.get("url") or "", 0, "captcha", "需要人工完成人机验证"))
-                captcha_message = "Google Scholar 要求人机验证。请在刚打开的浏览器中完成验证，然后点击重新检索；不会自动绕过验证码。"
-                if mixed:
-                    return save_partial_and_wait(captcha_message)
-                emit("attention", stage="verification", message=captcha_message)
-                return 0
-            if search.get("status") not in {"ok", "no_results"}:
-                reason = str(search.get("message") or "检索失败")
-                metas.append(_scholar_meta(source["key"], source_query, search.get("url") or "", 0, "error", reason))
-                if mixed:
-                    return save_partial_and_wait("Google Scholar 检索失败：" + reason)
-                emit("error", message=reason)
-                return 1
-            search_url = search_url or safe_url(search.get("url"))
-            hit_count = 0
-            for item in search.get("results") or []:
-                if isinstance(item, dict):
-                    raw_results.append({**item, "source_key": source["key"]})
-                    hit_count += 1
-            metas.append(_scholar_meta(source["key"], source_query, search.get("url") or "", hit_count, search.get("status") or "ok"))
-
-    emit("stage", stage="save", message="去重并保存候选清单")
-    labels = [str(meta.get("label") or meta.get("source_key")) for meta in metas]
-    result = write_results(
-        output_dir,
-        query,
-        {"url": next((str(meta.get("url") or "") for meta in metas if meta.get("source_key") in scholar_keys and meta.get("url")), ""), "results": raw_results},
-        config,
-        batch_index=index,
-        source_label="、".join(label for label in labels if label) or "Google Scholar",
-        scope="mixed_candidates" if mixed else "first_page_candidates_only",
-        source_metas=metas if mixed else None,
-    )
+    if _pause_deferred_sources(output_dir, config, state):
+        return 0
+    emit("stage", stage="save", message="保存各来源候选；跨来源重复留待去重阶段处理",
+         deferred_sources=list(state.get("deferred_sources", [])))
+    result = checkpoint_report(output_dir, config, state)
     if index > 1:
         summary = f"已保存 {result['count']} 条待复核候选（第 {index} 批，累计 {result['total']} 条）"
     else:
         summary = f"已保存 {result['count']} 条待复核候选"
-    if mixed:
-        per_source = "、".join(f"{meta.get('label') or meta.get('source_key')} {int(meta.get('count') or 0)} 条" for meta in metas)
-        summary += f"（{per_source}，跨源重复已合并）"
     emit("result", stage="completed", message=summary, **result)
     return 0
 
@@ -629,14 +996,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--scrape-current", action="store_true", help="After manual verification, read the current Scholar page without navigating again")
+    parser.add_argument("--scrape-current", action="store_true", help="After manual login/verification, read only the pending source's bound tab")
     parser.add_argument("--batch-index", type=int, default=None, help="续批/重试指定批次号；缺省 = 1 + 已有最大批号（新批次）")
-    parser.add_argument("--resume", action="store_true", help="断点续跑：重跑最近一批（同批号整批替换）")
+    parser.add_argument("--resume", action="store_true", help="断点续跑最近一批：保留已完成来源，仅继续待处理来源")
+    parser.add_argument("--defer-source", default=None, help="配合 --resume 暂缓当前等待来源，先继续其他来源")
     args = parser.parse_args()
     try:
         config = json.loads(args.config.read_text(encoding="utf-8"))
         validate_config(config)
-        return run(config, args.output_dir, args.scrape_current, batch_index=args.batch_index, resume=args.resume)
+        return run(config, args.output_dir, args.scrape_current, batch_index=args.batch_index, resume=args.resume, defer_source=args.defer_source)
     except Exception as error:
         emit("error", message=f"检索失败：{error}")
         return 1

@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-21T00:24:27.195132+00:00",
+  "schema_source": "confirmations.json#fieldDefinitions@2026-10-21T00:14:10.562Z",
+  "counts": {
+    "parameters_total": 259,
+    "ok": 251,
+    "blocking": 0,
+    "pending": 8,
+    "literature_total": 10,
+    "literature_blocking": 0,
+    "literature_pending": 0
+  },
+  "blocking": [],
+  "pending": [
+    {
+      "entity": "parameter",
+      "row_id": "PMID-007-R144",
+      "paper_id": "PMID-007",
+      "index": 143,
+      "rules": [
+        "missing_unit"
+      ],
+      "message": "字段 variation_value 为数值字段但未给出单位（unit_raw 为空）"
+    },
+    {
+      "entity": "parameter",
+      "row_id": "PMID-007-R145",
+      "paper_id": "PMID-007",
+      "index": 144,
+      "rules": [
+        "missing_unit"
+      ],
+      "message": "字段 variation_value 为数值字段但未给出单位（unit_raw 为空）"
+    },
+    {
+      "entity": "parameter",
+      "row_id": "PMID-007-R146",
+      "paper_id": "PMID-007",
+      "index": 145,
+      "rules": [
+        "missing_unit"
+      ],
+      "message": "字段 variation_value 为数值字段但未给出单位（unit_raw 为空）"
+    },
+    {
+      "entity": "parameter",
+      "row_id": "PMID-007-R147",
+      "paper_id": "PMID-007",
+      "index": 146,
+      "rules": [
+        "missing_unit"
+      ],
+      "message": "字段 variation_value 为数值字段但未给出单位（unit_raw 为空）"
+    },
+    {
+      "entity": "parameter",
+      "row_id": "PMID-007-R148",
+      "paper_id": "PMID-007",
+      "index": 147,
+      "rules": [
+        "missing_unit"
+      ],
+      "message": "字段 variation_value 为数值字段但未给出单位（unit_raw 为空）"
+    },
+    {
+      "entity": "parameter",
+      "row_id": "PMID-007-R149",
+      "paper_id": "PMID-007",
+      "index": 148,
+      "rules": [
+        "missing_unit"
+      ],
+      "message": "字段 variation_value 为数值字段但未给出单位（unit_raw 为空）"
+    },
+    {
+      "entity": "parameter",
+      "row_id": "PMID-007-R150",
+      "paper_id": "PMID-007",
+      "index": 149,
+      "rules": [
+        "missing_unit"
+      ],
+      "message": "字段 variation_value 为数值字段但未给出单位（unit_raw 为空）"
+    },
+    {
+      "entity": "parameter",
+      "row_id": "PMID-007-R151",
+      "paper_id": "PMID-007",
+      "index": 150,
+      "rules": [
+        "missing_unit"
+      ],
+      "message": "字段 variation_value 为数值字段但未给出单位（unit_raw 为空）"
+    }
+  ]
+}

@@ -4,6 +4,9 @@
 const { isKnown, assertExecutable } = require('./literature-sources');
 
 const DEFAULT_LIMITS = { discover: 180, dedupe: 120, fulltext: 3600, extract: 1800, validate: 300, export: 600 };
+// A grouped legacy draft may expand to many individual variables. Keep the
+// same bound across configuration, discussion and the confirmation checkpoint.
+const MAX_FIELD_DEFINITIONS = 200;
 
 function string(value, name, max = 500) {
   if (value == null) return '';
@@ -36,22 +39,22 @@ function integer(value, name, min, max) {
   return result;
 }
 
-function batchConfig(raw, limit) {
+function batchConfig(raw, limit, fixedSize = false) {
   const value = object(raw, '批配置');
-  const size = value.size == null ? limit : integer(value.size, '每批检索数量', 1, 10);
+  const size = fixedSize ? 10 : value.size == null ? limit : integer(value.size, '每批检索数量', 1, 10);
   const maxBatches = value.maxBatches == null ? 1 : integer(value.maxBatches, '批数上限', 1, 50);
   return { size, maxBatches };
 }
 
 // 按来源覆盖检索式（可选）：各源语法不通用，PubMed 的字段标签不能直接喂 OpenAlex。
 // 未列出的来源继续用顶层 query；旧配置（没有 sourceQueries）行为完全不变。
-function sourceQueriesConfig(raw, sources) {
-  const value = object(raw, '按源检索式');
+function sourceQueries(raw) {
+  const value = object(raw, '分来源检索式');
   const result = {};
-  for (const key of Object.keys(value)) {
-    if (!sources.includes(key)) throw new Error('按源检索式包含未启用的来源：' + key);
-    const query = string(value[key], `来源 ${key} 的检索式`, 600);
-    if (!query) throw new Error(`来源 ${key} 的检索式为空`);
+  for (const [key, entry] of Object.entries(value)) {
+    if (!isKnown(key)) throw new Error(`分来源检索式包含未知来源：${key}`);
+    const query = string(entry, `${key} 检索式`, 2000);
+    if (!query) throw new Error(`${key} 检索式不能为空`);
     result[key] = query;
   }
   return result;
@@ -59,7 +62,7 @@ function sourceQueriesConfig(raw, sources) {
 
 function fieldDefinitions(raw) {
   if (raw == null) return [];
-  if (!Array.isArray(raw) || raw.length > 50) throw new Error('字段定义必须是列表且不超过 50 项');
+  if (!Array.isArray(raw) || raw.length > MAX_FIELD_DEFINITIONS) throw new Error(`字段定义必须是列表且不超过 ${MAX_FIELD_DEFINITIONS} 项`);
   const seen = new Set();
   return raw.map((item, index) => {
     const label = `第 ${index + 1} 个字段定义`;
@@ -116,9 +119,19 @@ function extractionConfig(raw) {
   return { maxCharsPerPaper, model };
 }
 
-function limitsConfig(raw) {
+function discoverBudget(config) {
+  if (config?.searchMode === 'formal' && config.stopMode === 'end') return 86400;
+  const sourceCount = Array.isArray(config?.sources) ? config.sources.length : 1;
+  const target = config?.searchMode === 'formal'
+    ? (Number.isInteger(config.perSourceLimit) && config.perSourceLimit >= 1 && config.perSourceLimit <= 1000 ? config.perSourceLimit : 100)
+    : 10;
+  return Math.min(86400, 180 * Math.min(6, Math.max(1, sourceCount)) * Math.ceil(target / 10));
+}
+
+function limitsConfig(raw, config) {
   const value = object(raw, '阶段超时');
   const result = { ...DEFAULT_LIMITS };
+  result.discover = discoverBudget(config);
   for (const stage of Object.keys(DEFAULT_LIMITS)) {
     if (value[stage] == null) continue;
     result[stage] = integer(value[stage], `${stage} 阶段超时`, 1, 86400);
@@ -130,34 +143,47 @@ function normalizeConfig(raw, options = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('运行配置必须是对象');
   const topic = string(raw.topic, '研究主题');
   const query = string(raw.query, '检索式');
-  if (!topic || !query) throw new Error('请填写研究主题和 Google Scholar 检索式');
+  if (!topic || !query) throw new Error('请填写研究主题和默认检索式');
   const sources = list(raw.sources, '检索来源', 10).map(value => value.toLowerCase());
   if (!sources.length || sources.some(value => !isKnown(value)) || new Set(sources).size !== sources.length) throw new Error('检索来源为空、重复或不受识别');
   if (options.executable) assertExecutable(sources);
   const publicationYearFrom = year(raw.publicationYearFrom, '发表起始年份');
   const publicationYearTo = year(raw.publicationYearTo, '发表截止年份');
   if (publicationYearFrom && publicationYearTo && publicationYearFrom > publicationYearTo) throw new Error('发表起始年份不能晚于截止年份');
-  const limit = raw.limit == null ? 10 : Number(raw.limit);
+  const searchMode = raw.searchMode == null ? null : string(raw.searchMode, '检索模式', 20);
+  if (searchMode !== null && !['test', 'formal'].includes(searchMode)) throw new Error('检索模式必须是 test 或 formal');
+  const stopMode = raw.stopMode == null ? null : string(raw.stopMode, '检索停止方式', 20);
+  if (stopMode !== null && !['count', 'end'].includes(stopMode)) throw new Error('检索停止方式必须是 count 或 end');
+  if (stopMode === 'end' && searchMode !== 'formal') throw new Error('检索到末页只适用于正式模式');
+  let perSourceLimit = 10;
+  if (searchMode === 'formal' && stopMode === 'end') {
+    perSourceLimit = null;
+  } else if (searchMode === 'formal') {
+    if (typeof raw.perSourceLimit === 'boolean') throw new Error('每来源检索数量必须为 1–1000 的整数');
+    perSourceLimit = raw.perSourceLimit == null ? 100 : integer(raw.perSourceLimit, '每来源检索数量', 1, 1000);
+  }
+  const limit = searchMode ? 10 : raw.limit == null ? 10 : Number(raw.limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 10) throw new Error('首批检索数量必须为 1–10');
   const templates = object(raw.templates, '模板配置');
   return {
     version: 2, topic, query, sources,
-    sourceQueries: sourceQueriesConfig(raw.sourceQueries, sources),
     publicationYearFrom, publicationYearTo,
     geography: string(raw.geography, '地域', 200),
     language: string(raw.language, '语言', 100),
     studyTypes: list(raw.studyTypes, '研究类型'),
     inclusion: list(raw.inclusion, '纳入规则'),
     exclusion: list(raw.exclusion, '排除规则'),
-    targetFields: list(raw.targetFields, '目标字段'),
+    targetFields: list(raw.targetFields, '目标字段', MAX_FIELD_DEFINITIONS),
     limit,
-    batch: batchConfig(raw.batch, limit),
+    ...(searchMode ? { searchMode, perSourceLimit, ...(stopMode ? { stopMode } : {}) } : {}),
+    sourceQueries: sourceQueries(raw.sourceQueries),
+    batch: batchConfig(raw.batch, limit, !!searchMode),
     fieldDefinitions: fieldDefinitions(raw.fieldDefinitions),
     templates: { literature: templatePath(templates.literature, '文献模板'), parameters: templatePath(templates.parameters, '参数模板') },
     fulltext: fulltextConfig(raw.fulltext),
     extraction: extractionConfig(raw.extraction),
-    limits: limitsConfig(raw.limits)
+    limits: limitsConfig(raw.limits, { sources, searchMode, perSourceLimit, stopMode })
   };
 }
 
-module.exports = { normalizeConfig, DEFAULT_LIMITS };
+module.exports = { normalizeConfig, DEFAULT_LIMITS, MAX_FIELD_DEFINITIONS, discoverBudget };

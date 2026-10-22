@@ -1,0 +1,2234 @@
+{
+  "paper_id": "PMID-007",
+  "source_pdf": "PMID-007.txt",
+  "status": "partial",
+  "classification_reason": "正文报告了肉鸡热应激与异喹啉生物碱干预实验的温湿度、实验设计及生长、血液和基因表达数值，可纳入提取，但原始PDF缺失且补充材料待核查。",
+  "rows": [
+    {
+      "row_id": "PMID-007-R001",
+      "field": "strain",
+      "value_raw": "Ross 308",
+      "unit_raw": "",
+      "value_normalized": "Ross 308",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Materials and methods > Animals and Experimental Design"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R002",
+      "field": "sex",
+      "value_raw": "male",
+      "unit_raw": "",
+      "value_normalized": "male",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Materials and methods > Animals and Experimental Design"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R003",
+      "field": "enrollment_age",
+      "value_raw": "0-day-old",
+      "unit_raw": "day",
+      "value_normalized": "0-day-old",
+      "unit_normalized": "day",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Materials and methods > Animals and Experimental Design"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R004",
+      "field": "exposure_age",
+      "value_raw": "At day 14 ... until day 42",
+      "unit_raw": "day",
+      "value_normalized": "At day 14 ... until day 42",
+      "unit_normalized": "day",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；温度分组及暴露时间"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R005",
+      "field": "additive",
+      "value_raw": "100 ppm IQ (Sangrovit Extra)",
+      "unit_raw": "ppm",
+      "value_normalized": "100 ppm IQ (Sangrovit Extra)",
+      "unit_normalized": "ppm",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；IQ日粮组"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R006",
+      "field": "additive",
+      "value_raw": "control diet without IQ",
+      "unit_raw": "",
+      "value_normalized": "control diet without IQ",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；Control日粮组"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R007",
+      "field": "measured_temperature",
+      "value_raw": "21.1–24.7 [average 22.4]",
+      "unit_raw": "°C",
+      "value_normalized": "21.1–24.7 [average 22.4]",
+      "unit_normalized": "°C",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；TN环境报告温度"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R008",
+      "field": "measured_temperature",
+      "value_raw": "30.0–33.3 [average 33.0]",
+      "unit_raw": "°C",
+      "value_normalized": "30.0–33.3 [average 33.0]",
+      "unit_normalized": "°C",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；HS环境报告温度"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R009",
+      "field": "humidity",
+      "value_raw": "35–52",
+      "unit_raw": "% RH",
+      "value_normalized": "35–52",
+      "unit_normalized": "% RH",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；TN"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R010",
+      "field": "humidity",
+      "value_raw": "52–74",
+      "unit_raw": "% RH",
+      "value_normalized": "52–74",
+      "unit_normalized": "% RH",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；HS"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R011",
+      "field": "exposure_pattern",
+      "value_raw": "constant HS conditions",
+      "unit_raw": "",
+      "value_normalized": "constant HS conditions",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；HS"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R012",
+      "field": "independent_replicates",
+      "value_raw": 6,
+      "unit_raw": "replicates per treatment group",
+      "value_normalized": 6,
+      "unit_normalized": "replicates per treatment group",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；各处理组；温度处理独立性待核查"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R013",
+      "field": "birds_per_replicate",
+      "value_raw": "15",
+      "unit_raw": "birds per replicate",
+      "value_normalized": "15",
+      "unit_normalized": "birds per replicate",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design；各处理组"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R014",
+      "field": "housing",
+      "value_raw": "15 birds per replicate reared on a 1.2 m2 floor; 23L:1D",
+      "unit_raw": "",
+      "value_normalized": "15 birds per replicate reared on a 1.2 m2 floor; 23L:1D",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R015",
+      "field": "feeding_control",
+      "value_raw": "ad libitum access to water and feed",
+      "unit_raw": "",
+      "value_normalized": "ad libitum access to water and feed",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Animals and Experimental Design"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R016",
+      "field": "result_sample_size",
+      "value_raw": "6 replicates (15 birds per replicate)",
+      "unit_raw": "",
+      "value_normalized": "6 replicates (15 birds per replicate)",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2脚注；生长性能结果"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R017",
+      "field": "result_sample_size",
+      "value_raw": "6 individual birds",
+      "unit_raw": "birds",
+      "value_normalized": "6 individual birds",
+      "unit_normalized": "birds",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Statistical Analysis；血液指标及mRNA结果"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R018",
+      "field": "statistic_type",
+      "value_raw": "mean",
+      "unit_raw": "",
+      "value_normalized": "mean",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Statistical Analysis；Tables 2–4"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R019",
+      "field": "variation_type",
+      "value_raw": "SEM",
+      "unit_raw": "",
+      "value_normalized": "SEM",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Tables 2–4；变异列标题"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R020",
+      "field": "outcome_definition",
+      "value_raw": "ratio of the target mRNA to 18s ribosomal RNA",
+      "unit_raw": "",
+      "value_normalized": "ratio of the target mRNA to 18s ribosomal RNA",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Quantification of mRNA Expression by Using Real-Time PCR"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R021",
+      "field": "original_value",
+      "value_raw": "530",
+      "unit_raw": "g",
+      "value_normalized": "530",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 0–14；BW；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R022",
+      "field": "original_value",
+      "value_raw": "516",
+      "unit_raw": "g",
+      "value_normalized": "516",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 0–14；BW；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R023",
+      "field": "original_value",
+      "value_raw": "487",
+      "unit_raw": "g",
+      "value_normalized": "487",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 0–14；BWG；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R024",
+      "field": "original_value",
+      "value_raw": "474",
+      "unit_raw": "g",
+      "value_normalized": "474",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 0–14；BWG；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R025",
+      "field": "original_value",
+      "value_raw": "950",
+      "unit_raw": "g",
+      "value_normalized": "950",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BW at day 21；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R026",
+      "field": "original_value",
+      "value_raw": "973",
+      "unit_raw": "g",
+      "value_normalized": "973",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BW at day 21；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R027",
+      "field": "original_value",
+      "value_raw": "855",
+      "unit_raw": "g",
+      "value_normalized": "855",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BW at day 21；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R028",
+      "field": "original_value",
+      "value_raw": "861",
+      "unit_raw": "g",
+      "value_normalized": "861",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BW at day 21；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R029",
+      "field": "original_value",
+      "value_raw": "429",
+      "unit_raw": "g",
+      "value_normalized": "429",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BWG；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R030",
+      "field": "original_value",
+      "value_raw": "465",
+      "unit_raw": "g",
+      "value_normalized": "465",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BWG；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R031",
+      "field": "original_value",
+      "value_raw": "316",
+      "unit_raw": "g",
+      "value_normalized": "316",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BWG；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R032",
+      "field": "original_value",
+      "value_raw": "336",
+      "unit_raw": "g",
+      "value_normalized": "336",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BWG；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R033",
+      "field": "original_value",
+      "value_raw": "668",
+      "unit_raw": "g",
+      "value_normalized": "668",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FI；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R034",
+      "field": "original_value",
+      "value_raw": "696",
+      "unit_raw": "g",
+      "value_normalized": "696",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FI；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R035",
+      "field": "original_value",
+      "value_raw": "591",
+      "unit_raw": "g",
+      "value_normalized": "591",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FI；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R036",
+      "field": "original_value",
+      "value_raw": "625",
+      "unit_raw": "g",
+      "value_normalized": "625",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FI；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R037",
+      "field": "original_value",
+      "value_raw": "1.46",
+      "unit_raw": "g/g",
+      "value_normalized": "1.46",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FCR；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R038",
+      "field": "original_value",
+      "value_raw": "1.40",
+      "unit_raw": "g/g",
+      "value_normalized": "1.40",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FCR；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R039",
+      "field": "original_value",
+      "value_raw": "1.84",
+      "unit_raw": "g/g",
+      "value_normalized": "1.84",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FCR；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R040",
+      "field": "original_value",
+      "value_raw": "1.84",
+      "unit_raw": "g/g",
+      "value_normalized": "1.84",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FCR；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R041",
+      "field": "original_value",
+      "value_raw": "3,031a",
+      "unit_raw": "g",
+      "value_normalized": "3,031a",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BW at day 42；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R042",
+      "field": "original_value",
+      "value_raw": "3,114a",
+      "unit_raw": "g",
+      "value_normalized": "3,114a",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BW at day 42；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R043",
+      "field": "original_value",
+      "value_raw": "2,428c",
+      "unit_raw": "g",
+      "value_normalized": "2,428c",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BW at day 42；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R044",
+      "field": "original_value",
+      "value_raw": "2,647b",
+      "unit_raw": "g",
+      "value_normalized": "2,647b",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BW at day 42；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R045",
+      "field": "original_value",
+      "value_raw": "2,081a",
+      "unit_raw": "g",
+      "value_normalized": "2,081a",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BWG；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R046",
+      "field": "original_value",
+      "value_raw": "2,140a",
+      "unit_raw": "g",
+      "value_normalized": "2,140a",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BWG；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R047",
+      "field": "original_value",
+      "value_raw": "1,572c",
+      "unit_raw": "g",
+      "value_normalized": "1,572c",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BWG；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R048",
+      "field": "original_value",
+      "value_raw": "1,785b",
+      "unit_raw": "g",
+      "value_normalized": "1,785b",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BWG；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R049",
+      "field": "original_value",
+      "value_raw": "4,059",
+      "unit_raw": "g",
+      "value_normalized": "4,059",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FI；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R050",
+      "field": "original_value",
+      "value_raw": "4,150",
+      "unit_raw": "g",
+      "value_normalized": "4,150",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FI；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R051",
+      "field": "original_value",
+      "value_raw": "3,186",
+      "unit_raw": "g",
+      "value_normalized": "3,186",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FI；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R052",
+      "field": "original_value",
+      "value_raw": "3,383",
+      "unit_raw": "g",
+      "value_normalized": "3,383",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FI；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R053",
+      "field": "original_value",
+      "value_raw": "1.95",
+      "unit_raw": "g/g",
+      "value_normalized": "1.95",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FCR；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R054",
+      "field": "original_value",
+      "value_raw": "1.94",
+      "unit_raw": "g/g",
+      "value_normalized": "1.94",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FCR；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R055",
+      "field": "original_value",
+      "value_raw": "2.03",
+      "unit_raw": "g/g",
+      "value_normalized": "2.03",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FCR；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R056",
+      "field": "original_value",
+      "value_raw": "1.96",
+      "unit_raw": "g/g",
+      "value_normalized": "1.96",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FCR；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R057",
+      "field": "original_value",
+      "value_raw": "2,510a",
+      "unit_raw": "g",
+      "value_normalized": "2,510a",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；BWG；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R058",
+      "field": "original_value",
+      "value_raw": "2,606a",
+      "unit_raw": "g",
+      "value_normalized": "2,606a",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；BWG；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R059",
+      "field": "original_value",
+      "value_raw": "1,889c",
+      "unit_raw": "g",
+      "value_normalized": "1,889c",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；BWG；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R060",
+      "field": "original_value",
+      "value_raw": "2,121b",
+      "unit_raw": "g",
+      "value_normalized": "2,121b",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；BWG；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R061",
+      "field": "original_value",
+      "value_raw": "4,726",
+      "unit_raw": "g",
+      "value_normalized": "4,726",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FI；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R062",
+      "field": "original_value",
+      "value_raw": "4,846",
+      "unit_raw": "g",
+      "value_normalized": "4,846",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FI；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R063",
+      "field": "original_value",
+      "value_raw": "3,777",
+      "unit_raw": "g",
+      "value_normalized": "3,777",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FI；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R064",
+      "field": "original_value",
+      "value_raw": "4,008",
+      "unit_raw": "g",
+      "value_normalized": "4,008",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FI；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R065",
+      "field": "original_value",
+      "value_raw": "1.88b,c",
+      "unit_raw": "g/g",
+      "value_normalized": "1.88b,c",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FCR；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R066",
+      "field": "original_value",
+      "value_raw": "1.86c",
+      "unit_raw": "g/g",
+      "value_normalized": "1.86c",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FCR；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R067",
+      "field": "original_value",
+      "value_raw": "2.00a",
+      "unit_raw": "g/g",
+      "value_normalized": "2.00a",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FCR；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R068",
+      "field": "original_value",
+      "value_raw": "1.89b",
+      "unit_raw": "g/g",
+      "value_normalized": "1.89b",
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FCR；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R069",
+      "field": "variation_value",
+      "value_raw": 3.7,
+      "unit_raw": "g",
+      "value_normalized": 3.7,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 0–14；BW；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R070",
+      "field": "variation_value",
+      "value_raw": 3.1,
+      "unit_raw": "g",
+      "value_normalized": 3.1,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 0–14；BWG；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R071",
+      "field": "variation_value",
+      "value_raw": 12.7,
+      "unit_raw": "g",
+      "value_normalized": 12.7,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BW at day 21；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R072",
+      "field": "variation_value",
+      "value_raw": 13.7,
+      "unit_raw": "g",
+      "value_normalized": 13.7,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；BWG；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R073",
+      "field": "variation_value",
+      "value_raw": 11.2,
+      "unit_raw": "g",
+      "value_normalized": 11.2,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FI；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R074",
+      "field": "variation_value",
+      "value_raw": 0.044,
+      "unit_raw": "g/g",
+      "value_normalized": 0.044,
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–21；FCR；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R075",
+      "field": "variation_value",
+      "value_raw": 25.2,
+      "unit_raw": "g",
+      "value_normalized": 25.2,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BW at day 42；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R076",
+      "field": "variation_value",
+      "value_raw": 36.4,
+      "unit_raw": "g",
+      "value_normalized": 36.4,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；BWG；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R077",
+      "field": "variation_value",
+      "value_raw": 47.5,
+      "unit_raw": "g",
+      "value_normalized": 47.5,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FI；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R078",
+      "field": "variation_value",
+      "value_raw": 0.024,
+      "unit_raw": "g/g",
+      "value_normalized": 0.024,
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 22–42；FCR；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R079",
+      "field": "variation_value",
+      "value_raw": 25.7,
+      "unit_raw": "g",
+      "value_normalized": 25.7,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；BWG；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R080",
+      "field": "variation_value",
+      "value_raw": 49.5,
+      "unit_raw": "g",
+      "value_normalized": 49.5,
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FI；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R081",
+      "field": "variation_value",
+      "value_raw": 0.015,
+      "unit_raw": "g/g",
+      "value_normalized": 0.015,
+      "unit_normalized": "g/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 2；Days 15–42；FCR；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R082",
+      "field": "original_value",
+      "value_raw": "25.9b",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "25.9b",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；TBARS；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R083",
+      "field": "original_value",
+      "value_raw": "26.2b",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "26.2b",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；TBARS；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R084",
+      "field": "original_value",
+      "value_raw": "40.0a",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "40.0a",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；TBARS；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R085",
+      "field": "original_value",
+      "value_raw": "31.2b",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "31.2b",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；TBARS；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R086",
+      "field": "original_value",
+      "value_raw": "25.2b,c",
+      "unit_raw": "ng/mL",
+      "value_normalized": "25.2b,c",
+      "unit_normalized": "ng/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；CORT；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R087",
+      "field": "original_value",
+      "value_raw": "24.0c",
+      "unit_raw": "ng/mL",
+      "value_normalized": "24.0c",
+      "unit_normalized": "ng/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；CORT；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R088",
+      "field": "original_value",
+      "value_raw": "34.7a",
+      "unit_raw": "ng/mL",
+      "value_normalized": "34.7a",
+      "unit_normalized": "ng/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；CORT；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R089",
+      "field": "original_value",
+      "value_raw": "28.4b",
+      "unit_raw": "ng/mL",
+      "value_normalized": "28.4b",
+      "unit_normalized": "ng/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；CORT；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R090",
+      "field": "original_value",
+      "value_raw": "83.4b,c",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "83.4b,c",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；UA；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R091",
+      "field": "original_value",
+      "value_raw": "81.1c",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "81.1c",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；UA；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R092",
+      "field": "original_value",
+      "value_raw": "110.1a",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "110.1a",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；UA；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R093",
+      "field": "original_value",
+      "value_raw": "90.3b",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "90.3b",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；UA；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R094",
+      "field": "original_value",
+      "value_raw": "18.1",
+      "unit_raw": "mg/mL",
+      "value_normalized": "18.1",
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Albumin；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R095",
+      "field": "original_value",
+      "value_raw": "19.1",
+      "unit_raw": "mg/mL",
+      "value_normalized": "19.1",
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Albumin；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R096",
+      "field": "original_value",
+      "value_raw": "15.8",
+      "unit_raw": "mg/mL",
+      "value_normalized": "15.8",
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Albumin；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R097",
+      "field": "original_value",
+      "value_raw": "17.3",
+      "unit_raw": "mg/mL",
+      "value_normalized": "17.3",
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Albumin；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R098",
+      "field": "original_value",
+      "value_raw": "30.0a",
+      "unit_raw": "mg/mL",
+      "value_normalized": "30.0a",
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Total protein；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R099",
+      "field": "original_value",
+      "value_raw": "31.3a",
+      "unit_raw": "mg/mL",
+      "value_normalized": "31.3a",
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Total protein；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R100",
+      "field": "original_value",
+      "value_raw": "24.8b",
+      "unit_raw": "mg/mL",
+      "value_normalized": "24.8b",
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Total protein；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R101",
+      "field": "original_value",
+      "value_raw": "28.7a",
+      "unit_raw": "mg/mL",
+      "value_normalized": "28.7a",
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Total protein；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R102",
+      "field": "original_value",
+      "value_raw": "0.15b,c",
+      "unit_raw": "μg/mL",
+      "value_normalized": "0.15b,c",
+      "unit_normalized": "μg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；FITC-d；Thermoneutral > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R103",
+      "field": "original_value",
+      "value_raw": "0.13c",
+      "unit_raw": "μg/mL",
+      "value_normalized": "0.13c",
+      "unit_normalized": "μg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；FITC-d；Thermoneutral > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R104",
+      "field": "original_value",
+      "value_raw": "0.23a",
+      "unit_raw": "μg/mL",
+      "value_normalized": "0.23a",
+      "unit_normalized": "μg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；FITC-d；Heat stress > Control"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R105",
+      "field": "original_value",
+      "value_raw": "0.17b",
+      "unit_raw": "μg/mL",
+      "value_normalized": "0.17b",
+      "unit_normalized": "μg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；FITC-d；Heat stress > IQ"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R106",
+      "field": "variation_value",
+      "value_raw": 1.9,
+      "unit_raw": "nmol/mL",
+      "value_normalized": 1.9,
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；TBARS；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R107",
+      "field": "variation_value",
+      "value_raw": 2.41,
+      "unit_raw": "ng/mL",
+      "value_normalized": 2.41,
+      "unit_normalized": "ng/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；CORT；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R108",
+      "field": "variation_value",
+      "value_raw": 3.9,
+      "unit_raw": "nmol/mL",
+      "value_normalized": 3.9,
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；UA；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R109",
+      "field": "variation_value",
+      "value_raw": 1.25,
+      "unit_raw": "mg/mL",
+      "value_normalized": 1.25,
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Albumin；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R110",
+      "field": "variation_value",
+      "value_raw": 0.87,
+      "unit_raw": "mg/mL",
+      "value_normalized": 0.87,
+      "unit_normalized": "mg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；Total protein；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R111",
+      "field": "variation_value",
+      "value_raw": 0.009,
+      "unit_raw": "μg/mL",
+      "value_normalized": 0.009,
+      "unit_normalized": "μg/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 3；FITC-d；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R112",
+      "field": "original_value",
+      "value_raw": "1.00",
+      "unit_raw": "",
+      "value_normalized": "1.00",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR2；Thermoneutral > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R113",
+      "field": "original_value",
+      "value_raw": "0.93",
+      "unit_raw": "",
+      "value_normalized": "0.93",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR2；Thermoneutral > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R114",
+      "field": "original_value",
+      "value_raw": "1.36",
+      "unit_raw": "",
+      "value_normalized": "1.36",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR2；Heat stress > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R115",
+      "field": "original_value",
+      "value_raw": "1.30",
+      "unit_raw": "",
+      "value_normalized": "1.30",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR2；Heat stress > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R116",
+      "field": "original_value",
+      "value_raw": "1.00",
+      "unit_raw": "",
+      "value_normalized": "1.00",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR4；Thermoneutral > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R117",
+      "field": "original_value",
+      "value_raw": "0.90",
+      "unit_raw": "",
+      "value_normalized": "0.90",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR4；Thermoneutral > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R118",
+      "field": "original_value",
+      "value_raw": "1.39",
+      "unit_raw": "",
+      "value_normalized": "1.39",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR4；Heat stress > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R119",
+      "field": "original_value",
+      "value_raw": "1.22",
+      "unit_raw": "",
+      "value_normalized": "1.22",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR4；Heat stress > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R120",
+      "field": "original_value",
+      "value_raw": "1.00",
+      "unit_raw": "",
+      "value_normalized": "1.00",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IFN-γ；Thermoneutral > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R121",
+      "field": "original_value",
+      "value_raw": "0.94",
+      "unit_raw": "",
+      "value_normalized": "0.94",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IFN-γ；Thermoneutral > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R122",
+      "field": "original_value",
+      "value_raw": "1.17",
+      "unit_raw": "",
+      "value_normalized": "1.17",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IFN-γ；Heat stress > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R123",
+      "field": "original_value",
+      "value_raw": "0.96",
+      "unit_raw": "",
+      "value_normalized": "0.96",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IFN-γ；Heat stress > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R124",
+      "field": "original_value",
+      "value_raw": "1.00",
+      "unit_raw": "",
+      "value_normalized": "1.00",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-1β；Thermoneutral > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R125",
+      "field": "original_value",
+      "value_raw": "1.03",
+      "unit_raw": "",
+      "value_normalized": "1.03",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-1β；Thermoneutral > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R126",
+      "field": "original_value",
+      "value_raw": "1.23",
+      "unit_raw": "",
+      "value_normalized": "1.23",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-1β；Heat stress > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R127",
+      "field": "original_value",
+      "value_raw": "1.10",
+      "unit_raw": "",
+      "value_normalized": "1.10",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-1β；Heat stress > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R128",
+      "field": "original_value",
+      "value_raw": "1.00b",
+      "unit_raw": "",
+      "value_normalized": "1.00b",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-6；Thermoneutral > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R129",
+      "field": "original_value",
+      "value_raw": "0.83b",
+      "unit_raw": "",
+      "value_normalized": "0.83b",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-6；Thermoneutral > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R130",
+      "field": "original_value",
+      "value_raw": "1.54a",
+      "unit_raw": "",
+      "value_normalized": "1.54a",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-6；Heat stress > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R131",
+      "field": "original_value",
+      "value_raw": "1.05b",
+      "unit_raw": "",
+      "value_normalized": "1.05b",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-6；Heat stress > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R132",
+      "field": "original_value",
+      "value_raw": "1.00b",
+      "unit_raw": "",
+      "value_normalized": "1.00b",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TL1A；Thermoneutral > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R133",
+      "field": "original_value",
+      "value_raw": "0.94b",
+      "unit_raw": "",
+      "value_normalized": "0.94b",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TL1A；Thermoneutral > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R134",
+      "field": "original_value",
+      "value_raw": "1.39a",
+      "unit_raw": "",
+      "value_normalized": "1.39a",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TL1A；Heat stress > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R135",
+      "field": "original_value",
+      "value_raw": "0.98b",
+      "unit_raw": "",
+      "value_normalized": "0.98b",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TL1A；Heat stress > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R136",
+      "field": "original_value",
+      "value_raw": "1.00",
+      "unit_raw": "",
+      "value_normalized": "1.00",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；NOX4；Thermoneutral > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R137",
+      "field": "original_value",
+      "value_raw": "1.08",
+      "unit_raw": "",
+      "value_normalized": "1.08",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；NOX4；Thermoneutral > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R138",
+      "field": "original_value",
+      "value_raw": "1.28",
+      "unit_raw": "",
+      "value_normalized": "1.28",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；NOX4；Heat stress > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R139",
+      "field": "original_value",
+      "value_raw": "1.12",
+      "unit_raw": "",
+      "value_normalized": "1.12",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；NOX4；Heat stress > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R140",
+      "field": "original_value",
+      "value_raw": "1.00b,c",
+      "unit_raw": "",
+      "value_normalized": "1.00b,c",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；iNOS；Thermoneutral > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R141",
+      "field": "original_value",
+      "value_raw": "0.76c",
+      "unit_raw": "",
+      "value_normalized": "0.76c",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；iNOS；Thermoneutral > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R142",
+      "field": "original_value",
+      "value_raw": "1.35a",
+      "unit_raw": "",
+      "value_normalized": "1.35a",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；iNOS；Heat stress > Control；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R143",
+      "field": "original_value",
+      "value_raw": "0.86b",
+      "unit_raw": "",
+      "value_normalized": "0.86b",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；iNOS；Heat stress > IQ；at slaughter"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R144",
+      "field": "variation_value",
+      "value_raw": 0.087,
+      "unit_raw": "",
+      "value_normalized": 0.087,
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR2；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R145",
+      "field": "variation_value",
+      "value_raw": 0.095,
+      "unit_raw": "",
+      "value_normalized": 0.095,
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TLR4；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R146",
+      "field": "variation_value",
+      "value_raw": 0.106,
+      "unit_raw": "",
+      "value_normalized": 0.106,
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IFN-γ；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R147",
+      "field": "variation_value",
+      "value_raw": 0.072,
+      "unit_raw": "",
+      "value_normalized": 0.072,
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-1β；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R148",
+      "field": "variation_value",
+      "value_raw": 0.104,
+      "unit_raw": "",
+      "value_normalized": 0.104,
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；IL-6；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R149",
+      "field": "variation_value",
+      "value_raw": 0.076,
+      "unit_raw": "",
+      "value_normalized": 0.076,
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；TL1A；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R150",
+      "field": "variation_value",
+      "value_raw": 0.082,
+      "unit_raw": "",
+      "value_normalized": 0.082,
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；NOX4；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R151",
+      "field": "variation_value",
+      "value_raw": 0.092,
+      "unit_raw": "",
+      "value_normalized": 0.092,
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 4；iNOS；SEM列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R152",
+      "field": "diet",
+      "value_raw": "Corn 49.6; Sorghum 8.5; Soybean meal 25.6; Corn gluten meal 3.6; Fish meal (CP 65%) 5.1; L-Lysine hydrochloride 0.2; DL-Methionine 0.2; l-Arginine -; Animal fat 4.60; Calcium phosphate 1.15; Calcium carbonate 0.95; Salt 0.30; Vitamin mix 0.10; Mineral mix 0.10",
+      "unit_raw": "%",
+      "value_normalized": "Corn 49.6; Sorghum 8.5; Soybean meal 25.6; Corn gluten meal 3.6; Fish meal (CP 65%) 5.1; L-Lysine hydrochloride 0.2; DL-Methionine 0.2; l-Arginine -; Animal fat 4.60; Calcium phosphate 1.15; Calcium carbonate 0.95; Salt 0.30; Vitamin mix 0.10; Mineral mix 0.10",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 1；Ingredient (%)；Grower (0–21 d)列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R153",
+      "field": "diet",
+      "value_raw": "Corn 60.4; Sorghum 5.1; Soybean meal 20.0; Corn gluten meal 4.0; Fish meal (CP 65%) 3.0; L-Lysine hydrochloride 0.1; DL-Methionine 0.2; l-Arginine 0.1; Animal fat 4.45; Calcium phosphate 1.15; Calcium carbonate 0.95; Salt 0.30; Vitamin mix 0.15; Mineral mix 0.10",
+      "unit_raw": "%",
+      "value_normalized": "Corn 60.4; Sorghum 5.1; Soybean meal 20.0; Corn gluten meal 4.0; Fish meal (CP 65%) 3.0; L-Lysine hydrochloride 0.1; DL-Methionine 0.2; l-Arginine 0.1; Animal fat 4.45; Calcium phosphate 1.15; Calcium carbonate 0.95; Salt 0.30; Vitamin mix 0.15; Mineral mix 0.10",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 1；Ingredient (%)；Finisher (22–42 d)列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R154",
+      "field": "diet",
+      "value_raw": "CP 22.0",
+      "unit_raw": "%",
+      "value_normalized": "CP 22.0",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 1；Nutritional values > CP；Grower (0–21 d)"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R155",
+      "field": "diet",
+      "value_raw": "CP 19.0",
+      "unit_raw": "%",
+      "value_normalized": "CP 19.0",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 1；Nutritional values > CP；Finisher (22–42 d)"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R156",
+      "field": "diet",
+      "value_raw": "ME 3.20",
+      "unit_raw": "kcal/kg",
+      "value_normalized": "ME 3.20",
+      "unit_normalized": "kcal/kg",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 1；Nutritional values > ME；Grower (0–21 d)"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-007-R157",
+      "field": "diet",
+      "value_raw": "ME 3.25",
+      "unit_raw": "kcal/kg",
+      "value_normalized": "ME 3.25",
+      "unit_normalized": "kcal/kg",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-007.txt；Table 1；Nutritional values > ME；Finisher (22–42 d)"
+      },
+      "conditions": {},
+      "provenance": ""
+    }
+  ],
+  "warnings": [
+    "材料状态：main_pdf_status=missing；未核查原始PDF。supplement_check.status=unknown，页面错误或404导致补充材料检查暂停；未提供可读补充材料，不得视为无补充材料。",
+    "正文范围：上方正文标记chars=24271、truncated=false，而材料清单中的main-html读取结果为partial且摘录截至12000字符。Table 3、Table 4等后半部分取自本次直接提供的上方正文，未访问本地原文件或外部网页。",
+    "record_id、study_id、experiment_id：未提供原文编号或已确认编号分配规则，未自行生成；row_id仅为本输出的行编号。related_reports及跨报告重复关系待核查。",
+    "authors、publication_year、publication_source、fulltext_url：当前正文未提供可核验的完整题录信息；未从DOI年份片段或URL推断。",
+    "set_temperature：正文报告环境温度范围及平均值，未单独给出设定值；已按环境报告值列入measured_temperature，但测温设备、频次和采样方法未说明，实测口径待原件核查。",
+    "daily_exposure_duration、total_exposure_duration：仅报告constant HS及day 14至day 42，未另报每日小时数或总天数；未自行换算。exposure_term未见作者作短期或长期分类。",
+    "thi_value、thi_name、thi_definition：所提供正文未报告；未根据温湿度自行计算。",
+    "experimental_unit、independent_replicates：作者报告每组6个重复，每重复15只，生长结果按重复分析；环境房间或环境舱数量及温度处理的独立分配未说明，不能确认6个重复均为温度处理的独立实验单位。",
+    "birds_per_group：正文未直接报告各最终处理组总鸡数；未用6×15反推。",
+    "measurement_age：Table 2明确给出生长结果时间段及部分BW测量日龄；Table 4仅写at slaughter，Table 3未明确写采血日龄，未默认所有血液和mRNA结果均在42日龄测量。",
+    "result_sample_size：统计方法明确血液和mRNA为6只鸡；Tables 3、4脚注写作“6 individual birds from each replicate per group”，措辞存在歧义，结合方法保留6只，但仍需回原件核查。",
+    "outcome_definition：FCR仅展开为feed conversion ratio，未明确公式和分母口径；不自行计算或更正。Table 2的Days 15–21 FCR与FI/BWG表面不一致，原值照录。",
+    "来源冲突：Results称HS的FCR较TN低，而Table 2和Discussion显示HS的FCR较高；以表格数值记录，文字方向待核查。",
+    "来源冲突：IL-1β的P=0.049在结果文字中归于IQ，而Table 4位于Treatment列；IL-6的HS效应P值文字为0.007、表格为0.002；未擅自裁定。",
+    "diet：Table 1的ME标注kcal/kg但值为3.20和3.25，数值与单位组合待核查；保留原文，未改成Mcal/kg或乘以1000。维生素及矿物质预混料脚注配方尚未逐项拆行。",
+    "Table 4未列数值单位；方法称target mRNA/18s ribosomal RNA，但表中TN Control均为1.00，未说明额外归一化步骤；unit_raw及unit_normalized留空，未擅自标为fold change。",
+    "表内a、b、c为显著性上标，按提供文本保留在original_value中；同一指标行不同字母表示P<0.05。SEM按每个指标行单独记录，未当作各组SD或换算。",
+    "ci_lower、ci_upper、confidence_level：未见报告；standardized_value、standardized_unit、conversion_notes：统一单位方案未确认，未作换算。",
+    "condition_keys为空，所有conditions均为空对象；处理组、指标、时期及来源通过evidence.where定位。treatment_id、control_id、outcome等尚未建立独立的结构化结果关联记录，未虚构处理编号。",
+    "eligibility、eligibility_reason：可确认研究包含肉鸡热应激实验，但未提供更完整的研究资格规则，最终资格判断待确认。",
+    "source_filename、source_section、source_locator和source_evidence通过各行evidence提供；网页文本无可核验PDF页码，未补写page。",
+    "extraction_status为部分提取；verification_status未进行人工回原件核查。instructions_version提供为extract-contract-v1，但其是否同时作为rule_version尚待确认。",
+    "Figure 1仅提供机制图说明，无可提取的数值或标定数字化数据；未作肉眼读图。表格文本直接取值不使用figure-extracted标记。",
+    "仅整理本次提供的文字记录；未执行联网、文件读取、数值计算或文件生成操作。"
+  ],
+  "skip_reason": "",
+  "publication_note": "Source quotations omitted for repository distribution; verify against the linked originals. This snapshot does not grant scientific approval."
+}

@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "packaged_on": "2026-10-22",
+  "source_task_id": "13fd91ea-3bbd-449c-a799-2d09c0f1ef1b",
+  "source_status": "completed",
+  "source_stage": "completed",
+  "source_until": "export",
+  "source_counters": {
+    "candidates": 10,
+    "uniqueGroups": 10,
+    "fulltextFetched": 3,
+    "fulltextPdf": 0,
+    "fulltextHtml": 3,
+    "fulltextAbstract": 1,
+    "fulltextUnavailable": 6,
+    "fulltextAttention": 0,
+    "fulltextPending": 0,
+    "fulltextSkipped": 6,
+    "materialsIncomplete": 10,
+    "extractedPapers": 3,
+    "parameterRows": 259
+  },
+  "confirmed_fields": 75,
+  "extracted_rows_by_paper": {
+    "PMID-002": 8,
+    "PMID-006": 94,
+    "PMID-007": 157
+  },
+  "manual_validation": "not established by this package; candidate screening is still pending_review and exported rows retain automatic-check status",
+  "publication_transformations": [
+    "Candidate snippets and browser/session artifacts omitted; only public bibliographic metadata included.",
+    "evidence_quote CSV column and evidence.quote JSON members omitted; evidence locations and public DOI/article links retained.",
+    "Full text, supplementary files, browser storage, input bundles, machine logs and original spreadsheets omitted.",
+    "run-config.snapshot.json preserves frozen source configuration, including historical operational prose.",
+    "reuse-config.json removes the first two historical operational inclusion lines and adds the source task's 75 confirmed field definitions; the recipient must review before running."
+  ],
+  "source_sha256": {
+    "run_config.json": "51202fd053213136e78c4ef6780dbdf1d0f52dd9313fcc291c025a83a556dc97",
+    "candidates.json": "68b2991ab547004586d5b9d2de084a8a977ac906f48a17911ba27d0c90b50f80",
+    "confirmations.json": "45f2b4552cc8a83ebcf9c483229ed8fc669eb813af5383f78062e766b4545057",
+    "fulltext/status.json": "b8f754c0b7ee6f0ea08379a6208e31d74bf00b9c6613b1bb3886116b3363ee06",
+    "fulltext/materials.json": "d08cd4be9bf567dce10110f6355606752ec0150accada64c7b00902a87e07e99",
+    "export/literature.csv": "c0ec1a45c95f505b82f01ce05001a72f3265ddd711fbf033a9c553e8f36035d7",
+    "export/parameters.csv": "356d7b330639e6a9ad5c5754a02bb5ae113e530647307e39f22109cd5e0add1b",
+    "validation/validation.json": "31045c889e17a8989f4ecae6fcb0d8711c1576fe71bc37de6098aff21f109069",
+    "extraction/check_report.json": "6919a21144bed5a2d01e58e95cb5b75539840890e9fd026d53fd1f9ceadf5c1e"
+  }
+}

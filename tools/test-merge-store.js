@@ -21,10 +21,15 @@ const download = store.addModule('下载数据');
 assert.equal(download.type, 'download-data');
 assert.equal(store.saveDoc(download.id, '来源与验收规则').status, 'draft');
 assert.equal(store.approveDoc(download.id), true);
+assert.equal(store.submitModule(download.id), false);
+assert.equal(store.approveModule(download.id).ok, false);
+store.markRun(download.id, { artifacts: [{ name: 'original.csv', size: 120 }] });
+assert.equal(store.submitModule(download.id), false);
+assert.equal(store.confirmRun(download.id), true);
 store.submitModule(download.id);
 const approved = store.approveModule(download.id);
 assert.equal(approved.ok, true);
-assert.equal(approved.created.type, 'clean-data');
+assert.equal(approved.created.type, 'calculation');
 assert.equal(store.getState().activeModuleId, approved.created.id);
 
 const snapshot = JSON.parse(JSON.stringify(store.getState()));
@@ -33,7 +38,7 @@ const restored = store.getState();
 assert.equal(restored.modules[0].type, 'download-data');
 assert.equal(restored.modules[0].doc.status, 'approved');
 assert.equal(restored.modules[0].status, 'approved');
-assert.equal(restored.modules[1].type, 'clean-data');
+assert.equal(restored.modules[1].type, 'calculation');
 
 const legacy = JSON.parse(JSON.stringify(snapshot));
 legacy.modules = [{

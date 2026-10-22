@@ -4,29 +4,43 @@
 
 const assert = require('node:assert/strict');
 const { SOURCES, listSources, isKnown, stateOf, executableSources, assertExecutable } = require('./literature-sources');
-const { normalizeConfig, DEFAULT_LIMITS } = require('./literature-config');
+const { normalizeConfig, DEFAULT_LIMITS, MAX_FIELD_DEFINITIONS } = require('./literature-config');
 
 const base = { topic: '气候变化与养殖', query: 'climate change aquaculture China', sources: ['google-scholar'], publicationYearFrom: 2000, publicationYearTo: 2026,
   geography: '中国', language: '', studyTypes: ['原始研究'], inclusion: [], exclusion: [], targetFields: ['产量'], limit: 10 };
 
 function main() {
-  // 注册表：不写死完整顺序（来源会随接入进展增加），只断言不变量。
-  assert.deepEqual(SOURCES.map(item => item.key).slice(0, 6),
-    ['google-scholar', 'pubmed', 'pmc', 'openalex', 'semantic-scholar', 'europe-pmc'],
-    '可执行来源排在前，人工来源在后');
-  assert.deepEqual(executableSources().map(item => item.key).sort(),
-    ['europe-pmc', 'google-scholar', 'openalex', 'pmc', 'pubmed', 'semantic-scholar'].sort());
+  // 注册表：浏览器六源 + 开放 API 四源都可执行；不写死完整顺序。
+  const EXPECTED_KEYS = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed',
+    'pmc', 'openalex', 'semantic-scholar', 'europe-pmc'];
+  for (const key of EXPECTED_KEYS) assert.ok(SOURCES.some(item => item.key === key), '已登记：' + key);
+  assert.deepEqual(executableSources().map(item => item.key).sort(), EXPECTED_KEYS.slice().sort(), '全部来源可执行');
   for (const source of SOURCES) {
     assert.ok(source.label, '每个来源都有显示名：' + source.key);
     assert.ok(source.idPrefix, '每个来源都有候选 id 前缀：' + source.key);
-    assert.ok(['executable', 'registered'].includes(source.state), 'state 合法：' + source.key);
+    assert.equal(source.state, 'executable', 'state 可执行：' + source.key);
   }
   assert.equal(SOURCES[0].adapter.kind, 'soc-script');
   assert.ok(SOURCES[0].adapter.script.endsWith('google_scholar_search.py'));
   assert.equal(stateOf('google-scholar'), 'executable');
-  assert.equal(stateOf('pubmed'), 'executable');
-  assert.equal(stateOf('openalex'), 'executable');
-  assert.equal(stateOf('cnki'), 'registered');
+  assert.equal(stateOf('cnki'), 'executable');
+  assert.equal(stateOf('web-of-science'), 'executable');
+  for (const key of ['cnki', 'web-of-science']) {
+    const adapter = SOURCES.find(item => item.key === key).adapter;
+    assert.equal(adapter.kind, 'browser-script');
+    assert.equal(adapter.script, 'tools/literature_browser.py');
+  }
+  for (const key of ['wanfang', 'scopus']) {
+    const source = SOURCES.find(item => item.key === key);
+    assert.equal(source.state, 'executable');
+    assert.deepEqual(source.adapter, { kind: 'browser-script', script: 'tools/literature_extra_sources.py' });
+  }
+  assert.deepEqual(SOURCES.find(item => item.key === 'pubmed').adapter, { kind: 'public-api', script: 'tools/literature_pubmed.py' });
+  for (const key of ['pmc', 'openalex', 'europe-pmc', 'semantic-scholar']) {
+    const source = SOURCES.find(item => item.key === key);
+    assert.equal(source.adapter.kind, 'open-api', '开放 API 适配器：' + key);
+    assert.ok(source.adapter.module, '开放 API 模块：' + key);
+  }
   assert.equal(stateOf('arxiv'), null);
   assert.ok(isKnown('pubmed'));
   assert.ok(!isKnown('arxiv'));
@@ -35,33 +49,50 @@ function main() {
   copy[0].state = 'mutated';
   assert.equal(SOURCES[0].state, 'executable', 'listSources 必须返回副本');
 
-  // 双层防线：拒绝文案逐字保持（设计 §7/§10）
-  assert.equal(assertExecutable(['google-scholar']), true);
-  assert.equal(assertExecutable(['google-scholar', 'pubmed', 'openalex']), true);
-  assert.throws(() => assertExecutable(['cnki', 'wanfang']),
-    error => error.message.startsWith('尚未接通以下检索来源：cnki、wanfang；请明确改为仅检索 Google Scholar，或等待相应连接器。'));
+  // 全部来源可执行；未知来源仍明确拒绝，不能静默换源。
+  assert.equal(assertExecutable(SOURCES.map(item => item.key)), true);
+  assert.throws(() => assertExecutable(['arxiv', 'unknown-source']),
+    error => error.message === '尚未接通以下检索来源：arxiv、unknown-source；请选择已接通来源，或等待相应连接器。');
 
   // normalizeConfig：12 字段校验文案不回归 + v2 可选字段
-  assert.throws(() => normalizeConfig({ ...base, topic: '' }), /请填写研究主题和 Google Scholar 检索式/);
+  assert.throws(() => normalizeConfig({ ...base, topic: '' }), /请填写研究主题和默认检索式/);
   assert.throws(() => normalizeConfig({ ...base, sources: [] }), /检索来源为空、重复或不受识别/);
   assert.throws(() => normalizeConfig({ ...base, sources: ['google-scholar', 'google-scholar'] }), /检索来源为空、重复或不受识别/);
   assert.throws(() => normalizeConfig({ ...base, sources: ['arxiv'] }), /检索来源为空、重复或不受识别/);
   assert.throws(() => normalizeConfig({ ...base, limit: 11 }), /首批检索数量必须为 1–10/);
   assert.throws(() => normalizeConfig({ ...base, publicationYearFrom: 1800 - 1 }), /发表起始年份无效/);
   assert.throws(() => normalizeConfig({ ...base, publicationYearFrom: 2026, publicationYearTo: 2000 }), /不能晚于/);
-  assert.throws(() => normalizeConfig({ ...base, sources: ['google-scholar', 'scopus'] }, { executable: true }), /尚未接通以下检索来源：scopus/);
+  assert.deepEqual(normalizeConfig({ ...base, sources: SOURCES.map(item => item.key) }, { executable: true }).sources, SOURCES.map(item => item.key), '六来源可同时进入执行链');
+  for (const source of SOURCES) assert.deepEqual(normalizeConfig({ ...base, sources: [source.key] }, { executable: true }).sources, [source.key], '每个来源也可独立选择');
   assert.deepEqual(normalizeConfig({ ...base, sources: ['google-scholar', 'scopus'] }).sources, ['google-scholar', 'scopus'], '非 executable 模式保持登记语义');
 
   const normalized = normalizeConfig(base);
   assert.equal(normalized.version, 2);
-  assert.deepEqual(Object.keys(normalized).slice(0, 5), ['version', 'topic', 'query', 'sources', 'sourceQueries']);
-  assert.deepEqual(normalized.sourceQueries, {}, '旧配置没有按源检索式时为空对象，行为不变');
+  assert.deepEqual(Object.keys(normalized).slice(0, 13),
+    ['version', 'topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language', 'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit']);
+  assert.deepEqual(normalized.sourceQueries, {}, '旧配置没有按源检索式时为空对象');
   assert.deepEqual(
     normalizeConfig({ ...base, sources: ['google-scholar', 'pubmed'], sourceQueries: { pubmed: '"soil organic carbon"[Title/Abstract]' } }).sourceQueries,
     { pubmed: '"soil organic carbon"[Title/Abstract]' });
-  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { pubmed: 'x' } }), /未启用的来源/);
-  assert.throws(() => normalizeConfig({ ...base, sources: ['pubmed'], sourceQueries: { pubmed: '   ' } }), /检索式为空/);
-  assert.throws(() => normalizeConfig({ ...base, sourceQueries: 'pubmed=x' }), /按源检索式必须是对象/);
+  const allQueries = Object.fromEntries(SOURCES.map(source => [source.key, ' ' + source.key + ' query ']));
+  assert.deepEqual(normalizeConfig({ ...base, sources: SOURCES.map(item => item.key), sourceQueries: allQueries }, { executable: true }).sourceQueries,
+    Object.fromEntries(SOURCES.map(source => [source.key, source.key + ' query'])), '每个来源的独立检索式保持并归一');
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: [] }), /分来源检索式必须是对象/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { arxiv: 'test' } }), /未知来源/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: ' ' } }), /不能为空/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: 'a'.repeat(2001) } }), /过长/);
+  assert.deepEqual(Object.keys(normalized).slice(0, 13),
+    ['version', 'topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language', 'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit']);
+  assert.deepEqual(normalized.sourceQueries, {});
+  assert.deepEqual(normalizeConfig({ ...base, sources: ['cnki', 'web-of-science'], sourceQueries: { cnki: ' 肉鸡 高温 ', 'web-of-science': 'broiler heat stress' } }, { executable: true }).sourceQueries,
+    { cnki: '肉鸡 高温', 'web-of-science': 'broiler heat stress' });
+  const sixQueries = Object.fromEntries(SOURCES.map(source => [source.key, ' ' + source.key + ' query ']));
+  assert.deepEqual(normalizeConfig({ ...base, sources: SOURCES.map(item => item.key), sourceQueries: sixQueries }, { executable: true }).sourceQueries,
+    Object.fromEntries(SOURCES.map(source => [source.key, source.key + ' query'])), '新增三来源的独立检索式保持并归一');
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: [] }), /分来源检索式必须是对象/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { arxiv: 'test' } }), /未知来源/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: ' ' } }), /不能为空/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: 'a'.repeat(2001) } }), /过长/);
 
   // v2 缺省值（设计 §3.1：缺省时行为与 v1 逐字一致）
   assert.deepEqual(normalized.batch, { size: 10, maxBatches: 1 });
@@ -93,6 +124,15 @@ function main() {
   assert.throws(() => normalizeConfig({ ...base, fieldDefinitions: [{ key: 'a' }, { key: 'a' }] }), /key 重复/);
   assert.throws(() => normalizeConfig({ ...base, fieldDefinitions: [{ label: 'x' }] }), /缺少 key/);
   assert.throws(() => normalizeConfig({ ...base, fieldDefinitions: 'soc' }), /字段定义必须是列表/);
+  assert.equal(MAX_FIELD_DEFINITIONS, 200);
+  const expandedFields = Array.from({ length: MAX_FIELD_DEFINITIONS }, (_, index) => ({
+    key: `field_${index}`, label: `变量${index}`, meaning: `讨论后拆开的独立变量${index}`, unit: '原文单位', valueType: 'text', required: false
+  }));
+  const expanded = normalizeConfig({ ...base, targetFields: expandedFields.map(field => field.label), fieldDefinitions: expandedFields });
+  assert.deepEqual(expanded.fieldDefinitions, expandedFields, 'Expanded columns remain complete and ordered');
+  assert.equal(expanded.targetFields.length, MAX_FIELD_DEFINITIONS);
+  assert.throws(() => normalizeConfig({ ...base, fieldDefinitions: [...expandedFields, { key: 'overflow' }] }), /不超过 200 项/);
+  assert.throws(() => normalizeConfig({ ...base, targetFields: [...expanded.targetFields, 'overflow'] }), /目标字段必须是列表/);
 
   console.log('LITERATURE_SOURCES_TESTS_PASS');
 }

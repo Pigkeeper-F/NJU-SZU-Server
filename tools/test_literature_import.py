@@ -153,8 +153,8 @@ try:
     data = json.loads((job / "candidates.json").read_text(encoding="utf-8"))
     imported = [r for r in data["records"] if r.get("imported")]
     ok(len(imported) == 2, "记录数正确")
-    ok(all(r["candidate_id"].startswith("CNK-I") for r in imported),
-       "导入前缀 CNK-I：" + ", ".join(r["candidate_id"] for r in imported))
+    ok(all(r["candidate_id"].startswith("CNKI-I") for r in imported),
+       "导入前缀 CNKI-I：" + ", ".join(r["candidate_id"] for r in imported))
     ok(all(r["batch_index"] == 0 for r in imported), "导入批次 batch_index=0")
     ok(all(r["screening_status"] == "pending_review" for r in imported), "导入条目默认待复核")
     ok(any(b.get("batch_index") == 0 and b.get("imported") for b in data["batches"]), "批次记录标了 imported")

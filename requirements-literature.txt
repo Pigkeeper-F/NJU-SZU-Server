@@ -2,4 +2,4 @@
 # export 写 xlsx/读用户模板用 openpyxl；PDF→文本用 pypdf（依赖变更由 .literature-ready marker v2 感知）。
 playwright>=1.40,<2
 openpyxl>=3.1,<4
-pypdf>=4,<7
+pypdf[crypto]>=4,<7
