@@ -173,6 +173,116 @@ class LiteratureSearchTest(unittest.TestCase):
                 code = run(CONFIG, output, batch_index=0)
             self.assertEqual(code, 1)
 
+    def test_normalize_deduplicates_across_sources_by_doi(self) -> None:
+        records = normalize_candidates([
+            {"title": "Soil carbon under fertilization", "doi": "10.1016/J.GEODERMA.2019.01",
+             "source_key": "pubmed", "authors": "Li et al.", "year": 2019, "snippet": "structured abstract"},
+            {"title": "A differently punctuated title", "doi": "https://doi.org/10.1016/j.geoderma.2019.01",
+             "source_key": "google-scholar", "snippet": "scholar snippet"},
+        ], "q", "2026-10-22T00:00:00+00:00")
+        self.assertEqual(len(records), 1, "同一 DOI 的不同来源必须合并")
+        self.assertEqual(records[0]["source_key"], "pubmed", "保留先到的结构化来源")
+        self.assertEqual(records[0]["snippet"], "structured abstract")
+
+    def test_mixed_sources_use_per_source_queries_and_merge(self) -> None:
+        calls = []
+        class FakeOpen:
+            @staticmethod
+            def supports(key):
+                return key in {"pubmed", "openalex"}
+            @staticmethod
+            def run(key, query, limit, year_from, year_to):
+                calls.append(("open", key, query))
+                return {
+                    "status": "ok", "url": f"https://api.example/{key}", "count": 1,
+                    "results": [{"title": "Shared paper", "doi": "10.1/shared", "authors": "A", "year": 2020,
+                                 "venue": "J", "abstract": "open abstract", "result_url": f"https://api.example/{key}/1"}],
+                }
+        scholar = types.SimpleNamespace(run=lambda *args: (
+            calls.append(("scholar", args[0])) or {
+                "status": "ok", "url": "https://scholar.google.com/scholar?q=x",
+                "results": [{"title": "Shared paper", "snippet": "scholar snippet"},
+                            {"title": "Scholar only", "snippet": "s2"}],
+            }))
+        browser = types.SimpleNamespace(launch=lambda: {"status": "already_running"})
+        config = {"topic": "土壤碳", "query": "soil carbon fertilization",
+                  "sources": ["google-scholar", "pubmed"],
+                  "sourceQueries": {"pubmed": '"soil organic carbon"[Title/Abstract]'},
+                  "publicationYearFrom": 2015, "publicationYearTo": 2024, "limit": 5}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                sys.modules, {"literature_search_open": FakeOpen, "browser": browser, "google_scholar_search": scholar}):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = run(config, Path(temp))
+            self.assertEqual(code, 0)
+            self.assertIn(("open", "pubmed", '"soil organic carbon"[Title/Abstract]'), calls)
+            self.assertIn(("scholar", "soil carbon fertilization"), calls)
+            report = read_report(Path(temp))
+            self.assertEqual(report["scope"], "mixed_candidates")
+            self.assertEqual(report["count"], 2, "跨源同 DOI 只留一条，Scholar 独有条目保留")
+            self.assertEqual([record["title"] for record in report["records"]], ["Shared paper", "Scholar only"])
+            self.assertEqual(report["source_counts"]["pubmed"], 1)
+            self.assertEqual(report["source_counts"]["google-scholar"], 2)
+            self.assertEqual(report["batches"][0]["status"], "complete")
+
+    def test_mixed_sources_keep_open_results_when_scholar_hits_captcha(self) -> None:
+        class FakeOpen:
+            @staticmethod
+            def supports(key):
+                return key == "pubmed"
+            @staticmethod
+            def run(key, query, limit, year_from, year_to):
+                return {"status": "ok", "url": "https://api.example/pubmed", "count": 1,
+                        "results": [{"title": "Open only", "doi": "10.1/open", "abstract": "a"}]}
+        scholar = types.SimpleNamespace(run=lambda *args: {"status": "captcha", "url": "https://scholar.google.com/scholar"})
+        browser = types.SimpleNamespace(launch=lambda: {"status": "already_running"})
+        config = {"topic": "土壤碳", "query": "soil carbon", "sources": ["google-scholar", "pubmed"],
+                  "publicationYearFrom": None, "publicationYearTo": None, "limit": 5}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+                sys.modules, {"literature_search_open": FakeOpen, "browser": browser, "google_scholar_search": scholar}):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = run(config, Path(temp))
+            self.assertEqual(code, 0)
+            events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+            self.assertEqual([event["type"] for event in events if event.get("type") in {"result", "attention"}],
+                             ["result", "attention"])
+            report = read_report(Path(temp))
+            self.assertEqual(report["count"], 1)
+            self.assertEqual(report["batches"][0]["status"], "partial")
+            self.assertEqual(report["sources"][0]["status"], "ok")
+            self.assertEqual(report["sources"][1]["status"], "captcha")
+
+    def test_open_only_run_emits_result_event(self) -> None:
+        class FakeOpen:
+            @staticmethod
+            def supports(key):
+                return key == "pubmed"
+            @staticmethod
+            def run(key, query, limit, year_from, year_to):
+                return {"status": "ok", "url": "https://api.example/pubmed", "count": 1,
+                        "results": [{"title": "Open only", "abstract": "a"}]}
+        config = {"topic": "土壤碳", "query": "soil carbon", "sources": ["pubmed"],
+                  "publicationYearFrom": None, "publicationYearTo": None, "limit": 5}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"literature_search_open": FakeOpen}):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = run(config, Path(temp))
+            self.assertEqual(code, 0)
+            events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+            self.assertEqual(events[-1]["type"], "result", "纯开放源也必须发 result 收尾事件")
+            self.assertEqual(events[-1]["count"], 1)
+            report = read_report(Path(temp))
+            self.assertEqual(report["batches"][0]["status"], "complete")
+
+    def test_validate_config_accepts_per_source_queries(self) -> None:
+        validate_config({**CONFIG, "sources": ["google-scholar", "pubmed"],
+                         "sourceQueries": {"pubmed": '"soil organic carbon"[Title/Abstract]'}})
+        with self.assertRaisesRegex(ValueError, "未在 sources 中启用"):
+            validate_config({**CONFIG, "sourceQueries": {"pubmed": "x"}})
+        with self.assertRaisesRegex(ValueError, "检索式为空"):
+            validate_config({**CONFIG, "sources": ["pubmed"], "sourceQueries": {"pubmed": "  "}})
+
     def test_validate_config_rejects_unconnected_sources_with_frozen_message(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch("sys.argv", ["literature_search.py", "--config", str(Path(temp) / "c.json"), "--output-dir", str(Path(temp) / "out")]):
             config_path = Path(temp) / "c.json"

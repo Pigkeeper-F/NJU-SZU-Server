@@ -552,7 +552,7 @@ async function handleLiterature(req, res, url) {
       const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
       if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
       try {
-        const plan = await require('./tools/research-question').planQueries({ idea: data.idea, modelCfg: cfg, callModel: callModelWithRetry });
+        const plan = await require('./tools/research-question').planQueries({ idea: data.idea, sources: data.sources, modelCfg: cfg, callModel: callModelWithRetry });
         return sendJson(res, 200, { ...plan, config: configInfo(cfg, configSource(data.settings, normalizeCredential(data.credential))) });
       } catch (error) {
         const message = (error && error.message) || '选题拆解失败';
@@ -657,6 +657,19 @@ async function handleLiterature(req, res, url) {
     if (req.method === 'GET' && route === '/api/literature/job') {
       return sendJson(res, 200, literature.snapshot(url.searchParams.get('id')));
     }
+    // 【多源检索 · 2026-10-22】GET /api/literature/sources：可执行的检索来源（含开放 API 源）。
+    // 前端据此渲染来源多选，不再把来源清单写死在某一个页面里。
+    if (req.method === 'GET' && route === '/api/literature/sources') {
+      const registry = require('./tools/literature-sources');
+      return sendJson(res, 200, {
+        sources: registry.executableSources().map((item) => ({
+          key: item.key,
+          label: item.label,
+          access: item.access,
+          manual: item.access === 'manual'
+        }))
+      });
+    }
     // 【人工初筛 · 2026-10-20】GET /api/literature/candidates：检索作业的候选清单（供环节①初筛界面）。
     // 只回题录层面的字段（不含全文），够人判断"这篇要不要读"。
     if (req.method === 'GET' && route === '/api/literature/candidates') {
@@ -674,6 +687,9 @@ async function handleLiterature(req, res, url) {
         source: (data && data.source) || '',
         query: (data && data.query) || '',
         retrieved_at: (data && data.retrieved_at) || '',
+        scope: (data && data.scope) || '',
+        sources: (data && Array.isArray(data.sources)) ? data.sources : [],
+        source_counts: (data && data.source_counts) || {},
         candidates: records.map((record) => ({
           id: String(record.candidate_id || ''),
           title: String(record.title || ''),

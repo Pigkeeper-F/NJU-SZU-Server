@@ -43,6 +43,20 @@ function batchConfig(raw, limit) {
   return { size, maxBatches };
 }
 
+// 按来源覆盖检索式（可选）：各源语法不通用，PubMed 的字段标签不能直接喂 OpenAlex。
+// 未列出的来源继续用顶层 query；旧配置（没有 sourceQueries）行为完全不变。
+function sourceQueriesConfig(raw, sources) {
+  const value = object(raw, '按源检索式');
+  const result = {};
+  for (const key of Object.keys(value)) {
+    if (!sources.includes(key)) throw new Error('按源检索式包含未启用的来源：' + key);
+    const query = string(value[key], `来源 ${key} 的检索式`, 600);
+    if (!query) throw new Error(`来源 ${key} 的检索式为空`);
+    result[key] = query;
+  }
+  return result;
+}
+
 function fieldDefinitions(raw) {
   if (raw == null) return [];
   if (!Array.isArray(raw) || raw.length > 50) throw new Error('字段定义必须是列表且不超过 50 项');
@@ -128,6 +142,7 @@ function normalizeConfig(raw, options = {}) {
   const templates = object(raw.templates, '模板配置');
   return {
     version: 2, topic, query, sources,
+    sourceQueries: sourceQueriesConfig(raw.sourceQueries, sources),
     publicationYearFrom, publicationYearTo,
     geography: string(raw.geography, '地域', 200),
     language: string(raw.language, '语言', 100),

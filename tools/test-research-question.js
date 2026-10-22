@@ -53,6 +53,40 @@ const NOTES = [{
   try { await rq.planQueries({ idea: '  ', callModel: async () => '[]' }); } catch (error) { threw = error; }
   ok(!!threw && /研究想法/.test(threw.message), '空想法直接报错');
 
+  console.log('\nS1b 多源选题拆解：按来源分化检索式');
+  const multiReply = JSON.stringify({
+    dimensions: [{ name: '核心概念', keywords: ['long-term fertilization'] }],
+    queries: [{ query: '("long-term fertilization") "soil organic carbon"', rationale: '宽口径' }],
+    perSource: [
+      { source: 'google-scholar', query: '("long-term fertilization") "soil organic carbon"', rationale: '通用' },
+      { source: 'pubmed', query: '"soil organic carbon"[Title/Abstract] AND fertilization[Title/Abstract]', rationale: 'PubMed 字段标签' },
+      { source: 'cnki', query: '施肥 土壤有机碳', rationale: '未启用的来源应被丢掉' }
+    ]
+  });
+  let multiPrompt = '';
+  const multiPlan = await rq.planQueries({
+    idea: '长期施肥对土壤碳的影响',
+    sources: ['google-scholar', 'pubmed'],
+    modelCfg: {},
+    callModel: async (cfg, messages) => { multiPrompt = messages[0].content; return multiReply; }
+  });
+  ok(multiPlan.sources.length === 2 && multiPlan.sources[1] === 'pubmed', '只保留启用的目标来源');
+  ok(multiPlan.perSource.length === 2 && !multiPlan.perSource.some(item => item.source === 'cnki'), '未启用的来源计划被丢掉');
+  ok(multiPlan.perSource.some(item => item.source === 'pubmed' && item.query.includes('[Title/Abstract]')), 'PubMed 使用字段标签语法');
+  ok(multiPrompt.includes('PubMed') && multiPrompt.includes('字段标签'), '提示词按来源给出语法说明');
+
+  const partialReply = JSON.stringify({
+    queries: [{ query: '"soil organic carbon" fertilization', rationale: '通用' }],
+    perSource: [{ source: 'google-scholar', query: '"soil organic carbon" fertilization', rationale: '通用' }]
+  });
+  const fallbackPlan = await rq.planQueries({
+    idea: '土壤碳', sources: ['google-scholar', 'openalex'], modelCfg: {},
+    callModel: async () => partialReply
+  });
+  const fallback = fallbackPlan.perSource.find(item => item.source === 'openalex');
+  ok(!!fallback && fallback.query === fallbackPlan.queries[0].query, '模型漏写的来源用通用检索式补齐');
+  ok(/沿用通用检索式/.test(fallback.rationale), '补齐项明确标注是兜底');
+
   console.log('\nS2 候选科学问题：空白 + 要点 → 候选');
   let candidatesPromptSeen = '';
   const candReply = JSON.stringify([

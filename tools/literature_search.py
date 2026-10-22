@@ -91,15 +91,21 @@ def normalize_candidates(
     source_label: str = "Google Scholar",
 ) -> list[dict]:
     records: list[dict] = []
-    seen: set[str] = set()
+    seen_titles: set[str] = set()
+    seen_dois: set[str] = set()
     for item in raw:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()[:500]
         key = re.sub(r"\W+", "", title).casefold()
-        if not title or not key or key in seen:
+        doi_key = normalize_doi(item.get("doi"))
+        # 同一批内的跨源合并：DOI 相同或标题（去标点/大小写）相同都算同一篇。
+        # 调用方把结构化来源排在 Scholar 片段前面，所以保留的是元数据更全的那条。
+        if not title or not key or key in seen_titles or (doi_key and doi_key in seen_dois):
             continue
-        seen.add(key)
+        seen_titles.add(key)
+        if doi_key:
+            seen_dois.add(doi_key)
         links = []
         for link in item.get("fulltext_links") or []:
             if not isinstance(link, dict):
@@ -168,6 +174,20 @@ def _open_item_to_raw(item: dict, source_key: str) -> dict:
     }
 
 
+def query_for_source(config: dict, source_key: str, fallback: str = "") -> str:
+    """按来源取检索式：``config["sourceQueries"]`` 里有该源的专用式就用它，否则用主检索式。
+
+    多源检索时各家的语法并不通用（PubMed 有字段标签、OpenAlex 是自然语言检索），
+    所以允许 ``sourceQueries`` 按源覆盖，同时保留单检索式的旧配置。
+    """
+    source_queries = config.get("sourceQueries")
+    if isinstance(source_queries, dict):
+        value = source_queries.get(source_key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return str(fallback or "").strip()
+
+
 def collect_open_results(config: dict, query: str) -> tuple[list[dict], list[dict]]:
     """跑配置里的开放 API 来源。
 
@@ -181,12 +201,14 @@ def collect_open_results(config: dict, query: str) -> tuple[list[dict], list[dic
     items: list[dict] = []
     metas: list[dict] = []
     for key in open_source_keys(list(config.get("sources") or [])):
+        source_query = query_for_source(config, key, query)
         try:
-            outcome = open_mod.run(key, query, limit, year_from, year_to)
+            outcome = open_mod.run(key, source_query, limit, year_from, year_to)
         except Exception as error:  # 单源失败不影响其它源
             metas.append({
                 "source_key": key,
                 "label": _sources.label_of(key),
+                "query": source_query,
                 "url": "",
                 "count": 0,
                 "status": "error",
@@ -198,6 +220,7 @@ def collect_open_results(config: dict, query: str) -> tuple[list[dict], list[dic
         metas.append({
             "source_key": key,
             "label": _sources.label_of(key),
+            "query": source_query,
             "url": outcome.get("url") or "",
             "count": int(outcome.get("count") or 0),
             "status": outcome.get("status") or "ok",
@@ -298,6 +321,7 @@ def write_results(
     source_label: str = "Google Scholar",
     scope: str = "first_page_candidates_only",
     source_metas: list[dict] | None = None,
+    batch_status: str = "complete",
 ) -> dict:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -311,8 +335,10 @@ def write_results(
         "count": len(records),
         "applied_filters": applied_filters(config),
         "deferred_rules": deferred_rules(config),
-        "status": "complete",
+        "status": batch_status,
     }
+    if source_metas:
+        batch["sources"] = source_metas
     existing = load_existing_report(output_dir)
     grouped: dict[int, list[dict]] = {}
     for record in existing.get("records") or []:
@@ -347,6 +373,12 @@ def write_results(
     }
     if source_metas:
         report["sources"] = source_metas
+        # 逐源命中数：前端直接显示「PubMed 10 条 / OpenAlex 8 条 / Europe PMC 失败」，
+        # 不用再自己数 records。
+        report["source_counts"] = {
+            str(meta.get("source_key") or ""): int(meta.get("count") or 0)
+            for meta in source_metas if isinstance(meta, dict)
+        }
     paths = _common.job_paths(output_dir)
     _common.atomic_write_json(paths["candidates_json"], report)
     buffer = io.StringIO()
@@ -387,6 +419,44 @@ def validate_config(config: object) -> None:
     blocked = [item for item in sources if not _sources.is_executable(item)]
     if blocked:
         raise ValueError(_sources.unconnected_message(blocked))
+    # 可选：按来源覆盖检索式（多源语法不同时用）。键必须是本次启用的来源。
+    source_queries = config.get("sourceQueries")
+    if source_queries is not None:
+        if not isinstance(source_queries, dict):
+            raise ValueError("sourceQueries 必须是「来源 → 检索式」的对象")
+        for key, value in source_queries.items():
+            if key not in sources:
+                raise ValueError(f"sourceQueries 里的来源未在 sources 中启用：{key}")
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"来源 {key} 的检索式为空")
+
+
+def _source_failure_detail(metas: list[dict]) -> str:
+    """把各源失败原因拼成一句人话（没有失败时返回空串）。"""
+    failures = []
+    for meta in metas:
+        if not isinstance(meta, dict):
+            continue
+        if str(meta.get("status")) in {"ok", "no_results"}:
+            continue
+        label = str(meta.get("label") or meta.get("source_key") or "来源")
+        reason = str(meta.get("error") or meta.get("status") or "失败")
+        failures.append(f"{label}：{reason}")
+    return "；".join(failures)
+
+
+def _scholar_meta(source_key: str, source_query: str, url: str, count: int, status: str, error: str = "") -> dict:
+    meta = {
+        "source_key": source_key,
+        "label": _sources.label_of(source_key) or "Google Scholar",
+        "query": source_query,
+        "url": safe_url(url),
+        "count": int(count or 0),
+        "status": status,
+    }
+    if error:
+        meta["error"] = error[:300]
+    return meta
 
 
 def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_index: int | None = None, resume: bool = False) -> int:
@@ -404,72 +474,153 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
     query = str(config.get("query") or "").strip()
     open_keys = open_source_keys(sources)
     scholar_keys = [key for key in sources if key not in open_keys]
+    mixed = bool(open_keys and scholar_keys)
 
-    # 纯开放 API 组合：完全不碰浏览器（不启动持久 Chromium，不需要过验证码）。
-    if open_keys and not scholar_keys:
-        items, metas = collect_open_results(config, query)
+    raw_results: list[dict] = []
+    metas: list[dict] = []
+
+    # ---- 1) 开放 API 来源：不碰浏览器，先跑（混合模式下它们不受 Scholar 验证码影响） ----
+    if open_keys:
+        open_labels = [_sources.label_of(key) or key for key in open_keys]
+        emit("stage", stage="search", message="开放 API 检索：" + "、".join(open_labels))
+        items, open_metas = collect_open_results(config, query)
+        raw_results.extend(items)
+        metas.extend(open_metas)
+        if not mixed:
+            if not items:
+                detail = _source_failure_detail(open_metas)
+                message = "检索没有结果：开放来源均未返回候选" + (f"（{detail}）" if detail else "")
+                emit("error", message=message)
+                return 1
+            search_payload = {
+                "results": items,
+                "url": open_metas[0].get("url") if open_metas else "",
+            }
+            labels = [str(meta.get("label") or meta.get("source_key")) for meta in open_metas]
+            result = write_results(
+                output_dir,
+                query,
+                search_payload,
+                config,
+                batch_index=index,
+                source_label="、".join(labels) or "开放 API 来源",
+                scope="open_api_candidates",
+                source_metas=open_metas,
+            )
+            emit("stage", stage="search", message="开放 API 检索完成：" + "、".join(labels))
+            # 必须发 result 收尾事件：作业管理器据此把 discover 标成 done，
+            # 只发 stage 会在干净退出后被判「检索脚本未返回结果」。
+            summary = f"已保存 {result['count']} 条待复核候选"
+            if len(open_metas) > 1:
+                per_source = "、".join(
+                    f"{meta.get('label') or meta.get('source_key')} {int(meta.get('count') or 0)} 条"
+                    for meta in open_metas
+                )
+                summary += f"（{per_source}，跨源重复已合并）"
+            emit("result", stage="completed", message=summary, **result)
+            return 0
         if not items:
-            emit("error", message="检索没有结果：开放来源均未返回候选")
-            return 1
-        search_payload = {
-            "results": items,
-            "url": metas[0].get("url") if metas else "",
-        }
+            detail = _source_failure_detail(open_metas)
+            emit("stage", stage="search", message="开放来源未返回候选" + (f"（{detail}）" if detail else "，继续 Google Scholar"))
+
+    # ---- 2) Google Scholar：需要浏览器；验证码/启动失败时，混合模式保留已拿到的开放源结果 ----
+    def save_partial_and_wait(message: str) -> int:
+        """把已拿到的开放源结果先落盘，再把「需要人工处理」交给上层。"""
+        if not raw_results:
+            emit("attention", stage="verification", message=message)
+            return 0
         labels = [str(meta.get("label") or meta.get("source_key")) for meta in metas]
-        write_results(
+        result = write_results(
             output_dir,
             query,
-            search_payload,
+            {"url": metas[0].get("url") if metas else "", "results": raw_results},
             config,
             batch_index=index,
-            source_label="、".join(labels) or "开放 API 来源",
-            scope="open_api_candidates",
+            source_label="、".join(label for label in labels if label) or "开放 API 来源",
+            scope="mixed_candidates",
             source_metas=metas,
+            batch_status="partial",
         )
-        emit("stage", stage="search", message="开放 API 检索完成：" + "、".join(labels))
+        emit(
+            "result",
+            stage="completed",
+            message=f"开放来源已先保存 {result['count']} 条候选（Scholar 待人工处理后补齐）",
+            **result,
+        )
+        emit("attention", stage="verification", message=message + "；开放来源的候选已先保存。")
         return 0
 
-    sys.path.insert(0, str(SOC_FETCH))
-    import browser  # noqa: PLC0415 - reuse SOC discovery implementation
-    import google_scholar_search  # noqa: PLC0415
+    if scholar_keys:
+        sys.path.insert(0, str(SOC_FETCH))
+        import browser  # noqa: PLC0415 - reuse SOC discovery implementation
+        import google_scholar_search  # noqa: PLC0415
 
-    emit("stage", stage="browser", message="连接 SOC 持久浏览器")
-    launched = browser.launch()
-    if launched.get("status") not in {"already_running", "launched"}:
-        emit("error", message=str(launched.get("message") or launched.get("status") or "浏览器启动失败"))
-        return 1
-    if scrape_current:
-        message = "读取验证后的结果页"
-    elif index > 1:
-        message = f"按已确认配置进行 Google Scholar 第 {index} 批检索"
-    else:
-        message = "按已确认配置进行 Google Scholar 首批检索"
-    emit("stage", stage="search", message=message)
-
-    limit = batch_size(config)
-    raw_results: list[dict] = []
-    search_url = ""
-    for source in _sources.executable_sources():
-        if source["key"] not in config["sources"]:
-            continue
-        search = google_scholar_search.run(config["query"], scrape_current, limit, config["publicationYearFrom"], config["publicationYearTo"])
-        if search.get("status") == "captcha":
-            emit("attention", stage="verification", message="Google Scholar 要求人机验证。请在刚打开的浏览器中完成验证，然后点击重新检索；不会自动绕过验证码。")
-            return 0
-        if search.get("status") not in {"ok", "no_results"}:
-            emit("error", message=str(search.get("message") or "检索失败"))
+        emit("stage", stage="browser", message="连接 SOC 持久浏览器")
+        launched = browser.launch()
+        if launched.get("status") not in {"already_running", "launched"}:
+            reason = str(launched.get("message") or launched.get("status") or "浏览器启动失败")
+            for key in scholar_keys:
+                metas.append(_scholar_meta(key, query_for_source(config, key, query), "", 0, "error", reason))
+            if mixed:
+                return save_partial_and_wait("Google Scholar 浏览器启动失败：" + reason)
+            emit("error", message=reason)
             return 1
-        search_url = search_url or safe_url(search.get("url"))
-        for item in search.get("results") or []:
-            if isinstance(item, dict):
-                raw_results.append({**item, "source_key": source["key"]})
+        if scrape_current:
+            message = "读取验证后的结果页"
+        elif index > 1:
+            message = f"按已确认配置进行 Google Scholar 第 {index} 批检索"
+        else:
+            message = "按已确认配置进行 Google Scholar 首批检索"
+        emit("stage", stage="search", message=message)
+
+        limit = batch_size(config)
+        search_url = ""
+        for source in _sources.executable_sources():
+            if source["key"] not in config["sources"] or source["key"] in open_keys:
+                continue
+            source_query = query_for_source(config, source["key"], query)
+            search = google_scholar_search.run(source_query, scrape_current, limit, config.get("publicationYearFrom"), config.get("publicationYearTo"))
+            if search.get("status") == "captcha":
+                metas.append(_scholar_meta(source["key"], source_query, search.get("url") or "", 0, "captcha", "需要人工完成人机验证"))
+                captcha_message = "Google Scholar 要求人机验证。请在刚打开的浏览器中完成验证，然后点击重新检索；不会自动绕过验证码。"
+                if mixed:
+                    return save_partial_and_wait(captcha_message)
+                emit("attention", stage="verification", message=captcha_message)
+                return 0
+            if search.get("status") not in {"ok", "no_results"}:
+                reason = str(search.get("message") or "检索失败")
+                metas.append(_scholar_meta(source["key"], source_query, search.get("url") or "", 0, "error", reason))
+                if mixed:
+                    return save_partial_and_wait("Google Scholar 检索失败：" + reason)
+                emit("error", message=reason)
+                return 1
+            search_url = search_url or safe_url(search.get("url"))
+            hit_count = 0
+            for item in search.get("results") or []:
+                if isinstance(item, dict):
+                    raw_results.append({**item, "source_key": source["key"]})
+                    hit_count += 1
+            metas.append(_scholar_meta(source["key"], source_query, search.get("url") or "", hit_count, search.get("status") or "ok"))
 
     emit("stage", stage="save", message="去重并保存候选清单")
-    result = write_results(output_dir, config["query"], {"url": search_url, "results": raw_results}, config, batch_index=index)
+    labels = [str(meta.get("label") or meta.get("source_key")) for meta in metas]
+    result = write_results(
+        output_dir,
+        query,
+        {"url": next((str(meta.get("url") or "") for meta in metas if meta.get("source_key") in scholar_keys and meta.get("url")), ""), "results": raw_results},
+        config,
+        batch_index=index,
+        source_label="、".join(label for label in labels if label) or "Google Scholar",
+        scope="mixed_candidates" if mixed else "first_page_candidates_only",
+        source_metas=metas if mixed else None,
+    )
     if index > 1:
         summary = f"已保存 {result['count']} 条待复核候选（第 {index} 批，累计 {result['total']} 条）"
     else:
         summary = f"已保存 {result['count']} 条待复核候选"
+    if mixed:
+        per_source = "、".join(f"{meta.get('label') or meta.get('source_key')} {int(meta.get('count') or 0)} 条" for meta in metas)
+        summary += f"（{per_source}，跨源重复已合并）"
     emit("result", stage="completed", message=summary, **result)
     return 0
 

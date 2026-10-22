@@ -24,6 +24,7 @@ const vm = require('node:vm');
 
 const ROOT = path.join(__dirname, '..');
 const codex = fs.readFileSync(path.join(ROOT, 'js', 'codex.js'), 'utf8');
+const chat = fs.readFileSync(path.join(ROOT, 'js', 'chat.js'), 'utf8');
 const css = fs.readFileSync(path.join(ROOT, 'css', 'workspace.css'), 'utf8');
 
 // 1) 语法可编译（仅编译，不执行 IIFE）
@@ -82,15 +83,24 @@ assert.ok(css.includes('.literature-stage.is-running') && css.includes('.literat
   '阶段条与历史任务的状态样式应已定义');
 assert.ok(css.includes('文献挖掘 · 第二阶段'), '样式应以独立分区追加');
 
-// 8) 第一阶段关键文案/行为零回归
-for (const text of ['从对话整理规则', '确认配置并检索', '手动填写', '验证后重新检索', '当前仅 Google Scholar 已接通',
-  '检索来源（目前仅 Scholar 可执行）', '请先从对话整理运行配置并核对', '对话或已批准文档有更新，请重新整理规则后再检索',
+// 8) 第一阶段关键文案/行为零回归（多源检索上线后，来源相关文案按新行为断言）
+for (const text of ['从对话整理规则', '确认配置并检索', '手动填写', '验证后重新检索',
+  '请先从对话整理运行配置并核对', '对话或已批准文档有更新，请重新整理规则后再检索',
   '首批候选检索已保存 ', '这不是已纳入文献，也未提取全文。可在文献检索区下载清单。']) {
   assert.ok(codex.includes(text), '第一阶段文案不得回归: ' + text);
+}
+for (const text of ['开放 API 源免验证', 'PubMed', 'OpenAlex', 'Europe PMC', 'Semantic Scholar', '人工']) {
+  assert.ok(codex.includes(text), '多源检索能力应在配置面板可见: ' + text);
 }
 assert.ok(codex.includes('Google Scholar 需要人工验证。请在检索浏览器完成后点击“重新检索”。'), '验证码人工关口文案保持原句');
 assert.ok(codex.includes("'/api/literature/prepare'") && codex.includes("'/api/literature/search'") && codex.includes("'/api/literature/cancel")
   && codex.includes("'/api/literature/download"), '既有路由与取消行为保持');
 assert.ok(codex.includes('t.busy || !t.literatureConfig'), '未配置时启动按钮保持禁用');
+
+// 9) 多源检索面板：状态必须进 docSigOf（否则增量快速路径会吞掉勾选/逐源命中）
+for (const token of ['rs.sources', 'perSourceSig', 'sourceResultSig', '/api/literature/sources']) {
+  assert.ok(chat.includes(token), '多源检索面板应包含: ' + token);
+}
+assert.ok(!chat.includes("sources: ['google-scholar'], limit: 10"), '调研面板不得把来源写死为 Scholar');
 
 console.log('LITERATURE_UI_STAGE2_TESTS_PASS');

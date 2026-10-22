@@ -10,12 +10,22 @@ const base = { topic: '气候变化与养殖', query: 'climate change aquacultur
   geography: '中国', language: '', studyTypes: ['原始研究'], inclusion: [], exclusion: [], targetFields: ['产量'], limit: 10 };
 
 function main() {
-  // 注册表内容与设计 §7 冻结一致
-  assert.deepEqual(SOURCES.map(item => item.key), ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed']);
-  assert.deepEqual(executableSources().map(item => item.key), ['google-scholar']);
+  // 注册表：不写死完整顺序（来源会随接入进展增加），只断言不变量。
+  assert.deepEqual(SOURCES.map(item => item.key).slice(0, 6),
+    ['google-scholar', 'pubmed', 'pmc', 'openalex', 'semantic-scholar', 'europe-pmc'],
+    '可执行来源排在前，人工来源在后');
+  assert.deepEqual(executableSources().map(item => item.key).sort(),
+    ['europe-pmc', 'google-scholar', 'openalex', 'pmc', 'pubmed', 'semantic-scholar'].sort());
+  for (const source of SOURCES) {
+    assert.ok(source.label, '每个来源都有显示名：' + source.key);
+    assert.ok(source.idPrefix, '每个来源都有候选 id 前缀：' + source.key);
+    assert.ok(['executable', 'registered'].includes(source.state), 'state 合法：' + source.key);
+  }
   assert.equal(SOURCES[0].adapter.kind, 'soc-script');
   assert.ok(SOURCES[0].adapter.script.endsWith('google_scholar_search.py'));
   assert.equal(stateOf('google-scholar'), 'executable');
+  assert.equal(stateOf('pubmed'), 'executable');
+  assert.equal(stateOf('openalex'), 'executable');
   assert.equal(stateOf('cnki'), 'registered');
   assert.equal(stateOf('arxiv'), null);
   assert.ok(isKnown('pubmed'));
@@ -27,8 +37,9 @@ function main() {
 
   // 双层防线：拒绝文案逐字保持（设计 §7/§10）
   assert.equal(assertExecutable(['google-scholar']), true);
-  assert.throws(() => assertExecutable(['cnki', 'pubmed']),
-    error => error.message === '尚未接通以下检索来源：cnki、pubmed；请明确改为仅检索 Google Scholar，或等待相应连接器。');
+  assert.equal(assertExecutable(['google-scholar', 'pubmed', 'openalex']), true);
+  assert.throws(() => assertExecutable(['cnki', 'wanfang']),
+    error => error.message.startsWith('尚未接通以下检索来源：cnki、wanfang；请明确改为仅检索 Google Scholar，或等待相应连接器。'));
 
   // normalizeConfig：12 字段校验文案不回归 + v2 可选字段
   assert.throws(() => normalizeConfig({ ...base, topic: '' }), /请填写研究主题和 Google Scholar 检索式/);
@@ -43,8 +54,14 @@ function main() {
 
   const normalized = normalizeConfig(base);
   assert.equal(normalized.version, 2);
-  assert.deepEqual(Object.keys(normalized).slice(0, 13),
-    ['version', 'topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language', 'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit']);
+  assert.deepEqual(Object.keys(normalized).slice(0, 5), ['version', 'topic', 'query', 'sources', 'sourceQueries']);
+  assert.deepEqual(normalized.sourceQueries, {}, '旧配置没有按源检索式时为空对象，行为不变');
+  assert.deepEqual(
+    normalizeConfig({ ...base, sources: ['google-scholar', 'pubmed'], sourceQueries: { pubmed: '"soil organic carbon"[Title/Abstract]' } }).sourceQueries,
+    { pubmed: '"soil organic carbon"[Title/Abstract]' });
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { pubmed: 'x' } }), /未启用的来源/);
+  assert.throws(() => normalizeConfig({ ...base, sources: ['pubmed'], sourceQueries: { pubmed: '   ' } }), /检索式为空/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: 'pubmed=x' }), /按源检索式必须是对象/);
 
   // v2 缺省值（设计 §3.1：缺省时行为与 v1 逐字一致）
   assert.deepEqual(normalized.batch, { size: 10, maxBatches: 1 });

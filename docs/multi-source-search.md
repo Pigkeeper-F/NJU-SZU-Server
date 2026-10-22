@@ -50,10 +50,30 @@
 python tools/literature_search_open.py --source pubmed --query "soil carbon" --limit 3
 ```
 
-### 2.4 混合来源
+### 2.4 混合来源（2026-10-22 起支持）
 
-目前一次作业**要么走 Scholar、要么走开放源**（避免浏览器路径与 API 路径的候选合并语义变复杂）。
-想两个都要，就建两个作业——下游的跨批去重本来就会把重复的合掉。
+一次作业可以同时勾 Scholar 和开放源，**同一批里合并**：
+
+```json
+{
+  "topic": "长期施肥对土壤有机碳的影响",
+  "query": "long-term fertilization soil organic carbon",
+  "sources": ["google-scholar", "pubmed", "openalex"],
+  "sourceQueries": {
+    "pubmed": "\"soil organic carbon\"[Title/Abstract] AND fertilization[Title/Abstract]"
+  },
+  "limit": 10
+}
+```
+
+- `sourceQueries` 是**可选的按源检索式**：不同来源语法不通用（PubMed 用字段标签、OpenAlex 用自然语言），
+  没单列的来源继续用顶层 `query`。旧配置不带 `sourceQueries` 时行为完全不变。
+- 执行顺序：先跑开放 API 源（不碰浏览器），再跑 Scholar。**Scholar 需要人机验证时，
+  开放源已拿到的候选会先落盘**（批次 `status: "partial"`），完成验证后重新检索即可补齐。
+- 同批内跨源去重：**DOI 相同或标题（去标点/大小写）相同**即视为同一篇，保留先到的结构化来源
+  （PubMed/OpenAlex 的摘要比 Scholar 片段完整，所以开放源排在前面）。
+- 前端逐源显示命中数与失败原因；`candidates.json` 的 `sources` 字段记录每个源的
+  检索式、URL、条数、状态与错误，`source_counts` 给出逐源计数。
 
 ## 三、产物结构（下游零改动）
 
@@ -63,10 +83,12 @@ python tools/literature_search_open.py --source pubmed --query "soil carbon" --l
 差异点：
 
 - `source` 字段变成 `"PubMed、OpenAlex"`（多源时用顿号连接）
-- `scope` 变成 `open_api_candidates`（Scholar 是 `first_page_candidates_only`）
-- 新增 `sources` 字段，逐源记录检索 URL、条数、状态、错误
-- 候选 id 前缀按来源取自注册表：`GSC` / `PMD` / `PMC` / `OAX` / `EPMC`
+- `scope`：纯开放源是 `open_api_candidates`，混合来源是 `mixed_candidates`，
+  纯 Scholar 仍是 `first_page_candidates_only`
+- `sources` 字段逐源记录检索式、URL、条数、状态、错误；`source_counts` 给出逐源计数
+- 候选 id 前缀按来源取自注册表：`GSC` / `PMD` / `PMC` / `OAX` / `EPMC` / `S2`
 - `year` / `authors` / `venue` 取**结构化字段**（开放 API 原生带），不再从 byline 字符串猜
+- 混合批次被 Scholar 验证码打断时，批次 `status` 为 `partial`（不是 `complete`）
 
 ## 四、B 类（检索不到的那几个）怎么办
 
@@ -98,19 +120,25 @@ python tools/literature_search_open.py --source pubmed --query "soil carbon" --l
 | 文件 | 作用 |
 |---|---|
 | `tools/literature_search_open.py` | 开放 API 检索：请求构造、限流、响应解析、各源 runner |
-| `tools/literature_search.py` | 检索阶段主脚本；新增开放源分派与多源候选 id 前缀 |
+| `tools/literature_search.py` | 检索阶段主脚本：来源分派、按源检索式、混合来源合并与跨源去重 |
 | `tools/literature_sources.py` / `.json` / `literature-sources.js` | 来源注册表（可执行 / 需人工、原因、凭据、限流、id 前缀） |
+| `server.js` `GET /api/literature/sources` | 把可执行来源清单交给前端渲染来源多选 |
+| `js/chat.js` 调研面板 | 来源多选、逐源检索式、逐源命中/失败展示 |
+| `tools/test_literature_search.py` | 离线回归：含混合来源与 DOI 去重用例 |
 | `tools/test_literature_search_open.py` | 离线回归（80 项断言，不联网） |
 
 ## 七、已知限制
 
-1. 一次作业**不混跑** Scholar 与开放源（见 §2.4）。
+1. 混合来源里 Scholar 仍可能被验证码打断；此时开放源结果会先落盘（批次 `status: "partial"`），
+   完成验证后重新检索补齐。重新检索会重跑本批全部来源（含开放源），不会把两次结果拼成两批。
 2. PubMed 走 `esearch → esummary → efetch`；`efetch` 的 DOI 认 `ELocationID` 与 `ArticleId` 两个位置。
 3. Europe PMC 的 `pubYear` 真实返回是字符串，解析两种都收。
 4. 开放源的**全文**覆盖率低于出版方授权源：OpenAlex 基本只有元数据 + 开放获取链接，
    PubMed/PMC/Europe PMC 能拿到开放获取子集的正文。
 5. `tools/literature_fulltext.py` 目前只对 Scholar 作业验证过全文抓取路径；
    开放源作业的全文获取**还需要一轮联调**（这是下一步）。
+6. 跨源去重只按 DOI 与标题；同一篇论文在不同库里的标题差异过大时会漏合并，
+   由下游 `dedupe` 阶段继续处理。
 
 ---
 

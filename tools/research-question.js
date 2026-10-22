@@ -16,6 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const registry = require('./literature-sources');
 
 const MAX_GAPS = 12;
 const MAX_NOTES = 40;
@@ -169,34 +170,60 @@ function asList(value, limit) {
 // 环节① · 选题冷启动
 // ---------------------------------------------------------------------------
 
-function planPrompt(idea) {
-  return [
+//: 各来源的检索语法差异。写进提示词，避免模型把 Scholar 的语法照搬给所有源。
+const SOURCE_SYNTAX = {
+  'google-scholar': 'Google Scholar：短语用双引号，OR / AND 连接，必要时加括号',
+  'pubmed': 'PubMed：用字段标签，如 "soil organic carbon"[Title/Abstract] AND fertilization[Title/Abstract]；也可用 MeSH Terms',
+  'pmc': 'PMC：与 PubMed 相同（NCBI E-utilities），用 [Title/Abstract] 等字段标签',
+  'openalex': 'OpenAlex：自然语言关键词（检索标题/摘要全文），不要写字段标签或大括号',
+  'europe-pmc': 'Europe PMC：可用 TITLE_ABS:"..."、AUTH:"..." 等字段，AND / OR 连接',
+  'semantic-scholar': 'Semantic Scholar：自然语言关键词，支持 + | 等简单连接，不要写字段标签'
+};
+
+function normalizePlanSources(sources) {
+  const requested = Array.isArray(sources) ? sources.map((item) => String(item || '').trim()).filter(Boolean) : [];
+  const executable = registry.executableSources().map((item) => item.key);
+  const picked = requested.filter((key, index) => executable.indexOf(key) >= 0 && requested.indexOf(key) === index);
+  return picked.length ? picked : ['google-scholar'];
+}
+
+function planPrompt(idea, sources) {
+  const lines = [
     '你是科研选题助手。用户给出一个**可能还很模糊**的研究想法，请帮���把它变成可执行的文献检索。',
     '',
     '请输出 JSON：',
     '{',
     '  "dimensions": [{"name": "检索维度名", "keywords": ["同义词/上下位词", "..."]}],',
-    '  "queries": [{"query": "Google Scholar 检索式", "rationale": "为什么这样检索、能捞到什么"}]',
+    '  "queries": [{"query": "通用检索式（Google Scholar 语法）", "rationale": "为什么这样检索、能捞到什么"}],',
+    '  "perSource": [{"source": "来源 key", "query": "该来源能直接执行的检索式", "rationale": "该源的检索意图"}]',
     '}',
     '',
     '要求：',
     '1. dimensions 给 3–5 个维度，每个维度 3–6 个关键词或同义词。',
     '2. queries 给 3 条不同角度的检索式：一条宽口径（覆盖该方向主要工作）、一条聚焦方法、',
     '   一条聚焦具体对象/场景。每条要说明检索意图。',
-    '3. 检索式用 Google Scholar 能直接跑的语法：短语用双引号，OR / AND 连接，必要时加括号；',
-    '   不要写检索教程、不要解释语法。',
+    '3. perSource 必须覆盖下列每一个目标来源，每个来源一条、按该来源自己的语法写；',
+    '   不要把一条检索式原样复制给所有来源。各源语法：'
+  ];
+  for (const key of sources) {
+    lines.push('   - ' + key + '（' + ((registry.sourceOf(key) && registry.sourceOf(key).label) || key) + '）：' + (SOURCE_SYNTAX[key] || '自然语言关键词'));
+  }
+  lines.push(
     '4. 不要编造具体文献或结果；这里只负责把想法转成检索。',
     '5. 只输出 JSON。',
     '',
+    '目标来源：' + sources.join('、'),
     '研究想法：' + idea
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
-async function planQueries({ idea, callModel, modelCfg } = {}) {
+async function planQueries({ idea, sources, callModel, modelCfg } = {}) {
   const text = String(idea || '').trim();
   if (!text) throw new Error('请先写下你的研究想法（哪怕只有一句话）');
   if (typeof callModel !== 'function') throw new Error('缺少模型调用入口');
-  const reply = await callModel(modelCfg, [{ role: 'user', content: planPrompt(text) }], 120000);
+  const targets = normalizePlanSources(sources);
+  const reply = await callModel(modelCfg, [{ role: 'user', content: planPrompt(text, targets) }], 120000);
   const parsed = parseJsonLoose(reply);
   const dimensions = (parsed && typeof parsed === 'object')
     ? asList(parsed.dimensions, 6).map((item) => ({
@@ -220,7 +247,30 @@ async function planQueries({ idea, callModel, modelCfg } = {}) {
     if (byLine.length) queries = byLine.map((q) => ({ query: q, rationale: '' }));
   }
   if (!queries.length) throw new Error('选题拆解没有给出可用的检索式（模型输出无法解析）');
-  return { idea: text, dimensions, queries };
+  // 按来源分化的检索计划：模型可能漏源或写错源，这里按本次目标来源收敛。
+  let perSource = (parsed && typeof parsed === 'object' && Array.isArray(parsed.perSource))
+    ? asList(parsed.perSource, 10).map((item) => ({
+      source: cleanNote(String((item && item.source) || ''), 60),
+      query: cleanNote((item && item.query) || '', 600),
+      rationale: cleanNote((item && item.rationale) || '', 300)
+    })).filter((item) => targets.indexOf(item.source) >= 0 && looksLikeQuery(item.query))
+    : [];
+  const seenSources = new Set();
+  perSource = perSource.filter((item) => {
+    if (seenSources.has(item.source)) return false;
+    seenSources.add(item.source);
+    return true;
+  });
+  for (const key of targets) {
+    if (!seenSources.has(key)) {
+      perSource.push({
+        source: key,
+        query: queries[0].query,
+        rationale: '模型未单列该来源，沿用通用检索式；可在界面上改写'
+      });
+    }
+  }
+  return { idea: text, dimensions, queries, sources: targets, perSource };
 }
 
 // ---------------------------------------------------------------------------

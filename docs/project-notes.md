@@ -31,6 +31,8 @@
 | `js/guard.js` / `js/auth-*.js` | 登录与守卫（本地演示级门禁，非服务器认证） |
 | `server.js` | 零依赖 Node 服务：静态服务 + 全部 `/api/*` + **调试台** |
 | `tools/literature-research.js` | 环节①的要点抽取与研究空白归纳 |
+| `tools/literature_search.py` | 检索阶段主脚本：Scholar + 开放 API 源，混合来源同批合并 |
+| `tools/literature-sources.json` | 来源注册表（可执行 / 人工、语法与凭据），前后端共用 |
 | `tools/research-question.js` | 选题冷启动、候选问题、问题说明书 |
 | `tools/writing_build.py` | 环节⑥的 LaTeX 稿件生成（纯标准库） |
 | `tools/debug-report.js` | **命令行诊断报告**（维护者日常用） |
@@ -88,6 +90,9 @@ node tools/debug-report.js --json
 - 九步主流程（step/type 合流、逐步解锁、契约先行）——契约 §22
 - 上游产物汇聚（exec 的 `upstream` / `upstreamJobs` / `params`）——契约 §22.6
 - 环节①文献调研：冷启动 → 检索 → 人工初筛 → 逐篇要点/共识分歧/研究空白——契约 §23
+- **多源检索（2026-10-22）**：Scholar + PubMed / PMC / OpenAlex / Europe PMC / Semantic Scholar
+  可在同一批合并；支持按源检索式（`queries`）、跨源 DOI/标题去重、逐源命中/失败展示；
+  Scholar 验证码打断时开放源结果先落盘（批次 `status: "partial"`）
 - 环节②科学问题凝练：候选问题 → 人选 → 问题说明书——契约 §24
 - 环节⑥文章撰写：目标期刊手填、LaTeX 生成器、AAAI/NeurIPS/ICML 规范——契约 §22.7 / §23.5
 - 调试台：服务端缓冲 + 调试页 + 命令行报告 + 文档——契约 §25
@@ -99,11 +104,12 @@ node tools/debug-report.js --json
 3. 环节③的输入还没从②的问题说明书派生（"衔接"的最后一环）
 4. 少量文献卡在 Scholar 人机验证（需手动过，不自动绕过）
 5. 个别全文的要点抽取失败；「局限」字段几乎全是「文中未说明」（原文没明写）
+6. 开放源作业的**全文获取**还没联调（`literature_fulltext.py` 只验证过 Scholar 路径）
 
 ## 7. 下一步建议顺序
 
-1. 跑通②：①过审核门 → ②生成候选问题 → 采用一条 → 说明书 → 审核环节文档 → 过门 → ③
-2. 补齐卡在人机验证的全文
+1. 开放源作业的全文获取联调（`literature_fulltext.py` + 开放源候选的 `fulltext_links`）
+2. 跑通②：①过审核门 → ②生成候选问题 → 采用一条 → 说明书 → 审核环节文档 → 过门 → ③
 3. 让③的检索式与目标字段从②的问题说明书派生
 4. 做⑦的生成器（自查清单 + 投稿材料包 + 封面信）——离"能交差"最近
 

@@ -1440,3 +1440,76 @@ README 的「调试」段给了一条命令的用法。
 2. 「最近请求」表逐条显示 时间 / 级别 / 类型 / 方法 / 路径 / 状态 / 耗时。
 3. 在主界面制造一个 JS 错误 → 调试页「错误」表出现该条（中文正常显示）。
 4. 侧栏底部「调试台」链接可跳转到该页。
+
+---
+
+## 26. 多源检索：Scholar + 开放 API（2026-10-22）
+
+### 26.1 来源注册表
+
+单一真相仍是 `tools/literature-sources.json`；`state=executable` 的 6 个来源可自动执行：
+
+| key | 显示名 | 接入 | 人工 |
+|---|---|---|---|
+| `google-scholar` | Google Scholar | browser | 可能需过验证码 |
+| `pubmed` | PubMed | api | 否 |
+| `pmc` | PMC | api | 否 |
+| `openalex` | OpenAlex | api | 否 |
+| `semantic-scholar` | Semantic Scholar | api | 否（无 Key 时共享池限流） |
+| `europe-pmc` | Europe PMC | api | 否 |
+
+`cnki` / `wanfang` / `web-of-science` / `scopus` 是 `state=registered`（人工源），
+程序化启动仍按冻结文案拒绝，只能走导出清单导入。
+
+### 26.2 运行配置新增 `sourceQueries`（可选）
+
+```json
+{ "query": "通用检索式", "sources": ["google-scholar", "pubmed"],
+  "sourceQueries": { "pubmed": "\"soil organic carbon\"[Title/Abstract] AND fertilization[Title/Abstract]" } }
+```
+
+- 键必须是本次 `sources` 中启用的来源；值为非空字符串（≤600 字符）。
+- 未列出的来源回落到顶层 `query`；不带 `sourceQueries` 的旧配置行为不变。
+- JS `normalizeConfig` 与 Python `validate_config` 双层校验。
+
+### 26.3 执行语义
+
+- 顺序：先开放 API 源（不启动浏览器），再 Scholar。
+- 单源失败不拖垮整批：`sources[]` 元信息记 `status=error` 与 `error`；其余源照常。
+- 跨源去重：DOI 归一化后相同，或标题去标点/大小写后相同 → 同一篇，保留先到的
+  结构化来源（开放 API 源排在 Scholar 前面，摘要更完整）。
+- Scholar 验证码/启动失败而开放源已有结果时：先落盘（批次 `status="partial"`），
+  发 `result` + `attention` 两个事件；作业状态为 `needs_attention`，验证后重新检索补齐。
+- 批次 `scope`：纯开放源 `open_api_candidates`，混合 `mixed_candidates`，
+  纯 Scholar 仍 `first_page_candidates_only`。
+
+### 26.4 端点
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/api/literature/sources` | GET | 可执行来源清单 `{ sources: [{ key, label, access, manual }] }`，前端据此渲染来源多选 |
+| `/api/literature/candidates?id=` | GET | 新增 `scope`、`sources[]`（逐源检索式/URL/条数/状态/错误）、`source_counts` |
+| `/api/literature/research-plan` | POST | 请求新增可选 `sources: string[]`；响应新增 `sources` 与 `perSource[]` |
+| `/api/literature/search` | POST | 接受 26.2 的 `sourceQueries` |
+
+`research-plan` 的 `perSource` 每项为 `{ source, query, rationale }`；
+模型漏写的来源用通用检索式补齐并在 `rationale` 标注「沿用通用检索式」。
+
+### 26.5 前端
+
+- 环节①调研面板：来源多选（来自 §26.4 端点，含「免验证」标记）、多源时逐源检索式输入框、
+  按源检索计划「用这条」、检索完成后逐源显示命中数/失败原因。
+- 上述面板状态（`sources` / `perSource` / `sourceResults`）必须进 `js/chat.js` 的 `docSigOf()`，
+  否则会被增量渲染快速路径吞掉（§22 已知坑）。
+- 文献挖掘配置面板的来源清单同步为 6 个可执行源 + 4 个人工源。
+
+### 26.6 验收
+
+```bash
+python tools/test_literature_search.py        # 19 项，含混合来源/DOI 去重/部分落盘
+python tools/test_literature_search_open.py   # 80 项，来源注册表与请求构造
+node tools/test-literature-sources.js         # 注册表 + normalizeConfig（含 sourceQueries）
+node tools/test-research-question.js          # 选题拆解（含 perSource）
+node tools/test-literature-ui-stage2.js       # 多源面板静态检查
+node tools/check-contract.js                  # ALL_CHECKS_PASS
+```

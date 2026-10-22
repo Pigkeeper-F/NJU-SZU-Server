@@ -32,6 +32,10 @@
 - 每次运行在 `.workbench/literature/<任务 ID>/` 保存阶段记录和候选 JSON/CSV；页面按真实阶段显示状态并提供下载，不显示虚构的百分比。
 - 结果只是 Scholar 标题、来源链接和页面片段；全部标为 `pending_review`、`search_result_snippet`，不自动纳入或冒充摘要/全文证据。
 
+> **2026-10-22 更新**：PubMed / PMC / OpenAlex / Europe PMC / Semantic Scholar 已接通，可与 Scholar 同批混合检索；
+> 知网 / 万方 / WoS / Scopus 走「导出清单 → 导入」。本节「当前仅 Google Scholar 接通」是 2026-10-15 的历史表述，
+> 现行能力以 `README.md` 与 `docs/multi-source-search.md` 为准。
+
 ## 实现进度（2026-10-15 更新）
 
 第二阶段六阶段流水线已接入网页（设计见 `docs/literature-mining-stage2-design.md`，接口契约见 `docs/contract.md` §21）：

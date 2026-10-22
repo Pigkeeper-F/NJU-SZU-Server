@@ -472,7 +472,7 @@
   }
   function literaturePanel(mod, t) {
     const box = node('div', undefined, 'literature-connector');
-    box.append(node('p', '对话确认规则 → 核对运行配置 → 分阶段执行：候选检索、跨来源去重、全文获取、参数提取、校验、导出。当前仅 Google Scholar 已接通；全文提取前需要你确认参数字段含义与单位。'));
+    box.append(node('p', '对话确认规则 → 核对运行配置 → 分阶段执行：候选检索、跨来源去重、全文获取、参数提取、校验、导出。候选检索支持 Scholar + 开放 API 源（PubMed / PMC / OpenAlex / Europe PMC / Semantic Scholar 免验证码）；全文提取前需要你确认参数字段含义与单位。'));
     const row = node('div', undefined, 'codex-toolbar literature-toolbar');
     const prepare = node('button', t.literatureBusy ? '处理中…' : '从对话整理规则', 'quiet-button');
     prepare.type = 'button'; prepare.disabled = t.literatureBusy || t.busy; prepare.onclick = () => prepareLiterature(mod); row.append(prepare);
@@ -527,9 +527,11 @@
         wrap.append(field); fields.append(wrap);
       }
       function persistConfig() { saved[mod.id] = { ...saved[mod.id], literatureConfig: config }; persist(); }
-      input('研究主题', 'topic'); input('Google Scholar 检索式', 'query');
-      const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（目前仅 Scholar 可执行）'));
-      [['google-scholar', 'Google Scholar'], ['cnki', '知网'], ['wanfang', '万方'], ['web-of-science', 'Web of Science'], ['scopus', 'Scopus'], ['pubmed', 'PubMed']].forEach(([value, label]) => {
+      input('研究主题', 'topic'); input('通用检索式', 'query');
+      const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（开放 API 源免验证；人工源请用下方导入）'));
+      [['google-scholar', 'Google Scholar'], ['pubmed', 'PubMed'], ['pmc', 'PMC'], ['openalex', 'OpenAlex'],
+        ['europe-pmc', 'Europe PMC'], ['semantic-scholar', 'Semantic Scholar'],
+        ['cnki', '知网（人工）'], ['wanfang', '万方（人工）'], ['web-of-science', 'WoS（人工）'], ['scopus', 'Scopus（人工）']].forEach(([value, label]) => {
         const wrap = node('label', label); const check = node('input'); check.type = 'checkbox'; check.checked = config.sources.includes(value);
         check.onchange = () => { config.sources = check.checked ? [...config.sources, value] : config.sources.filter(source => source !== value); persistConfig(); };
         wrap.prepend(check); sources.append(wrap);
@@ -540,7 +542,8 @@
       lines('研究类型（每行一项）', 'studyTypes'); lines('纳入规则（每行一项）', 'inclusion');
       lines('排除规则（每行一项）', 'exclusion'); lines('目标参数字段（每行一项）', 'targetFields');
       details.append(fields); box.append(details);
-      if (config.sources.some(source => source !== 'google-scholar')) box.append(node('p', '配置含未接通来源：启动时会报错；如本次只做 Scholar 首批检索，请明确取消其他来源。', 'codex-error'));
+      const manualPicked = config.sources.filter(source => ['cnki', 'wanfang', 'web-of-science', 'scopus'].includes(source));
+      if (manualPicked.length) box.append(node('p', '配置含人工检索来源（' + manualPicked.join('、') + '）：无法自动执行。请在①调研面板用「导入清单」把知网/万方/WoS/Scopus 的导出题录并进候选池；自动检索请只勾开放 API 源。', 'codex-error'));
     } else box.append(node('p', '先在本模块对话确认规则，再点“从对话整理规则”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
     if (!job) box.append(node('p', '首次运行将自动创建 .venv 并安装最小依赖及 Chromium；若 Scholar 出现验证码，请在新开的浏览器中手动完成。', 'codex-status'));
     if (job) {

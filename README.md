@@ -31,10 +31,10 @@
 
 当前执行边界和验收要求：
 
-- 只接通 **Google Scholar**；如果配置包含知网、万方、Web of Science、Scopus 或 PubMed，启动会明确拒绝，绝不悄悄只查 Scholar。首批最多 10 条；Python 实际使用 `query`、`publicationYearFrom`、`publicationYearTo` 和 `limit`。地域与研究类型只有写入检索式才会影响检索阶段的搜索；语言、纳排规则和目标字段随配置保存，供后续阶段使用。
+- 候选检索支持 **Google Scholar + 开放 API 源**（PubMed / PMC / OpenAlex / Europe PMC / Semantic Scholar，后者免验证码），可同批混合并按 DOI/标题合并；`queries` 可为每个来源单独指定检索式。知网 / 万方 / Web of Science / Scopus 属人工源：不绕过验证码、不代持订阅，走「源站导出 RIS/BibTeX/CSV → 导入清单」。首批每个来源最多 10 条；Python 实际使用 `query`（或 `queries` 的按源覆盖）、`publicationYearFrom`、`publicationYearTo` 和 `limit`。地域与研究类型只有写入检索式才会影响检索阶段的搜索；语言、纳排规则和目标字段随配置保存，供后续阶段使用。
 - 候选清单保留标题、结果链接、全文链接（如有）、页面片段、来源、检索时间与待复核状态；批内按标题去重，跨批/跨来源重复由去重阶段归并。片段不是已核实的摘要或全文，候选不是已纳入文献。结果必须记录检索 URL 与实际应用的筛选条件；失败或验证码要给出真实状态。
 - 自动化只做“明确重复/无法获取”的判断：去重仅自动排除明确重复；全文获取不重试无法合法获取项；不自动判“不相关”。参数字段以研究者确认记录为准（`confirmations.json`），不把 AI 建议当已确认规则。提取行必须带出处，阻断/待审核行按规则分流，被排除文献仍保留筛选记录。
-- 本阶段仍**不**做：其他检索来源接入、用户上传清单/PDF 的自动导入、图表像素读数（人工转录可补录）、代理自动发现。无合法全文的文献标为待补充。
+- 本阶段仍**不**做：人工源（知网/万方/WoS/Scopus）的程序化直连、PDF 上传后自动解析题录、图表像素读数（人工转录可补录）、代理自动发现。无合法全文的文献标为待补充。
 
 详细的字段、异常和交付规则见 `docs/literature-mining-alignment.md`；SOC 原始规则见 `SOC-database-pipeline-clean/AGENTS.md`，仅在选择 SOC 示例时适用。
 

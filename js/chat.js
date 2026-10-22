@@ -548,6 +548,31 @@
     render();
   }
 
+  // 【多源检索 · 2026-10-22】来源清单从服务端注册表取（不在前端写死），缓存一次。
+  var literatureSourceCache = null;
+  var literatureSourceLoading = false;
+  function loadLiteratureSources(done) {
+    if (literatureSourceCache) { done(literatureSourceCache); return; }
+    if (literatureSourceLoading) return;
+    literatureSourceLoading = true;
+    researchGet('/api/literature/sources').then(function (data) {
+      literatureSourceCache = (data && Array.isArray(data.sources)) ? data.sources : [];
+      literatureSourceLoading = false;
+      done(literatureSourceCache);
+    }).catch(function () {
+      literatureSourceCache = [{ key: 'google-scholar', label: 'Google Scholar', access: 'browser' }];
+      literatureSourceLoading = false;
+      done(literatureSourceCache);
+    });
+  }
+  function researchSourceLabel(key) {
+    var list = literatureSourceCache || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].key === key) return list[i].label || key;
+    }
+    return key;
+  }
+
   function buildResearchPanel(mod) {
     if (!mod || mod.type !== 'literature-research') return null;
     var state = uiOf(mod.id).research || (uiOf(mod.id).research = {
@@ -555,8 +580,14 @@
       plan: null, planBusy: false, planMessage: '',
       candidates: null, keep: null, screeningBusy: false, jobId: '',
       phase: '', startedAt: 0, abort: null, model: '',
-      importBusy: false, importMessage: ''
+      importBusy: false, importMessage: '',
+      sources: ['google-scholar'], perSource: {}, sourceResults: null
     });
+    if (!Array.isArray(state.sources) || !state.sources.length) state.sources = ['google-scholar'];
+    if (!state.perSource || typeof state.perSource !== 'object') state.perSource = {};
+    if (!literatureSourceCache) {
+      loadLiteratureSources(function (list) { if (list && list.length) render(); });
+    }
     // 刷新后恢复：作业 id 记在模块参数上，候选清单按它重新拉回（否则初筛界面会丢）
     if (!state.jobId && mod.params && typeof mod.params.researchJobId === 'string') {
       state.jobId = mod.params.researchJobId;
@@ -564,6 +595,7 @@
     if (!state.candidates && state.jobId) {
       researchGet('/api/literature/candidates?id=' + encodeURIComponent(state.jobId)).then(function (data) {
         state.candidates = (data && data.candidates) || [];
+        state.sourceResults = (data && Array.isArray(data.sources)) ? data.sources : (state.sourceResults || []);
         state.keep = state.keep || state.candidates.map(function (c) { return c.id; });
         render();
       }).catch(function () { /* 拉不到就留空，用户可重新检索 */ });
@@ -594,15 +626,73 @@
     topicRow.appendChild(planBtn);
     box.appendChild(topicRow);
 
+    // 【多源检索 · 2026-10-22】来源多选：开放 API 源（PubMed/OpenAlex 等）免验证码，
+    // 与 Scholar 同批合并，重复条目按 DOI/标题去掉。
+    var sourceOptions = (literatureSourceCache && literatureSourceCache.length)
+      ? literatureSourceCache
+      : [{ key: 'google-scholar', label: 'Google Scholar', access: 'browser' }];
+    var sourceRow = el('div', 'research-sources');
+    sourceRow.appendChild(el('span', 'research-label', '检索来源'));
+    for (var si = 0; si < sourceOptions.length; si++) {
+      (function (source) {
+        var wrap = el('label', 'research-source');
+        var cb = el('input', 'research-check');
+        cb.type = 'checkbox';
+        cb.checked = state.sources.indexOf(source.key) >= 0;
+        cb.addEventListener('change', function () {
+          var next = state.sources.slice();
+          var at = next.indexOf(source.key);
+          if (cb.checked && at < 0) next.push(source.key);
+          if (!cb.checked && at >= 0) next.splice(at, 1);
+          if (!next.length) {
+            cb.checked = true;
+            state.message = '至少保留一个检索来源';
+            render();
+            return;
+          }
+          state.sources = next;
+          state.message = '';
+          render();
+        });
+        wrap.appendChild(cb);
+        wrap.appendChild(el('span', 'research-source-label', source.label || source.key));
+        if (source.access === 'api') wrap.appendChild(el('span', 'research-source-tag', '免验证'));
+        sourceRow.appendChild(wrap);
+      })(sourceOptions[si]);
+    }
+    box.appendChild(sourceRow);
+
+    var multiSource = state.sources.length > 1 || state.sources[0] !== 'google-scholar';
     var queryRow = el('label', 'research-field');
-    queryRow.appendChild(el('span', 'research-label', '检索式'));
+    queryRow.appendChild(el('span', 'research-label', multiSource ? '通用检索式' : '检索式'));
     var queryInput = el('input', 'research-input');
     queryInput.type = 'text';
-    queryInput.placeholder = 'Google Scholar 检索式，如 ("long-term fertilization") "soil organic carbon"';
+    queryInput.placeholder = multiSource
+      ? '未单列检索式的来源用它，如 "soil organic carbon" fertilization'
+      : 'Google Scholar 检索式，如 ("long-term fertilization") "soil organic carbon"';
     queryInput.value = state.query || '';
     queryInput.addEventListener('input', function () { state.query = queryInput.value; });
     queryRow.appendChild(queryInput);
     box.appendChild(queryRow);
+
+    // 多源时逐源显示检索式：不同来源语法不通用（PubMed 用字段标签、OpenAlex 用自然语言）。
+    if (multiSource) {
+      var perSourceBox = el('div', 'research-per-source');
+      for (var psi = 0; psi < state.sources.length; psi++) {
+        (function (key) {
+          var row = el('label', 'research-field');
+          row.appendChild(el('span', 'research-label', researchSourceLabel(key) + ' 检索式'));
+          var input = el('input', 'research-input');
+          input.type = 'text';
+          input.placeholder = key === 'google-scholar' ? '同通用检索式' : '留空则用通用检索式';
+          input.value = state.perSource[key] || '';
+          input.addEventListener('input', function () { state.perSource[key] = input.value; });
+          row.appendChild(input);
+          perSourceBox.appendChild(row);
+        })(state.sources[psi]);
+      }
+      box.appendChild(perSourceBox);
+    }
 
     // 候选检索式（冷启动结果）：点一条即填入检索式框
     if (state.plan && state.plan.queries && state.plan.queries.length) {
@@ -624,6 +714,34 @@
       }
       box.appendChild(planBox);
     }
+
+    // 【多源检索 · 2026-10-22】按来源分化的检索计划：每个来源一条，按该源语法写。
+    var planPerSource = (state.plan && Array.isArray(state.plan.perSource)) ? state.plan.perSource : [];
+    var selectedPlans = planPerSource.filter(function (item) {
+      return item && state.sources.indexOf(item.source) >= 0;
+    });
+    if (selectedPlans.length) {
+      var psBox = el('div', 'research-plans');
+      psBox.appendChild(el('div', 'research-plan-title', '按来源的检索式（点「用这条」填入该源）'));
+      for (var ppi = 0; ppi < selectedPlans.length; ppi++) {
+        (function (item) {
+          var row = el('div', 'research-plan');
+          row.appendChild(el('span', 'research-plan-source', researchSourceLabel(item.source)));
+          row.appendChild(el('span', 'research-plan-query', item.query));
+          if (item.rationale) row.appendChild(el('span', 'research-plan-why', item.rationale));
+          var use = el('button', 'quiet-button', '用这条');
+          use.type = 'button';
+          use.addEventListener('click', function () {
+            state.perSource[item.source] = item.query;
+            if (item.source === 'google-scholar') state.query = item.query;
+            render();
+          });
+          row.appendChild(use);
+          psBox.appendChild(row);
+        })(selectedPlans[ppi]);
+      }
+      box.appendChild(psBox);
+    }
     if (state.planMessage) box.appendChild(el('div', 'research-status', state.planMessage));
     // 当前用的哪个模型通道（慢的时候主人一眼能看出是不是走了慢通道）
     if (state.model) box.appendChild(el('div', 'research-model', '当前模型：' + state.model));
@@ -641,6 +759,21 @@
     actions.appendChild(runBtn);
     if (state.message) actions.appendChild(el('span', 'research-status', state.message));
     box.appendChild(actions);
+
+    // 【多源检索 · 2026-10-22】逐源命中/失败：混合检索时一眼看出是哪个源没拿到。
+    if (state.sourceResults && state.sourceResults.length) {
+      var srcBox = el('div', 'research-source-results');
+      for (var sri = 0; sri < state.sourceResults.length; sri++) {
+        (function (meta) {
+          var status = String(meta.status || '');
+          var failed = status !== 'ok' && status !== 'no_results';
+          var text = (meta.label || meta.source_key || '来源') + '：'
+            + (failed ? ('失败 — ' + (meta.error || status || '未知原因')) : (Number(meta.count || 0) + ' 条'));
+          srcBox.appendChild(el('span', 'research-source-result' + (failed ? ' research-source-result-fail' : ''), text));
+        })(state.sourceResults[sri]);
+      }
+      box.appendChild(srcBox);
+    }
 
     // 人工初筛：检索完成后列出候选，勾掉不相关的再抽要点
     if (state.candidates && state.candidates.length) {
@@ -775,13 +908,25 @@
     state.abort = new AbortController();
     render();
     startResearchTimer(mod);
-    researchPost('/api/literature/research-plan', { idea: state.topic, settings: readLlmSettings() || {} }, state.abort.signal)
+    researchPost('/api/literature/research-plan', { idea: state.topic, sources: state.sources, settings: readLlmSettings() || {} }, state.abort.signal)
       .then(function (plan) {
         stopResearchTimer();
         state.planBusy = false;
         state.phase = '';
         state.startedAt = 0;
         state.plan = plan;
+        // 模型给的按源检索式直接落到各源输入框；通用检索式只在用户还没填时补上。
+        if (plan && Array.isArray(plan.perSource)) {
+          for (var i = 0; i < plan.perSource.length; i++) {
+            var item = plan.perSource[i];
+            if (!item || !item.source || !item.query) continue;
+            state.perSource[item.source] = item.query;
+            if (item.source === 'google-scholar' && !String(state.query || '').trim()) state.query = item.query;
+          }
+        }
+        if (!String(state.query || '').trim() && plan && plan.queries && plan.queries.length) {
+          state.query = plan.queries[0].query;
+        }
         state.model = modelLabel(plan && plan.config);
         state.planMessage = plan && plan.dimensions && plan.dimensions.length
           ? ('检索维度：' + plan.dimensions.map(function (d) { return d.name; }).join('、'))
@@ -807,25 +952,33 @@
   function runResearch(mod) {
     var state = uiOf(mod.id).research;
     if (!state || state.busy) return;
-    if (!state.topic || !state.query) {
+    var sources = (Array.isArray(state.sources) && state.sources.length) ? state.sources.slice() : ['google-scholar'];
+    var query = String(state.query || '').trim() || String(state.perSource[sources[0]] || '').trim();
+    if (!state.topic || !query) {
       state.message = '请先填想法与检索式（检索式可以点「生成检索式」自动生成）';
       render();
       return;
     }
+    var sourceQueries = {};
+    for (var qi = 0; qi < sources.length; qi++) {
+      var custom = String(state.perSource[sources[qi]] || '').trim();
+      if (custom) sourceQueries[sources[qi]] = custom;
+    }
     state.busy = true;
-    state.phase = '正在检索 Google Scholar';
+    state.phase = '正在检索 ' + sources.map(researchSourceLabel).join('、');
     state.startedAt = Date.now();
     state.message = '检索中…';
     state.result = null;
     state.candidates = null;
     state.keep = null;
+    state.sourceResults = null;
     state.abort = new AbortController();
     render();
     startResearchTimer(mod);
 
     var jobId = '';
     researchPost('/api/literature/search', {
-      config: { topic: state.topic, query: state.query, sources: ['google-scholar'], limit: 10 }
+      config: { topic: state.topic, query: query, sources: sources, sourceQueries: sourceQueries, limit: 10 }
     }, state.abort.signal).then(function (started) {
       jobId = started && started.id ? started.id : '';
       if (!jobId) throw new Error('检索作业没有返回标识');
@@ -860,9 +1013,22 @@
       state.startedAt = 0;
       state.candidates = (data && data.candidates) || [];
       state.keep = state.candidates.map(function (c) { return c.id; });
+      state.sourceResults = (data && Array.isArray(data.sources)) ? data.sources : [];
+      var failed = state.sourceResults.filter(function (meta) {
+        var status = String((meta && meta.status) || '');
+        return status !== 'ok' && status !== 'no_results';
+      });
+      var perSource = state.sourceResults.length > 1
+        ? '（' + state.sourceResults.map(function (meta) {
+          var status = String((meta && meta.status) || '');
+          return (meta.label || meta.source_key || '来源') + ' '
+            + (status === 'ok' ? (Number(meta.count || 0) + ' 条') : '失败');
+        }).join('、') + '）'
+        : '';
       state.message = state.candidates.length
-        ? ('检索到 ' + state.candidates.length + ' 篇，请初筛后生成要点')
-        : '检索没有结果——换条检索式或放宽条件';
+        ? ('检索到 ' + state.candidates.length + ' 篇' + perSource + '，请初筛后生成要点')
+        : ('检索没有结果——换条检索式或放宽条件'
+          + (failed.length ? '（' + failed.map(function (meta) { return (meta.label || meta.source_key) + '：' + (meta.error || meta.status); }).join('；') + '）' : ''));
       render();
     }).catch(function (error) {
       stopResearchTimer();
@@ -1338,11 +1504,20 @@
     // 状态一变就被快速路径吞掉，界面看起来"点了完全没反应"。
     var rs = uiOf(mod.id).research;
     if (rs) {
+      var perSourceSig = Object.keys(rs.perSource || {}).sort().map(function (key) {
+        return key + '=' + (rs.perSource[key] || '');
+      }).join(',');
+      var sourceResultSig = (rs.sourceResults || []).map(function (meta) {
+        return (meta.source_key || '') + ':' + (meta.status || '') + ':' + (meta.count || 0);
+      }).join(',');
       s += '#R' + (rs.busy ? 1 : 0) + (rs.planBusy ? 1 : 0) + (rs.screeningBusy ? 1 : 0)
         + '|' + (rs.phase || '') + '|' + (rs.topic || '') + '|' + (rs.query || '')
         + '|' + (rs.plan ? (rs.plan.queries || []).length : 0)
         + '|' + (rs.result ? 1 : 0) + '|' + ((rs.candidates || []).length) + '|' + ((rs.keep || []).length)
-        + '|' + (rs.message || '') + '|' + (rs.planMessage || '') + '|' + (rs.model || '');
+        + '|' + (rs.message || '') + '|' + (rs.planMessage || '') + '|' + (rs.model || '')
+        // 【多源检索 · 2026-10-22】来源多选 / 逐源检索式 / 逐源命中也必须进签名，
+        // 否则勾选来源或检索完成时会被增量快速路径吞掉（本文件已知坑，踩过两次）。
+        + '|' + ((rs.sources || []).join(',')) + '|' + perSourceSig + '|' + sourceResultSig;
     }
     var qs = uiOf(mod.id).question;
     if (qs) {
