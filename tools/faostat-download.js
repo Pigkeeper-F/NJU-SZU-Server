@@ -9,7 +9,8 @@ const { fetchSource } = require('./source-download');
 const { transferArchive, transferFile, hashFile, officialUrl, readJson, writeJson, MAX_ARCHIVE_BYTES } = require('./source-transfer');
 const ID = /^[0-9a-f-]{36}$/;
 const CATALOG = 'https://bulks-faostat.fao.org/production/datasets_E.json';
-const FILTERS = ['reporterCodes', 'partnerCodes', 'itemCodes', 'elementCodes', 'elementNames'];
+const FILTERS = ['reporterCodes', 'partnerCodes', 'itemCodes', 'elementCodes', 'elementNames', 'itemNames', 'reporterNames', 'partnerNames'];
+const NAME_FILTERS = new Set(['elementNames', 'itemNames', 'reporterNames', 'partnerNames']);
 const TYPES = /\.(csv|tsv|xlsx|xls|json|txt|zip|pdf|xml|md)$/i;
 const sha = text => createHash('sha256').update(text).digest('hex');
 function isFaostatPlan(rules) { return /FAOSTAT|fao\.org/i.test(rules) && /贸易矩阵|Detailed\s*trade\s*matrix|\bTM\b/i.test(rules); }
@@ -26,19 +27,38 @@ function validatePlan(config, rules) {
   for (const key of FILTERS) {
     const values = config.filters?.[key] || [];
     if (!Array.isArray(values) || values.length > 1000 || values.some(value => typeof value !== 'string' || !value || value.length > 100)) throw new Error('筛选代码或指标格式无效');
-    if (key !== 'elementNames' && values.some(value => !/^\d+$/.test(value) || !new RegExp('(?<!\\d)' + value + '(?!\\d)').test(rules))) throw new Error('国家、商品或要素代码必须在方案中明确，不能猜测代码');
+    if (!NAME_FILTERS.has(key) && values.some(value => !/^\d+$/.test(value) || !new RegExp('(?<!\\d)' + value + '(?!\\d)').test(rules))) throw new Error('国家、商品或要素代码必须在方案中明确，不能猜测代码');
+    if (NAME_FILTERS.has(key) && key !== 'elementNames' && values.some(value => !rules.toLocaleLowerCase().includes(value.toLocaleLowerCase()))) throw new Error('筛选名称必须来自已审核方案，正式名称与代码由官方字典核对');
     if (key === 'elementNames') {
       const evidence = { 'Import Quantity': /Import\s*Quantity|进口(?:量|数量)|进出口数量/i, 'Export Quantity': /Export\s*Quantity|出口(?:量|数量)|进出口数量/i,
         'Import Value': /Import\s*Value|进口(?:额|金额|价值)|进出口金额/i, 'Export Value': /Export\s*Value|出口(?:额|金额|价值)|进出口金额/i };
-      if (values.some(value => !evidence[value]?.test(rules))) throw new Error('指标限定缺少方案依据');
+      if (values.some(value => !Object.entries(evidence).find(([name]) => name.toLowerCase() === value.toLowerCase())?.[1].test(rules))) throw new Error('指标限定缺少方案依据');
     }
     if (values.length) filters[key] = [...new Set(values)];
   }
   return { dataset: 'TM', years: [...config.years].sort(), filters, scopeNote: String(config.scopeNote || '未指定的国家、商品和指标不作筛选，保留官方记录').slice(0, 1000) };
 }
+function structuredPlan(rules) {
+  const cell = label => rules.split(/\r?\n/).map(line => line.split('|').map(value => value.trim())).find(parts => parts[1] === label)?.[2] || '';
+  const year = cell('目标年份') || cell('年份');
+  const item = cell('商品范围').split(/[；;]/)[0];
+  const reporter = cell('报告国范围'), partner = cell('贸易伙伴范围');
+  const indicators = (cell('进出口指标') || cell('指标范围')).split(/[；;]/)[0];
+  const years = [...new Set((year.match(/(?<!\d)(?:19|20)\d{2}(?!\d)/g) || []).map(Number))];
+  const named = /^(?:已确认)?(?:限定为|仅为|仅限于?|采用|为)?\s*([^()（）]+?)\s*[（(]([^()（）]+)[)）]\s*$/.exec(item);
+  if (!named || years.length !== 1 || !/全部报告国/.test(reporter) || !/全部贸易伙伴/.test(partner)
+    || /仅|限定|只(?:选|保留|含)|排除|不含/.test(reporter + partner) || !/进口数量/.test(indicators) || !/出口数量/.test(indicators)
+    || /(?:禁止|不允许|不得)[^\n。；]{0,15}(?:整包|压缩包)|仅允许[^\n。]{0,12}直接导出/.test(rules)) return null;
+  const rest = indicators.replace(/不(?:包含|含)(?:贸易)?(?:金额|价值)/g, '');
+  if (/金额|价值/.test(rest)) return null;
+  return validatePlan({ dataset: 'TM', years, filters: { itemNames: [named[2].trim()], elementNames: ['Import quantity', 'Export quantity'] },
+    scopeNote: named[2].trim() + '；全部报告国和贸易伙伴（含来源汇总项）；仅进口与出口数量，正式代码和单位由官方数据核对' }, rules);
+}
 async function interpretPlan(rules, generate, signal) {
+  const structured = structuredPlan(rules);
+  if (structured) return structured;
   if (generate) {
-    const prompt = '只依据以下已审核下载方案生成JSON，不调用工具，不下载，不编造网址。数据集仅支持FAOSTAT详细贸易矩阵TM。返回 {"dataset":"TM","years":[2024],"filters":{"reporterCodes":[],"partnerCodes":[],"itemCodes":[],"elementCodes":[],"elementNames":[]},"scopeNote":"其余范围的处理说明","unresolved":[]}。年份必须来自方案。国家/商品/要素代码必须在方案明确提供，不凭知识猜测或将M49当FAO代码；明确限某些国家或商品但没有官方代码时写unresolved。elementNames仅可用Import Quantity、Export Quantity、Import Value、Export Value并有方案依据。未指定/不限/待确认的范围不添加筛选条件、保留全部官方记录并在scopeNote说明，不把未确认写成已确认。明确的限定不能忽略；方案含不能实现的聚合、换算、去重等须写unresolved。本任务只获取官方整包并按年份及明确条件筛选原始记录。只返回JSON。\n\n已审核方案：\n' + rules;
+    const prompt = '从已审核方案提取研究范围，返回JSON，不调用工具，不猜代码或网址。当前平台已支持FAOSTAT TM官方整包自动定位、2GiB流式获取、包内官方字典核对名称代码、实际年份与单位核对及目标记录另存。这些是程序已具备的事实；下载URL、文件大小、商品代码、正式名称大小写、指标单位及年份可用性待官方核对，均交执行器完成，不能列为unresolved。旧方案中20MB或技术路径待核对的文字不表示研究范围未定，也不额外要求用户找链接或先查代码。只在真的缺少业务选择、明确禁止当前获取方法、或要求未支持的转换/合并时列unresolved；保留原件并另存目标记录不属于改写原件或科学清洗。\n返回 {"dataset":"TM","years":[2024],"filters":{"reporterCodes":[],"partnerCodes":[],"itemCodes":[],"elementCodes":[],"elementNames":[],"itemNames":[],"reporterNames":[],"partnerNames":[]},"scopeNote":"范围说明","unresolved":[]}。名称用方案中原文，例如itemNames:["Wheat"]或["小麦"]；平台将从包内官方字典唯一精确匹配，真实多义才停止。代码只有方案已明确时才填，不把M49猜成FAO代码。进口/出口数量使用elementNames:["Import quantity","Export quantity"]，金额对应Import value/Export value；正式代码和单位由执行器核对，不猜。不得忽略已明确的小麦、国家、年份或数量限定；仅未指定/不限的范围保留全部。当前请求由用户审核方案并点击执行发起，未执行/待核对等旧状态不冒充新的业务审批。只返回JSON。\n\n已审核方案：\n' + rules;
     const text = String(await generate(prompt, signal));
     const start = text.indexOf('{'), end = text.lastIndexOf('}');
     if (start < 0 || end <= start) throw new Error('未能从方案读取下载范围，请在对话中明确数据集和年份');
@@ -174,7 +194,8 @@ class SourceDownloads {
       else if (await hashFile(target) !== file.sha256) throw new Error('同名结果已存在且内容不符，未覆盖');
       deliverables.push({ ...file, storedName: job.id + '/' + file.name, group: 'input', finalUrl: complete.finalUrl });
     }
-    job.deliverables = deliverables; job.result = { sourceRows: report.sourceRows, rowsSelected: report.rowsSelected, columns: report.columns, zipCRCVerified: true };
+    if (report.resolvedConfig) job.config = report.resolvedConfig;
+    job.deliverables = deliverables; job.result = { sourceRows: report.sourceRows, rowsSelected: report.rowsSelected, columns: report.columns, zipCRCVerified: true, officialMappings: report.officialMappings, unitsByElement: report.unitsByElement };
     writeJson(path.join(output, 'source-and-filter-report.json'), { ...report, rulesSha256: job.rulesSha256, config: job.config, catalog, archive: job.archive, fetchedAt: complete.completedAt });
     fs.copyFileSync(path.join(this.root, 'tools', 'faostat_filter.py'), path.join(output, 'faostat_filter.py'));
     writeJson(path.join(output, 'filter-config.json'), job.config);
@@ -208,11 +229,14 @@ class SourceDownloads {
       run.child = child; let errorText = '';
       child.stderr.on('data', bytes => { errorText = (errorText + bytes.toString('utf8')).slice(-2000); });
       readline.createInterface({ input: child.stdout }).on('line', line => {
-        try { const event = JSON.parse(line); if (event.error) errorText = event.error; else this.update(job, 'filter', '正在筛选：已扫描 ' + (event.rowsRead || 0).toLocaleString() + ' 行，保留 ' + (event.rowsSelected || 0).toLocaleString() + ' 行', event); } catch (_) { /* Ignore non-JSON diagnostics. */ }
+        try { const event = JSON.parse(line); if (event.error) errorText = event.error;
+          else if (event.stage === 'lookup') { if (event.resolvedConfig) job.config = event.resolvedConfig; this.update(job, 'lookup', event.message || '官方名称与代码已核对，准备筛选', event); }
+          else this.update(job, 'filter', '正在筛选：已扫描 ' + (event.rowsRead || 0).toLocaleString() + ' 行，保留 ' + (event.rowsSelected || 0).toLocaleString() + ' 行', event);
+        } catch (_) { /* Ignore non-JSON diagnostics. */ }
       });
       child.once('error', reject); child.once('exit', code => { run.child = null; code === 0 ? resolve() : reject(new Error(errorText || '筛选进程未完成')); });
     });
   }
   close() { for (const run of this.running.values()) { run.cancelled = true; run.controller.abort(); run.child?.kill(); } }
 }
-module.exports = { SourceDownloads, interpretPlan, validatePlan, isFaostatPlan, fileSources, CATALOG, MAX_ARCHIVE_BYTES };
+module.exports = { SourceDownloads, interpretPlan, validatePlan, structuredPlan, isFaostatPlan, fileSources, CATALOG, MAX_ARCHIVE_BYTES };

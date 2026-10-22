@@ -4,6 +4,9 @@
 const { isKnown, assertExecutable } = require('./literature-sources');
 
 const DEFAULT_LIMITS = { discover: 180, dedupe: 120, fulltext: 3600, extract: 1800, validate: 300, export: 600 };
+// A grouped legacy draft may expand to many individual variables. Keep the
+// same bound across configuration, discussion and the confirmation checkpoint.
+const MAX_FIELD_DEFINITIONS = 200;
 
 function string(value, name, max = 500) {
   if (value == null) return '';
@@ -57,7 +60,7 @@ function sourceQueries(raw) {
 
 function fieldDefinitions(raw) {
   if (raw == null) return [];
-  if (!Array.isArray(raw) || raw.length > 50) throw new Error('字段定义必须是列表且不超过 50 项');
+  if (!Array.isArray(raw) || raw.length > MAX_FIELD_DEFINITIONS) throw new Error(`字段定义必须是列表且不超过 ${MAX_FIELD_DEFINITIONS} 项`);
   const seen = new Set();
   return raw.map((item, index) => {
     const label = `第 ${index + 1} 个字段定义`;
@@ -168,7 +171,7 @@ function normalizeConfig(raw, options = {}) {
     studyTypes: list(raw.studyTypes, '研究类型'),
     inclusion: list(raw.inclusion, '纳入规则'),
     exclusion: list(raw.exclusion, '排除规则'),
-    targetFields: list(raw.targetFields, '目标字段'),
+    targetFields: list(raw.targetFields, '目标字段', MAX_FIELD_DEFINITIONS),
     limit,
     ...(searchMode ? { searchMode, perSourceLimit, ...(stopMode ? { stopMode } : {}) } : {}),
     sourceQueries: sourceQueries(raw.sourceQueries),
@@ -181,4 +184,4 @@ function normalizeConfig(raw, options = {}) {
   };
 }
 
-module.exports = { normalizeConfig, DEFAULT_LIMITS, discoverBudget };
+module.exports = { normalizeConfig, DEFAULT_LIMITS, MAX_FIELD_DEFINITIONS, discoverBudget };

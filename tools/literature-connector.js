@@ -10,9 +10,10 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
-const { normalizeConfig, discoverBudget } = require('./literature-config');
+const { normalizeConfig, discoverBudget, MAX_FIELD_DEFINITIONS } = require('./literature-config');
 const { executableSources } = require('./literature-sources');
 const { proxyFor } = require('./source-download');
+const { readMaterials, registeredMaterialFile, safeFile } = require('./literature-materials');
 
 function childEnv() {
   const proxy = proxyFor('https:');
@@ -48,6 +49,8 @@ const DELIVERABLE_PATTERNS = [
   /^dedupe\/dedupe\.(?:json|csv)$/,
   /^fulltext\/status\.json$/,
   /^fulltext\/review\.json$/,
+  /^fulltext\/materials\.json$/,
+  /^fulltext\/materials\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[^\\]+$/,
   /^fulltext\/files\/[^/\\]+\.(?:pdf|txt)$/,
   /^extraction\/inputs\/[^/\\]+\.json$/,
   /^extraction\/[^/\\]+\.json$/,
@@ -207,18 +210,34 @@ function cnkiRetryItems(job, dir) {
     const states = status.items.filter(item => item?.paper_id === id);
     if (members.length !== 1 || originals.length !== 1 || states.length !== 1) continue;
     const member = members[0], original = originals[0], state = states[0];
+    const materialsOnly = job.cnkiRetryPaperId === id && ['fetched_pdf', 'fetched_html'].includes(state.status)
+      && pendingPaperMaterials(dir, id);
     const title = normalizeTitle(group.title || member.title);
     if (member.source_key !== 'cnki' || original.source_key !== 'cnki' || !title || title.length > 500
         || normalizeTitle(member.title) !== normalizeTitle(original.title) || title !== normalizeTitle(original.title)
-        || !CNKI_RETRY_STATUSES.has(state.status) || normalizeTitle(state.title) !== title) continue;
+        || (!CNKI_RETRY_STATUSES.has(state.status) && !materialsOnly) || normalizeTitle(state.title) !== title) continue;
     // Reasons are fixed UI explanations, never persisted URLs or session data.
-    const reason = state.status === 'abstract_only' ? '目前仅有摘要，尚未取得全文'
+    const reason = materialsOnly ? '主文已保存，本篇补充材料仍待处理；继续仅补充本篇材料，不重新下载正文'
+      : state.status === 'abstract_only' ? '目前仅有摘要，尚未取得全文'
       : state.status === 'needs_attention' ? '原全文页面需要处理或核对'
         : state.status === 'pending' ? '尚未处理这篇文献' : '尚未取得可确认的全文，需要补充官方入口';
-    items.push({ id, title, status: state.status, reason });
+    items.push({ id, title, status: state.status, reason, ...(materialsOnly ? { materials_only: true } : {}) });
     if (items.length >= 100) break;
   }
   return items;
+}
+
+function pendingPaperMaterials(dir, paperId) {
+  try {
+    const inventory = readMaterials(dir);
+    if (inventory.legacy) return false;
+    const papers = inventory.papers.filter(paper => paper.paper_id === paperId);
+    if (papers.length !== 1) return false;
+    const paper = papers[0];
+    return ['pending', 'needs_attention'].includes(paper.main_pdf_status)
+      || !['checked', 'none_declared'].includes(paper.supplement_check.status)
+      || paper.materials.some(material => material.role === 'supplement' && material.download_status !== 'downloaded');
+  } catch (_) { return false; }
 }
 
 function existingPython(root, job) {
@@ -548,6 +567,7 @@ class LiteratureConnector {
     return { id: job.id, status: job.status, stage: job.stage, message: job.message,
       count: job.count, config: job.config, files: job.files, events: job.events, error: job.error,
       stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters, activeStage: job.activeStage || null,
+      fulltextFailurePolicy: job.fulltextFailurePolicy === 'skip' ? 'skip' : 'pause',
       attention: sourceAttention(job.attention), deferredSources: queue, deferredOnly: checkpointDeferredOnly(job.dir, job.config),
       executionOrder: executionOrder(job.config, queue), processingBasis: job.processingBasis || null, deletedAt: job.deletedAt || null,
       canReviewFulltext: fulltextReviewEligible(job, job.dir), cnkiRetryItems: cnkiRetryItems(job, job.dir),
@@ -604,6 +624,8 @@ class LiteratureConnector {
     if (!Array.isArray(status?.items)) return;
     const counts = Object.fromEntries(['fetched_pdf', 'fetched_html', 'abstract_only', 'unavailable', 'needs_attention', 'pending'].map(key => [key, 0]));
     for (const item of status.items) if (item && Object.hasOwn(counts, item.status)) counts[item.status]++;
+    counts.acquisition_skipped = status.items.filter(item => item?.acquisition_skip?.policy === 'skip_unavailable').length;
+    if (Number.isInteger(status.counts?.material_incomplete)) counts.material_incomplete = status.counts.material_incomplete;
     const count = counts.fetched_pdf + counts.fetched_html;
     job.count = count; this.mergeCounters(job, 'fulltext', { count, counts });
     this.registerFiles(job, ['fulltext/status.json']); this.registerFulltextFiles(job);
@@ -620,7 +642,8 @@ class LiteratureConnector {
     }
     if (['fulltext', 'fulltext_review'].includes(stage)) {
       for (const [field, key] of Object.entries({ fetched_pdf: 'fulltextPdf', fetched_html: 'fulltextHtml',
-        abstract_only: 'fulltextAbstract', unavailable: 'fulltextUnavailable', needs_attention: 'fulltextAttention', pending: 'fulltextPending' })) {
+        abstract_only: 'fulltextAbstract', unavailable: 'fulltextUnavailable', needs_attention: 'fulltextAttention', pending: 'fulltextPending',
+        acquisition_skipped: 'fulltextSkipped', material_incomplete: 'materialsIncomplete' })) {
         if (integer(counts[field]) !== null) counters[key] = counts[field];
       }
     }
@@ -658,6 +681,7 @@ class LiteratureConnector {
         job.count = event.count;
         this.mergeCounters(job, stageKey, event);
       }
+      if (stageKey === 'fulltext' && event.counts) this.mergeCounters(job, stageKey, event);
       this.update(job, String(event.stage || stageKey), String(event.message || '正在处理'));
       return;
     }
@@ -734,6 +758,7 @@ class LiteratureConnector {
     } else if (job.resumeRun) {
       extraArgs.push('--resume');
     }
+    if (stage === 'fulltext' && job.fulltextFailurePolicy === 'skip') extraArgs.push('--skip-unavailable');
     try { return await this.runStage(STAGE_SCRIPTS[stage], extraArgs, job, onEvent); }
     finally { if (stage === 'discover') job.deferSource = null; }
   }
@@ -920,7 +945,7 @@ class LiteratureConnector {
         // The researcher may stop just after the verified file and status were
         // saved but before the worker's result event. The offline review is the
         // gate that confirms that completed artifact and releases its scope.
-        if (['fetched_pdf', 'fetched_html'].includes(item?.status)) job.cnkiRetryPaperId = null;
+        if (['fetched_pdf', 'fetched_html'].includes(item?.status) && !pendingPaperMaterials(job.dir, job.cnkiRetryPaperId)) job.cnkiRetryPaperId = null;
       }
       job.status = 'needs_attention'; job.resumeStage = 'fulltext'; job.activeStage = null; job.attention = null;
       job.stages = { ...(job.stages || {}), fulltext: 'pending' };
@@ -950,6 +975,7 @@ class LiteratureConnector {
     }
     const target = cnkiRetryItems(saved, dir).find(item => item.id === paperId);
     if (!target) throw new Error('只能重试已暂停全文任务中尚未取得的知网单篇；请核对原候选、去重及全文状态，已有下游成果时不可重试');
+    if (restart === true && target.materials_only) throw new Error('本篇正文已保存，请使用“继续这篇材料”，不能重新定位或下载正文');
     if (saved.cnkiRetryPaperId && saved.cnkiRetryPaperId !== paperId) throw new Error('上一篇知网全文尚未处理完成，请先继续原单篇任务');
     const job = this.jobs.get(id) || this.loadPersisted(id);
     job.status = 'running'; job.error = null; job.attention = null; job.activeStage = 'fulltext'; job.resumeStage = 'fulltext';
@@ -978,7 +1004,7 @@ class LiteratureConnector {
       if (['needs_attention', 'failed'].includes(job.status)) { this.persist(job); return; }
       if (!receivedResult) throw new Error('单篇全文获取未返回有效结果，已有材料保留');
       job.status = 'needs_attention'; job.resumeStage = 'fulltext'; job.attention = null;
-      job.cnkiRetryPaperId = null;
+      job.cnkiRetryPaperId = pendingPaperMaterials(job.dir, paperId) ? paperId : null;
       job.stages.fulltext = 'pending';
       this.update(job, 'fulltext_ready', '本篇已处理，请核查全文状态；其他材料仍待处理或补充。仅执行了指定的这一篇，不重新检索或进入提取。');
     } catch (error) {
@@ -1009,6 +1035,7 @@ class LiteratureConnector {
       stages: saved.stages && typeof saved.stages === 'object' ? saved.stages : null,
       resumeStage: typeof saved.resumeStage === 'string' && STAGES.includes(saved.resumeStage) ? saved.resumeStage : null,
       until: typeof saved.until === 'string' ? saved.until : null,
+      fulltextFailurePolicy: saved.fulltextFailurePolicy === 'skip' ? 'skip' : 'pause',
       counters: saved.counters && typeof saved.counters === 'object' ? saved.counters : {},
       limits: resolveLimits(saved.config || diskConfig), activeStage: null, python: null, resumeRun: true,
       attention: sourceAttention(saved.attention), browserOpening: false,
@@ -1048,7 +1075,18 @@ class LiteratureConnector {
     const stored = this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json'));
     if (stored?.deletedAt) throw new Error('该任务已删除，请先恢复后再执行');
     if (hasCnkiRetryScope(stored)) throw new Error('请使用“继续这篇知网文献”处理原单篇，不能扩大到其他文献');
+    const hasSkip = Object.hasOwn(requested, 'skipUnavailable');
+    if (hasSkip) {
+      if (typeof requested.skipUnavailable !== 'boolean') throw new Error('跳过策略必须为布尔值');
+      if (!stored || !['needs_attention', 'failed', 'cancelled'].includes(stored.status) || stored.resumeStage !== 'fulltext'
+          || (stored.status === 'cancelled' && requested.skipUnavailable !== true)) {
+        throw new Error('只能在全文获取暂停后调整跳过策略');
+      }
+      if (requested.deferSource !== undefined || requested.confirmations != null) throw new Error('跳过全文不能同时修改检索来源或提取字段');
+      if (requested.until != null && requested.until !== '' && requested.until !== 'fulltext') throw new Error('跳过文献只继续全文获取，不进入提取');
+    }
     let until = requested.until == null || requested.until === '' ? 'export' : String(requested.until);
+    if (hasSkip) until = 'fulltext';
     if (!STAGES.includes(until)) throw new Error('阶段边界必须是 discover–export 的有效阶段名');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening)) throw new Error('已有文献检索正在运行，请等待或停止后重试');
     const hasDefer = Object.hasOwn(requested, 'deferSource') && requested.deferSource !== undefined;
@@ -1076,14 +1114,19 @@ class LiteratureConnector {
     }
     const job = this.jobs.get(id) || this.loadPersisted(id);
     if ((requested.until == null || requested.until === '') && job.status === 'needs_attention' && job.resumeStage === 'discover') until = job.until || 'discover';
-    if (job.status === 'cancelled') throw new Error('任务已停止，不能继续；请发起新检索');
+    const resumeStoppedFulltext = job.status === 'cancelled' && hasSkip && requested.skipUnavailable === true && job.resumeStage === 'fulltext';
+    if (job.status === 'cancelled' && !resumeStoppedFulltext) throw new Error('任务已停止，不能继续；请发起新检索');
+    if (resumeStoppedFulltext && (job.child || !Array.isArray(loadJsonFile(path.join(job.dir, 'fulltext', 'status.json'))?.items))) {
+      throw new Error(job.child ? '原任务进程正在退出，请稍后再继续' : '原全文进度无法核对，请先核查历史任务');
+    }
     if (job.status === 'running') throw new Error('已有文献检索正在运行，请等待或停止后重试');
     const stage = job.resumeStage || null;
     if (!stage) throw new Error('该任务已完成全部阶段');
-    if (!['completed', 'needs_attention', 'failed'].includes(job.status)) throw new Error('该任务已完成全部阶段');
+    if (!['completed', 'needs_attention', 'failed'].includes(job.status) && !resumeStoppedFulltext) throw new Error('该任务已完成全部阶段');
     if (job.browserOpening) throw new Error('正在打开检索页面，请稍后继续');
     if (STAGES.indexOf(until) < STAGES.indexOf(stage)) throw new Error('请选择当前待运行阶段或之后的阶段');
     if (requested.confirmations != null) this.appendConfirmations(job, requested.confirmations);
+    if (hasSkip) job.fulltextFailurePolicy = requested.skipUnavailable ? 'skip' : 'pause';
     job.resumeRun = true;
     job.deferSource = hasDefer ? requested.deferSource : null;
     if (hasDefer) job.resumeCurrent = false;
@@ -1092,7 +1135,9 @@ class LiteratureConnector {
     job.status = 'running';
     job.error = null;
     job.until = until;
-    this.update(job, stage, `继续${STAGE_LABELS[stage] || stage}`);
+    this.update(job, stage, stage === 'fulltext' && job.fulltextFailurePolicy === 'skip'
+      ? '继续获取全文：无法取得的正文或补充材料记录原因后跳过，保留已有成果。'
+      : `继续${STAGE_LABELS[stage] || stage}`);
     void this.run(job, stage, until);
     return this.public(job);
   }
@@ -1125,7 +1170,7 @@ class LiteratureConnector {
   //: 追加确认记录（append-only，原子重写；§3.2）。
   appendConfirmations(job, confirmations) {
     const fields = confirmations && Array.isArray(confirmations.fields) ? confirmations.fields : null;
-    const valid = fields && fields.length && fields.length <= 50 && fields.every(item =>
+    const valid = fields && fields.length && fields.length <= MAX_FIELD_DEFINITIONS && fields.every(item =>
       item && typeof item === 'object' && !Array.isArray(item) && typeof item.key === 'string' && item.key.trim());
     if (!valid) throw new Error('字段确认内容无效');
     const file = path.join(job.dir, 'confirmations.json');
@@ -1236,16 +1281,30 @@ class LiteratureConnector {
 
   restoreJob(id) { return this.setDeleted(id, false); }
 
+  materials(id) {
+    if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    const dir = path.join(this.base, id);
+    if (!safeFile(dir, 'job.json')) throw new Error('检索任务不存在');
+    return readMaterials(dir);
+  }
+
   download(id, name) {
     const job = this.snapshot(id);
+    if (typeof name === 'string' && name.startsWith('fulltext/materials/')) {
+      const file = registeredMaterialFile(path.join(this.base, id), name);
+      if (!file) throw new Error('材料未登记、尚未保存或路径不安全，不能下载');
+      return file;
+    }
+    if (typeof name === 'string' && name.startsWith('fulltext/files/')) {
+      const dir = path.join(this.base, id), file = registeredMaterialFile(dir, name);
+      if (file) return file;
+      if (safeFile(dir, 'fulltext/materials.json')) throw new Error('材料未在当前清单登记或尚未保存，不能下载');
+    }
     if (!isDeliverable(name) || !Array.isArray(job.files) || !job.files.includes(name)) throw new Error('结果文件不存在');
     const dir = path.join(this.base, id);
-    const file = path.resolve(dir, name);
-    if (!file.startsWith(dir + path.sep)) throw new Error('结果文件不可下载');
-    let stat;
-    try { stat = fs.lstatSync(file); } catch (_) { throw new Error('结果文件不存在'); }
-    if (stat.isSymbolicLink() || !fs.statSync(file).isFile()) throw new Error('结果文件不可下载');
-    return file;
+    const entry = safeFile(dir, name);
+    if (!entry) throw new Error('结果文件不存在或路径不安全');
+    return entry.file;
   }
 
   cancel(id) {

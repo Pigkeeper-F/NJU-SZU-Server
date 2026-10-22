@@ -20,6 +20,29 @@ from test_literature_fulltext_browser import Clock, Context, Response, snapshot
 
 
 class ReviewSafetyTests(unittest.TestCase):
+    def test_review_old_abstract_labels_does_not_count_empty_or_navigation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            job = Path(temp)
+            folder = job / "fulltext/files"
+            folder.mkdir(parents=True)
+            texts = ["\n", "Scopus Logo\nView PDF\nFull text\n", "Abstract\nA controlled experiment measured the effects of heat stress on broiler growth performance and feed intake.\nKeywords\npoultry"]
+            items = []
+            for index, text in enumerate(texts):
+                name = f"item-{index}.txt"
+                (folder / name).write_text(text, encoding="utf-8")
+                items.append({"paper_id": str(index), "status": "abstract_only", "kind": "html",
+                              "path": f"fulltext/files/{name}", "source_url": "https://www.scopus.com/pages/publications/105001"})
+            original = json.dumps({"items": items}).encode("utf-8")
+            (job / "fulltext/status.json").write_bytes(original)
+            with patch.object(fulltext, "make_fetcher", side_effect=AssertionError("must stay offline")):
+                report = fulltext.review_saved_fulltext(job, emit_result=False)
+            self.assertEqual(report["counts"]["abstract_only"], 1)
+            self.assertEqual(report["counts"]["unavailable"], 2)
+            self.assertEqual(report["counts"]["fetched"], 0)
+            self.assertEqual((job / report["backup"]).read_bytes(), original)
+            for index, text in enumerate(texts):
+                self.assertEqual((folder / f"item-{index}.txt").read_text(encoding="utf-8"), text)
+
     def test_cnki_missing_entry_is_explained_offline_without_requeue(self):
         with tempfile.TemporaryDirectory() as temp:
             job = Path(temp)

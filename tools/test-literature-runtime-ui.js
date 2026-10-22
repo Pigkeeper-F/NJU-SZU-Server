@@ -23,7 +23,7 @@ function functionSource(name) {
   return source.slice(start, end + 4);
 }
 const FUNCTIONS = ['checkLiteratureRuntime', 'autoOpenLiteratureBrowser', 'watchLiterature', 'startLiterature',
-  'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'confirmLiteratureFields', 'literatureAttentionMessage', 'literatureCompletedMessage', 'literatureProcessingBasisMessage'];
+  'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'confirmLiteratureFields', 'literatureFieldsAssistState', 'literatureAttentionMessage', 'literatureCompletedMessage', 'literatureProcessingBasisMessage'];
 function job(overrides = {}) {
   return { id: 'original-job', status: 'needs_attention', stage: 'verification', resumeStage: 'discover', until: 'discover',
     config: { topic: 'fixture topic', query: 'fixture query', sources: ['cnki'], limit: 10,
@@ -39,7 +39,7 @@ function harness(savedSnapshot) {
   const current = { busy: false, literatureBusy: false, literatureError: '', literatureUntil: 'discover',
     literatureJob: activeJob, literatureConfig: copy(activeJob.config), literatureConfirmDrafts: [{ key: 'value', label: '值', meaning: '报告值', unit: '原文单位', valueType: 'number' }] };
   const context = vm.createContext({
-    task: () => current, saved, root: { LiteratureUI: { isBusy: () => false } }, account: { model: 'fixture-model' },
+    task: () => current, saved, literatureFieldDrafts: {}, root: { LiteratureUI: { isBusy: () => false } }, account: { model: 'fixture-model' },
     persist() {}, render() {}, renderLiteratureFieldsDialog() {}, closeLiteratureFields() {},
     ensureLiteratureFieldDrafts: () => current.literatureConfirmDrafts,
     validatedLiteratureFields: () => copy(current.literatureConfirmDrafts), saveLiteratureFieldDrafts: () => true,
@@ -214,7 +214,7 @@ async function main() {
   await confirm.subject.confirmLiteratureFields(mod);
   assert.equal(confirm.calls[0].url, '/api/literature/runtime');
   assert.equal(confirm.calls[1].url, '/api/literature/advance');
-  assert.equal(confirm.calls[1].body.id, 'original-job'); assert.equal(confirm.calls[1].body.until, 'validate');
+  assert.equal(confirm.calls[1].body.id, 'original-job'); assert.equal(confirm.calls[1].body.until, 'extract', 'The field-table action explicitly extracts only');
 
   // Watching existing jobs stays available even if runtime does not support a
   // new execution; genuine auth waits trigger one checked browser request.

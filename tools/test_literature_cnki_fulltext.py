@@ -12,6 +12,7 @@ import literature_fulltext_browser as browser
 
 
 TITLE = "PGE2在热应激肉鸡肠道免疫功能中的调控机制"
+SCIENTIFIC_TITLE = "L-瓜氨酸对热应激和免疫应激肉鸡体温调节和一氧化氮代谢影响的研究"
 PDF = b"%PDF-1.7\n" + b"x" * (60 * 1024)
 RECORD = {"source_key": "cnki", "source_candidate_id": "CNKI-1", "paper_id": "P-1", "title": TITLE,
           "links": [{"url": "https://bar.cnki.net/bar/download/order?token=never-replay"}]}
@@ -128,6 +129,56 @@ class Element:
         self.disposed = True
 
 
+class QueryEditor:
+    def __init__(self, page):
+        self.page = page
+
+    def is_visible(self):
+        return True
+
+    def is_enabled(self):
+        return True
+
+    def is_editable(self):
+        return True
+
+    def fill(self, value, **options):
+        self.page.query_fills.append(value)
+        self.page.ui["queries"] = [value]
+
+    def input_value(self):
+        return self.page.ui["queries"][0]
+
+    def dispose(self):
+        pass
+
+
+class SearchButton:
+    def __init__(self, page, label="检索"):
+        self.page, self.label = page, label
+
+    def is_visible(self):
+        return True
+
+    def is_enabled(self):
+        return True
+
+    def evaluate(self, script):
+        if script == mod._CONTROL_LABEL_JS:
+            return self.label
+        if script == mod._CONTROL_READY_JS:
+            return True
+        raise AssertionError(script)
+
+    def click(self, **options):
+        assert options.get("no_wait_after") is True
+        self.page.search_submits += 1
+        self.page.on_search(self.page)
+
+    def dispose(self):
+        pass
+
+
 class Page:
     def __init__(self, context, target, opener=None):
         self.context, self.target, self._opener = context, target, opener
@@ -138,6 +189,10 @@ class Page:
         self.main_frame = object()
         self.on_title, self.on_download = self.detail, self.begin_download
         self.lookup_delay = 0
+        self.repairable = False
+        self.query_fills, self.search_submits = [], 0
+        self.search_labels = ["检索"]
+        self.on_search = lambda p: None
 
     def is_closed(self):
         return self.closed
@@ -173,6 +228,10 @@ class Page:
         return Locator(self, selector)
 
     def query_selector_all(self, selector):
+        if selector == mod.QUERY_CONTROLS:
+            return [QueryEditor(self)] if self.repairable else []
+        if selector == mod.SEARCH_CONTROLS:
+            return [SearchButton(self, label) for label in self.search_labels] if self.repairable else []
         assert selector == mod.CONTROLS
         return [Element(self, item) for item in self.ui["controls"]]
 
@@ -1153,8 +1212,144 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "attention")
         self.assertNotIn("bytes", result)
 
+    def scientific_case(self, *, repairable=True, on_search=None, search_labels=None):
+        self.context.initial_ui = ui(title=SCIENTIFIC_TITLE, query=SCIENTIFIC_TITLE[2:])
+        def setup(page):
+            page.repairable = repairable
+            if on_search is not None:
+                page.on_search = on_search
+            if search_labels is not None:
+                page.search_labels = search_labels
+            def detail(p):
+                p.detail(p)
+                p.snap["citation_title"] = SCIENTIFIC_TITLE
+                p.ui["titles"] = [SCIENTIFIC_TITLE]
+            page.on_title = detail
+        self.context.next_setup = setup
+        return {**RECORD, "title": SCIENTIFIC_TITLE, "paper_id": "CNKI-008"}
+
+    def test_leading_scientific_prefix_removed_by_visible_query_gets_one_literal_repair(self):
+        record = self.scientific_case()
+        original = copy.deepcopy(record)
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, record, {})
+        self.assertEqual(result["status"], "pdf_page")
+        page = fetcher._page
+        self.assertEqual(page.query_fills, ['"' + SCIENTIFIC_TITLE + '"'])
+        self.assertEqual(page.search_submits, 1)
+        self.assertEqual(page.title_clicks, 1)
+        self.assertEqual(page.download_clicks, 1)
+        self.assertEqual(len(page.gotos), 1)
+        repair = fetcher._binding["cnki_flow"]["lookup_repair"]
+        self.assertEqual(repair["state"], "submitted")
+        self.assertEqual(repair["method"], "visible-literal-title")
+        self.assertNotIn(SCIENTIFIC_TITLE, json.dumps(repair, ensure_ascii=False))
+        self.assertEqual(record, original, "single-paper lookup cannot change original candidate/query")
+
+    def test_literal_repair_still_missing_prefix_pauses_and_resume_never_resubmits(self):
+        record = self.scientific_case(on_search=lambda p: p.ui.update(queries=[SCIENTIFIC_TITLE[2:]]))
+        first = self.fetcher()
+        result = mod.run_cnki(first, record, {})
+        self.assertEqual(result["lookup_diagnostic"], "repair_query_rewritten")
+        page = first._page
+        self.assertEqual(page.search_submits, 1)
+        self.assertEqual(page.title_clicks, 0)
+        first.close()
+        second = self.fetcher()
+        result = mod.run_cnki(second, record, {})
+        self.assertEqual(result["lookup_diagnostic"], "repair_query_rewritten")
+        self.assertEqual(page.search_submits, 1)
+        self.assertEqual(len(page.query_fills), 1)
+        self.assertEqual(len(page.gotos), 1)
+
+    def test_submitted_literal_repair_auth_pause_recovers_without_second_submission(self):
+        record = self.scientific_case(on_search=lambda p: p.snap.update(verification=True))
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, record, {})["reason"], "verification")
+        page = first._page
+        self.assertEqual(first._binding["cnki_flow"]["lookup_repair"]["state"], "submitted")
+        self.assertEqual(page.title_clicks, 0)
+        first.close()
+        page.snap["verification"] = False
+        second = self.fetcher()
+        result = mod.run_cnki(second, record, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(page.search_submits, 1)
+        self.assertEqual(page.title_clicks, 1)
+        self.assertEqual(page.download_clicks, 1)
+
+    def test_uncertain_literal_submission_resume_never_replays_click(self):
+        def uncertain(page):
+            page.snap["verification"] = True
+            raise TimeoutError("submission result uncertain")
+        record = self.scientific_case(on_search=uncertain)
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, record, {})["reason"], "verification")
+        page = first._page
+        self.assertEqual(first._binding["cnki_flow"]["lookup_repair"]["state"], "prepared")
+        first.close()
+        page.snap["verification"] = False
+        second = self.fetcher()
+        result = mod.run_cnki(second, record, {})
+        self.assertEqual(result["lookup_diagnostic"], "repair_incomplete")
+        self.assertEqual(page.search_submits, 1)
+        self.assertEqual(page.title_clicks, 0)
+
+    def test_query_repair_requires_unique_normal_search_control(self):
+        for name, labels in (("ai", ["AI检索"]), ("two", ["检索", "搜索"])):
+            with self.subTest(name=name):
+                self.path = Path(self.tmp.name) / name
+                record = self.scientific_case(search_labels=labels)
+                result = mod.run_cnki(self.fetcher(), record, {})
+                self.assertEqual(result["lookup_diagnostic"], "repair_button_unrecognized")
+                self.assertEqual(self.context.pages[-1].search_submits, 0)
+                self.assertEqual(self.context.pages[-1].title_clicks, 0)
+
+    def test_owned_same_paper_detail_recovers_from_lookup_without_goto_or_search(self):
+        record = self.scientific_case(repairable=False)
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, record, {})["lookup_diagnostic"], "repair_editor_unrecognized")
+        page = first._page
+        first.close()
+        page.on_title(page)  # researcher finishes normal navigation in owned target
+        page.snap["citation_doi"] = "10.27277/d.cnki.gsdnu.2026.000352"
+        second = self.fetcher()
+        result = mod.run_cnki(second, record, {})
+        self.assertEqual(result["status"], "pdf_page")
+        self.assertEqual(len(page.gotos), 1)
+        self.assertEqual(page.search_submits, 0)
+        self.assertEqual(page.title_clicks, 0)
+        self.assertEqual(page.download_clicks, 1)
+
+    def test_unrelated_detail_tab_does_not_satisfy_owned_lookup(self):
+        record = self.scientific_case(repairable=False)
+        other = self.context.pages[0]
+        other.detail(other)
+        other.snap["citation_title"] = SCIENTIFIC_TITLE
+        other.ui["titles"] = [SCIENTIFIC_TITLE]
+        result = mod.run_cnki(self.fetcher(), record, {})
+        self.assertEqual(result["lookup_diagnostic"], "repair_editor_unrecognized")
+        self.assertEqual(other.title_clicks, 0)
+        self.assertEqual(other.download_clicks, 0)
+        self.assertFalse(other.gotos)
+
+    def test_true_loading_stall_still_pauses_after_one_minute_with_specific_diagnostic(self):
+        self.context.initial_ui = ui(count=0)
+        fetcher = self.fetcher()
+        result = mod.run_cnki(fetcher, RECORD, {})
+        self.assertEqual(result["lookup_diagnostic"], "rows_loading")
+        self.assertEqual(result["reason"], "load_timeout")
+        self.assertGreaterEqual(self.clock.now, 1060)
+        self.assertEqual(fetcher._page.search_submits, 0)
+        self.assertEqual(fetcher._page.title_clicks, 0)
+
 
 class OriginSummaryTests(unittest.TestCase):
+    def test_literal_query_wrapper_preserves_entire_scientific_prefix(self):
+        for value in (SCIENTIFIC_TITLE, '"' + SCIENTIFIC_TITLE + '"'):
+            self.assertTrue(mod._query_matches(ui(title=SCIENTIFIC_TITLE, query=value), SCIENTIFIC_TITLE))
+        for value in (SCIENTIFIC_TITLE[2:], '"' + SCIENTIFIC_TITLE[2:] + '"', SCIENTIFIC_TITLE + "综述", "L-瓜氨酸"):
+            self.assertFalse(mod._query_matches(ui(title=SCIENTIFIC_TITLE, query=value), SCIENTIFIC_TITLE))
     def test_fixed_categories_and_no_credentials_paths_queries_fragments_or_port_values(self):
         cases = [
             ("http://kns.cnki.net/secret-path?v=secret-token", "http", "kns.cnki.net", "http_cnki"),
@@ -1264,6 +1459,27 @@ class LocalDOMTests(unittest.TestCase):
         self.assertTrue(self.page.evaluate(mod._CNKI_UI_JS)["purchase_required"])
         self.page.set_content('<nav><a>充值</a><a>订阅</a></nav><h1>' + TITLE + '</h1><button>PDF下载</button>')
         self.assertFalse(self.page.evaluate(mod._CNKI_UI_JS)["purchase_required"])
+
+    def test_actual_scientific_title_markup_and_literal_visible_form_submission(self):
+        suffix = SCIENTIFIC_TITLE[2:]
+        self.page.set_content('<input id="txt_SearchText" value="' + suffix + '">'
+            '<button onclick="document.body.dataset.submitted=document.querySelector(\'#txt_SearchText\').value">检索</button>'
+            '<button>AI检索</button><table class="result-table-list"><tbody><tr><td style="width:200px">'
+            '<a href="#"><i>L</i>-<span style="color:red">' + suffix + '</span></a></td></tr></tbody></table>')
+        before = self.page.evaluate(mod._CNKI_UI_JS)
+        self.assertEqual(mod._title_matches(before, SCIENTIFIC_TITLE), [(0, 0)])
+        self.assertEqual(mod._exact_result(before, SCIENTIFIC_TITLE), [])
+        self.assertEqual(mod._lookup_diagnosis(mod.ENTRY, before, SCIENTIFIC_TITLE), "query_rewritten")
+        editor, button, problem = mod._lookup_form(self.page)
+        self.assertIsNone(problem)
+        literal = '"' + SCIENTIFIC_TITLE + '"'
+        editor.fill(literal)
+        button.click(no_wait_after=True)
+        self.assertEqual(self.page.locator("body").get_attribute("data-submitted"), literal)
+        after = self.page.evaluate(mod._CNKI_UI_JS)
+        self.assertEqual(mod._exact_result(after, SCIENTIFIC_TITLE), [(0, 0)])
+        editor.dispose()
+        button.dispose()
 
 
 if __name__ == "__main__":

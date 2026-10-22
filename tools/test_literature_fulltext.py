@@ -35,7 +35,7 @@ import literature_fulltext as lf
 
 def fake_pdf_bytes(size: int | None = None) -> bytes:
     size = size or lf.MIN_PDF_BYTES + 1024
-    return b"%PDF-1.4\n" + b"0" * (size - 9)
+    return b"%PDF-1.4\n" + b"0" * (size - 15) + b"\n%%EOF"
 
 
 def article_page(title: str = "论文 GSC-002") -> dict:
@@ -294,6 +294,51 @@ class FetchOneTest(unittest.TestCase):
         self.assertEqual(item["status"], "fetched_pdf")
         self.assertTrue((self.job / item["path"]).read_bytes().startswith(b"%PDF"))
 
+    def test_verified_html_is_kept_while_main_pdf_wins_over_supplement_pdf(self) -> None:
+        article = article_page("Test paper")
+        article["html_evidence"]["links"] = [
+            {"url": "https://example.org/supp.pdf", "label": "Supplementary PDF", "kind": "pdf"},
+            {"url": "https://example.org/main.pdf", "label": "Download article PDF", "kind": "pdf"},
+        ]
+        fetcher = FakeFetcher(page={"https://example.org/article": article})
+        target = self._target(result_url="https://example.org/article", title="Test paper")
+        checkpoints = []
+        item = lf.fetch_one(target, self.job, {**self._opts(fetcher), "on_main_saved": lambda saved: checkpoints.append(dict(saved))})
+        self.assertEqual(item["status"], "fetched_pdf")
+        self.assertEqual([entry["status"] for entry in checkpoints], ["fetched_html", "fetched_pdf"])
+        self.assertTrue((self.job / "fulltext/files/GSC-001.txt").exists())
+        self.assertIn(("fetch_pdf", "https://example.org/main.pdf"), fetcher.calls)
+        self.assertNotIn(("fetch_pdf", "https://example.org/supp.pdf"), fetcher.calls)
+
+    def test_returned_main_is_checkpointed_before_supplement_attention(self) -> None:
+        discovery = {"status": "checked", "links": [{"url": "https://example.org/s1.xlsx", "label": "Table S1"}]}
+        for route in ["pdf", "pdf_page", "html", "cnki"]:
+            with self.subTest(route=route):
+                folder = self.job / route
+                folder.mkdir()
+                checkpoint = []
+                record = self._target(title="Test paper", result_url="https://example.org/article")
+                fetcher = FakeFetcher()
+                if route == "pdf":
+                    record["source_url"] = "https://example.org/main.pdf"
+                    record["result_url"] = record["source_url"]
+                    fetcher.pdf_results[record["source_url"]] = {"status": "saved", "material_discovery": discovery}
+                elif route == "pdf_page":
+                    fetcher.page_results["https://example.org/article"] = {"status": "pdf_page", "material_discovery": discovery}
+                elif route == "cnki":
+                    record["source_key"] = "cnki"
+                    fetcher.fetch_cnki = lambda *_: {"status": "pdf_page", "bytes": fake_pdf_bytes(), "material_discovery": discovery}
+                else:
+                    fetcher.page_results["https://example.org/article"] = {**article_page("Test paper"), "material_discovery": discovery}
+                def pause_after_save(_):
+                    self.assertEqual(len(checkpoint), 1)
+                    self.assertTrue((folder / checkpoint[0]["path"]).is_file())
+                    return {"status": "attention", "reason": "verification", "message": "Supplement login"}
+                with self.assertRaises(lf.FulltextPause):
+                    lf.fetch_one(record, folder, {**self._opts(fetcher), "on_main_saved": lambda saved: checkpoint.append(dict(saved)),
+                                                 "on_material_discovery": pause_after_save})
+                self.assertEqual(checkpoint[0]["status"], "fetched_html" if route == "html" else "fetched_pdf")
+
     def test_invalid_pdf_bytes_from_page_are_not_saved(self) -> None:
         fetcher = FakeFetcher(page={"https://example.org/download": {"status": "pdf_page", "bytes": b"<html>404</html>"}})
         item = lf.fetch_one(self._target(result_url="https://example.org/download"), self.job, self._opts(fetcher))
@@ -350,14 +395,16 @@ class FetchOneTest(unittest.TestCase):
         self.assertEqual(item["kind"], "none")
         self.assertIn("待补充", item["reason"])
 
-    def test_existing_valid_pdf_skips_all_browser_calls(self) -> None:
+    def test_untracked_existing_pdf_is_preserved_and_requires_review(self) -> None:
         files = self.job / "fulltext" / "files"
         files.mkdir(parents=True)
         (files / "GSC-001.pdf").write_bytes(fake_pdf_bytes())
         fetcher = FakeFetcher()
-        item = lf.fetch_one(self._target(links=[{"label": "[PDF]", "url": "https://example.org/a.pdf"}]), self.job, self._opts(fetcher))
-        self.assertEqual(item["status"], "fetched_pdf")
-        self.assertEqual(item["size"], lf.MIN_PDF_BYTES + 1024)
+        before = (files / "GSC-001.pdf").read_bytes()
+        with self.assertRaises(lf.FulltextPause) as paused:
+            lf.fetch_one(self._target(links=[{"label": "[PDF]", "url": "https://example.org/a.pdf"}]), self.job, self._opts(fetcher))
+        self.assertEqual(paused.exception.reason, "local_fulltext_verification")
+        self.assertEqual((files / "GSC-001.pdf").read_bytes(), before)
         self.assertEqual(fetcher.calls, [])
 
     def test_captcha_in_pdf_raises_pause_with_url(self) -> None:
@@ -469,7 +516,7 @@ class RunFlowTest(unittest.TestCase):
         result = events[-1]
         self.assertEqual(result["type"], "result")
         self.assertEqual(result["stage"], "fulltext")
-        self.assertEqual(result["files"], ["fulltext/status.json"])
+        self.assertEqual(result["files"], ["fulltext/status.json", "fulltext/materials.json"])
         self.assertEqual(result["count"], 2)
         self.assertEqual(result["counts"]["fetched_pdf"], 1)
         self.assertEqual(result["counts"]["fetched_html"], 1)
@@ -490,7 +537,7 @@ class RunFlowTest(unittest.TestCase):
         # §3.5 item key set
         self.assertEqual(
             set(items["GSC-001"].keys()),
-            {"paper_id", "title", "doi", "source_url", "fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason"},
+            {"paper_id", "title", "doi", "source_url", "fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "content_sha256", "pdf_evidence"},
         )
 
     def test_captcha_pauses_with_attention_and_resume_completes(self) -> None:
@@ -558,6 +605,24 @@ class RunFlowTest(unittest.TestCase):
         self.assertEqual(fetcher2.calls, [])
         self.assertEqual(events2[-1]["count"], 1)
         self.assertEqual(events2[-1]["counts"]["skipped"], 1)
+
+    def test_default_fetcher_backfills_old_main_without_downloading_main_again(self) -> None:
+        write_candidates(self.job, [candidate("GSC-001", links=[{"label": "[PDF]", "url": "https://example.org/a.pdf"}])])
+        self.assertEqual(run_stage(self.job, fetcher=FakeFetcher())[0], 0)
+        fetcher = FakeFetcher()
+        def inspect(record, opts):
+            fetcher.calls.append(("inspect_materials", record["paper_id"]))
+            return {"status": "ok", "material_discovery": {"status": "none_declared", "reason": "Publisher explicitly declares none", "links": []}}
+        fetcher.inspect_materials = inspect
+        with patch.object(lf, "make_fetcher", return_value=fetcher):
+            self.assertEqual(run_stage(self.job, resume=True)[0], 0)
+        self.assertIn(("inspect_materials", "GSC-001"), fetcher.calls)
+        self.assertFalse(any(call[0] in {"fetch_pdf", "fetch_page"} for call in fetcher.calls))
+        manifest = json.loads((self.job / "fulltext/materials.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["papers"][0]["supplement_check"]["status"], "none_declared")
+        fetcher.calls.clear()
+        self.assertEqual(run_stage(self.job, fetcher=fetcher, resume=True)[0], 0)
+        self.assertEqual(fetcher.calls, [])
 
     def test_verified_html_cache_retains_evidence_and_never_reopens_browser(self) -> None:
         write_candidates(self.job, [candidate("GSC-002", result_url="https://example.org/article")])
@@ -949,7 +1014,7 @@ class LocalHttpFixtureTest(unittest.TestCase):
                 "needs_attention": 0,
                 "pending": 0,
             })
-            self.assertEqual(events[-1]["files"], ["fulltext/status.json"])
+            self.assertEqual(events[-1]["files"], ["fulltext/status.json", "fulltext/materials.json"])
 
 
 if __name__ == "__main__":

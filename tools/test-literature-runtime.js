@@ -87,6 +87,12 @@ function unitCases(root) {
   assert.ok(!JSON.stringify(runtime.snapshot()).includes('fixture-secret-not-in-runtime'));
   assert.ok(!JSON.stringify(runtime.snapshot()).includes(root), 'Runtime response must not reveal the absolute workspace path');
 
+  for (const moduleName of ['literature_fulltext_reuse.py', 'literature_target_groups.py']) {
+    const prior = backendFingerprint(root);
+    write(path.join(root, 'tools', moduleName), '# changed local full-text behavior\n');
+    assert.notEqual(backendFingerprint(root), prior, moduleName + ' must invalidate the loaded backend');
+  }
+
   const changed = { sources: [{ key: 'google-scholar', state: 'executable' }, { key: 'pubmed', state: 'registered' }] };
   write(path.join(root, 'tools', 'literature-sources.json'), JSON.stringify(changed));
   assert.notEqual(backendFingerprint(root), before);
@@ -102,7 +108,7 @@ function unitCases(root) {
 
 async function httpCases(root) {
   sourceFixture(root);
-  for (const name of ['server.js', 'tools/literature-runtime.js', 'tools/source-download.js', 'tools/scholar-flow.js']) {
+  for (const name of ['server.js', 'tools/literature-runtime.js', 'tools/source-download.js', 'tools/scholar-flow.js', 'tools/plotting.js']) {
     write(path.join(root, name), fs.readFileSync(path.join(ROOT, name)));
   }
   // The real server's busy predicate sees fake job holders. Any actual model/login access fails the fixture.

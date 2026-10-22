@@ -78,6 +78,22 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 #rules-dialog .task-summary-confirmed { max-height:180px; overflow:auto; padding:13px 16px; white-space:pre-wrap; line-height:1.7; }
 #rules-dialog .task-summary-actions { flex-wrap:wrap; align-items:center; margin-top:16px; }
 #rules-dialog #task-rules-execute { background:#244f40; }
+#rules-dialog button:disabled { opacity:.45; cursor:not-allowed; box-shadow:none; }
+#task-rules-execution-status { margin-top:12px; min-height:1.6em; color:#607563; font-size:13px; line-height:1.6; }
+#rules-dialog .task-rules-footer { position:sticky; bottom:0; z-index:2; padding:8px 0 0; background:#fff; border-top:1px solid var(--border); }
+.clean-results .clean-result-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding-bottom:12px; }
+.clean-result-heading select { max-width:100%; padding:7px 9px; border:1px solid var(--border); border-radius:6px; background:white; color:var(--text); }
+.clean-result-section { margin:0 0 14px; }
+.clean-result-section h4 { font-size:14px; margin:0 0 7px; color:var(--text); }
+.clean-results .clean-result-file { display:flex; flex-direction:column; gap:3px; padding:9px 12px; margin:5px 0; border:1px solid var(--border); border-radius:7px; color:var(--text); background:#fbfcfa; text-decoration:none; }
+.clean-result-file:hover { border-color:var(--accent-line); background:#f1f6f1; }
+.clean-result-file strong { font-size:13px; font-weight:550; }
+.clean-result-meta { font-size:12px; color:var(--muted); line-height:1.6; margin:4px 0; overflow-wrap:anywhere; }
+.clean-result-aux { border-top:1px solid var(--border); margin-top:10px; padding-top:9px; }
+.clean-result-aux>summary { cursor:pointer; font-size:12px; color:var(--muted); padding:4px 0; }
+.codex-files.clean-results { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.clean-results>.clean-result-heading,.clean-results>.clean-result-aux,.clean-results>.codex-status,.clean-results>.codex-error { grid-column:1/-1; }
+@media(max-width:800px) { .codex-files.clean-results { grid-template-columns:1fr; max-height:60dvh; } }
 .section-heading { display:flex; align-items:center; justify-content:space-between; flex-shrink:0; min-height:54px; padding:14px 32px; gap:12px; }
 #section-name { margin:0; font-size:19px; font-weight:600; letter-spacing:-.025em; }
 #active-module-meta { font-size:11px; color:#99a19a; }

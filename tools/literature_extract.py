@@ -31,6 +31,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from literature_fulltext_evidence import EVIDENCE_VERSION, verified_saved_html
+from literature_target_groups import expanded_target_groups
+from literature_materials import extraction_materials, materials_fingerprint, MaterialsError
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -278,6 +280,22 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
     except json.JSONDecodeError as error:
         raise StageError(f"全文状态文件损坏：{error}") from None
     items = [item for item in (status.get("items") or []) if isinstance(item, dict)]
+    # Legacy fulltext lists used only a probable group's canonical paper and
+    # could omit a different article with a similar title. Do not let that old
+    # list silently define the extraction population or edit it here.
+    dedupe_path = job_dir / "dedupe" / "dedupe.json"
+    if dedupe_path.is_file():
+        try:
+            dedupe = json.loads(dedupe_path.read_text(encoding="utf-8"))
+            groups = expanded_target_groups(dedupe.get("groups") if isinstance(dedupe, dict) else None)
+        except (ValueError, OSError) as error:
+            raise StageError("去重目标尚未核对，不能生成提取输入；原结果保留") from error
+        listed = {str(item.get("paper_id") or "") for item in items}
+        missing = [str(group.get("canonical_id") or "") for group in groups
+                   if group.get("target_group_expanded") is True and group.get("canonical_id") not in listed]
+        if missing:
+            shown = "、".join(missing[:5]) + ("…" if len(missing) > 5 else "")
+            raise StageError("有待核对的相似文献未进入全文清单，请返回全文获取继续处理；原结果保留（" + shown + "）")
     # Older whole-page text was sometimes mislabeled as full text. Validate
     # HTML evidence before reusing any old input bundle or calling a model.
     for item in items:
@@ -301,6 +319,7 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
 
     # 先整体扫描过期 bundle（schema 已变化）：不静默重建，要求 --force（§2.4.4 关口）。
     stale: list[str] = []
+    stale_materials: list[str] = []
     for item in items:
         paper_id = str(item.get("paper_id") or "").strip()
         if not safe_paper_id(paper_id):
@@ -315,9 +334,19 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
             existing = None
         if isinstance(existing, dict) and existing.get("schema_sha256") != schema["sha256"]:
             stale.append(paper_id)
+        if isinstance(existing, dict):
+            try:
+                current_materials = materials_fingerprint(job_dir, paper_id)
+            except MaterialsError as error:
+                raise StageError(str(error)) from error
+            if existing.get("materials_fingerprint") != current_materials:
+                stale_materials.append(paper_id)
     if stale and not force:
         shown = "、".join(stale[:5]) + ("…" if len(stale) > 5 else "")
         raise StageError(f"提取输入包与当前已确认字段定义不一致（{shown}）；请使用 --force 重建提取输入包后重跑")
+    if stale_materials and not force:
+        shown = "、".join(stale_materials[:5]) + ("…" if len(stale_materials) > 5 else "")
+        raise StageError(f"材料清单已更新，旧提取输入未包含当前材料（{shown}）；请使用 --force 重建，不会静默继续正文单文件输入")
 
     created: list[str] = []
     reused: list[str] = []
@@ -346,6 +375,10 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
                 if item_status == "fetched_html" and (existing.get("fulltext", {}).get("content_sha256") != item.get("content_sha256")
                         or existing.get("fulltext", {}).get("evidence_version") != EVIDENCE_VERSION):
                     raise StageError("提取输入与当前正文证据不一致（" + paper_id + "）；请使用 --force 重建后重跑")
+                if "materials_check" not in existing:
+                    existing.update(materials=[], materials_fingerprint=None,
+                                    materials_check={"manifest_present": False, "supplement_check": {"status": "uninspected", "reason": "旧输入未核查补充材料。"}})
+                    atomic_write_json(bundle_path, existing)
                 reused.append(paper_id)
                 files.append(relative)
                 continue
@@ -377,6 +410,13 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
             "field_definitions": schema["fields"],
             "condition_keys": conditions,
         }
+        try:
+            material_inputs = extraction_materials(job_dir, paper_id, max_chars=max_chars,
+                                                   main_path=str(item.get("path") or ""))
+            bundle.update(materials=material_inputs.pop("materials"), materials_check=material_inputs,
+                          materials_fingerprint=materials_fingerprint(job_dir, paper_id))
+        except MaterialsError as error:
+            raise StageError(str(error)) from error
         if degraded_reason:
             bundle["degraded"] = {"reason": degraded_reason}
             degraded.append({"paper_id": paper_id, "reason": degraded_reason})

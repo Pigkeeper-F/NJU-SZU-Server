@@ -193,6 +193,42 @@ async function main() {
   const stale = fixture(crashed, { status: 'failed', stage: 'failed', resumeStage: 'extract', until: 'export', cnkiRetryPaperId: 'CNKI-001' });
   assert.equal(crashed.loadPersisted(stale.id).resumeStage, 'fulltext');
   assert.throws(() => crashed.advance(stale.id, { until: 'export' }), /继续这篇知网文献/);
+
+  // A scoped retry may save/reuse the main PDF, then pause at a supplemental
+  // material. Its fetched status must not lock out this same paper's remaining
+  // materials, nor permit restart to redownload its already saved main paper.
+  const materialsConnector = new LiteratureConnector(root, { prepare: async () => 'fixture-python', prepareOffline: async () => 'fixture-python' });
+  materialsConnector.base = path.join(root, 'materials-scope');
+  const materialTask = fixture(materialsConnector, { cnkiRetryPaperId: 'CNKI-001' });
+  const materialStatusFile = path.join(materialTask.dir, 'fulltext/status.json');
+  const materialStatus = JSON.parse(fs.readFileSync(materialStatusFile)); materialStatus.items[0].status = 'fetched_pdf'; write(materialStatusFile, materialStatus);
+  fs.mkdirSync(path.join(materialTask.dir, 'fulltext/files'), { recursive: true }); fs.writeFileSync(path.join(materialTask.dir, 'fulltext/files/CNKI-001.pdf'), 'saved-pdf');
+  const materialManifest = { version: 1, papers: [{ paper_id: 'CNKI-001', title: '原题名0', main_pdf_status: 'downloaded',
+    supplement_check: { status: 'needs_attention', reason: 'Supplement download needs confirmation' }, materials: [
+      { material_id: 'main', role: 'main_pdf', path: 'fulltext/files/CNKI-001.pdf', download_status: 'downloaded', size: 9 },
+      { material_id: 'S1', role: 'supplement', download_status: 'needs_attention', read_status: 'not_checked' }
+    ] }] };
+  const materialManifestFile = path.join(materialTask.dir, 'fulltext/materials.json'); write(materialManifestFile, materialManifest);
+  const scopedMaterial = materialsConnector.snapshot(materialTask.id).cnkiRetryItems.find(item => item.id === 'CNKI-001');
+  assert.equal(scopedMaterial.materials_only, true); assert.match(scopedMaterial.reason, /主文已保存/);
+  assert.throws(() => materialsConnector.restartCnki(materialTask.id, 'CNKI-001'), /继续这篇材料/);
+  materialsConnector.runStage = async (_script, args, _job, event) => {
+    assert.deepEqual(args, ['--resume', '--only', 'CNKI-001', '--retry-unavailable', '--limit', '1']);
+    event({ type: 'attention', stage: 'verification', message: 'Supplement still needs confirmation' });
+  };
+  materialsConnector.retryCnki(materialTask.id, 'CNKI-001'); await finish(materialsConnector, materialTask.id);
+  assert.equal(materialsConnector.snapshot(materialTask.id).cnkiRetryPaperId, 'CNKI-001');
+  assert.throws(() => materialsConnector.advance(materialTask.id, { until: 'export' }), /继续这篇知网文献/);
+  // Merely viewing or reviewing the saved main PDF cannot clear the still
+  // pending supplement scope.
+  materialsConnector.runStage = async (_script, args, _job, event) => {
+    assert.deepEqual(args, ['--review-only']); event({ type: 'result', stage: 'fulltext_review', count: 1, files: [] });
+  };
+  materialsConnector.reviewFulltext(materialTask.id); await finish(materialsConnector, materialTask.id);
+  assert.equal(materialsConnector.snapshot(materialTask.id).cnkiRetryPaperId, 'CNKI-001');
+  materialManifest.papers[0].supplement_check.status = 'none_declared'; materialManifest.papers[0].materials.pop(); write(materialManifestFile, materialManifest);
+  assert.ok(!materialsConnector.snapshot(materialTask.id).cnkiRetryItems.some(item => item.id === 'CNKI-001'));
+  assert.throws(() => materialsConnector.retryCnki(materialTask.id, 'CNKI-001'), /只能重试/);
   console.log('LITERATURE_CNKI_SINGLE_RETRY_TESTS_PASS');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {

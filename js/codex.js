@@ -12,6 +12,8 @@
     if (value && typeof value === 'object' && !Array.isArray(value)) literatureFieldDrafts = value;
   } catch (_) {}
   let literatureFieldsDialog = null;
+  const literatureFieldsAssistWatchers = new Set();
+  let literatureMaterialsDialog = null;
   let account = null;
   let checking = false;
   let loginBusy = false;
@@ -34,7 +36,9 @@
   function persist() { try { localStorage.setItem(key, JSON.stringify(saved)); } catch (_) {} }
   function task(id) {
     if (!tasks[id]) tasks[id] = { files: [], busy: false, backend: saved[id]?.backend || preferences.backend || 'codex', model: saved[id]?.model ?? preferences.model ?? '', execute: false, executeOnce: false, error: '', job: null, filesOpen: false, logOpen: false,
-      literatureConfig: saved[id]?.literatureConfig || null, literatureJob: null, literatureBusy: false, literatureError: '',
+      literatureConfig: saved[id]?.literatureConfig || null,
+      literatureConfigOpen: typeof saved[id]?.literatureConfigOpen === 'boolean' ? saved[id].literatureConfigOpen : null,
+      literatureJob: null, literatureBusy: false, literatureError: '',
       literatureUntil: saved[id]?.literatureUntil || 'discover', literatureJobs: null, literatureJobsTried: false, literatureJobsLoading: false, literatureJobsError: '', literatureIncludeDeleted: false, literatureHistoryBusy: null,
       literatureConfirmJob: null, literatureConfirmDrafts: null };
     return tasks[id];
@@ -43,7 +47,7 @@
   async function request(url, options = {}) {
     const response = await fetch(url, { ...options, headers: { 'X-Workbench': '1', ...(options.headers || {}) } });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '本地服务请求失败');
+    if (!response.ok) throw Object.assign(new Error(data.error || '本地服务请求失败'), { status: response.status, code: data.code, sessionId: data.sessionId });
     return data;
   }
   async function session(id) {
@@ -67,6 +71,7 @@
     try {
       const sid = await session(id);
       t.files = (await request('/api/codex/files?session=' + sid)).files;
+      t.cleanResultsKey = null;
       if (Store.getState().modules.find(mod => mod.id === id)?.type === 'plotting') await loadPlotRuns(id);
       t.error = '';
     } catch (error) { t.error = error.message; }
@@ -258,7 +263,7 @@
           if (saved[id]?.literatureDelivered !== stamp) {
             const text = job.status === 'completed' ? literatureCompletedMessage(job)
               : job.status === 'needs_attention' && job.stage === 'awaiting_confirmation'
-                ? '提取前需由研究者确认参数字段含义与单位：请在文献检索区核对字段并点击“确认并继续提取”。'
+                ? '提取前需由研究者确认参数字段含义与单位：请在文献检索区核对字段并点击“核对表格并开始提取”。'
               : job.status === 'needs_attention' ? literatureAttentionMessage(job)
               : '文献检索' + (job.status === 'cancelled' ? '已停止' : '未完成') + '：' + (job.error || job.message);
             Store.appendMessage(id, text, 'system');
@@ -320,7 +325,9 @@
     const deferSource = options.deferSource;
     const restoreFrozenOrder = deferSource !== undefined && t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig)
       && sameLiteratureDeferralConfig(job.config, t.literatureConfig);
-    if (t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig) && !restoreFrozenOrder) {
+    const restoreStopped = options.resumeStopped === true && options.skipUnavailable === true
+      && job.status === 'cancelled' && job.resumeStage === 'fulltext';
+    if (t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig) && !restoreFrozenOrder && !restoreStopped) {
       t.literatureError = '本次设置已改变，不能混入旧任务结果；请确认新配置并发起新检索，或从历史任务重新载入原配置'; render(); return;
     }
     if (deferSource !== undefined && (job.status !== 'needs_attention' || job.resumeStage !== 'discover'
@@ -334,11 +341,16 @@
     t.literatureBusy = true; t.literatureError = ''; render();
     try {
       await checkLiteratureRuntime(job.config?.sources || []);
-      const body = { id: job.id, until, ...(deferSource !== undefined ? { deferSource } : {}) };
+      const body = { id: job.id, until, ...(deferSource !== undefined ? { deferSource } : {}),
+        ...(options.skipUnavailable !== undefined ? { skipUnavailable: options.skipUnavailable } : {}) };
       const next = await request('/api/literature/advance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (restoreFrozenOrder) {
+      if (restoreFrozenOrder || restoreStopped) {
         t.literatureConfig = JSON.parse(JSON.stringify(job.config));
         saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig }; persist();
+        if (restoreStopped) {
+          t.literatureUntil = 'fulltext';
+          saved[mod.id] = { ...saved[mod.id], literatureUntil: 'fulltext' }; persist();
+        }
       }
       applyLiteratureJob(mod, next);
       await watchLiterature(mod.id, next.id || job.id);
@@ -392,6 +404,9 @@
     if (restart === true && (job.cnkiRetryPaperId !== paperId || !['needs_attention', 'failed'].includes(job.status))) {
       t.literatureError = '只能重新定位当前已暂停的这篇知网文献，请刷新任务状态后再操作。'; render(); return;
     }
+    if (restart === true && job.cnkiRetryItems.some(item => item.id === paperId && item.materials_only)) {
+      t.literatureError = '本篇正文已保存，请使用“继续这篇材料”，无需重新定位正文。'; render(); return;
+    }
     t.literatureBusy = true; t.literatureError = ''; render();
     try {
       await checkLiteratureRuntime(job.config?.sources || []);
@@ -434,19 +449,20 @@
   }
   async function confirmLiteratureFields(mod) {
     const t = task(mod.id);
-    if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
+    if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy || t.literatureFieldsAssistBusy) return;
     const job = t.literatureJob;
     if (!job?.id) { t.literatureError = '没有可确认的检索任务'; render(); return; }
+    if (literatureFieldsAssistState(mod, job).pending) return;
     if (job.status !== 'needs_attention' || job.stage !== 'awaiting_confirmation') {
       t.literatureFieldsError = '当前可先保存字段草稿；运行到提取阶段后再确认。'; renderLiteratureFieldsDialog(); return;
     }
     if (t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig)) {
       t.literatureFieldsError = '检索设置已改变，请从历史任务重新载入原配置后再确认提取字段；字段草稿会保留。'; renderLiteratureFieldsDialog(); return;
     }
-    const until = t.literatureUntil || job.until || 'discover';
-    if (LITERATURE_STAGE_ORDER.indexOf(until) < LITERATURE_STAGE_ORDER.indexOf('extract')) {
-      t.literatureFieldsError = '请先将“本次做到哪一步”改为参数提取或更后的阶段，再确认字段'; renderLiteratureFieldsDialog(); return;
-    }
+    // This explicit action starts extraction on the existing task. A stale
+    // search-stage selector outside the dialog must not block this checkpoint
+    // or silently broaden it to validation/export.
+    const until = 'extract';
     ensureLiteratureFieldDrafts(t, job);
     let fields;
     try { fields = validatedLiteratureFields(t); }
@@ -457,6 +473,7 @@
       await checkLiteratureRuntime(job.config?.sources || []);
       const next = await request('/api/literature/advance', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: job.id, until, confirmations: { fields } }) });
+      t.literatureUntil = until;
       t.literatureConfirmJob = null; t.literatureConfirmDrafts = null;
       closeLiteratureFields();
       applyLiteratureJob(mod, next);
@@ -623,8 +640,9 @@
     'completed': '已完成', 'failed': '失败', 'cancelled': '已停止', 'interrupted': '已中断', 'running': '进行中' };
   const LITERATURE_STAGE_STATES = { 'pending': '待运行', 'running': '进行中', 'done': '已完成', 'failed': '失败', 'skipped': '已跳过' };
   const LITERATURE_COUNTER_LABELS = { 'candidates': '候选', 'uniqueGroups': '去重组', 'fulltextFetched': '已获取全文',
-    'fulltextPdf': 'PDF正文', 'fulltextHtml': 'HTML正文', 'fulltextAbstract': '仅摘要', 'fulltextUnavailable': '待补充',
-    'fulltextAttention': '待人工处理', 'fulltextPending': '尚未处理', 'extractedPapers': '已提取论文', 'parameterRows': '参数行' };
+    'fulltextPdf': 'PDF正文', 'fulltextHtml': '网页正文文本', 'fulltextAbstract': '仅题录/摘要（非全文）', 'fulltextUnavailable': '待补充',
+    'fulltextAttention': '待人工处理', 'fulltextPending': '尚未处理', 'fulltextSkipped': '本轮跳过（含补材）',
+    'materialsIncomplete': '材料不完整', 'extractedPapers': '已提取论文', 'parameterRows': '参数行' };
   const LITERATURE_UNTIL_OPTIONS = [['discover', '仅检索候选'], ['dedupe', '续跑到去重'], ['fulltext', '续跑到全文获取'],
     ['extract', '续跑到参数提取'], ['validate', '续跑到校验'], ['export', '完整流水线']];
   const LITERATURE_STATUS_LABELS = { 'running': '进行中', 'completed': '已完成', 'needs_attention': '需要人工', 'failed': '失败', 'cancelled': '已停止' };
@@ -633,7 +651,7 @@
   const LITERATURE_EXECUTABLE_SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
   const LITERATURE_FILE_LABELS = { 'run_config.json': '运行配置（冻结）', 'processing-basis.json': '本次处理依据', 'candidates.json': '候选清单 JSON（累计）', 'candidates.csv': '候选清单 CSV（累计）',
     'dedupe/dedupe.json': '去重结果 JSON', 'dedupe/dedupe.csv': '去重结果 CSV', 'fulltext/status.json': '全文获取状态',
-    'fulltext/review.json': '全文缓存复核报告',
+    'fulltext/review.json': '全文缓存复核报告', 'fulltext/materials.json': '每篇材料清单 JSON',
     'extraction/check_report.json': '提取校验报告', 'validation/validation.json': '校验结果 JSON', 'validation/validation.md': '待审核清单',
     'export/literature.csv': '文献表 CSV', 'export/literature.xlsx': '文献表 Excel', 'export/parameters.csv': '参数明细表 CSV',
     'export/parameters.xlsx': '参数明细表 Excel', 'export/export_report.md': '导出报告' };
@@ -735,7 +753,7 @@
   }
   function saveLiteratureFieldDrafts(t, job) {
     if (!job?.id || t.literatureConfirmJob !== job.id || !Array.isArray(t.literatureConfirmDrafts)) return false;
-    literatureFieldDrafts[job.id] = { fields: JSON.parse(JSON.stringify(t.literatureConfirmDrafts)) };
+    literatureFieldDrafts[job.id] = { ...literatureFieldDrafts[job.id], fields: JSON.parse(JSON.stringify(t.literatureConfirmDrafts)) };
     try {
       localStorage.setItem(literatureFieldDraftKey, JSON.stringify(literatureFieldDrafts));
       t.literatureFieldsError = ''; return true;
@@ -746,7 +764,7 @@
   function addLiteratureField(mod, t, job) {
     if (t.literatureBusy || t.busy || job.status === 'running') return;
     const drafts = ensureLiteratureFieldDrafts(t, job);
-    if (drafts.length >= 50) { t.literatureFieldsError = '每个任务最多设置50个提取字段。'; renderLiteratureFieldsDialog(); return; }
+    if (drafts.length >= 200) { t.literatureFieldsError = '每个任务最多设置200个提取字段。'; renderLiteratureFieldsDialog(); return; }
     const keys = new Set(drafts.map(field => String(field.key || '').trim()));
     let index = 1; while (keys.has('field_' + index)) index++;
     drafts.push({ key: 'field_' + index, label: '', meaning: '', unit: '', valueType: 'text', required: false });
@@ -761,7 +779,7 @@
   function validatedLiteratureFields(t) {
     const drafts = t.literatureConfirmDrafts || [];
     if (!drafts.length) throw new Error('请点击“新增提取字段”，填写本次要提取的表头。');
-    if (drafts.length > 50) throw new Error('每个任务最多设置50个提取字段。');
+    if (drafts.length > 200) throw new Error('每个任务最多设置200个提取字段。');
     const fields = drafts.map(draft => ({ ...JSON.parse(JSON.stringify(draft)), key: String(draft.key || '').trim(), label: String(draft.label || '').trim(),
       meaning: String(draft.meaning || '').trim(), unit: String(draft.unit || '').trim(), valueType: draft.valueType || 'text', required: draft.required === true }));
     if (fields.some(field => !field.key || field.key.length > 100)) throw new Error('字段标识无效，请删除该行后重新新增。');
@@ -770,8 +788,212 @@
     if (new Set(fields.map(field => field.label)).size !== fields.length) throw new Error('表头名称不能重复，请明确区分不同字段。');
     if (fields.some(field => !field.meaning || field.meaning.length > 500)) throw new Error('请填写每个字段的含义（最多500字）。');
     if (fields.some(field => field.unit.length > 100 || (field.valueType === 'number' && !field.unit))) throw new Error('请明确数值字段的单位，可填写“无量纲”或“原文单位”（最多100字）。');
+    if (fields.some(field => !['text', 'number'].includes(field.valueType))) throw new Error('字段类型仅支持文本或数值。');
     if (new TextEncoder().encode(JSON.stringify(fields)).byteLength > 60 * 1024) throw new Error('字段说明总量超过单次确认容量，请精简含义或其他字段规则后再确认；草稿会保留。');
     return fields;
+  }
+  function literatureFieldsAssistState(mod, job) {
+    const record = literatureFieldDrafts[job.id] ||= {};
+    record.assists ||= {};
+    return record.assists[mod.id] ||= { discussions: [], input: '', preview: null, previousFields: null, pending: null, error: '' };
+  }
+  function saveLiteratureFieldsAssist(t) {
+    try { localStorage.setItem(literatureFieldDraftKey, JSON.stringify(literatureFieldDrafts)); return true; }
+    catch (_) { t.literatureFieldsError = '字段讨论暂时无法保存到浏览器，请保留当前页面并检查浏览器存储空间。'; return false; }
+  }
+  function literatureFieldsAssistSignature(mod, t, state) {
+    mod = Store.getState?.().modules?.find(item => item.id === mod.id) || mod;
+    return JSON.stringify({ fields: t.literatureConfirmDrafts || [], discussions: state.discussions, input: state.input,
+      background: (mod.messages || []).filter(item => ['user', 'assistant'].includes(item.role)).slice(-30),
+      approvedDoc: mod.doc?.status === 'approved' ? mod.doc.content : '' });
+  }
+  function parseLiteratureFieldsPreview(text) {
+    let value;
+    try { value = JSON.parse(String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
+    catch (_) { throw new Error('AI 返回的字段草稿格式不完整，原字段没有改变，请重试整理。'); }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.fields)) throw new Error('AI 返回的字段草稿缺少 fields 清单，原字段没有改变。');
+    if (value.fields.length > 200) throw new Error('AI 草稿超过200个字段，请讨论取舍或分批；原字段没有改变。');
+    const fields = value.fields.map(field => {
+      if (!field || typeof field !== 'object' || Array.isArray(field)
+        || ['key', 'label', 'meaning', 'unit'].some(key => typeof field[key] !== 'string')
+        || !['text', 'number'].includes(field.valueType) || typeof field.required !== 'boolean') throw new Error('AI 字段的名称、含义、单位或类型不完整，原字段没有改变。');
+      return { key: field.key.trim(), label: field.label.trim(), meaning: field.meaning.trim(), unit: field.unit.trim(), valueType: field.valueType, required: field.required };
+    });
+    if (fields.length) validatedLiteratureFields({ literatureConfirmDrafts: fields });
+    if (new Set(fields.map(field => field.key.toLocaleLowerCase())).size !== fields.length
+      || new Set(fields.map(field => field.label.toLocaleLowerCase())).size !== fields.length) throw new Error('AI 字段存在重复标识或表头，请重新整理。');
+    const lines = value => {
+      const items = value === undefined ? [] : typeof value === 'string' ? [value] : value;
+      if (!Array.isArray(items) || items.length > 100 || items.some(item => typeof item !== 'string' || item.length > 2000)) throw new Error('AI 待确认事项格式无效，请重新整理。');
+      return items.filter(item => item.trim()).map(item => item.trim());
+    };
+    return { fields, unresolved: lines(value.unresolved), notes: lines(value.notes) };
+  }
+  async function watchLiteratureFieldsAssist(mod, jobId) {
+    const t = task(mod.id), state = literatureFieldsAssistState(mod, { id: jobId });
+    const pending = state.pending, watchKey = mod.id + ':' + jobId;
+    if (!pending?.id || literatureFieldsAssistWatchers.has(watchKey)) return;
+    literatureFieldsAssistWatchers.add(watchKey);
+    t.literatureFieldsAssistBusy = jobId;
+    let fillTable = false;
+    try {
+      let result;
+      const deadline = Date.now() + 10 * 60 * 1000;
+      do {
+        result = await request('/api/codex/job?id=' + encodeURIComponent(pending.id));
+        if (result.status !== 'running') break;
+        if (Date.now() >= deadline) throw new Error('AI 回复等待超时，讨论和字段草稿已保留。可点击“检查 AI 回复”，不会重新发送。');
+        await new Promise(resolve => setTimeout(resolve, 1200));
+      } while (state.pending === pending);
+      if (state.pending !== pending) return;
+      if (result.status !== 'completed') throw Object.assign(new Error(result.error || 'AI 未完成回复，请重试；原字段草稿保留。'), { terminal: true });
+      if (pending.mode === 'draft') {
+        let preview;
+        try { preview = parseLiteratureFieldsPreview(result.text); } catch (error) { error.terminal = true; throw error; }
+        state.preview = { ...preview, signature: pending.signature };
+        fillTable = pending.autoApply === true && preview.fields.length > 0;
+      } else {
+        if (!String(result.text || '').trim()) throw Object.assign(new Error('AI 回复为空，请重试。'), { terminal: true });
+        state.discussions.push({ role: 'assistant', text: String(result.text).trim() });
+      }
+      state.pending = null; state.retry = null; state.error = '';
+    } catch (error) {
+      state.error = error.message;
+      // Keep an accepted AI job id after a network/timeout error; check it before any retry.
+      if (error.terminal || [400, 403, 404].includes(error.status)) { state.pending = null; state.retry = { mode: pending.mode, autoApply: pending.autoApply === true }; }
+    } finally {
+      literatureFieldsAssistWatchers.delete(watchKey);
+      if (t.literatureFieldsAssistBusy === jobId) t.literatureFieldsAssistBusy = null;
+      if (fillTable) applyLiteratureFieldsPreview(mod, t, { id: jobId });
+      saveLiteratureFieldsAssist(t);
+      if (t.literatureJob?.id === jobId) renderLiteratureFieldsDialog();
+    }
+  }
+  async function requestLiteratureFieldsAssist(mod, mode, retry = false, autoApply = false) {
+    const t = task(mod.id), job = t.literatureJob;
+    if (!job?.id || t.busy || t.literatureBusy || job.status === 'running' || root.LiteratureUI?.isBusy() || t.literatureFieldsAssistBusy) return;
+    ensureLiteratureFieldDrafts(t, job);
+    const state = literatureFieldsAssistState(mod, job);
+    if (state.pending?.id) { void watchLiteratureFieldsAssist(mod, job.id); return; }
+    if (retry) autoApply = state.retry?.autoApply === true;
+    if (mode === 'discuss' && !retry) {
+      const text = state.input.trim();
+      if (!text) { state.error = '请先写下想讨论的表头、字段含义或单位问题。'; renderLiteratureFieldsDialog(); return; }
+      if (text.length > 6000) { state.error = '单条讨论请控制在6000字以内。'; renderLiteratureFieldsDialog(); return; }
+      if (state.discussions.length >= 60) { state.error = '字段讨论已达到本轮容量，完整讨论仍保留。请先核对、应用已确认的字段草稿，再整理后续讨论；不会自动丢弃前面的规则。'; renderLiteratureFieldsDialog(); return; }
+      state.discussions.push({ role: 'user', text }); state.input = '';
+    }
+    state.error = ''; state.retry = null;
+    if (!saveLiteratureFieldDrafts(t, job) || !saveLiteratureFieldsAssist(t)) { renderLiteratureFieldsDialog(); return; }
+    const signature = literatureFieldsAssistSignature(mod, t, state);
+    const payload = { id: job.id, mode, discussions: JSON.parse(JSON.stringify(state.discussions)),
+      message: mode === 'discuss' ? [...state.discussions].reverse().find(item => item.role === 'user')?.text || '' : '',
+      currentFields: JSON.parse(JSON.stringify(t.literatureConfirmDrafts)),
+      moduleMessages: (mod.messages || []).filter(item => ['user', 'assistant'].includes(item.role) && typeof item.text === 'string' && item.text.trim()).slice(-30).map(item => ({ role: item.role, text: item.text })),
+      approvedDoc: mod.doc?.status === 'approved' ? mod.doc.content : '', model: t.model || account?.model };
+    t.literatureFieldsAssistBusy = job.id; renderLiteratureFieldsDialog();
+    try {
+      const sid = await session(mod.id);
+      const started = await request('/api/literature/fields-assist', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, sessionId: sid }) });
+      if (!started?.id) throw new Error('AI 回复任务缺少编号，请重试。');
+      state.pending = { id: started.id, mode, signature, autoApply: mode === 'draft' && autoApply }; saveLiteratureFieldsAssist(t);
+      if (t.literatureJob?.id === job.id) renderLiteratureFieldsDialog();
+      await watchLiteratureFieldsAssist(mod, job.id);
+    } catch (error) { state.error = error.message; state.retry = { mode, autoApply: mode === 'draft' && autoApply }; saveLiteratureFieldsAssist(t); }
+    finally { if (t.literatureFieldsAssistBusy === job.id) t.literatureFieldsAssistBusy = null; if (t.literatureJob?.id === job.id) renderLiteratureFieldsDialog(); }
+  }
+  function applyLiteratureFieldsPreview(mod, t, job) {
+    const state = literatureFieldsAssistState(mod, job), preview = state.preview;
+    if (t.literatureJob?.id !== job.id || t.busy || t.literatureBusy || t.literatureJob.status === 'running' || t.literatureFieldsAssistBusy || state.pending || root.LiteratureUI?.isBusy() || !preview?.fields?.length) {
+      if (preview?.fields?.length) state.error = 'AI 已整理字段，但当前任务已切换或正在运行；请回到原任务核对后再填入表格。';
+      return;
+    }
+    if (preview.signature !== literatureFieldsAssistSignature(mod, t, state)) { state.error = '字段或讨论已有变化，请重新整理候选草稿后再应用。'; renderLiteratureFieldsDialog(); return; }
+    try {
+      const fields = validatedLiteratureFields({ literatureConfirmDrafts: preview.fields });
+      const previousFields = JSON.parse(JSON.stringify(t.literatureConfirmDrafts));
+      t.literatureConfirmDrafts = fields.map(field => ({ ...JSON.parse(JSON.stringify(previousFields.find(prior => prior.key === field.key) || {})), ...field }));
+      if (!saveLiteratureFieldDrafts(t, job)) {
+        t.literatureConfirmDrafts = previousFields;
+        literatureFieldDrafts[job.id].fields = JSON.parse(JSON.stringify(previousFields));
+        throw new Error(t.literatureFieldsError || '表格暂时无法保存，原字段已保留，请重试。');
+      }
+      state.previousFields = previousFields;
+      state.applied = { count: fields.length, unresolved: preview.unresolved, notes: preview.notes };
+      state.error = ''; state.preview = null;
+      saveLiteratureFieldsAssist(t); renderLiteratureFieldsDialog();
+    } catch (error) { state.error = error.message; renderLiteratureFieldsDialog(); }
+  }
+  function literatureFieldsAssistForm(mod, t, job) {
+    const state = literatureFieldsAssistState(mod, job);
+    const busy = t.literatureFieldsAssistBusy === job.id;
+    const disabled = t.busy || t.literatureBusy || job.status === 'running' || busy || !!state.pending || !!root.LiteratureUI?.isBusy();
+    const box = node('section', undefined, 'literature-fields-assist');
+    box.append(node('h3', '讨论并填写提取表格'), node('p', '先与 AI 讨论，再点“按讨论填入表格”，把表头、含义、单位和类型直接填到下方可编辑表格。一列只放一个变量；单位可先约定“原文单位”。核对后由你点击开始提取。', 'codex-status'));
+    box.append(node('p', '会参考近期模块对话、已审核方案和下方字段草稿，并保留本任务完整的字段讨论。当前任务的讨论与候选保存在本浏览器。', 'codex-status'));
+    const thread = node('div', undefined, 'literature-fields-thread'); thread.setAttribute('aria-live', 'polite');
+    state.discussions.forEach(item => thread.append(node('p', (item.role === 'user' ? '你：' : 'AI：') + item.text, 'literature-fields-message')));
+    if (!state.discussions.length) thread.append(node('p', '例如：请把“记录ID、文献ID、研究ID”拆成独立列，并讨论温度和采食量的单位。', 'codex-status'));
+    box.append(thread);
+    const input = node('textarea', undefined, 'literature-fields-question'); input.setAttribute('aria-label', '与 AI 讨论提取字段'); input.placeholder = '输入字段、表头或单位处理的要求…'; input.maxLength = 6000; input.value = state.input; input.disabled = disabled;
+    input.oninput = () => { state.input = input.value; saveLiteratureFieldsAssist(t); updatePreviewState(); };
+    box.append(input);
+    const actions = node('div', undefined, 'literature-confirm-actions');
+    const send = node('button', busy ? 'AI 处理中…' : '发送给 AI', 'quiet-button'); send.type = 'button'; send.disabled = disabled; send.onclick = () => requestLiteratureFieldsAssist(mod, 'discuss');
+    const draft = node('button', '按讨论填入表格', 'primary-button'); draft.type = 'button'; draft.disabled = disabled;
+    draft.onclick = () => {
+      if (state.input.trim()) { state.error = '还有未发送的讨论，请先发送，或清空后再整理字段。'; renderLiteratureFieldsDialog(); return; }
+      return requestLiteratureFieldsAssist(mod, 'draft', false, true);
+    };
+    actions.append(send, draft);
+    if (state.error && state.pending && !busy) {
+      const check = node('button', '检查 AI 回复', 'quiet-button'); check.type = 'button'; check.disabled = t.busy || t.literatureBusy || job.status === 'running'; check.onclick = () => watchLiteratureFieldsAssist(mod, job.id); actions.append(check);
+    } else if (state.retry && !busy) {
+      const retry = node('button', '重试 AI 回复', 'quiet-button'); retry.type = 'button'; retry.disabled = disabled; retry.onclick = () => requestLiteratureFieldsAssist(mod, state.retry.mode, true); actions.append(retry);
+    }
+    if (state.previousFields) {
+      const undo = node('button', '恢复应用前草稿', 'quiet-button'); undo.type = 'button'; undo.disabled = disabled;
+      undo.onclick = () => { if (undo.disabled || t.literatureJob?.id !== job.id || t.literatureJob.status === 'running') return; t.literatureConfirmDrafts = JSON.parse(JSON.stringify(state.previousFields)); state.previousFields = null; state.preview = null; state.applied = null; saveLiteratureFieldDrafts(t, job); renderLiteratureFieldsDialog(); }; actions.append(undo);
+    }
+    box.append(actions);
+    const status = node('p', state.error || (busy ? 'AI 正在回复' + (state.pending?.id ? '（' + state.pending.id.slice(0, 8) + '）' : '') + '；可临时关闭窗口，返回后查看。按讨论填表完成后，仍需你核对并开始提取。'
+      : state.applied ? '已将讨论整理成 ' + state.applied.count + ' 个字段并填入下方表格；请核对表格后开始提取。'
+      : '填入表格会保存当前任务的字段草稿；核对表格后再开始提取。'), state.error ? 'codex-error' : 'literature-fields-assist-status');
+    status.setAttribute('aria-live', 'polite'); box.append(status);
+    if (state.applied) {
+      const unresolved = state.applied.unresolved || [], notes = state.applied.notes || [];
+      if (unresolved.length || notes.length) {
+        const review = node('details', undefined, 'literature-fields-review');
+        review.append(node('summary', '查看待核对事项（' + unresolved.length + '）与 AI 整理说明（' + notes.length + '）'));
+        unresolved.forEach(text => review.append(node('p', '待确认：' + text, 'literature-fields-assist-status')));
+        notes.forEach(text => review.append(node('p', 'AI 说明：' + text, 'codex-status')));
+        box.append(review);
+      }
+    }
+    let apply = null, stale = null;
+    const updatePreviewState = () => {
+      if (!apply) return;
+      const changed = state.preview?.signature !== literatureFieldsAssistSignature(mod, t, state);
+      apply.disabled = disabled || changed || !state.preview?.fields?.length;
+      stale.hidden = !changed;
+    };
+    t.literatureFieldsPreviewRefresh = updatePreviewState;
+    if (state.preview) {
+      const preview = node('section', undefined, 'literature-fields-preview'); preview.append(node('h4', 'AI 字段草稿（待你核对）'));
+      const table = node('table', undefined, 'literature-fields-preview-table');
+      const head = node('tr'); ['表头名称', '含义', '单位', '类型', '必填'].forEach(title => head.append(node('th', title))); table.append(head);
+      state.preview.fields.forEach(field => { const row = node('tr'); [field.label, field.meaning, field.unit || '—', field.valueType === 'number' ? '数值' : '文本', field.required ? '是' : '否'].forEach(value => row.append(node('td', value))); table.append(row); });
+      preview.append(table);
+      if (!state.preview.fields.length) preview.append(node('p', '本次未生成可应用字段，请先讨论以下待确认事项。', 'codex-status'));
+      state.preview.unresolved.forEach(text => preview.append(node('p', '待确认：' + text, 'literature-fields-assist-status')));
+      state.preview.notes.forEach(text => preview.append(node('p', '说明：' + text, 'codex-status')));
+      stale = node('p', '字段或讨论已有变化，这份候选已过期；请重新整理后再应用。', 'codex-error');
+      apply = node('button', '填入下方表格', 'quiet-button'); apply.type = 'button'; apply.onclick = () => applyLiteratureFieldsPreview(mod, t, job);
+      preview.append(stale, apply); box.append(preview); updatePreviewState();
+    }
+    if (state.pending?.id && !state.error && !busy && !literatureFieldsAssistWatchers.has(mod.id + ':' + job.id)) void watchLiteratureFieldsAssist(mod, job.id);
+    return box;
   }
   function closeLiteratureFields() {
     if (!literatureFieldsDialog) return;
@@ -784,11 +1006,12 @@
     const { element: dialog, mod, jobId } = literatureFieldsDialog;
     const t = task(mod.id), job = t.literatureJob;
     if (job?.id !== jobId) { closeLiteratureFields(); return; }
+    literatureFieldsDialog.lockStamp = JSON.stringify([job.id, job.status, t.busy, t.literatureBusy, !!root.LiteratureUI?.isBusy()]);
     dialog.replaceChildren();
     const head = node('div', undefined, 'literature-help-head');
     head.append(node('h2', '提取字段与表头'));
     const close = node('button', '关闭', 'quiet-button'); close.type = 'button'; close.onclick = closeLiteratureFields;
-    head.append(close); dialog.append(head, literatureConfirmForm(mod, t, job));
+    head.append(close); dialog.append(head, literatureFieldsAssistForm(mod, t, job), literatureConfirmForm(mod, t, job));
     const save = node('button', '保存草稿并关闭', 'quiet-button'); save.type = 'button'; save.disabled = t.literatureBusy || t.busy;
     save.onclick = () => { if (saveLiteratureFieldDrafts(t, job)) { closeLiteratureFields(); render(); } else renderLiteratureFieldsDialog(); };
     dialog.append(save);
@@ -804,6 +1027,65 @@
     literatureFieldsDialog = { element: dialog, mod, jobId: job.id };
     document.body.append(dialog); renderLiteratureFieldsDialog(); dialog.showModal();
   }
+  function closeLiteratureMaterials() {
+    if (!literatureMaterialsDialog) return;
+    const dialog = literatureMaterialsDialog; literatureMaterialsDialog = null;
+    dialog.close(); dialog.remove();
+  }
+  function renderLiteratureMaterials(dialog, jobId, inventory) {
+    const pdf = { pending: '正文PDF尚未取得', downloaded: '正文PDF已保存', missing: '缺少正文PDF', needs_attention: '正文PDF待处理' };
+    const checks = { uninspected: '补材尚未检查', checked: '已检查补材入口', none_declared: '原文明确无补充材料', unknown: '补材情况尚不能确认', needs_attention: '补材检查待处理' };
+    const downloads = { pending: '尚未下载', downloaded: '已保存', missing: '缺失', needs_attention: '下载待处理' };
+    const reads = { not_checked: '未检查读取', readable: '可读取', partial: '部分可读取', unreadable: '不可读取', unsupported: '暂不支持读取原格式' };
+    const roles = { main_pdf: '正文PDF', main_html: '网页正文或旧文本缓存', supplement: '补充材料' };
+    const content = node('div');
+    content.append(node('p', '取得正文不代表补材齐全。此处只查看已保存记录，不会继续当前任务、下载文献或启动提取。', 'codex-status'));
+    if (inventory.legacy) content.append(node('p', '这是旧记录的只读清单；未逐项检查的补材显示“尚未检查”，不能理解为没有补材。', 'codex-status'));
+    const papers = Array.isArray(inventory.papers) ? inventory.papers : [];
+    if (!papers.length) content.append(node('p', '当前任务还没有登记材料。查看不会开始获取。', 'codex-status'));
+    papers.forEach(paper => {
+      const section = node('details', undefined, 'literature-deliverable-group');
+      section.append(node('summary', paper.paper_id + ' · ' + paper.title));
+      section.append(node('p', (pdf[paper.main_pdf_status] || '正文PDF状态未知') + '；' + (checks[paper.supplement_check?.status] || checks.unknown)));
+      if (paper.supplement_check?.reason) section.append(node('p', paper.supplement_check.reason, 'codex-status'));
+      (Array.isArray(paper.materials) ? paper.materials : []).forEach(material => {
+        const entry = node('div', undefined, 'literature-confirm');
+        entry.append(node('strong', (roles[material.role] || '材料') + ' · ' + (material.label || material.filename || '未命名材料')));
+        entry.append(node('p', '文件：' + (material.filename || '尚未生成') + ' · 格式：' + (material.format || '未知')
+          + ' · ' + (Number.isSafeInteger(material.size) ? material.size + ' 字节' : '大小未知')));
+        entry.append(node('p', '下载：' + (downloads[material.download_status] || '未知') + '；读取：' + (reads[material.read_status] || '未检查读取'), 'codex-status'));
+        if (material.download_reason) entry.append(node('p', '保存问题：' + material.download_reason, 'codex-status'));
+        if (material.read_reason) entry.append(node('p', material.read_reason, 'codex-status'));
+        if (material.reused_from) entry.append(node('p', '已复用本机保存材料，来源任务：' + material.reused_from.job_id + ' · ' + material.reused_from.paper_id, 'codex-status'));
+        if (material.available === true && material.path) {
+          const link = node('a', '下载已保存文件', 'quiet-button'); link.href = '/api/literature/download?id=' + encodeURIComponent(jobId) + '&name=' + encodeURIComponent(material.path);
+          link.setAttribute('download', material.filename || 'material'); entry.append(link);
+        }
+        section.append(entry);
+      });
+      if (!paper.materials?.length) section.append(node('p', '尚未保存材料文件；主文和补材状态分别列在上方。', 'codex-status'));
+      content.append(section);
+    });
+    dialog.append(content);
+  }
+  async function openLiteratureMaterials(mod) {
+    const jobId = task(mod.id).literatureJob?.id;
+    if (!jobId) return;
+    closeLiteratureMaterials();
+    const dialog = node('dialog', undefined, 'literature-help-dialog'); dialog.style.width = 'min(1200px, 94vw)'; dialog.style.maxHeight = '90vh';
+    dialog.setAttribute('aria-label', '每篇材料清单');
+    const head = node('div', undefined, 'literature-help-head'); head.append(node('h2', '每篇材料清单'));
+    const close = node('button', '关闭', 'quiet-button'); close.type = 'button'; close.onclick = closeLiteratureMaterials;
+    head.append(close); dialog.append(head);
+    const notice = node('p', '正在读取本机材料记录…', 'codex-status'); notice.setAttribute('aria-live', 'polite'); dialog.append(notice);
+    dialog.onclose = () => { if (literatureMaterialsDialog === dialog) literatureMaterialsDialog = null; dialog.remove(); };
+    literatureMaterialsDialog = dialog; document.body.append(dialog); dialog.showModal();
+    try {
+      const inventory = await request('/api/literature/materials?id=' + encodeURIComponent(jobId));
+      if (literatureMaterialsDialog !== dialog) return;
+      notice.remove(); renderLiteratureMaterials(dialog, jobId, inventory);
+    } catch (error) { if (literatureMaterialsDialog === dialog) { notice.textContent = error.message; notice.className = 'codex-error'; } }
+  }
   function literatureConfirmForm(mod, t, job) {
     const box = node('div', undefined, 'literature-confirm');
     const awaitingConfirm = job.status === 'needs_attention' && job.stage === 'awaiting_confirmation';
@@ -812,11 +1094,22 @@
     box.append(node('p', '当前任务 ' + job.id.slice(0, 8) + ' · 已有候选与全文保留；编辑字段不会重新检索。', 'codex-status'));
     const drafts = ensureLiteratureFieldDrafts(t, job);
     const disabled = t.literatureBusy || t.busy || job.status === 'running';
+    const tableHead = node('div', undefined, 'literature-confirm-actions literature-fields-next');
+    tableHead.append(node('h3', '本次提取表格 · ' + drafts.length + ' 个字段'));
+    const nextButton = () => {
+      const confirm = node('button', t.literatureBusy ? '提交中…' : '核对表格并开始提取', 'primary-button');
+      confirm.type = 'button'; confirm.disabled = disabled || !!t.literatureFieldsAssistBusy || !!literatureFieldsAssistState(mod, job).pending || !drafts.length || !!root.LiteratureUI?.isBusy();
+      confirm.onclick = () => confirmLiteratureFields(mod); return confirm;
+    };
+    if (awaitingConfirm) tableHead.append(nextButton());
+    box.append(tableHead);
+    if (awaitingConfirm) box.append(node('p', '下一步：按本表提取原任务的已保存材料，完成提取后停止。缺失材料和待确认问题会保留标记。', 'codex-status'));
     if (!drafts.length) box.append(node('p', '还没有提取字段，点击“新增提取字段”开始填写。', 'codex-status'));
     const notice = node('p', t.literatureFieldsError || '草稿自动保存在本浏览器，保存草稿不会启动提取。', t.literatureFieldsError ? 'codex-error' : 'codex-status');
     notice.setAttribute('aria-live', 'polite');
     const saveDraft = () => {
       saveLiteratureFieldDrafts(t, job);
+      t.literatureFieldsPreviewRefresh?.();
       notice.textContent = t.literatureFieldsError || '草稿已保存在本浏览器，尚未提交确认。';
       notice.className = t.literatureFieldsError ? 'codex-error' : 'codex-status';
     };
@@ -850,12 +1143,10 @@
     });
     box.append(fields);
     const actions = node('div', undefined, 'literature-confirm-actions');
-    const add = node('button', '新增提取字段', 'quiet-button'); add.type = 'button'; add.disabled = disabled || drafts.length >= 50;
+    const add = node('button', '新增提取字段', 'quiet-button'); add.type = 'button'; add.disabled = disabled || drafts.length >= 200;
     add.onclick = () => addLiteratureField(mod, t, job); actions.append(add);
     if (awaitingConfirm) {
-      const confirm = node('button', t.literatureBusy ? '提交中…' : '确认并继续提取', 'primary-button');
-      confirm.type = 'button'; confirm.disabled = disabled || !drafts.length || !!root.LiteratureUI?.isBusy();
-      confirm.onclick = () => confirmLiteratureFields(mod); actions.append(confirm);
+      actions.append(nextButton());
     }
     box.append(actions, notice);
     return box;
@@ -928,7 +1219,7 @@
     const start = node('button', '确认配置并检索', 'primary-button');
     start.type = 'button'; start.disabled = t.literatureBusy || !!root.LiteratureUI?.isBusy() || t.busy || !t.literatureConfig || (awaitingAccess && sameConfig);
     if (awaitingAccess && sameConfig) start.title = '原任务等待人工处理；请用下方“检查并继续”，保留已有来源的结果。';
-    if (awaitingConfirm) start.title = '当前任务停在字段确认关口；本按钮发起一次新检索，继续原任务请用下方“确认并继续提取”。';
+    if (awaitingConfirm) start.title = '当前任务停在字段确认关口；本按钮发起一次新检索，继续原任务请在字段表格点击“核对表格并开始提取”。';
     start.onclick = () => startLiterature(mod); row.append(start);
     if (job && ['running', 'needs_attention'].includes(job.status)) {
       const stop = node('button', '停止', 'quiet-button'); stop.type = 'button';
@@ -947,7 +1238,17 @@
       advance.title = '继续原任务，运行到上方所选阶段；请先选择下一阶段或更后的目标。';
       advance.onclick = () => continueLiterature(mod); row.append(advance);
     }
+    if (job?.status === 'cancelled' && job.resumeStage === 'fulltext' && !job.cnkiRetryPaperId) {
+      const stopped = node('button', '按原任务继续（跳过失败项）', 'primary-button'); stopped.type = 'button';
+      stopped.title = '恢复原任务冻结设置与已有候选，保留已存材料，跳过无法取得的正文或补材；只运行到全文获取。';
+      stopped.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+      stopped.onclick = () => continueLiterature(mod, { until: 'fulltext', skipUnavailable: true, resumeStopped: true });
+      row.append(stopped);
+    }
     if (job?.id) {
+      const materials = node('button', '每篇材料清单', 'quiet-button'); materials.type = 'button';
+      materials.title = '只读查看正文PDF、网页正文和补充材料的保存与读取状态，不运行任务。';
+      materials.onclick = () => openLiteratureMaterials(mod); row.append(materials);
       if (job.canReviewFulltext === true) {
         const review = node('button', '复核已保存全文', 'quiet-button'); review.type = 'button';
         review.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
@@ -968,7 +1269,9 @@
     box.append(node('p', '登录流程：需要登录、验证或机构权限时，平台会尝试自动打开本任务的官方页面。请在平台专用检索浏览器操作，它会保存该浏览器的登录状态；普通 Edge/Chrome 的登录不会自动共享。完成后回到本平台点击“检查并继续”，任务才会恢复。', 'codex-status'));
     box.append(node('p', '后台对每次页面加载或候选获取设置1分钟时限，超时后暂停并保留已保存结果；正式检索每页单独计时，依赖准备另行提示。', 'codex-status'));
     if (job?.files?.includes('fulltext/status.json') || job?.resumeStage === 'fulltext') {
-      box.append(node('p', '全文获取逐篇处理：同篇文献复用任务页，确认文件和状态已保存后关闭；文件生成或下载中会等待完成，登录、验证、限流或错误时保留原页并暂停。摘要与待补充项不自动重复请求。', 'codex-status'));
+      box.append(node('p', job.fulltextFailurePolicy === 'skip'
+        ? '全文获取逐篇处理：无法取得的正文或补充材料记录原因后跳过，继续下一篇；登录、验证或限流页面保留，同一受限站点本轮不反复请求。已有材料保留，不重复下载；本地文件校验问题仍需处理。'
+        : '全文获取逐篇处理：同篇文献复用任务页，确认文件和状态已保存后关闭；文件生成或下载中会等待完成，登录、验证、限流或错误时保留原页并暂停。摘要与待补充项不自动重复请求。', 'codex-status'));
     }
     if (job?.processingBasis) box.append(node('p', literatureProcessingBasisMessage(job), 'codex-status'));
     const executionOrder = job ? Array.isArray(job.executionOrder) ? job.executionOrder : job.config?.sources : newLiteratureSourceOrder(t.literatureConfig?.sources);
@@ -982,7 +1285,7 @@
         + '。已有候选保留，检索尚未全部完成；可打开原页面处理后点击“' + (job.deferredOnly === true ? '补检该来源' : '检查并继续') + '”补检。', 'codex-status'));
       const stages = literatureStageBar(job);
       if (stages) box.append(stages);
-      if (awaitingConfirm) box.append(node('p', '提取字段等待确认：点击“设置提取字段”，新增或核对表头后确认并继续提取。', 'codex-status'));
+      if (awaitingConfirm) box.append(node('p', '提取字段等待确认：点击“设置提取字段”，按讨论填入表格，核对后点击“核对表格并开始提取”。', 'codex-status'));
     }
     if (job?.status !== 'running' && !job?.deletedAt && Array.isArray(job?.cnkiRetryItems) && job.cnkiRetryItems.length) {
       const retry = node('details', undefined, 'literature-deliverable-group');
@@ -991,11 +1294,11 @@
       job.cnkiRetryItems.slice(0, 100).forEach(item => {
         const entry = node('div', undefined, 'literature-confirm');
         entry.append(node('p', item.title)); entry.append(node('p', item.reason, 'codex-status'));
-        const button = node('button', job.cnkiRetryPaperId === item.id ? '继续这篇知网文献' : '重试这篇知网文献', 'quiet-button'); button.type = 'button';
+        const button = node('button', item.materials_only ? '继续这篇材料' : job.cnkiRetryPaperId === item.id ? '继续这篇知网文献' : '重试这篇知网文献', 'quiet-button'); button.type = 'button';
         button.setAttribute('aria-label', button.textContent + '：' + item.title);
         button.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || (!!job.cnkiRetryPaperId && job.cnkiRetryPaperId !== item.id);
         button.onclick = () => retryLiteratureCnki(mod, item.id); entry.append(button); retry.append(entry);
-        if (job.status === 'failed' && job.cnkiRetryPaperId === item.id) {
+        if (job.status === 'failed' && job.cnkiRetryPaperId === item.id && !item.materials_only) {
           const restart = node('button', '重新定位这篇知网文献', 'quiet-button'); restart.type = 'button';
           restart.title = '从本篇的正常知网检索页重新执行一次；保留原窗口，不重跑其他文献。';
           restart.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
@@ -1011,6 +1314,7 @@
         || (job.resumeStage === 'fulltext' && String(job.message || '').startsWith('全文页面加载超过1分钟')))) timeoutAttention = attention;
       const hasSourcePage = LITERATURE_EXECUTABLE_SOURCES.includes(job.attention?.source);
       const fulltextPaused = job.resumeStage === 'fulltext';
+      const materialsOnly = job.cnkiRetryItems?.some(item => item.id === job.cnkiRetryPaperId && item.materials_only);
       attention.append(node('h4', job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : '当前需要处理：' + (fulltextPaused ? '全文获取' : hasSourcePage ? LITERATURE_SOURCE_LABELS[job.attention.source] : job.resumeStage === 'extract' ? '全文核查与提取确认' : '检索暂停')));
       attention.append(node('p', literatureAttentionMessage(job), 'codex-status'));
       if (t.literatureAutoOpenNotice && job.deferredOnly !== true) attention.append(node('p', t.literatureAutoOpenNotice, 'codex-status'));
@@ -1021,12 +1325,19 @@
         open.onclick = () => openLiteratureBrowser(mod);
         actions.append(open);
       }
-      const resume = node('button', fulltextPaused ? (job.cnkiRetryPaperId ? '继续这篇知网文献' : '继续获取全文') : job.resumeStage === 'extract' ? '继续提取' : job.deferredOnly === true ? '补检该来源' : '检查并继续', 'primary-button'); resume.type = 'button';
+      const resume = node('button', fulltextPaused ? (materialsOnly ? '继续这篇材料' : job.cnkiRetryPaperId ? '继续这篇知网文献' : '继续获取全文') : job.resumeStage === 'extract' ? '继续提取' : job.deferredOnly === true ? '补检该来源' : '检查并继续', 'primary-button'); resume.type = 'button';
       resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
       resume.onclick = () => job.cnkiRetryPaperId && fulltextPaused ? retryLiteratureCnki(mod, job.cnkiRetryPaperId)
         : continueLiterature(mod, fulltextPaused ? { until: 'fulltext' } : {});
       actions.append(resume);
-      if (fulltextPaused && job.cnkiRetryPaperId && job.cnkiRetryItems?.some(item => item.id === job.cnkiRetryPaperId)) {
+      if (fulltextPaused && !job.cnkiRetryPaperId) {
+        const skip = node('button', '跳过无法获取的文献，继续', 'quiet-button'); skip.type = 'button';
+        skip.title = '本任务无法取得的正文或补充材料记入待补充清单，继续下一篇；保留已保存材料，只运行到全文获取。';
+        skip.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
+        skip.onclick = () => continueLiterature(mod, { until: 'fulltext', skipUnavailable: true });
+        actions.append(skip);
+      }
+      if (fulltextPaused && job.cnkiRetryPaperId && !materialsOnly && job.cnkiRetryItems?.some(item => item.id === job.cnkiRetryPaperId)) {
         const restart = node('button', '重新定位这篇知网文献', 'quiet-button'); restart.type = 'button';
         restart.title = '从本篇的正常知网检索页重新执行一次；保留原窗口，不重跑其他文献。';
         restart.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
@@ -1049,8 +1360,24 @@
     }
     if (t.literatureConfig) {
       const config = t.literatureConfig;
-      const details = node('details', undefined, 'literature-config'); details.open = !awaitingAccess;
-      details.append(node('summary', '本次检索设置（点击查看或修改）' + (saved[mod.id]?.literatureSource !== literatureSource(mod) ? ' · 对话已更新' : '')));
+      const details = node('details', undefined, 'literature-config');
+      details.open = typeof t.literatureConfigOpen === 'boolean' ? t.literatureConfigOpen : !awaitingAccess;
+      let lastConfigOpen = details.open;
+      function rememberConfigOpen(open) {
+        t.literatureConfigOpen = open;
+        saved[mod.id] = { ...saved[mod.id], literatureConfigOpen: open };
+        persist();
+      }
+      const summary = node('summary', '本次检索设置（点击查看或修改）' + (saved[mod.id]?.literatureSource !== literatureSource(mod) ? ' · 对话已更新' : ''));
+      // Capture the user's choice before the native asynchronous toggle event,
+      // so a polling render cannot replace the panel with the old default.
+      summary.onclick = event => { if (!event?.defaultPrevented) rememberConfigOpen(!details.open); };
+      details.ontoggle = () => {
+        if (!details.isConnected || details.open === lastConfigOpen) return;
+        lastConfigOpen = details.open;
+        if (t.literatureConfigOpen !== details.open) rememberConfigOpen(details.open);
+      };
+      details.append(summary);
       details.append(node('p', '这里是本次任务的要求表。核对检索什么、检索范围和需要提取的字段；修改后再开始执行。', 'codex-status'));
       const fields = node('div', undefined, 'literature-config-fields');
       function input(label, key, type = 'text') {
@@ -1198,6 +1525,12 @@
     return true;
   }
   function cancelPreparedExecution(id) { task(id).executeOnce = false; task(id).preparedPlotPlan = null; render(); }
+  function prepareRuleDiscussion(id) {
+    const t = task(id);
+    if (t.busy || root.ModuleSpace?.isBusy()) throw new Error('当前文件或 AI 任务尚未完成');
+    t.execute = false; t.executeOnce = false; t.preparedPlotPlan = null;
+    render();
+  }
   function plotInputNames(id) {
     const all = task(id).files.filter(file => file.group === 'input' && /\.(csv|tsv|xlsx|xls|json|txt)$/i.test(file.name)).map(file=>file.name);
     const chosen = saved[id]?.plotInputNames;
@@ -1456,25 +1789,46 @@
     if (run.failures.length) { t.error = '仍有下载失败，请补齐清单后再交给清洗。成功文件已保留。'; render(); return; }
     const basis = basisForDownload(mod, run.sourceType);
     if (!basis || basis.text !== run.text) { t.error = '下载规则已变化，请先按当前规则重新核查或下载文件。'; render(); return; }
-    if (run.confirmed) {
-      const clean = Store.getState().modules.find(item => item.type === 'clean-data');
-      if (clean) { Store.selectModule(clean.id); return; }
-    }
     t.busy = true; t.error = ''; render();
     try {
       let clean = Store.getState().modules.find(item => item.type === 'clean-data');
       if (!clean) { Store.addModule('数据清洗'); clean = Store.getState().modules.find(item => item.type === 'clean-data'); }
       if (!clean) throw new Error('无法建立清洗模块');
-      const target = await session(clean.id);
+      let target = await session(clean.id), existing;
+      try { existing = (await request('/api/codex/files?session=' + target)).files; }
+      catch (error) {
+        if (error.code !== 'SESSION_NOT_FOUND' || error.sessionId !== target) throw error;
+        // A lost target must never cause the successful download source to be replaced.
+        try {
+          const sourceFiles = (await request('/api/codex/files?session=' + saved[mod.id].sessionId)).files;
+          if (!run.files.every(file => sourceFiles.some(source => source.group === 'input' && source.name === file.storedName))) throw new Error('下载记录对应的原始文件未找到，请先找回原文件；下载方案和记录已保留。');
+        }
+        catch (sourceError) {
+          if (sourceError.code === 'SESSION_NOT_FOUND') throw new Error('下载源文件会话已失效，请先找回原文件；本次下载记录和方案已保留。');
+          throw sourceError;
+        }
+        const previous = target;
+        target = (await request('/api/codex/session', { method: 'POST' })).id;
+        saved[clean.id].sessionId = target;
+        run.confirmed = false;
+        persist();
+        Store.appendMessage(clean.id, '原清洗文件接收区已失效（' + previous + '），已建立新的接收区。已有方案和对话保留，正在重新交接现存下载文件；尚未执行清洗。', 'system');
+      }
+      if (run.confirmed && existing) {
+        const names = saved[clean.id].inputBatch?.names;
+        if (!names?.length || !names.every(name => existing.some(file => file.group === 'input' && file.name === name))) throw new Error('此前交接的清洗输入文件未找到，请先检查“文件与结果”；下载原文件和记录已保留。');
+        task(clean.id).files = existing; task(clean.id).filesOpen = true; task(clean.id).error = '';
+        Store.selectModule(clean.id); return;
+      }
       const result = await request('/api/codex/import-input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: target, sourceSessionId: saved[mod.id].sessionId, names: run.files.map(file => file.storedName), confirm: true }) });
-      task(clean.id).files = result.files; task(clean.id).filesOpen = true;
+      task(clean.id).files = result.files; task(clean.id).filesOpen = true; task(clean.id).error = '';
       saved[clean.id].inputBatch = { names: result.names, label: run.label, text: run.text };
       run.confirmed = true; persist(); Store.confirmRun(mod.id);
       Store.appendMessage(mod.id, '已人工确认 ' + run.files.length + ' 个下载文件并交给数据清洗。' + (run.failures.length ? '本次仍有 ' + run.failures.length + ' 个下载失败，须另行补充。' : ''), 'system');
       Store.appendMessage(clean.id, '已接收下载模块确认的 ' + run.files.length + ' 个原始文件，依据“' + run.label + '”。\n来源与获取要求（用于交接，清洗规则另行确认）：\n' + run.text + '\n交接文件：\n' + run.files.map(file => file.name + '；来源：' + file.finalUrl + '；SHA-256：' + file.sha256).join('\n') + '\n请先查看输入并讨论清洗规则，再执行清洗。', 'system');
       Store.approveModule(mod.id);
       Store.selectModule(clean.id);
-    } catch (error) { t.error = error.message; }
+    } catch (error) { t.error = error.code === 'SESSION_NOT_FOUND' && error.sessionId === saved[mod.id].sessionId ? '下载源文件会话已失效，请先找回原文件；本次下载记录和方案已保留。' : error.message; }
     finally { t.busy = false; render(); ModuleSpace.render(); }
   }
   async function runAudit(mod) {
@@ -1509,8 +1863,71 @@
     input.dispatchEvent(new Event('input'));
     input.focus();
   }
+  async function loadCleanResults(id, runId) {
+    const t = task(id), generation = (t.cleanResultsGeneration || 0) + 1;
+    t.cleanResultsGeneration = generation; t.cleanResultsLoading = true; t.cleanResultsError = '';
+    try {
+      const sid = await session(id);
+      const data = await request('/api/codex/clean-results?session=' + encodeURIComponent(sid) + (runId ? '&run=' + encodeURIComponent(runId) : ''));
+      if (t.cleanResultsGeneration === generation) t.cleanResults = data;
+    } catch (error) { if (t.cleanResultsGeneration === generation) t.cleanResultsError = '无法整理清洗结果：' + error.message; }
+    finally { if (t.cleanResultsGeneration === generation) { t.cleanResultsLoading = false; render(); } }
+  }
+  function cleanResultLink(id, file) {
+    const link = node('a', undefined, 'clean-result-file');
+    link.title = file.name;
+    link.setAttribute('aria-label', (file.label || '文件') + '：' + file.name.split('/').pop());
+    link.href = '/api/codex/download?session=' + encodeURIComponent(saved[id]?.sessionId || '') + '&group=' + file.group + '&name=' + encodeURIComponent(file.name);
+    link.append(node('strong', file.label || file.name.split('/').pop()));
+    link.append(node('span', file.name.split('/').pop() + ' · ' + Math.ceil(file.size / 1024) + 'KB' + (Number.isInteger(file.rowCount) ? ' · ' + file.rowCount.toLocaleString() + ' 行' : ''), 'clean-result-meta'));
+    return link;
+  }
+  function renderCleanResults(mod, t, list) {
+    list.classList.add('clean-results');
+    const key = JSON.stringify(t.files.map(file => [file.group, file.name, file.size]));
+    if (saved[mod.id]?.sessionId && !t.cleanResultsLoading && t.cleanResultsKey !== key && (!t.busy || t.job?.status === 'completed')) {
+      t.cleanResultsKey = key; loadCleanResults(mod.id, t.cleanResultsRunId);
+    }
+    if (t.cleanResultsLoading) list.append(node('p', '正在整理结果文件…', 'codex-status'));
+    if (t.cleanResultsError) {
+      list.append(node('p', t.cleanResultsError, 'codex-error'));
+      const retry = node('button', '重新整理结果', 'quiet-button'); retry.type = 'button'; retry.onclick = () => { t.cleanResultsKey = null; render(); }; list.append(retry);
+    }
+    const view = t.cleanResults;
+    if (!view) return;
+    if (view.runId) {
+      const heading = node('div', undefined, 'clean-result-heading');
+      const select = node('select'); select.setAttribute('aria-label', '查看哪次清洗结果');
+      view.runs.forEach((run, index) => { const option = node('option', (index === 0 ? '最新结果 · ' : '历史结果 · ') + new Date(run.updatedAt).toLocaleString('zh-CN') + ' · ' + run.id.slice(0, 8)); option.value = run.id; select.append(option); });
+      select.value = view.runId; select.disabled = !!t.cleanResultsLoading;
+      select.onchange = () => { t.cleanResultsRunId = select.value; loadCleanResults(mod.id, select.value); render(); };
+      const bundle = node('a', '打包下载本次结果', 'quiet-button');
+      bundle.setAttribute('aria-label', '打包下载本次结果');
+      bundle.href = '/api/codex/clean-results/archive?session=' + encodeURIComponent(saved[mod.id].sessionId) + '&run=' + encodeURIComponent(view.runId);
+      bundle.title = '包含本次结果、代码和说明，不混入其他运行或原始输入';
+      if (t.busy) { bundle.removeAttribute('href'); bundle.setAttribute('aria-disabled', 'true'); bundle.title = '任务完成后可打包下载'; }
+      heading.append(select, bundle); list.append(heading);
+      [['main', '主要结果', '本次尚未生成主要结果数据。'], ['reports', '检查报告', '本次尚未生成检查报告。'], ['issues', '待处理问题', '所列问题清单中没有记录；是否通过验收仍以检查报告和人工核查为准。']].forEach(([group, title, empty]) => {
+        const section = node('section', undefined, 'clean-result-section'); section.append(node('h4', title));
+        if (view.groups[group].length) view.groups[group].forEach(file => section.append(cleanResultLink(mod.id, file)));
+        else section.append(node('p', empty, 'clean-result-meta'));
+        list.append(section);
+      });
+      const auxiliary = node('details', undefined, 'clean-result-aux'); auxiliary.append(node('summary', '辅助文件（' + view.groups.auxiliary.length + '）· 代码、说明及其他检查材料'));
+      view.groups.auxiliary.forEach(file => auxiliary.append(cleanResultLink(mod.id, file))); list.append(auxiliary);
+    } else list.append(node('p', '还没有清洗结果。先讨论并确认规则，再执行清洗。', 'codex-status'));
+    const originals = node('details', undefined, 'clean-result-aux'); originals.append(node('summary', '原始文件（' + view.inputs.length + '）'));
+    view.inputs.forEach(file => { const batch = saved[mod.id]?.inputBatch; originals.append(cleanResultLink(mod.id, { ...file, label: batch ? batch.names.includes(file.name) ? '当前原始文件' : '历史原始文件' : '原始文件' })); }); list.append(originals);
+    if (view.otherFiles.length) { const extra = node('details', undefined, 'clean-result-aux'); extra.append(node('summary', '其他保留文件（' + view.otherFiles.length + '）')); view.otherFiles.forEach(file => extra.append(cleanResultLink(mod.id, file))); list.append(extra); }
+  }
   function render() {
+    root.TaskManager?.refreshControls();
     renderConnection();
+    if (literatureFieldsDialog) {
+      const current = task(literatureFieldsDialog.mod.id);
+      const stamp = JSON.stringify([current.literatureJob?.id, current.literatureJob?.status, current.busy, current.literatureBusy, !!root.LiteratureUI?.isBusy()]);
+      if (literatureFieldsDialog.lockStamp !== stamp) renderLiteratureFieldsDialog();
+    }
     const state = Store.getState();
     const mod = state.modules.find(m => m.id === state.activeModuleId);
     panel.hidden = !mod || !document.getElementById('records-view').hidden;
@@ -1564,7 +1981,7 @@
     toggle.setAttribute('aria-expanded', String(files.open));
     toggle.setAttribute('aria-controls', 'codex-file-list');
     toggle.title = '点击查看已上传文件与处理结果';
-    toggle.append(node('span', '文件与结果 · ' + t.files.length));
+    toggle.append(node('span', mod.type === 'clean-data' ? '清洗结果' : '文件与结果 · ' + t.files.length));
     const chevron = node('span', undefined, 'codex-chevron'); chevron.setAttribute('aria-hidden', 'true'); toggle.append(chevron);
     files.append(toggle);
     files.ontoggle = () => { if (!files.isConnected) return; t.filesOpen = files.open; toggle.setAttribute('aria-expanded', String(files.open)); };
@@ -1609,6 +2026,8 @@
     if (mod.type === 'clean-data' && saved[mod.id]?.inputBatch) panel.append(node('p', '当前交接输入 ' + saved[mod.id].inputBatch.names.length + ' 个；历史原始文件保留，不自动合并到本次清洗。', 'codex-status'));
     const list = node('div', undefined, 'codex-files');
     list.id = 'codex-file-list';
+    if (mod.type === 'clean-data') renderCleanResults(mod, t, list);
+    else {
     list.append(node('p', mod.type === 'result-audit' ? '与计算模块共享输入及各次输出；点击文件名下载。' : mod.type === 'download-data' ? '下载的原始文件与下载记录；点击文件名保存到本机。' : '上传文件与本次结果；点击文件名下载。每个上传文件上限 20MB。'));
     if (!t.files.length) list.append(node('p', mod.type === 'result-audit' ? '还没有计算文件，请先在计算模块运行。' : mod.type === 'download-data' ? '尚未下载文件，请确认规则后开始下载。' : '还没有文件，请先选择原始数据。'));
     t.files.forEach(file => {
@@ -1618,12 +2037,13 @@
       link.title = file.name;
       link.href = '/api/codex/download?session=' + saved[mod.id]?.sessionId + '&group=' + file.group + '&name=' + encodeURIComponent(file.name); list.append(link);
     });
+    }
     files.append(list); fileRow.append(files);
     if (t.busy && !t.sourceJob) panel.append(node('p', t.job ? 'Codex 正在处理…' : '上传或启动中…', 'codex-status'));
     if (t.job?.events.length) { const log = node('details'); log.open = t.logOpen; log.ontoggle = () => { t.logOpen = log.open; }; log.append(node('summary', '执行进度')); log.append(node('pre', t.job.events.join('\n'))); panel.append(log); }
     if (t.error) panel.append(node('p', t.error, 'codex-error'));
   }
-  root.CodexUI = { render, reply, openDownload, prepareConfirmedExecution, cancelPreparedExecution, session, refresh,
+  root.CodexUI = { render, reply, openDownload, prepareConfirmedExecution, cancelPreparedExecution, prepareRuleDiscussion, session, refresh,
     getConnection: mod => ({ backend: task(mod.id).backend, model: task(mod.id).model || (task(mod.id).backend === 'codex' ? account?.model : null) || null }),
     setInputBatch: (id, batch) => { saved[id] = { ...saved[id], inputBatch: batch }; persist(); },
     useCodex: mod => !!mod && task(mod.id).backend === 'codex', getModel: mod => mod ? task(mod.id).model || null : null, busy: id => task(id).busy || task(id).literatureBusy };

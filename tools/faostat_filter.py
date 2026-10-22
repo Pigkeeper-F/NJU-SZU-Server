@@ -11,6 +11,7 @@ import time
 import zipfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
+import unicodedata
 
 MAX_OUTPUT = 2 * 1024 ** 3
 MAX_UNCOMPRESSED = 32 * 1024 ** 3
@@ -21,6 +22,13 @@ FILTER_COLUMNS = {
     "elementCodes": "Element Code",
     "elementNames": "Element",
 }
+NAME_FILTERS = {
+    "itemNames": ("itemCodes", "_ItemCodes.csv", "Item Code", "Item"),
+    "reporterNames": ("reporterCodes", "_ReporterCountries.csv", "Reporter Country Code", "Reporter Countries"),
+    "partnerNames": ("partnerCodes", "_PartnerCountries.csv", "Partner Country Code", "Partner Countries"),
+    "elementNames": ("elementCodes", "_Elements.csv", "Element Code", "Element"),
+}
+QUERY_ALIASES = {"小麦": "Wheat", "进口数量": "Import quantity", "进口量": "Import quantity", "出口数量": "Export quantity", "出口量": "Export quantity"}
 
 
 def emit(**value):
@@ -42,12 +50,64 @@ def local_path(value):
     return absolute
 
 
+def normalized_name(value):
+    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
+
+
+def resolve_official_config(package, config):
+    """Resolve exact names using dictionaries inside the same original ZIP."""
+    filters = {key: list(values) for key, values in (config.get("filters") or {}).items()}
+    mappings = []
+    for name_key, (code_key, suffix, code_column, name_column) in NAME_FILTERS.items():
+        requested = filters.pop(name_key, [])
+        # Code-only configurations remain valid; exact-name resolution is only needed for names.
+        if not requested:
+            continue
+        candidates = [entry for entry in package.infolist() if entry.filename.lower().endswith(suffix.lower())]
+        if len(candidates) != 1 or candidates[0].file_size > 64 * 1024 * 1024:
+            raise ValueError("缺少唯一的官方名称字典：" + suffix)
+        member = candidates[0]
+        with package.open(member) as raw, io.TextIOWrapper(raw, encoding="utf-8-sig", newline="", errors="strict") as text:
+            reader = csv.DictReader(text)
+            if not reader.fieldnames or code_column not in reader.fieldnames or name_column not in reader.fieldnames:
+                raise ValueError("官方字典字段不完整：" + member.filename)
+            rows = []
+            for row in reader:
+                if len(rows) >= 100000:
+                    raise ValueError("官方字典行数异常")
+                if row.get(code_column) and row.get(name_column):
+                    rows.append((reader.line_num, row))
+        matched_codes = set()
+        for value in requested:
+            query = QUERY_ALIASES.get(value, value)
+            matches = [(line, row) for line, row in rows if normalized_name(row[name_column]) == normalized_name(query)]
+            unique = {(row[code_column], normalized_name(row[name_column])) for _, row in matches}
+            if not matches:
+                raise ValueError(f"官方字典未精确匹配名称 {value!r}；未采用子串或相似商品替代（{member.filename}）")
+            if name_key != "elementNames" and len(unique) != 1:
+                choices = "; ".join(f"{row[name_column]} [{row[code_column]}]" for _, row in matches)
+                raise ValueError(f"官方名称 {value!r} 对应多个条目，请选择：{choices}")
+            for line, row in matches:
+                matched_codes.add(row[code_column])
+                mappings.append({"field": name_key, "requested": value, "query": query, "name": row[name_column], "code": row[code_column],
+                                 "sourceFile": member.filename, "sourceRow": line, "unit": row.get("Unit")})
+        if filters.get(code_key):
+            selected = matched_codes.intersection(filters[code_key])
+            if not selected:
+                raise ValueError("方案中的名称与明确代码冲突：" + name_key)
+            filters[code_key] = sorted(selected)
+        else:
+            filters[code_key] = sorted(matched_codes)
+    resolved = {**config, "filters": filters}
+    return resolved, mappings
+
+
 def filter_archive(archive, config, output_dir, on_progress=emit):
     years = config.get("years")
     if not isinstance(years, list) or not 1 <= len(years) <= 20 or any(type(y) is not int or not 1961 <= y <= 2100 for y in years) or len(set(years)) != len(years):
         raise ValueError("筛选年份无效")
     filters = config.get("filters") or {}
-    if any(key not in FILTER_COLUMNS for key in filters):
+    if any(key not in set(FILTER_COLUMNS) | set(NAME_FILTERS) for key in filters):
         raise ValueError("存在不支持的筛选条件")
     if any(not isinstance(values, list) or len(values) > 1000 or any(not isinstance(v, str) or not v or len(v) > 100 for v in values) for values in filters.values()):
         raise ValueError("筛选代码或指标格式无效")
@@ -59,6 +119,7 @@ def filter_archive(archive, config, output_dir, on_progress=emit):
     rows_read = rows_selected = 0
     counts = Counter()
     seen_years = Counter()
+    units_by_element = Counter()
     csv.field_size_limit(1024 * 1024)
     try:
         with zipfile.ZipFile(archive) as package:
@@ -90,6 +151,11 @@ def filter_archive(archive, config, output_dir, on_progress=emit):
                 with package.open(entry) as extra:
                     for _ in iter(lambda: extra.read(1024 * 1024), b""):
                         pass
+            resolved_config, official_mappings = resolve_official_config(package, config)
+            filters = resolved_config["filters"]
+            if official_mappings:
+                on_progress(stage="lookup", resolvedConfig=resolved_config, officialMappings=official_mappings,
+                            message="已从官方字典核对名称与代码：" + "; ".join(dict.fromkeys(f"{m['requested']} → {m['name']} [{m['code']}]" for m in official_mappings)))
             with package.open(member) as raw, io.TextIOWrapper(raw, encoding="utf-8-sig", newline="", errors="strict") as text:
                 reader = csv.reader(text, strict=True)
                 header = next(reader)
@@ -126,6 +192,8 @@ def filter_archive(archive, config, output_dir, on_progress=emit):
                         writers[selected].writerow(row)
                         counts[selected] += 1
                         rows_selected += 1
+                        if "Unit" in header and "Element Code" in header and "Element" in header:
+                            units_by_element[(row[header.index("Element Code")], row[header.index("Element")], row[header.index("Unit")])] += 1
                     if rows_read % 100000 == 0:
                         for year, handle in handles.items():
                             handle.flush()
@@ -146,7 +214,8 @@ def filter_archive(archive, config, output_dir, on_progress=emit):
                 handle.close()
             handles.clear()
             files = [{"name": paths[year].name, "year": year, "rows": counts[year], "size": paths[year].stat().st_size, "sha256": file_sha(paths[year])} for year in years]
-            result = {"schema": 1, "dataset": "TM", "years": years, "filters": filters, "member": member.filename,
+            result = {"schema": 1, "dataset": "TM", "years": years, "filters": filters, "resolvedConfig": resolved_config, "officialMappings": official_mappings,
+                      "unitsByElement": [{"elementCode": code, "element": name, "unit": unit, "rows": total} for (code, name, unit), total in sorted(units_by_element.items())], "member": member.filename,
                       "memberCRC32": f"{member.CRC:08x}", "zipCRCVerified": True, "sourceRows": rows_read,
                       "rowsSelected": rows_selected, "sourceYearCounts": dict(sorted(seen_years.items())), "columns": header,
                       "files": files, "method": "保留全部原始字段及单元格文本，仅按年份和明确条件筛选；未换算、插补、去重或合并。CSV按标准格式重新序列化。"}

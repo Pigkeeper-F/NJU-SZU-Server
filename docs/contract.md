@@ -1397,6 +1397,16 @@ Windows虚拟环境启动器可能产生不同于实际脚本的PID；Node阶段
 
 历史 `mod.doc` 原样保留，在弹窗的 `.task-previous-plan` 折叠区只读展示，可由用户明确点击复制到草稿后再审核；不自动覆盖既有方案、不自动审核。该类仅增加折叠区的间距、边框和字号，文本沿用已有 `.doc-content`；不新增存储键、Store API 或全局对象。原规则版本继续有效，生成执行指令携带审核版本。人工审核模块继续使用原有意见记录与通过/退回状态；说明需区分执行前方案审核与执行后成果审核，不声称已具备自动绑定计算版本或跨模块退回能力。
 
+## 2026-10-20 绘图完整流程
+
+绘图复用任务规则弹窗，唯一方案保存在既有 `research_tasks_v1.rulesByModule[moduleId]` 的草稿、已审核文本及版本；底部不再显示第二份绘图方案卡。可上传 CSV/TSV/Excel/JSON/TXT，在只读对话中查看数据、讨论图型与科学口径，审核后显式生成。草稿有未审核变更时禁止执行。旧 `mod.doc` 仍可只读核对并手动复制为草稿。
+
+`POST /api/codex/run` 对 plotting 新增执行支持，execute=true 必须带 `plotPlan:{text,version,inputNames,previousRunId?}`；服务端校验非空已确认文本、版本、实际输入及同会话历史版本，保存方案、输入 SHA-256 与模型。每次运行使用独立输出目录，生成图像与绘图代码，不覆盖旧版本。普通绘图对话仍只读。沿用所选本机 Codex 模型、网络关闭与仅本次输出可写的执行沙箱。首次读取绘图数据或生成时由服务器在项目 `.venv` 准备 requirements-plotting.txt 中的公开绘图依赖，过程显示进度；失败有明确错误，不声称出图成功。
+
+新增 `GET /api/codex/plots?session=...` 返回 `{runs:[{id,status,createdAt,finishedAt,planVersion,planHash,model,previousRunId,inputFiles,files,error}]}`，按新到旧排列，从磁盘记录恢复，停止和失败也保留。新增 `GET /api/codex/preview?session=...&name=...` 仅以核对过的 PNG/JPEG/WebP 类型内联提供本会话输出，沿用下载的路径边界校验；SVG/PDF 与代码仍通过附件下载，不能以内联 HTML 执行。
+
+绘图区域显示当前版本、预览、图片/代码/绘图数据下载及修改意见。讨论修改时明确所选历史版本且不执行；核对修订方案后生成新版本，刷新后仍可找回。`research_codex_tasks_v1` 兼容扩展绘图视图选择与反馈草稿，不改变旧字段。TaskManager 新增 `openPlan()` 供绘图区域打开同一方案弹窗，不建立第二份文本或确认状态。新增 CSS 类 `.plotting-results`、`.plotting-preview`、`.plotting-feedback`、`.plotting-downloads`、`.plotting-meta`。不新增脚本或 Store API。
+
 ### 2026-10-20 下载弹窗记录与单篇重新定位
 
 弹窗经本次任务页真实点击、opener及准确target ID核对后，立即持久化pending_popup见证（仅父子target ID、操作阶段及原paper/title hash，不保存会话URL）。暂停及重启后仅按此记录找原页，再核对所有权及官方来源，不挑选最近标签或相似网址。交接须先原子保存新绑定再切换内存页；关闭已证明的旧定位页失败单独登记cleanup_target_id，不误报所有权失败，全文与状态保存后再按准确ID清理自己的旧页。首次PDF响应可能早于popup事件，只可接收本次操作、当前任务页opener可核实的主框架官方PDF响应，不监听并处理其他研究者页面。
@@ -1415,21 +1425,37 @@ Windows虚拟环境启动器可能产生不同于实际脚本的PID；Node阶段
 
 浏览器下载记录只证明曾触发传输，不能凭GUID文件名、大小或截图当作平台已取得全文，也不扫描浏览器下载目录猜文件。对本次已核对题名的真实点击，下载事件还须关联已点击target或其持久direct-opener窗口；仅官方来源的真实download/主框架PDF响应并通过文件校验才能交付。先处理已到文件事件，再等待旁支弹窗跳转；已校验的官方文件不因旁支窗口地址未获页面操作许可而丢弃。未知旁支仍不接管、导航或点击，只有opener已证明且准确ID可核验时登记为文件与状态保存后的cleanup_target_id；记录冲突或关系不明则暂停。下载小窗口已关闭时，已捕获的真实文件事件仍可完成保存，缺失事件不得从截图或任意目录补造。
 
-## 2026-10-20 绘图完整流程
+## 2026-10-20 全文续跑、重复复用与材料类型
 
-绘图复用任务规则弹窗，唯一方案保存在既有 `research_tasks_v1.rulesByModule[moduleId]` 的草稿、已审核文本及版本；底部不再显示第二份绘图方案卡。可上传 CSV/TSV/Excel/JSON/TXT，在只读对话中查看数据、讨论图型与科学口径，审核后显式生成。草稿有未审核变更时禁止执行。旧 `mod.doc` 仍可只读核对并手动复制为草稿。
+### 正文与补充材料清单（2026-10-20 补充）
 
-`POST /api/codex/run` 对 plotting 新增执行支持，execute=true 必须带 `plotPlan:{text,version,inputNames,previousRunId?}`；服务端校验非空已确认文本、版本、实际输入及同会话历史版本，保存方案、输入 SHA-256 与模型。每次运行使用独立输出目录，生成图像与绘图代码，不覆盖旧版本。普通绘图对话仍只读。沿用所选本机 Codex 模型、网络关闭与仅本次输出可写的执行沙箱。首次读取绘图数据或生成时由服务器在项目 `.venv` 准备 requirements-plotting.txt 中的公开绘图依赖，过程显示进度；失败有明确错误，不声称出图成功。
+材料获取按每篇文献执行：在已核对身份的官方详情页检查实际可见的补充材料入口，保留原入口的真实点击上下文，再获取正文。正文优先原版 PDF，已验证的网页正文作为并存材料或未取得 PDF 时的后备；补充 PDF 不得误认成正文 PDF。Excel、Word、PDF、CSV、ZIP 及其他补充材料保留下载原格式，既不统一转成 PDF，也不把下载链接或摘要当作已取得原件。只有网站明确声明无补充材料才标 `none_declared`；没找到入口或尚未核查分别为 `unknown` / `uninspected`，不得自动宣称齐全。
 
-新增 `GET /api/codex/plots?session=...` 返回 `{runs:[{id,status,createdAt,finishedAt,planVersion,planHash,model,previousRunId,inputFiles,files,error}]}`，按新到旧排列，从磁盘记录恢复，停止和失败也保留。新增 `GET /api/codex/preview?session=...&name=...` 仅以核对过的 PNG/JPEG/WebP 类型内联提供本会话输出，沿用下载的路径边界校验；SVG/PDF 与代码仍通过附件下载，不能以内联 HTML 执行。
+新增 `fulltext/materials.json`（`version:1`）：每篇记录 `paper_id/title/doi/main_pdf_status/main_pdf_reason/supplement_check/materials`。每件材料记录 `material_id/role/label/filename/path/format/mime_type/size/sha256/source_key/download_status/download_reason/read_status/read_reason/reused_from`。`role` 为 `main_pdf/main_html/supplement`；保存状态为 `pending/downloaded/missing/needs_attention`；读取状态为 `not_checked/readable/partial/unreadable/unsupported`。清单持久化不保留带会话参数的补充材料 URL。正文保存与每件附件落盘后立即分别更新状态，最后才确认并关闭本任务拥有的下载窗口；读不了的已保存原件仍为 `downloaded`，窗口清理失败也不能降为未下载。
 
-绘图区域显示当前版本、预览、图片/代码/绘图数据下载及修改意见。讨论修改时明确所选历史版本且不执行；核对修订方案后生成新版本，刷新后仍可找回。`research_codex_tasks_v1` 兼容扩展绘图视图选择与反馈草稿，不改变旧字段。TaskManager 新增 `openPlan()` 供绘图区域打开同一方案弹窗，不建立第二份文本或确认状态。新增 CSS 类 `.plotting-results`、`.plotting-preview`、`.plotting-feedback`、`.plotting-downloads`、`.plotting-meta`。不新增脚本或 Store API。
+本任务与历史任务的已有材料按同篇强身份、原候选/冻结输入及文件 SHA 核对后复用。不可只凭题名相似、文件名相同或材料编号复用；版本冲突、已登记原件丢失或 SHA 不符需人工核查，不静默覆盖或重下。继续任务先补齐材料检查，保留已存正文与附件；不会因 `unreadable/unsupported/partial` 而重复下载同一原件。材料下载收到后可暂存于本任务私有暂存区，恢复时仅核对本任务持久见证与 SHA，不扫描浏览器下载目录或重放临时下载链接。
+
+新增只读 `GET /api/literature/materials?id=...`，返回安全投影 `{schema:1,papers,legacy}`；网页“每篇材料清单”使用大弹窗逐篇展示保存、可读性、缺失原因和原件下载。无清单的旧任务只读投影已有正文状态，补材标尚未核查，不创建清单或触发运行。有清单时，新增材料只有被登记为已下载、实际文件有效且位于任务安全目录内才能通过原下载接口取回；拒绝越界、符号链接、Windows 特殊路径。下载清单 JSON 也只返回安全字段，不泄露未知 URL 或凭证字段。
+
+离线读取支持 PDF 文字、XLSX 单元格、DOCX 段落/表格、CSV/TSV、TXT/JSON/XML/HTML，并提供文件名及页码、工作表/单元格或段落/表格位置。ZIP 保留原包，有限度在内存检查安全成员，不在文件系统解包执行。旧 Office、CAJ、图片、扫描/加密或损坏文件等未能读取时明示原因；公式不重算，文本、页数、行列和压缩成员限制触发时标 `partial`，原件仍完整保留。提取输入新增 `materials/materials_check/materials_fingerprint`，材料内容变化后既有输入必须显式重建；模型只能引用已提供且能读取的材料内容，证据注明文件及原文位置，缺失不得猜填。全文阶段结束仍停在人工材料核查关口，不自动批准字段或进入提取。
+
+本次功能安装只修改程序与离线样例；用户未要求继续之前，不恢复现有文献检索、下载或提取任务。
+
+知网单篇定位需保留完整科学题名（包括 L-/D- 等前缀）。可见检索词被官网改写而唯一完整题名仍在时，只允许在该任务原官方页通过唯一普通检索表单真实提交一次加双引号的完整题名；提交前后持久记录步骤和查询摘要，恢复不得反复提交。官网仍改写、无唯一控件或提交不确定时按实际原因暂停，不能删除前缀或借其他窗口通过校验。任务原绑定 target/hash 相符且已进入同篇可核验详情时，可从该详情继续，不再要求返回结果页。题录未加载仍受一分钟时限；查询改写、题名不符、同名多项与加载等待分别显示具体原因。
+
+下载前检查本任务及同级历史任务的已确认全文，只有严格同篇身份且本地文件证据有效才复用。DOI、知网永久文献标识或完整题名＋年份＋作者须一致，身份冲突、题名相似、概率合并、摘要、导航空壳及没有状态证明的孤立文件均不得作为复用依据。HTML须通过正文结构、身份及精确文件SHA核验；PDF须通过实际文件格式和完整性证据，旧记录缺少可靠下载证明时须另核对PDF正文身份。解析依赖不足不能误报文件截断或偷偷重复下载已有同篇，保留原文件并提示人工核查。复用采用原子本地复制并登记来源任务/原文献/文件SHA与匹配依据，不改源任务、原候选、去重或冻结配置；仅复用的条目无需启动浏览器，保存成功的网络请求页仍在文件与状态落盘后才关闭。
+
+去重中 `needs_review` / `merge_confidence=probable` 的相似组并非已确认同篇。全文读取时按各原 candidate_id 分别建立目标，保留待审核标记及各自作者年份，不静默少取其中一篇；冻结去重文件和实际组数保持。提取前核查这些独立成员均出现在全文清单中，旧清单遗漏成员时明确要求回全文阶段补齐，不自动改写任务或开始下载。
+
+页面材料类型区分PDF正文、网页正文文本、仅题录/摘要（非全文）、待补充、待人工处理与尚未处理。网页正文TXT是已验证正文区域的文本，不承诺同时包含原PDF版式、图片或补充附件。已保存文件数不能当作全文篇数；元数据URL、空文本及带有“摘要”导航标签的空壳不证明取得摘要。新获取须看到实际摘要段才可标摘要；显式离线复核也重查旧 `abstract_only` 条目，原文件和复核前status备份保留，空白/导航降为待补充，不自动再次请求网站。
+
 
 ## 2026-10-20 并列准备与模型汇合
 
 侧栏按“准备资料 · 三条并列路径”和“汇入模型 · 计算与结果”分组，新增 `.workflow-group-title`、`.workflow-preparation-actions` 样式。缺少的准备环节可独立添加，也可直接建立计算入口。新建任务的 start=download/clean/literature/calculation 仅建立所选入口，不虚构已完成的准备工作。计算讨论可以读取三条准备路径中已确认的规则作为来源上下文，仍须确认本次计算方案；不自动复制文件，也不把来源规则当作计算执行授权。
 
 兼容沿用 fa_state_v1 与各任务快照键；未增加持久化依赖字段。旧任务恢复时按旧 type 或旧固定顺序识别模块，再排序，保留所有有效环节，不因计算方式为空删除下游。切换 direct/modify/历史子方式不删除历史环节与文件。
+
 
 ## 2026-10-20 数据下载与文献执行分离
 
@@ -1438,6 +1464,7 @@ Windows虚拟环境启动器可能产生不同于实际脚本的PID；Node阶段
 文献检索、筛选、材料获取和数值提取归文献挖掘模块。LiteratureUI.start 对 download-data 拒绝新文献运行；下载模块中既有误入的文献批次保留为折叠只读记录（可刷新状态、停止旧批次、下载已有成果），不自动把旧批次的检索问题注入下载对话，不提供继续文献提取或新批次入口。清空或覆盖原记录均不属于迁移。
 
 workflowPrompt 按模块分别描述实际工具：下载对话帮助确定数据源、年份、范围、指标与实际文件地址；仅文献挖掘提示词提供文献执行能力说明。原 download-dialog 的 DOM id、现有下载 API 和存储键保持不变。
+
 
 ## 2026-10-20 继续讨论与 AI 修订方案
 
@@ -1468,3 +1495,39 @@ AI 返回前若当前方案已被编辑/审核/替换或模块不再存在，拒
 浏览器现有 research_codex_tasks_v1 条目新增可选 sourceJobId、sourceBasis（冻结方案）；不改变旧 download 字段。可见 .source-download-progress 显示实际下载字节与筛选行数，支持停止、同方案继续、下载原包和结果；首次点击及继续均核对当前审核方案。结果仍待人工检查后交接，不自动通过研究验收。新增 source-job 的 run-state.json 供启动器识别运行状态，后台运行时不重启服务。后端版本指纹纳入新增执行文件。
 
 同一API也支持kind='files'：方案已含公开文件链接时自动建任务，每批最多5个、每个2GiB；不含可执行数据源的方案保留兼容手动入口，不宣称已接入任意数据库。通用文件任务与FAO任务共用进度、停止、持久化、继续、文件下载和清洗交接语义。CodexUI.openDownload(mod,basis?,options?)新增可选options.manual=true供旧手动入口兼容；默认优先自动执行已接入的数据源。
+
+## 2026-10-20 官方分类自动核对修复
+
+FAOSTAT配置filters增加可选itemNames、reporterNames、partnerNames。解释方案时允许保留研究者给定名称，由ZIP内官方ItemCodes、Elements、ReporterCountries、PartnerCountries字典精确匹配后确定代码；不能要求研究者事先提供机器可查的代码、单位、下载URL和文件大小。代码筛选仍须有方案依据，官方名称匹配必须唯一，不采用相似度、子串扩展或模型猜代码。有限中英文别名只转换查询名称，实际代码和单位始终来自官方字典；不支持或多义的名称须显示候选并暂停。
+
+筛选前输出lookup进度与官方映射（请求名称、实际名称、代码、单位、字典文件及行号），保存在report.officialMappings和report.resolvedConfig，作业config采用经官方解析后的代码。原始字段及文件保留；年份可用性由实际扫描核验。方案中旧的20MB/来源技术信息待核对/尚未执行等状态，不自动升级为额外人工审批；明确禁止某种获取方式或仍缺研究范围决定时继续遵守。
+
+## 2026-10-20 下载文件交接的失效会话恢复
+
+CodexBridge.session 对确实不存在的会话目录抛出 code=SESSION_NOT_FOUND、sessionId；目录仍在但 input 缺失时为 SESSION_INCOMPLETE，不视为可自动替换的会话。/api/codex/* 错误响应保留这两个机器字段，前端 request 将其连同 HTTP status 保留在异常上。无效标识、网络错误、权限错误、运行中状态均不得触发会话重建。
+
+“确认文件并进入清洗”先验证清洗接收会话；仅在服务端明确报告该目标 SESSION_NOT_FOUND 时，先验证下载源仍可读取，再创建清洗接收区并更新该清洗模块的 sessionId。只追加恢复说明，原方案、规则、对话、下载记录及源会话不变，不重新下载、不执行清洗。已有接收区继续使用并保留其中的文件；目录不完整时提示保留现场核查。
+
+已交接的按钮再次点击时须验证该接收区及 inputBatch.names 后再跳转，避免凭旧 confirmed 标记跳入失效会话；接收区确已丢失时可重新交接现存源文件。文件复制成功后才确认本次下载交接；运行中的连续点击被 busy 拦截，已交接且文件仍在时不重复复制。源会话缺失时明确提示找回原文件，禁止创建空下载源或假报成功。
+
+## 2026-10-20 规则执行按钮的忙碌同步与版本核对
+
+TaskManager 新增 refreshControls()：仅更新规则窗口的按钮、版本状态及 #task-rules-execution-status（role=status），不重填草稿、不保存或改写规则。ModuleSpace.render 与 CodexUI.render 在忙碌状态变化后调用此方法，确保 AI 回复完成、上传结束或任务失败后，打开的弹窗及时恢复可用；禁用按钮须有明显样式及具体原因。
+
+清洗规则与修改计算/绘图方案同样采用“草稿修改→重新确认→执行”的版本核对。编辑或载入历史只更新草稿；不得沿用旧确认版本执行新草稿。准备文件期间使用仅内存的 startingExecution 锁拦截重复启动，准备完成后重新核对任务、模块、确认文本、版本及草稿；发生变化则取消准备并提示，不发执行请求。准备失败必须解除锁并恢复控件。
+
+仅修复交互与执行请求连接，不自动改动研究者已确认的规则内容，不自动决定比例分母等科学口径，也不因修复而启动真实清洗。
+
+规则窗口增加 #task-rules-discuss“继续讨论完善规则”。讨论在平台当前模块对话中进行：AI 先核对现有材料和已确认决定，再主动提出影响下一步的少量关键问题；未决问题不转为已确认规则。CodexUI.prepareRuleDiscussion(id) 清除本次/持续执行标记并使用只读讨论模式；讨论及候选规则提取均不调用 prepareConfirmedExecution，不运行清洗、不新增确认版本。研究者在平台讨论后点击 AI 提取候选规则、确认规则，再执行。
+
+规则状态、操作按钮和反馈位于 .task-rules-footer，弹窗滚动时固定在可视区底部，避免长规则把执行入口和禁用原因挤出窗口。
+
+## 2026-10-20 清洗成果分组与打包
+
+clean-data 的文件区按所选运行显示“主要结果、检查报告、待处理问题”，默认折叠“辅助文件”（代码、字段说明、无记录的检查清单）和“原始文件”。未知结果数据继续显示在主要结果，不丢弃或删除原始/历史文件。已知文件名提供中文用途标签；空问题表只表示没有列出记录，不代表正式验收通过。只读元数据读取不能执行输出脚本。
+
+GET /api/codex/clean-results?session=<UUID>&run=<可选UUID> 返回 {sessionId,runId,runs:[{id,updatedAt,fileCount}],groups:{main,reports,issues,auxiliary},inputs,otherFiles}。组内文件 {name,group,size,label,rowCount?,empty?}；默认选择最新有文件的输出目录，切换运行仍可找回历史。小CSV依据逻辑记录数显示行数；超出有界读取范围、解析不确定时不报精确行数，不把未知当空。分类是展示用途提示，不替代研究判断。
+
+GET /api/codex/clean-results/archive?session=<UUID>&run=<UUID> 返回当前所选运行ZIP，含该运行的结果、代码及说明，不含其他运行或原始input。运行中拒绝打包；仅普通受控文件，拒绝路径越界、符号链接及敏感文件，跳过内部run-state.json，最多300文件、整体2GiB；以流式方式制作临时ZIP并在响应结束后清理，不改源文件。接口沿用Host/Origin/X-Workbench保护；普通同源附件导航沿用download接口许可。
+
+展示使用 .clean-results、.clean-result-section、.clean-result-file、.clean-result-heading、.clean-result-meta、.clean-result-aux。只更改clean-data结果区，其他模块的文件展示不变。

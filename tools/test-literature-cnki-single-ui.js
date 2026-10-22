@@ -41,6 +41,11 @@ async function main() {
     await blocked.subject({ id: 'module-fixture' }, 'CNKI-007', true); assert.equal(blocked.calls.length, 0);
     assert.match(blocked.state.literatureError, /只能重新定位/);
   }
+  const material = harness(); material.state.literatureJob.cnkiRetryPaperId = 'CNKI-007'; material.state.literatureJob.cnkiRetryItems[0].materials_only = true;
+  await material.subject({ id: 'module-fixture' }, 'CNKI-007', true);
+  assert.equal(material.calls.length, 0); assert.match(material.state.literatureError, /继续这篇材料/);
+  await material.subject({ id: 'module-fixture' }, 'CNKI-007');
+  assert.equal(material.calls[1].url, '/api/literature/retry-cnki');
   assert.ok(source.includes("'重试这篇知网文献'") && source.includes("'继续这篇知网文献'"));
   assert.ok(source.includes('job.cnkiRetryItems.slice(0, 100)'));
   assert.ok(source.includes('canAdvance && !job.cnkiRetryPaperId'), 'failed single-paper run must not offer a broad stage retry');

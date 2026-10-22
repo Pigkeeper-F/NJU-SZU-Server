@@ -8,6 +8,7 @@
   var memory = {};
   var switching = false;
   var pendingRules = null;
+  var startingExecution = null;
   var index;
 
   function read(key) {
@@ -28,6 +29,35 @@
   function busy() { return !!(root.ModuleSpace && root.ModuleSpace.isBusy()); }
   function isModification(mod) { return !!mod && mod.type === 'calculation' && mod.mode === 'modify'; }
   function isPlotting(mod) { return !!mod && mod.type === 'plotting'; }
+  function hasEditableRules(mod) { return !!mod && (mod.type === 'clean-data' || isModification(mod) || isPlotting(mod)); }
+  function refreshControls() {
+    if (switching) return;
+    var state = root.Store.getState();
+    var mod = state.modules.filter(function (item) { return item.id === state.activeModuleId; })[0];
+    var rules = rulesFor(current());
+    var isDownload = !!mod && mod.type === 'download-data';
+    var visible = !!mod && (isDownload || hasEditableRules(mod) || mod.type === 'result-audit');
+    var confirmed = isDownload ? confirmedRules() : rules.confirmed;
+    var changed = hasEditableRules(mod) && rules.draft.trim() !== rules.confirmed;
+    var processing = busy();
+    var reason = startingExecution ? '正在核对输入文件并准备执行，请等待。'
+      : pendingRules ? 'AI 正在提取候选规则，请等待完成后核对并确认。'
+      : processing ? '当前有 AI 或文件任务正在处理，完成后执行按钮会自动恢复。'
+      : !visible || mod.type === 'result-audit' ? '请在对应模块继续操作。'
+      : !confirmed ? '请先确认规则，再执行任务。'
+      : changed ? '草稿已修改，请先重新确认；本次不会按旧规则执行。'
+      : '准备就绪，可按已确认版本执行；规则中尚未确定的处理口径会先在对话中询问。';
+    $('task-summary-ai').disabled = !!pendingRules || processing || !!startingExecution;
+    $('task-rules-discuss').disabled = !!pendingRules || processing || !!startingExecution;
+    $('task-rules-discuss').hidden = !hasEditableRules(mod) && (!mod || mod.type !== 'result-audit');
+    $('task-summary-save').disabled = !!pendingRules || processing || !!startingExecution;
+    $('task-summary-history').disabled = !(rules.versions || []).length || !!startingExecution;
+    $('task-rules-execute').disabled = !confirmed || !visible || mod.type === 'result-audit' || !!pendingRules || processing || !!startingExecution || changed;
+    $('task-rules-execute').title = reason;
+    $('task-rules-execute').setAttribute('aria-describedby', 'task-rules-execution-status');
+    $('task-rules-execution-status').textContent = reason;
+    if (hasEditableRules(mod)) $('task-summary-status').textContent = confirmed && changed ? '草稿已修改 · 待重新' + (isModification(mod) || isPlotting(mod) ? '审核' : '确认') : confirmed ? (isModification(mod) || isPlotting(mod) ? '已审核 v' : '已确认 v') + rules.versions.length : '尚未确认';
+  }
   function previousPlan(mod, rules) {
     var dialog = $('rules-dialog');
     var panel = dialog.querySelector('.task-previous-plan');
@@ -179,14 +209,13 @@
       history.appendChild(option);
     });
     history.disabled = !(rules.versions || []).length;
-    $('task-summary-ai').disabled = !!pendingRules || busy();
     $('task-rules-execute').textContent = isDownload ? '按方案开始下载' : isPlot ? '按方案生成图表' : isModify ? '按方案修改并计算' : '按规则执行清洗';
-    $('task-rules-execute').disabled = !(isDownload ? confirmedRules() : rules.confirmed) || !rulesVisible || !!pendingRules || busy() || (isModify || isPlot) && rules.draft.trim() !== rules.confirmed;
+    refreshControls();
   }
 
   function switchTask(targetId) {
     if (targetId === index.activeTaskId) return true;
-    if (busy() || pendingRules) { showMessage('当前 AI 正在回复，请等完成后再切换任务。'); render(); return false; }
+    if (busy() || pendingRules || startingExecution) { showMessage('当前任务正在处理，请等完成后再切换任务。'); render(); return false; }
     var target = index.tasks.filter(function (task) { return task.id === targetId; })[0];
     var targetState = target && readState(targetId);
     if (!targetState) { showMessage('该任务的本地记录无法读取，未切换。'); render(); return false; }
@@ -204,7 +233,7 @@
   }
 
   function createTask(name, start) {
-    if (busy() || pendingRules) { showMessage('当前 AI 正在回复，请等完成后再新建任务。'); return false; }
+    if (busy() || pendingRules || startingExecution) { showMessage('当前任务正在处理，请等完成后再新建任务。'); return false; }
     name = String(name || '').trim();
     if (!name) return false;
     saveState();
@@ -231,13 +260,34 @@
   }
   function ruleVersion() { return rulesFor(current()).versions.length; }
 
+  function prepareDiscussion(mod) {
+    if (root.CodexUI && root.CodexUI.useCodex(mod)) root.CodexUI.prepareRuleDiscussion(mod.id);
+  }
+  function discussRules() {
+    var state = root.Store.getState();
+    var mod = state.modules.filter(function (item) { return item.id === state.activeModuleId; })[0];
+    if (!mod) return;
+    if (busy() || pendingRules || startingExecution) { showMessage('当前任务正在处理，请稍后继续讨论。'); return; }
+    if ($('composer-input').value.trim()) { showMessage('输入框中还有未发送的内容，请先发送或暂存。'); return; }
+    try { prepareDiscussion(mod); }
+    catch (error) { showMessage('无法开始讨论：' + error.message); return; }
+    var rules = rulesFor(current(), mod.id);
+    var prompt = '我们在本平台当前模块继续讨论并完善规则。请先读取当前已交接或上传的文件（具备读取能力时），结合现有对话核对已确认的目标和方法；不要只重复这段文字。主动找出影响下一步的关键缺口，每轮提出1–3个具体问题，说明选项及其对结果的影响；已有明确答案直接沿用，不反复提问。由你在本对话中补问，不让研究者去其他地方填写或自行猜测。区分已经决定的处理规则、候选建议和待确认问题；不要把“先讨论”“请明确”等阶段性指令当成最终执行规则。现在只讨论和读取材料，不运行清洗、计算或绘图，不改写输入文件、不生成执行成果；讨论补齐后再整理候选规则供我确认。'
+      + '\n当前已确认规则（保留已确定的处理要求；若仍含待定问题则继续讨论）：\n' + (rules.confirmed || '暂无')
+      + '\n当前草稿（不代表已确认）：\n' + (rules.draft || '暂无');
+    $('conversation-mode').value = 'ai';
+    $('conversation-mode').dispatchEvent(new Event('change'));
+    if (!root.ModuleSpace.sendText(prompt)) { showMessage('无法发送讨论请求，请检查当前模块状态。'); refreshControls(); return; }
+    $('rules-dialog').close();
+  }
+
   function extractRules() {
     var state = root.Store.getState();
     var mod = state.modules.filter(function (item) { return item.id === state.activeModuleId; })[0];
     if (!mod) { showMessage('请先创建或选择一个模块。'); return; }
     if ($('conversation-mode').value !== 'ai') { showMessage('请先把底部输入模式切到“AI 对话”。'); return; }
     if ($('composer-input').value.trim()) { showMessage('输入框里还有未发送的文字，请先发送或暂存。'); return; }
-    if (busy() || pendingRules) { showMessage('当前 AI 正在回复，请稍后。'); return; }
+    if (busy() || pendingRules || startingExecution) { showMessage('当前 AI 正在回复，请稍后。'); return; }
     var history = (mod.messages || []).filter(function (message) { return message.role === 'user' || message.role === 'assistant'; });
     if (!history.length) { showMessage('这个模块还没有对话。你可以先手写规则，或讨论后再提取。'); return; }
     var excerpts = history.slice(-22).map(function (entry) {
@@ -247,6 +297,9 @@
     if (isModification(mod)) prompt = '请只从以下对话提取研究者明确决定采用的计算修改方案，按修改目标、代码与输入、公式或参数变更、影响范围、异常处理、验证与通过条件、输出列出。未确认项写“待确认”，不把建议转为决定，不写背景摘要，不修改或运行代码。只输出待研究者审核的方案草稿。\n对话摘录：\n' + excerpts.slice(-3200);
     if (isPlotting(mod)) prompt = '请把对话中研究者确定采用的绘图要求整理为待审核绘图方案，包括数据文件与版本、图型、横纵轴字段与单位、分组、筛选和聚合、缺失处理、误差线含义、样式与尺寸、输出格式。修订时以用户指定的历史图版本和修改意见为准，保留未改变的已审核要求。未确认的科学口径标待确认，不用建议代替决定，不生成图片或执行代码。\n对话摘录：\n' + excerpts.slice(-3200);
     if (mod.type === 'result-audit') prompt = '请只提取我在对话中明确决定采用的核查原则，按核查对象与版本、指标、阈值或判定关系、抽样办法、通过与退回条件、参考标准列出。不能把 AI 的建议当成我的确认，未确认项标为待确认。不要总结背景或无关讨论，只输出候选原则草稿。\n对话摘录：\n' + excerpts.slice(-3200);
+    prompt += '\n只整理规则，不运行或改写文件。不要把“暂不执行”“请先明确”等讨论指令抄成数据处理规则；关键口径尚未决定时，在草稿末尾单列待确认问题并建议回到本模块继续讨论，不代替研究者作决定。';
+    try { prepareDiscussion(mod); }
+    catch (error) { showMessage('无法提取规则：' + error.message); return; }
     pendingRules = { taskId: index.activeTaskId, moduleId: state.activeModuleId };
     showMessage('正在提取候选规则；AI 输出不会自动生效。');
     render();
@@ -276,7 +329,8 @@
     var mod = state.modules.filter(function (item) { return item.id === state.activeModuleId; })[0];
     var rules = confirmedRules();
     if (!rules) { showMessage('请先确认执行规则。'); return; }
-    if ((isModification(mod) || isPlotting(mod)) && rulesFor(current(), mod.id).draft.trim() !== rules) { showMessage('方案草稿已变化，请重新审核通过后再执行。'); render(); return; }
+    if (hasEditableRules(mod) && rulesFor(current(), mod.id).draft.trim() !== rules) { showMessage('规则草稿已变化，请重新确认后再执行。'); refreshControls(); return; }
+    if (startingExecution) { showMessage('正在准备执行，请等待，不必重复点击。'); return; }
     if (mod && mod.type === 'download-data') {
       if (busy() || pendingRules) { showMessage('当前任务尚未完成，请稍后。'); return; }
       if (root.CodexUI.openDownload(mod)) $('rules-dialog').close();
@@ -285,27 +339,29 @@
     if (!mod || !(mod.type === 'clean-data' || isModification(mod) || isPlotting(mod))) { showMessage('当前模块不支持按方案执行文件处理。'); return; }
     if (busy() || pendingRules) { showMessage('当前 AI 正在处理，请稍后。'); return; }
     if (!root.CodexUI || !root.CodexUI.useCodex(mod)) { showMessage('请先将模块助手切换为“本机 Codex”。'); return; }
-    $('task-rules-execute').disabled = true;
+    var taskId = index.activeTaskId, version = ruleVersion();
+    startingExecution = { taskId: taskId, moduleId: mod.id };
+    refreshControls();
     showMessage('正在核对已上传的原始文件……');
     try {
       var ready = await root.CodexUI.prepareConfirmedExecution(mod.id);
-      if (!ready) { showMessage(isPlotting(mod) ? '请先上传并选择绘图数据。' : '请先在当前模块上传代码与输入数据，再按规则执行。'); render(); return; }
-      if ((isModification(mod) || isPlotting(mod)) && (confirmedRules() !== rules || rulesFor(current(),mod.id).draft.trim() !== rules)) throw new Error('方案已变化，请重新审核后生成。');
+      if (!ready) { root.CodexUI.cancelPreparedExecution(mod.id); showMessage(isPlotting(mod) ? '请先上传并选择绘图数据。' : mod.type === 'clean-data' ? '当前清洗模块没有输入文件，请先交接下载结果或上传原始数据。' : '请先在当前模块上传代码与输入数据，再执行。'); return; }
+      if (index.activeTaskId !== taskId || root.Store.getState().activeModuleId !== mod.id || confirmedRules() !== rules || ruleVersion() !== version || rulesFor(current(),mod.id).draft.trim() !== rules) throw new Error('任务或规则已变化，请重新确认后执行。');
       $('conversation-mode').value = 'ai';
       $('conversation-mode').dispatchEvent(new Event('change'));
       var instruction = isPlotting(mod)
-        ? '请按本模块已审核的绘图方案 v' + ruleVersion() + ' 生成图表，实际运行绘图代码并核对输出。保存PNG预览、方案要求的图片格式、可独立复现的绘图代码、绘图数据和运行说明。以本次冻结的输入和选定历史版本为准，另存新版本；科学口径缺失或冲突时停下说明。'
+        ? '请按本模块已审核的绘图方案 v' + version + ' 生成图表，实际运行绘图代码并核对输出。保存PNG预览、方案要求的图片格式、可独立复现的绘图代码、绘图数据和运行说明。以本次冻结的输入和选定历史版本为准，另存新版本；科学口径缺失或冲突时停下说明。'
         : mod.type === 'calculation'
-        ? '请依据本模块已审核的计算修改方案 v' + ruleVersion() + '，在输出目录中复制并修改已上传的计算代码，然后运行修改后的代码处理已上传的输入数据。不得覆盖原代码。交付修改后的代码、计算结果、运行日志和核查报告；方案未覆盖的科学判断先停下询问。'
-        : '请执行本模块已确认的清洗规则 v' + ruleVersion() + '。只处理本模块上传的原始文件；规则未覆盖的科学判断先停下询问。生成清洗结果、可复现代码和检查报告，并在报告中注明规则版本。';
+        ? '请依据本模块已审核的计算修改方案 v' + version + '，在输出目录中复制并修改已上传的计算代码，然后运行修改后的代码处理已上传的输入数据。不得覆盖原代码。交付修改后的代码、计算结果、运行日志和核查报告；方案未覆盖的科学判断先停下询问。'
+        : '请执行本模块已确认的清洗规则 v' + version + '。只处理本模块上传的原始文件；规则未覆盖的科学判断先停下询问。生成清洗结果、可复现代码和检查报告，并在报告中注明规则版本。';
       if (!root.ModuleSpace.sendText(instruction)) { root.CodexUI.cancelPreparedExecution(mod.id); showMessage('启动失败，请检查当前模块状态。'); render(); return; }
       $('rules-dialog').close();
     } catch (error) { root.CodexUI.cancelPreparedExecution(mod.id); showMessage('无法启动执行：' + error.message); }
-    render();
+    finally { startingExecution = null; refreshControls(); }
   }
 
   initialize();
-  root.TaskManager = { confirmedRules: confirmedRules, switchTask: switchTask, createTask: createTask,
+  root.TaskManager = { confirmedRules: confirmedRules, switchTask: switchTask, createTask: createTask, refreshControls: refreshControls,
     openPlan: function () { $('rules-dialog').showModal(); render(); },
     rulesForModule: function (moduleId) { var rules = rulesFor(current(), moduleId); return { text: rules.confirmed || '', version: (rules.versions || []).length }; } };
   $('task-select').addEventListener('change', function (event) { switchTask(event.target.value); });
@@ -337,6 +393,7 @@
   });
   $('rules-dialog-close').addEventListener('click', function () { $('rules-dialog').close(); });
   $('task-summary-ai').addEventListener('click', extractRules);
+  $('task-rules-discuss').addEventListener('click', discussRules);
   $('task-summary-save').addEventListener('click', confirmRules);
   $('task-rules-execute').addEventListener('click', executeRules);
   $('task-summary-draft').addEventListener('input', function () {
@@ -344,12 +401,7 @@
     saveIndex();
     var state = root.Store.getState();
     var mod = state.modules.filter(function (item) { return item.id === state.activeModuleId; })[0];
-    if (isModification(mod) || isPlotting(mod)) {
-      var rules = rulesFor(current(), mod.id);
-      var changed = this.value.trim() !== rules.confirmed;
-      $('task-summary-status').textContent = rules.confirmed && changed ? '草稿已修改 · 待重新审核' : rules.confirmed ? '已审核 v' + rules.versions.length : '待制定 / 审核';
-      $('task-rules-execute').disabled = !rules.confirmed || changed || !!pendingRules || busy();
-    }
+    refreshControls();
   });
   $('task-summary-history').addEventListener('change', function () {
     if (this.value === '') return;
@@ -360,6 +412,7 @@
     $('task-summary-draft').value = version.text;
     showMessage('已将历史版本放入草稿；修改后点击“确认规则”才会生效。');
     this.value = '';
+    refreshControls();
   });
   root.Store.subscribe(function (event) {
     if (switching) return;

@@ -152,6 +152,28 @@ def _substantive_sections(evidence: dict, article_text: str) -> list[tuple[str, 
     return out
 
 
+def has_abstract_text(text: str) -> bool:
+    """Require visible abstract prose, rather than a metadata URL or nav label.
+
+    This is only the fallback classification; it never proves full text or
+    permits parameter extraction. Structured abstract subheadings are allowed.
+    """
+    text = _string(text)
+    marker = re.search(r"(?:^|\n)\s*(?:abstract|摘要)\s*(?:\n|:|：)", text, re.I)
+    if not marker:
+        return False
+    prose = text[marker.end():]
+    prose = re.split(
+        r"(?:^|\n)\s*(?:keywords?|references?|similar articles|cited by|"
+        r"figures?|funding(?: details)?|author information|related articles|"
+        r"关键词|参考文献|相似文献|引证文献|作者信息|基金项目)\s*(?:\n|:|：|$)",
+        prose, maxsplit=1, flags=re.I,
+    )[0].strip()
+    if re.match(r"(?:no abstract(?: available)?|abstract (?:not available|unavailable)|暂无摘要|无摘要)\b", prose, re.I):
+        return False
+    return len(prose) >= 40 and sum(ch.isalpha() for ch in prose) >= 25
+
+
 def assess_html(text: str, url: str = "", evidence: dict | None = None,
                 expected_title: str = "", expected_doi: str = "") -> tuple[str, str]:
     """Classify fresh visible HTML as fulltext, abstract, or unavailable.
@@ -166,11 +188,13 @@ def assess_html(text: str, url: str = "", evidence: dict | None = None,
     problem = page_problem(text, evidence)
     if problem:
         return "unavailable", problem
-    metadata, inherently_metadata = _metadata_page(url)
+    _, inherently_metadata = _metadata_page(url)
+    has_abstract = has_abstract_text(text)
     if inherently_metadata:
-        return "abstract", "这是题录或摘要页面；全文链接不等于已取得正文。"
+        if has_abstract:
+            return "abstract", "这是题录或摘要页面；全文链接不等于已取得正文。"
+        return "unavailable", "仅有题录、导航或空页面，尚未取得可确认的摘要或正文。"
     body = _string(evidence.get("article_text"))
-    has_abstract = metadata or bool(re.search(r"(?:^|\n)\s*(?:abstract|摘要)\s*(?:\n|:|：)", text, re.I))
     fallback = "abstract" if has_abstract else "unavailable"
     if evidence.get("container_verified") is not True or evidence.get("origin") != "dom_article_region":
         return fallback, "尚无可验证的文章正文区域；整页长度不能证明取得全文。"
@@ -223,7 +247,9 @@ def revalidate_saved_html(item: dict, filetext: str) -> tuple[str, str]:
     problem = page_problem(filetext, raw if isinstance(raw, dict) else None)
     if problem:
         return "unavailable", problem
-    url = _string(item.get("final_url") or item.get("fulltext_url") or item.get("source_url") or item.get("url")) if isinstance(item, dict) else ""
-    metadata, _ = _metadata_page(url)
-    has_abstract = metadata or bool(re.search(r"(?:^|\n)\s*(?:abstract|摘要)\s*(?:\n|:|：)", filetext, re.I))
+    has_abstract = has_abstract_text(filetext)
+    if not has_abstract and not filetext.strip():
+        reason = "已保存文件为空，未取得摘要或正文；保留原文件。"
+    elif not has_abstract:
+        reason = "没有可确认的摘要或正文证据；题录、导航页面不算全文，保留原文件。"
     return ("abstract" if has_abstract else "unavailable"), reason

@@ -208,6 +208,16 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "error")
         self.assertEqual(events[-1]["message"], "提取前需先在研究者确认参数字段含义与单位")
 
+    def test_prepare_preserves_expanded_individual_fields(self):
+        fields = [{"key": f"field_{index}", "label": f"变量{index}", "meaning": "讨论后拆开的独立变量",
+                   "unit": "原文单位", "valueType": "text", "required": False} for index in range(200)]
+        job = write_job(Path(self.tmp.name) / "expanded", fields=fields)
+        self.assertEqual(extract.load_effective_schema(job)["fields"], fields)
+        code, _ = run_cli(extract.main, ["--config", str(job / "run_config.json"), "--output-dir", str(job), "--prepare"])
+        self.assertEqual(code, 0)
+        bundle = json.loads((job / "extraction" / "inputs" / "GSC-001.json").read_text(encoding="utf-8"))
+        self.assertEqual(bundle["field_definitions"], fields, "Expanded schema must reach extraction without truncation")
+
     def test_prepare_stale_bundle_requires_force(self):
         argv = ["--config", str(self.job / "run_config.json"), "--output-dir", str(self.job), "--prepare"]
         run_cli(extract.main, argv)

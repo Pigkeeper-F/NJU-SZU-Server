@@ -42,10 +42,22 @@ class EvidenceTests(unittest.TestCase):
         text, evidence = body_fixture()
         for url in ("https://pubmed.ncbi.nlm.nih.gov/33925609/", "https://www.scopus.com/pages/publications/105001", "https://www.scopus.com/record/display.uri?eid=example"):
             with self.subTest(url=url):
-                self.assertEqual(assess_html(text * 4, url, evidence, TITLE, DOI)[0], "abstract")
+                self.assertEqual(assess_html(text * 4, url, evidence, TITLE, DOI)[0], "unavailable")
+
+    def test_metadata_url_empty_or_navigation_is_not_an_abstract(self):
+        for url in ("https://pubmed.ncbi.nlm.nih.gov/33925609/", "https://www.scopus.com/pages/publications/105001", "https://d.wanfangdata.com.cn/periodical/example"):
+            for text in ("\n", "Scopus Logo\nView PDF\nFull text\n", "摘要\n关键词\n作者信息\n", "Abstract\nNo abstract available"):
+                with self.subTest(url=url, text=text):
+                    self.assertEqual(assess_html(text, url)[0], "unavailable")
+                    self.assertEqual(revalidate_saved_html({"source_url": url}, text)[0], "unavailable")
+
+    def test_real_abstract_prose_is_retained_but_never_fulltext(self):
+        text = "Abstract\nHeat stress reduces feed intake and growth performance in broilers under controlled experimental conditions.\nKeywords\nbroiler"
+        self.assertEqual(assess_html(text, "https://pubmed.ncbi.nlm.nih.gov/33925609/")[0], "abstract")
+        self.assertEqual(revalidate_saved_html({"source_url": "https://d.wanfangdata.com.cn/periodical/example"}, text)[0], "abstract")
 
     def test_long_real_failure_sample_shapes_remain_abstract(self):
-        pubmed = "Title & authors\nAbstract\nHeat stress affects production.\nFigures\nSimilar articles\nReferences\n" + ("A reference about methods and results. DOI 10.1234/ref\n" * 100)
+        pubmed = "Title & authors\nAbstract\nHeat stress affects production and growth performance in broilers during controlled experiments.\nFigures\nSimilar articles\nReferences\n" + ("A reference about methods and results. DOI 10.1234/ref\n" * 100)
         scopus = "Scopus Logo\nView PDF\nFull text\nAbstract\n" + ("Experiment results and methods in a long abstract. " * 90) + "\nFunding details\nCorresponding authors"
         self.assertEqual(assess_html(pubmed, "https://pubmed.ncbi.nlm.nih.gov/33925609/")[0], "abstract")
         self.assertEqual(assess_html(scopus, "https://www.scopus.com/pages/publications/105001")[0], "abstract")
@@ -139,7 +151,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(item, before)
         for url in ("https://pubmed.ncbi.nlm.nih.gov/33925609/", "https://kns.cnki.net/kcms2/article/abstract"):
             item["source_url"] = url
-            self.assertEqual(revalidate_saved_html(item, text)[0], "abstract")
+            self.assertEqual(revalidate_saved_html(item, text)[0], "unavailable")
 
     def test_saved_errors_unavailable_and_no_mutation(self):
         item = {"status": "fetched_html", "source_url": "https://kns.cnki.net/kcms2/article/abstract"}

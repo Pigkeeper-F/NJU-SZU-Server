@@ -18,8 +18,15 @@ import literature_browser
 ENTRY = "https://kns.cnki.net/kns8s/defaultresult/index"
 ROWS = (".result-table-list tbody tr", "table.result-table-list tr", ".search-table tr")
 CONTROLS = "a,button,input[type=button],input[type=submit]"
+QUERY_CONTROLS = '#txt_SearchText,#txt_search,#txtSearchText,input[name="kw"],input[name="txt_SearchText"],input[name="txt_1_value1"],input.search-input,.search-input input,.search-box input[type="text"]'
+SEARCH_CONTROLS = 'button,input[type=button],input[type=submit],a[role="button"],a.search-btn,a.btn-search'
 WAIT_SECONDS = 60.0
-_CONTROL_LABEL_JS = "e => [e.getAttribute('aria-label'), e.innerText, e.value, e.getAttribute('title'), e.querySelector('img')?.alt].map(v => String(v || '').trim()).find(Boolean) || ''"
+_CONTROL_LABEL_JS = r"""e => {
+  const supplement=/supplement|supporting\s+(?:information|material|data|file)|additional\s+(?:file|material|data)|补充(?:材料|数据|文件|信息)|附件/i;
+  const area=e.closest('section,details,[id*="supp"],[class*="supp"],[id*="attachment"],[class*="attachment"]');
+  const label=[e.getAttribute('aria-label'),e.innerText,e.value,e.getAttribute('title'),e.querySelector('img')?.alt].map(v=>String(v||'').trim()).find(Boolean)||'';
+  return supplement.test(label) || (area && supplement.test([area.id,area.className,area.querySelector('h2,h3,h4,h5,h6,summary')?.innerText].join(' '))) ? '' : label;
+}"""
 _CONTROL_READY_JS = "e => e.isConnected && !e.disabled && e.getAttribute('aria-disabled') !== 'true'"
 _POPUP_MESSAGES = {
     "extra": "知网本次点击打开了多个待确认窗口，已暂停；请核对任务页面和下载窗口，避免重复下载。",
@@ -55,7 +62,7 @@ _CNKI_UI_JS = r"""/* literature_cnki_fulltext_ui */ () => {
     if(found.length) {rowSelector=sel; rows=found.map((row,index)=>({index,visible:visible(row),anchors:Array.from(row.querySelectorAll('a')).map((a,index)=>({index,visible:visible(a),text:text(a)}))})); break;}
   }
   const titles=Array.from(document.querySelectorAll('h1,.wx-tit h1,.brief h1,.title h1')).filter(visible).map(text).filter(Boolean);
-  const label = e => [e.getAttribute('aria-label'),e.innerText,e.value,e.getAttribute('title'),e.querySelector('img')?.alt].map(v=>String(v||'').trim()).find(Boolean)||'';
+  const label = __CONTROL_LABEL__;
   const controls=Array.from(document.querySelectorAll('a,button,input[type=button],input[type=submit]')).map((e,index)=>({index,text:label(e),visible:visible(e),enabled:!e.disabled&&e.getAttribute('aria-disabled')!=='true'})).filter(e=>e.visible);
   const head=(document.body?.innerText||'').slice(0,8000);
   const paymentDialog=Array.from(document.querySelectorAll('[role="dialog"],.modal,.layui-layer-dialog,.pay-dialog,.purchase-dialog')).filter(visible)
@@ -63,7 +70,7 @@ _CNKI_UI_JS = r"""/* literature_cnki_fulltext_ui */ () => {
   return {queries,rowSelector,rows,titles,controls,
     purchase_required:paymentDialog || /请购买全文|需付费|购买后(?:下载|阅读)|支付后(?:下载|阅读)|需支付|purchase (?:this article|access) to/i.test(head),
     generating:/正在(?:生成|准备|下载)|文件(?:生成|准备)中|下载准备中|generating (?:the )?(?:file|pdf)|preparing (?:the )?download/i.test(head)};
-}"""
+}""".replace("__CONTROL_LABEL__", _CONTROL_LABEL_JS)
 
 
 def _norm(value):
@@ -159,9 +166,15 @@ def _identity(snapshot, ui, record):
     return title_ok or bool(wanted_doi and actual_doi == wanted_doi)
 
 
-def _exact_result(ui, title):
-    queries = {_norm(v) for v in ui.get("queries", []) if str(v).strip()}
-    if queries != {_norm(title)} or ui.get("rowSelector") not in ROWS:
+def _query_matches(ui, title):
+    values = {_norm(v) for v in ui.get("queries", []) if str(v).strip()}
+    # Quotes are only an exact literal wrapper of this entire target title.
+    # Missing L-/D- prefixes, substrings and extra terms remain mismatches.
+    return bool(values) and values <= {_norm(title), _norm('"' + title + '"')}
+
+
+def _title_matches(ui, title):
+    if ui.get("rowSelector") not in ROWS:
         return []
     matches = []
     for row in ui.get("rows", []):
@@ -171,6 +184,48 @@ def _exact_result(ui, title):
             if anchor.get("visible") and _norm(anchor.get("text")) == _norm(title):
                 matches.append((int(row["index"]), int(anchor["index"])))
     return matches
+
+
+def _exact_result(ui, title):
+    return _title_matches(ui, title) if _query_matches(ui, title) else []
+
+
+def _lookup_diagnosis(url, ui, title):
+    if not _lookup_page(url):
+        return "page_unrecognized"
+    if not any(str(value).strip() for value in ui.get("queries", [])):
+        return "query_missing"
+    if not _query_matches(ui, title):
+        return "query_rewritten"
+    if ui.get("rowSelector") not in ROWS or not any(row.get("visible") for row in ui.get("rows", [])):
+        return "rows_loading"
+    found = _title_matches(ui, title)
+    return "ambiguous" if len(found) > 1 else "title_mismatch" if not found else "ready"
+
+
+def _lookup_form(page):
+    """Only actual visible editable search input + unique normal search UI."""
+    editors, buttons = page.query_selector_all(QUERY_CONTROLS), page.query_selector_all(SEARCH_CONTROLS)
+    selected_editor = selected_button = None
+    try:
+        editable = [item for item in editors if item.is_visible() and item.is_enabled() and item.is_editable()]
+        if len(editable) != 1:
+            return None, None, "repair_editor_unrecognized"
+        selected_editor = editable[0]
+        searchable = [item for item in buttons if item.is_visible() and item.is_enabled()
+                      and item.evaluate(_CONTROL_READY_JS) and _norm(item.evaluate(_CONTROL_LABEL_JS)) in {"检索", "搜索", "search"}]
+        if len(searchable) != 1:
+            selected_editor = None
+            return None, None, "repair_button_unrecognized"
+        selected_button = searchable[0]
+        return selected_editor, selected_button, None
+    finally:
+        for item in [*editors, *buttons]:
+            if item is not selected_editor and item is not selected_button:
+                try:
+                    item.dispose()
+                except Exception:
+                    pass
 
 
 def _download_control(ui):
@@ -263,6 +318,8 @@ def run_cnki(fetcher, record, opts):
     attached_targets = {}
     origin_wait_started = {}
     origin_wait_reported = set()
+    material_discovery = None
+    materials_observed_target = None
 
     def pause(reason, message=None, snapshot=None):
         result = fetcher._attention(reason, getattr(fetcher._page, "url", lookup), snapshot=snapshot)
@@ -286,7 +343,7 @@ def run_cnki(fetcher, record, opts):
         flow = {"paper_hash": paper_hash, "title_hash": title_hash,
                 "target_id": updated.get("target_id"), "step": step}
         if preserve_popup and isinstance(previous, dict) and previous.get("paper_hash") == paper_hash and previous.get("title_hash") == title_hash:
-            for key in ("pending_popup", "cleanup_target_id", "diagnostic", "title_click_target_id", "download_click_target_ids", "download_click_target_id", "download_click_count"):
+            for key in ("pending_popup", "cleanup_target_id", "diagnostic", "lookup_repair", "lookup_diagnostic", "title_click_target_id", "download_click_target_ids", "download_click_target_id", "download_click_count"):
                 if key in previous:
                     flow[key] = previous[key]
         if title_target is not None:
@@ -593,7 +650,8 @@ def run_cnki(fetcher, record, opts):
                     return popup_pause()
         fetcher._clear_pending()
         return {"status": "pdf_page", "bytes": blob, "size": len(blob),
-                "url": literature_browser.safe_url(fetcher._page.url) or ENTRY}
+                "url": literature_browser.safe_url(fetcher._page.url) or ENTRY,
+                "material_discovery": material_discovery or {"status": "unknown", "reason": "article_materials_not_observed", "source_url": "", "links": []}}
 
     def read():
         current = fetcher._page
@@ -602,6 +660,79 @@ def run_cnki(fetcher, record, opts):
         if not isinstance(snap, dict) or not isinstance(ui, dict):
             raise ValueError("Unrecognized CNKI page")
         return snap, ui
+
+    def lookup_pause(code, *, snapshot=None):
+        messages = {
+            "page_unrecognized": "知网当前任务页不是可核对的题名检索结果或目标详情页，已暂停；请在原任务页面核对。",
+            "query_missing": "知网单篇定位超过1分钟，但未识别到可见检索框中的完整目标题名，已暂停；请在原任务页面核对。",
+            "query_rewritten": "知网显示的检索词与完整目标题名不一致，已暂停；不能删除或忽略L-等题名前缀后继续。请在原任务页面核对完整题名。",
+            "rows_loading": "知网单篇结果列表超过1分钟仍未加载出可核对题录，已暂停；已有成果保留。",
+            "title_mismatch": "知网结果页未出现完全匹配的完整目标题名，已暂停；未点击相似文献。",
+            "ambiguous": "知网检索到多个完全同名结果，已暂停；请人工确认目标文献。",
+            "repair_editor_unrecognized": "知网显示的检索词已改变，但无法唯一核对可编辑的普通检索框，已暂停；请在原任务页面按完整题名检索后继续。",
+            "repair_button_unrecognized": "知网显示的检索词已改变，但未找到唯一普通检索按钮，已暂停；未点击AI检索或其他按钮。请在原任务页面按完整题名检索后继续。",
+            "repair_incomplete": "上次完整题名字面检索尚未确认提交完成，已暂停；不会重复提交。请在原任务页核对，或在该任务页打开同篇详情后继续。",
+            "repair_query_rewritten": "已按加引号的完整题名重新检索一次，但官网显示的词仍与完整题名不一致，已暂停；不会删除前缀或反复提交。",
+        }
+        updated = copy.deepcopy(fetcher._binding)
+        updated.setdefault("cnki_flow", {})["lookup_diagnostic"] = code
+        commit_binding(updated)
+        result = pause("load_timeout" if code in {"query_missing", "rows_loading"} else "page_error", messages[code], snapshot=snapshot)
+        result["lookup_diagnostic"] = code
+        fetcher._blocked = dict(result)
+        return result
+
+    def repair_lookup(current, ui):
+        """Submit at most one visible literal-title repair for this paper."""
+        previous = fetcher._binding.get("cnki_flow", {}).get("lookup_repair")
+        if previous is not None:
+            return lookup_pause("repair_incomplete" if not isinstance(previous, dict) or previous.get("state") != "submitted" else "repair_query_rewritten")
+        if '"' in title:
+            # No invented quoting/escaping grammar for an embedded quote.
+            return lookup_pause("query_rewritten")
+        editor, button, problem = _lookup_form(current)
+        if problem:
+            return lookup_pause(problem)
+        try:
+            fetcher._pace(current.url)
+            latest_snap, latest_ui = read()
+            reason = fetcher._reason(latest_snap)
+            if reason:
+                return pause(reason, snapshot=latest_snap)
+            if (not _lookup_page(current.url) or len(_title_matches(latest_ui, title)) != 1
+                or not editor.is_visible() or not editor.is_editable() or not button.is_visible()
+                or not button.is_enabled() or _norm(button.evaluate(_CONTROL_LABEL_JS)) not in {"检索", "搜索", "search"}):
+                return lookup_pause("query_rewritten")
+            literal = '"' + title + '"'
+            updated = copy.deepcopy(fetcher._binding)
+            updated["cnki_flow"]["lookup_repair"] = {"state": "prepared", "query_hash": _hash(_norm(literal)), "method": "visible-literal-title"}
+            commit_binding(updated)
+            editor.fill(literal, timeout=10_000)
+            if _norm(editor.input_value()) != _norm(literal):
+                return lookup_pause("repair_incomplete")
+            fetcher._progress("全文获取：官网显示的检索词与完整题名不一致，正在原任务页以加引号的完整题名重新检索一次；保留L-等前缀。")
+            button.click(timeout=15_000, no_wait_after=True)
+            updated = copy.deepcopy(fetcher._binding)
+            updated["cnki_flow"]["lookup_repair"]["state"] = "submitted"
+            updated["cnki_flow"].pop("lookup_diagnostic", None)
+            commit_binding(updated)
+            return None
+        except Exception:
+            try:
+                snap, _ = read()
+                reason = fetcher._reason(snap)
+                if reason:
+                    return pause(reason, snapshot=snap)
+            except Exception:
+                pass
+            return lookup_pause("repair_incomplete")
+        finally:
+            for item in (editor, button):
+                if item is not None:
+                    try:
+                        item.dispose()
+                    except Exception:
+                        pass
 
     def bound_blob_witness():
         """A blob address alone is never proof of task ownership or a PDF."""
@@ -858,9 +989,22 @@ def run_cnki(fetcher, record, opts):
                     step = "detail"
             if step == "lookup":
                 if _lookup_page(current.url):
+                    repair = fetcher._binding.get("cnki_flow", {}).get("lookup_repair")
+                    if repair is not None and (not isinstance(repair, dict) or repair.get("state") != "submitted"):
+                        return lookup_pause("repair_incomplete")
+                    titles_found = _title_matches(ui, title)
+                    if len(titles_found) > 1:
+                        return lookup_pause("ambiguous")
+                    if not _query_matches(ui, title) and len(titles_found) == 1:
+                        repaired = repair_lookup(current, ui)
+                        if repaired:
+                            return repaired
+                        start = fetcher._clock()
+                        tick()
+                        continue
                     matches = _exact_result(ui, title)
                     if len(matches) > 1:
-                        return pause("page_error", "知网检索到多个完全同名结果，已暂停；请人工确认目标文献。")
+                        return lookup_pause("ambiguous")
                     if len(matches) == 1:
                         row_index, anchor_index = matches[0]
                         link = current.locator(ui["rowSelector"]).nth(row_index).locator("a").nth(anchor_index)
@@ -874,6 +1018,8 @@ def run_cnki(fetcher, record, opts):
                         latest_reason = fetcher._reason(latest_snap)
                         if latest_reason:
                             return pause(latest_reason, snapshot=latest_snap)
+                        if not _query_matches(latest_ui, title):
+                            return lookup_pause("repair_query_rewritten" if fetcher._binding.get("cnki_flow", {}).get("lookup_repair") else "query_rewritten")
                         if not _lookup_page(current.url) or _exact_result(latest_ui, title) != matches or not link.is_visible() or _norm(link.inner_text()) != _norm(title):
                             return pause("page_error", "知网题名结果在等待期间发生变化，已暂停；未点击相似文献。")
                         flow_write("detail_pending", title_target=fetcher._binding.get("target_id"))
@@ -886,6 +1032,13 @@ def run_cnki(fetcher, record, opts):
                         continue
                 elif _identity(snap, ui, record):
                     # The researcher may finish normal navigation while paused.
+                    # Only this exact persisted task target qualifies; an
+                    # unrelated detail tab with the same title is not borrowed.
+                    flow = fetcher._binding.get("cnki_flow", {})
+                    if (flow.get("paper_hash") != paper_hash or flow.get("title_hash") != title_hash
+                        or flow.get("target_id") != fetcher._binding.get("target_id")
+                        or literature_browser._target_id(fetcher._context, current) != flow.get("target_id")):
+                        return lookup_pause("page_unrecognized")
                     step = "detail"
                     flow_write(step)
                     start = fetcher._clock()
@@ -895,6 +1048,22 @@ def run_cnki(fetcher, record, opts):
                     step = "detail"
                     if fetcher._binding.get("cnki_flow", {}).get("step") != step:
                         flow_write(step)
+                    current_target = fetcher._binding.get("target_id")
+                    if materials_observed_target != current_target:
+                        # Supplementary-file events belong to the collector,
+                        # never to this main-PDF/title-click artifact queue.
+                        main_action, action = action, None
+                        try:
+                            material_discovery, interrupted = fetcher._observe_materials(record, snap, current.url, opts)
+                        finally:
+                            action = main_action
+                        materials_observed_target = current_target
+                        if interrupted:
+                            return interrupted
+                    if opts.get("materials_only"):
+                        fetcher._clear_pending()
+                        return {"status": "ok", "url": literature_browser.safe_url(current.url) or ENTRY,
+                                "material_discovery": material_discovery}
                     if snap.get("container_verified"):
                         evidence = {key: snap.get(key) for key in ("page_title", "citation_title", "citation_doi", "article_text", "article_html", "headings", "sections", "container", "container_verified", "origin")}
                         evidence["links"] = []
@@ -903,7 +1072,8 @@ def run_cnki(fetcher, record, opts):
                         if verdict == "fulltext":
                             fetcher._clear_pending()
                             return {"status": "ok", "url": literature_browser.safe_url(current.url) or ENTRY,
-                                    "text": str(snap.get("text") or ""), "html_evidence": evidence}
+                                    "text": str(snap.get("text") or ""), "html_evidence": evidence,
+                                    "material_discovery": material_discovery}
                     control, caj_only, ambiguous = _download_control(ui)
                     if ambiguous:
                         return pause("page_error", "知网详情有多个无法唯一核对的下载控件，已暂停；请在原页面选择目标。")
@@ -966,7 +1136,8 @@ def run_cnki(fetcher, record, opts):
                     start = fetcher._clock()
             if fetcher._clock() - start >= WAIT_SECONDS:
                 if step == "lookup":
-                    return pause("load_timeout", "知网单篇定位超过1分钟，未能核对完整题名、检索词及唯一结果，已暂停；请在原页面核对。")
+                    code = _lookup_diagnosis(current.url, ui, title)
+                    return lookup_pause("title_mismatch" if code == "ready" else code)
                 if step == "download_clicked":
                     if any(not child.is_closed() and child is not fetcher._page for _, child in popups):
                         return popup_pause("origin")

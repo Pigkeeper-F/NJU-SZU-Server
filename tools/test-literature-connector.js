@@ -242,6 +242,17 @@ async function main() {
         onEvent({ type: 'result', count: 0, files: ['candidates.json', 'candidates.csv'], message: 'mock complete' });
       }
     });
+    const expanded = Array.from({ length: 200 }, (_, index) => ({
+      key: `field_${index}`, label: `变量${index}`, meaning: '讨论整理后的独立变量', unit: '原文单位', valueType: 'text', required: false
+    }));
+    const schemaFixture = { dir: path.join(root, 'expanded-field-checkpoint') };
+    fs.mkdirSync(schemaFixture.dir);
+    connector.appendConfirmations(schemaFixture, { fields: expanded });
+    const expandedCheckpoint = fs.readFileSync(path.join(schemaFixture.dir, 'confirmations.json'), 'utf8');
+    assert.deepEqual(JSON.parse(expandedCheckpoint).records[0].fields, expanded, 'All200 confirmed variables reach the checkpoint unchanged');
+    assert.throws(() => connector.appendConfirmations(schemaFixture, { fields: [...expanded, { key: 'overflow' }] }), /字段确认内容无效/);
+    assert.equal(fs.readFileSync(path.join(schemaFixture.dir, 'confirmations.json'), 'utf8'), expandedCheckpoint,
+      'An oversized schema cannot partially overwrite the last confirmed schema');
     assert.throws(() => connector.start({ ...config, topic: '' }), /研究主题/);
     assert.throws(() => connector.start({ ...config, limit: 11 }), /1–10/);
     assert.throws(() => connector.start({ ...config, sources: ['google-scholar', 'arxiv'] }), /检索来源/);

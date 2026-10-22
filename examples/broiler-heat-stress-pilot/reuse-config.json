@@ -1,0 +1,752 @@
+{
+  "version": 2,
+  "topic": "高温或热应激对肉鸡生长表现、采食量和饲料利用的影响",
+  "query": "broiler[Title/Abstract] AND \"heat stress\"[Title/Abstract]",
+  "sources": [
+    "pubmed"
+  ],
+  "publicationYearFrom": null,
+  "publicationYearTo": null,
+  "geography": "全球",
+  "language": "优先处理中英文；其他语言标记待翻译，不直接排除",
+  "studyTypes": [
+    "原始研究",
+    "优先控制温度的实验研究",
+    "现场观测与长期气候变化研究另行登记，后续处理"
+  ],
+  "inclusion": [
+    "首批选取3—5篇互不重复的原始研究",
+    "研究对象为肉鸡，首轮以出壳后饲养阶段为主",
+    "研究高温或热应激，按原文记录暴露条件，不自设温度阈值",
+    "存在温度处理、对照、梯度或明确的温度关联分析",
+    "至少测量体重、增重、日增重、采食量、饲料转化、饲料效率、死亡率或存活率之一",
+    "期刊论文、学位论文及具有完整方法和结果的研究报告可候选",
+    "不按结果是否显著筛选",
+    "研究资格与数据完整性分别判断；信息不足记待定，缺失值登记原因",
+    "同一研究的不同报告关联管理，不重复计入",
+    "温度与其他干预混杂时明确标记；析因研究在相同营养条件内比较温度",
+    "提取保留原值、原单位和可复现证据位置，首批数值全部人工回原件核查",
+    "登录、验证、权限、网络或页面异常时暂停等待人工继续"
+  ],
+  "exclusion": [
+    "蛋鸡及其他动物不进入本批",
+    "仅冷应激研究不进入本批",
+    "温度仅为固定背景且未分析温度变化者不进入温度效应表",
+    "确认未测量目标生产指标的研究仅作背景参考",
+    "综述和Meta分析仅用于追溯原始研究",
+    "种鸡、胚胎温处理及纯模型预测研究单列",
+    "明确撤稿研究不进入正式数据表",
+    "GHG不纳入本次方案，也不保留另批安排",
+    "不开展Meta分析、效应量计算或合并"
+  ],
+  "targetFields": [
+    "记录ID",
+    "文献ID",
+    "研究ID",
+    "实验ID",
+    "题名",
+    "作者",
+    "发表年份",
+    "来源",
+    "DOI",
+    "PMID",
+    "题录链接",
+    "全文链接",
+    "关联报告",
+    "研究类型",
+    "品系",
+    "性别",
+    "入组日龄",
+    "暴露日龄",
+    "测量日龄",
+    "饲养方式",
+    "处理组ID",
+    "对照组ID",
+    "比较关系",
+    "日粮",
+    "添加剂",
+    "其他干预",
+    "采食控制方式",
+    "设定温度",
+    "实测温度",
+    "对照温度",
+    "湿度",
+    "THI值",
+    "THI名称",
+    "THI定义",
+    "每天暴露时长",
+    "总暴露天数",
+    "暴露模式",
+    "暴露期限分类",
+    "实验单位",
+    "独立重复数",
+    "每重复鸡数",
+    "每组总鸡数",
+    "结果样本量",
+    "结果样本量层级",
+    "指标",
+    "指标定义",
+    "测量时间段",
+    "原值",
+    "原单位",
+    "统计类型",
+    "中心值",
+    "范围下限",
+    "范围上限",
+    "变异值",
+    "变异类型",
+    "CI下限",
+    "CI上限",
+    "置信水平",
+    "标准化值",
+    "标准化单位",
+    "换算说明",
+    "来源部分",
+    "文件名",
+    "来源链接",
+    "页码",
+    "定位标识",
+    "原文证据",
+    "研究判断",
+    "判断理由",
+    "材料状态",
+    "缺失说明",
+    "提取状态",
+    "核查状态",
+    "问题说明",
+    "规则版本"
+  ],
+  "limit": 10,
+  "searchMode": "test",
+  "perSourceLimit": 10,
+  "stopMode": "count",
+  "sourceQueries": {
+    "pubmed": "broiler[Title/Abstract] AND \"heat stress\"[Title/Abstract]"
+  },
+  "batch": {
+    "size": 10,
+    "maxBatches": 1
+  },
+  "fieldDefinitions": [
+    {
+      "key": "record_id",
+      "label": "记录ID",
+      "meaning": "参数记录的唯一编号。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "report_id",
+      "label": "文献ID",
+      "meaning": "单份论文、学位论文或研究报告的唯一编号。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "study_id",
+      "label": "研究ID",
+      "meaning": "用于关联同一研究的不同报告；关系不明时保留临时编号并标待核查。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "experiment_id",
+      "label": "实验ID",
+      "meaning": "区分同一研究内的不同实验；无法区分时标待核查，不擅自合并。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "title",
+      "label": "题名",
+      "meaning": "文献的原始题名。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "authors",
+      "label": "作者",
+      "meaning": "原文报告的作者信息。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "publication_year",
+      "label": "发表年份",
+      "meaning": "文献发表年份，不以下载年份替代。",
+      "unit": "年",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "publication_source",
+      "label": "来源",
+      "meaning": "期刊名称、学位授予机构或研究报告发布机构。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "doi",
+      "label": "DOI",
+      "meaning": "文献的DOI标识，不以PMID代填。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "pmid",
+      "label": "PMID",
+      "meaning": "文献的PubMed标识，不以DOI代填。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "bibliographic_url",
+      "label": "题录链接",
+      "meaning": "对应文献原始题录页面的地址。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "fulltext_url",
+      "label": "全文链接",
+      "meaning": "对应文献正文的地址；链接存在不代表正文已取得或已核验。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "related_reports",
+      "label": "关联报告",
+      "meaning": "同一研究其他报告的文献ID；关系不明时注明待核查。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "study_type",
+      "label": "研究类型",
+      "meaning": "依据原文记录控温实验、现场观测等研究设计。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "strain",
+      "label": "品系",
+      "meaning": "原文报告的肉鸡品系，不按常用品系推定。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "sex",
+      "label": "性别",
+      "meaning": "原文报告的肉鸡性别或混合性别情况。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "enrollment_age",
+      "label": "入组日龄",
+      "meaning": "肉鸡进入实验或分组时的日龄；保留原文表达。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "exposure_age",
+      "label": "暴露日龄",
+      "meaning": "温度处理对应的日龄或日龄区间；不以入组日龄替代。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "measurement_age",
+      "label": "测量日龄",
+      "meaning": "当前结果测量对应的日龄或日龄区间。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "housing",
+      "label": "饲养方式",
+      "meaning": "原文报告的笼养、栏养等饲养方式及相关条件。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "treatment_id",
+      "label": "处理组ID",
+      "meaning": "当前结果所属处理组的编号。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "control_id",
+      "label": "对照组ID",
+      "meaning": "当前比较对应的对照组编号；共享对照复用同一编号。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "comparison",
+      "label": "比较关系",
+      "meaning": "温度处理之间的比较及其可比条件；温度与其他干预混杂时明确说明。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "diet",
+      "label": "日粮",
+      "meaning": "当前处理组的基础日粮组成及营养条件，保留原文表达。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "additive",
+      "label": "添加剂",
+      "meaning": "当前处理组的添加剂干预条件，保留原文名称、用量及单位。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "other_interventions",
+      "label": "其他干预",
+      "meaning": "温度、日粮和添加剂之外的其他处理；仅原文明示无干预时记录为无。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "feeding_control",
+      "label": "采食控制方式",
+      "meaning": "自由采食、配对饲喂等原文采食安排，不默认自由采食。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "set_temperature",
+      "label": "设定温度",
+      "meaning": "温度处理的设定值或设定序列，保留与时段的对应关系，不代填实测温度。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "measured_temperature",
+      "label": "实测温度",
+      "meaning": "原文实际测得的环境温度或温度序列，不以设定温度代填。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "control_temperature",
+      "label": "对照温度",
+      "meaning": "对应对照组的原文温度条件，注明为设定值或实测值。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "humidity",
+      "label": "湿度",
+      "meaning": "原文湿度数值及其口径，例如相对湿度；未报告时不补值。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "thi_value",
+      "label": "THI值",
+      "meaning": "原文报告的温湿指数数值，不自行计算。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "thi_name",
+      "label": "THI名称",
+      "meaning": "原文使用的温湿指数名称或具体版本。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "thi_definition",
+      "label": "THI定义",
+      "meaning": "原文对温湿指数的计算公式、变量和适用口径的说明。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "daily_exposure_duration",
+      "label": "每天暴露时长",
+      "meaning": "每日高温处理持续时间，保留原文表达，不默认全天暴露。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "total_exposure_duration",
+      "label": "总暴露天数",
+      "meaning": "整个温度处理的持续时间，保留原值和原单位，不以饲养天数替代。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "exposure_pattern",
+      "label": "暴露模式",
+      "meaning": "原文报告的恒定、循环等温度变化模式。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "exposure_term",
+      "label": "暴露期限分类",
+      "meaning": "原文对短期、长期等暴露期限的分类；原文未分类时不自设界限。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "experimental_unit",
+      "label": "实验单位",
+      "meaning": "实际独立接受处理的鸡、笼栏、房间或环境舱等单位，依据处理分配判断。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "independent_replicates",
+      "label": "独立重复数",
+      "meaning": "每组独立实验单位的数量，不以测量鸡数替代。",
+      "unit": "个/组",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "birds_per_replicate",
+      "label": "每重复鸡数",
+      "meaning": "每个独立重复包含的鸡只数量；数量不等时保留原文表达，不反推。",
+      "unit": "只/重复",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "birds_per_group",
+      "label": "每组总鸡数",
+      "meaning": "该处理组纳入的鸡只总数，不与当前结果的有效分析样本量混用。",
+      "unit": "只/组",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "result_sample_size",
+      "label": "结果样本量",
+      "meaning": "当前指标和时间段实际进入分析的样本量；保留原文表达，不从初始分组数默认。",
+      "unit": "原文单位；层级待原文明确",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "sample_size_level",
+      "label": "结果样本量层级",
+      "meaning": "当前结果样本量对应的鸡只、栏、重复、环境舱或试验等统计层级；不明时标待核查。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "outcome",
+      "label": "指标",
+      "meaning": "当前结果的原文指标名称。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "outcome_definition",
+      "label": "指标定义",
+      "meaning": "原文对指标计算和分母口径的定义；FCR与饲料效率的方向须按原文明示记录。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "measurement_period",
+      "label": "测量时间段",
+      "meaning": "当前结果对应的起止时间、时间点或期间，不跨时间段拼接。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "original_value",
+      "label": "原值",
+      "meaning": "原文完整数值表达，保留范围、±、正负号及小于或大于等限定符。",
+      "unit": "见原单位字段",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "original_unit",
+      "label": "原单位",
+      "meaning": "当前结果的原始计量单位及分母口径，不凭指标名称猜测。",
+      "unit": "原文单位",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "statistic_type",
+      "label": "统计类型",
+      "meaning": "原文明示的均值、中位数、最小二乘均值等统计量类型；未定义时不默认均值。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "central_value",
+      "label": "中心值",
+      "meaning": "原文明示的中心估计数值；限定界限不得作为精确中心值。",
+      "unit": "同原单位",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "range_lower",
+      "label": "范围下限",
+      "meaning": "原文数值范围的下端点，不用于保存日龄区间或置信区间。",
+      "unit": "同原单位",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "range_upper",
+      "label": "范围上限",
+      "meaning": "原文数值范围的上端点，不取中点替代原范围。",
+      "unit": "同原单位",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "variation_value",
+      "label": "变异值",
+      "meaning": "原文配套报告的变异数值；类型未定义时保留原值并说明，不推定为SD或SE。",
+      "unit": "原文单位",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "variation_type",
+      "label": "变异类型",
+      "meaning": "原文明示的SD、SE、SEM等变异类型，不依据误差线外观推断，不自动换算。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "ci_lower",
+      "label": "CI下限",
+      "meaning": "原文报告的置信区间下限。",
+      "unit": "同原单位",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "ci_upper",
+      "label": "CI上限",
+      "meaning": "原文报告的置信区间上限。",
+      "unit": "同原单位",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "confidence_level",
+      "label": "置信水平",
+      "meaning": "原文明示的置信水平，保留原值和原单位，不默认95%。",
+      "unit": "原文单位",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "standardized_value",
+      "label": "标准化值",
+      "meaning": "仅在统一单位方案及换算口径明确后保存的换算结果；未明确时留空。",
+      "unit": "见标准化单位字段；待确认",
+      "valueType": "number",
+      "required": false
+    },
+    {
+      "key": "standardized_unit",
+      "label": "标准化单位",
+      "meaning": "标准化结果采用的单位；当前统一单位方案尚待确认。",
+      "unit": "待确认",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "conversion_notes",
+      "label": "换算说明",
+      "meaning": "实际换算采用的公式、原值、单位、适用口径和依据；未换算时留空。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "source_section",
+      "label": "来源部分",
+      "meaning": "实际取值来源所属的摘要、方法、结果、表格、图注或补充材料等部分。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "source_filename",
+      "label": "文件名",
+      "meaning": "承载当前证据的原件或补充材料文件名；未取得文件时留空并说明。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "source_url",
+      "label": "来源链接",
+      "meaning": "承载当前证据的网页或文件地址；仅有题录时注明来源限于题录。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "page",
+      "label": "页码",
+      "meaning": "当前证据对应的原文页码；无页码网页注明不适用并提供可复现定位。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "source_locator",
+      "label": "定位标识",
+      "meaning": "当前证据的表号、处理行、指标列、脚注、图号、段落或工作表及单元格等可复现位置。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "source_evidence",
+      "label": "原文证据",
+      "meaning": "支撑取值的原文短句、表头、数据行及必要脚注；不同字段来自不同位置时注明对应关系。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "eligibility",
+      "label": "研究判断",
+      "meaning": "依据研究范围和证据记录符合、不符合或待定，与材料完整性分别判断。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "eligibility_reason",
+      "label": "判断理由",
+      "meaning": "研究资格判断的依据；不符合时写明对应规则和原因。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "material_status",
+      "label": "材料状态",
+      "meaning": "实际材料情况，如正文已取得、补材待查、缺权限、文件缺失或无法读取。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "missing_notes",
+      "label": "缺失说明",
+      "meaning": "按字段名逐项记录缺失或不适用原因，区分未报告、材料未取得、待翻译、待数字化及待核查等。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "extraction_status",
+      "label": "提取状态",
+      "meaning": "当前记录实际提取进度，不将取得正文视为完成提取。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "verification_status",
+      "label": "核查状态",
+      "meaning": "当前记录人工回原件核查的实际状态；未核查或证据不足时不得记为已核查。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    },
+    {
+      "key": "issue_notes",
+      "label": "问题说明",
+      "meaning": "记录来源冲突、干预混杂、重复关系不明及其他问题和处理依据。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": false
+    },
+    {
+      "key": "rule_version",
+      "label": "规则版本",
+      "meaning": "当前记录实际遵循的规则版本；尚未明确时留空，不自行生成已确认版本。",
+      "unit": "不适用",
+      "valueType": "text",
+      "required": true
+    }
+  ],
+  "templates": {
+    "literature": null,
+    "parameters": null
+  },
+  "fulltext": {
+    "maxPapers": 0,
+    "perPaperTimeoutSec": 120
+  },
+  "extraction": {
+    "maxCharsPerPaper": 120000,
+    "model": "gpt-6.1-sol"
+  },
+  "limits": {
+    "discover": 180,
+    "dedupe": 120,
+    "fulltext": 3600,
+    "extract": 1800,
+    "validate": 300,
+    "export": 600
+  }
+}

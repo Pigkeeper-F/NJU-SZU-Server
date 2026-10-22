@@ -1,0 +1,1351 @@
+{
+  "paper_id": "PMID-006",
+  "source_pdf": "PMID-006.txt",
+  "status": "partial",
+  "classification_reason": "正文报告了Ross 308雄性肉鸡热中性与慢性热应激对照实验及行为、血液和肉品质数值，可纳入抽取，但补充材料未核查且部分字段与结果尚未完成结构化。",
+  "rows": [
+    {
+      "row_id": "PMID-006-R001",
+      "field": "title",
+      "value_raw": "Impact of chronic heat stress on behavior, oxidative status and meat quality traits of fast-growing broiler chickens.",
+      "unit_raw": "",
+      "value_normalized": "Impact of chronic heat stress on behavior, oxidative status and meat quality traits of fast-growing broiler chickens.",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "用户提供的本次文献题录：title"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R002",
+      "field": "doi",
+      "value_raw": "10.3389/fphys.2023.1242094",
+      "unit_raw": "",
+      "value_normalized": "10.3389/fphys.2023.1242094",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "用户提供的本次文献题录：doi"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R003",
+      "field": "bibliographic_url",
+      "value_raw": "https://pubmed.ncbi.nlm.nih.gov/37772060/",
+      "unit_raw": "",
+      "value_normalized": "https://pubmed.ncbi.nlm.nih.gov/37772060/",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "用户提供的本次文献题录：source_url；来源限于题录"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R004",
+      "field": "related_reports",
+      "value_raw": "Zampiga et al. (2021)",
+      "unit_raw": "",
+      "value_normalized": "Zampiga et al. (2021)",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1首段"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R005",
+      "field": "strain",
+      "value_raw": "Ross 308",
+      "unit_raw": "",
+      "value_normalized": "Ross 308",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R006",
+      "field": "sex",
+      "value_raw": "male",
+      "unit_raw": "",
+      "value_normalized": "male",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R007",
+      "field": "enrollment_age",
+      "value_raw": "one-day-old",
+      "unit_raw": "day",
+      "value_normalized": "one-day-old",
+      "unit_normalized": "day",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1，购入及随机分配"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R008",
+      "field": "housing",
+      "value_raw": "two different rooms; six pens/room; 3.3 m2/pen; one circular pan feeder and five nipples/pen; 25 chickens/pen",
+      "unit_raw": "",
+      "value_normalized": "two different rooms; six pens/room; 3.3 m2/pen; one circular pan feeder and five nipples/pen; 25 chickens/pen",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R009",
+      "field": "treatment_id",
+      "value_raw": "HS",
+      "unit_raw": "",
+      "value_normalized": "HS",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R010",
+      "field": "control_id",
+      "value_raw": "TNT",
+      "unit_raw": "",
+      "value_normalized": "TNT",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R011",
+      "field": "set_temperature",
+      "value_raw": "30",
+      "unit_raw": "°C",
+      "value_normalized": "30",
+      "unit_normalized": "°C",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1，HS组"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R012",
+      "field": "control_temperature",
+      "value_raw": "placement: 30; 3 days: 28; 6 days: 27; 9 days: 26; 12 days: 25; 15 days: 24; 18 days: 23; 21 days: 22; 24 days: 21; 27–41 days: 20",
+      "unit_raw": "°C",
+      "value_normalized": "placement: 30; 3 days: 28; 6 days: 27; 9 days: 26; 12 days: 25; 15 days: 24; 18 days: 23; 21 days: 22; 24 days: 21; 27–41 days: 20",
+      "unit_normalized": "°C",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1，TNT组设定温度序列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R013",
+      "field": "exposure_age",
+      "value_raw": "35 to 41",
+      "unit_raw": "days",
+      "value_normalized": "35 to 41",
+      "unit_normalized": "days",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2标题"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R014",
+      "field": "daily_exposure_duration",
+      "value_raw": "24",
+      "unit_raw": "h/d",
+      "value_normalized": "24",
+      "unit_normalized": "h/d",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1，HS组"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R015",
+      "field": "total_exposure_duration",
+      "value_raw": "6",
+      "unit_raw": "days",
+      "value_normalized": "6",
+      "unit_normalized": "days",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.2，HS暴露末次观察"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R016",
+      "field": "exposure_term",
+      "value_raw": "chronic",
+      "unit_raw": "",
+      "value_normalized": "chronic",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R017",
+      "field": "humidity",
+      "value_raw": "40%–55%",
+      "unit_raw": "%",
+      "value_normalized": "40%–55%",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1，两组相对湿度"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R018",
+      "field": "diet",
+      "value_raw": "commercial basal diet based on corn, wheat and soybean meal; mash form; starter 0—14 days, grower 15—28 days, finisher 29—41 days",
+      "unit_raw": "",
+      "value_normalized": "commercial basal diet based on corn, wheat and soybean meal; mash form; starter 0—14 days, grower 15—28 days, finisher 29—41 days",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1，两组共同日粮"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R019",
+      "field": "feeding_control",
+      "value_raw": "ad-libitum",
+      "unit_raw": "",
+      "value_normalized": "ad-libitum",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.1，两组"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R020",
+      "field": "result_sample_size",
+      "value_raw": "36 birds/treatment",
+      "unit_raw": "birds/treatment",
+      "value_normalized": "36 birds/treatment",
+      "unit_normalized": "birds/treatment",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.2，行为观察"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R021",
+      "field": "result_sample_size",
+      "value_raw": "12",
+      "unit_raw": "birds/group",
+      "value_normalized": "12",
+      "unit_normalized": "birds/group",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.3，血液指标"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R022",
+      "field": "result_sample_size",
+      "value_raw": "15",
+      "unit_raw": "carcasses/group",
+      "value_normalized": "15",
+      "unit_normalized": "carcasses/group",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，2.4及Table 5，肉品质"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R023",
+      "field": "result_sample_size",
+      "value_raw": "12/group",
+      "unit_raw": "",
+      "value_normalized": "12/group",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Tables 6、7标题，肌肉氧化、抗氧化及脂肪酸结果"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R024",
+      "field": "measurement_period",
+      "value_raw": "average of independent measurements carried out after 1 and 6 days of HS exposure",
+      "unit_raw": "days",
+      "value_normalized": "average of independent measurements carried out after 1 and 6 days of HS exposure",
+      "unit_normalized": "days",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Figure 2图注"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R025",
+      "field": "original_value",
+      "value_raw": "4.8",
+      "unit_raw": "n./time",
+      "value_normalized": "4.8",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，HS组35日龄升温至25°C，drinking；Figure 1图注time=minute"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R026",
+      "field": "original_value",
+      "value_raw": "16.1",
+      "unit_raw": "n./time",
+      "value_normalized": "16.1",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，HS组35日龄升温至26°C，roosting；time=minute"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R027",
+      "field": "original_value",
+      "value_raw": "8.3",
+      "unit_raw": "n./time",
+      "value_normalized": "8.3",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，HS组35日龄升温至26°C，elevating wings；time=minute"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R028",
+      "field": "original_value",
+      "value_raw": "7.8",
+      "unit_raw": "n./time",
+      "value_normalized": "7.8",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，HS组35日龄升温至26°C，panting；time=minute"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R029",
+      "field": "original_value",
+      "value_raw": "6.64",
+      "unit_raw": "n./time",
+      "value_normalized": "6.64",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，TNT组resting；36、41日龄合并；time=2 h video/d"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R030",
+      "field": "original_value",
+      "value_raw": "1.32",
+      "unit_raw": "n./time",
+      "value_normalized": "1.32",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，HS组resting；36、41日龄合并；time=2 h video/d"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R031",
+      "field": "original_value",
+      "value_raw": "2.48",
+      "unit_raw": "n./time",
+      "value_normalized": "2.48",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，TNT组sleeping；36、41日龄合并；time=2 h video/d"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R032",
+      "field": "original_value",
+      "value_raw": "0.16",
+      "unit_raw": "n./time",
+      "value_normalized": "0.16",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，HS组sleeping；36、41日龄合并；time=2 h video/d"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R033",
+      "field": "original_value",
+      "value_raw": "49.4",
+      "unit_raw": "n./time",
+      "value_normalized": "49.4",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，HS组roosting；36、41日龄合并；time=2 h video/d"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R034",
+      "field": "original_value",
+      "value_raw": "18.9",
+      "unit_raw": "n./time",
+      "value_normalized": "18.9",
+      "unit_normalized": "n./time",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，3.1，TNT组roosting；36、41日龄合并；time=2 h video/d"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R035",
+      "field": "original_value",
+      "value_raw": "36.21",
+      "unit_raw": "nmol MDA/mL",
+      "value_normalized": "36.21",
+      "unit_normalized": "nmol MDA/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，TBARS行，TNT列；41日龄，n=12/group"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R036",
+      "field": "original_value",
+      "value_raw": "35.47",
+      "unit_raw": "nmol MDA/mL",
+      "value_normalized": "35.47",
+      "unit_normalized": "nmol MDA/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，TBARS行，HS列；41日龄，n=12/group"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R037",
+      "field": "original_value",
+      "value_raw": "2.39",
+      "unit_raw": "nmol/mg proteins",
+      "value_normalized": "2.39",
+      "unit_normalized": "nmol/mg proteins",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，Carbonyls行，TNT列；41日龄，n=12/group"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R038",
+      "field": "original_value",
+      "value_raw": "7.19",
+      "unit_raw": "nmol/mg proteins",
+      "value_normalized": "7.19",
+      "unit_normalized": "nmol/mg proteins",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，Carbonyls行，HS列；41日龄，n=12/group"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R039",
+      "field": "original_value",
+      "value_raw": "6.32",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "6.32",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，Retinol行，TNT列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R040",
+      "field": "original_value",
+      "value_raw": "5.89",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "5.89",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，Retinol行，HS列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R041",
+      "field": "original_value",
+      "value_raw": "0.005",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "0.005",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，α-tocotrienol行，TNT列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R042",
+      "field": "original_value",
+      "value_raw": "0.110",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "0.110",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，α-tocotrienol行，HS列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R043",
+      "field": "original_value",
+      "value_raw": "0.15",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "0.15",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，δ-tocopherol行，TNT列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R044",
+      "field": "original_value",
+      "value_raw": "0.31",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "0.31",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，δ-tocopherol行，HS列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R045",
+      "field": "original_value",
+      "value_raw": "0.38",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "0.38",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，γ-tocopherol行，TNT列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R046",
+      "field": "original_value",
+      "value_raw": "0.18",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "0.18",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，γ-tocopherol行，HS列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R047",
+      "field": "original_value",
+      "value_raw": "18.78",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "18.78",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，α-tocopherol行，TNT列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R048",
+      "field": "original_value",
+      "value_raw": "19.19",
+      "unit_raw": "nmol/mL",
+      "value_normalized": "19.19",
+      "unit_normalized": "nmol/mL",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 2，α-tocopherol行，HS列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R049",
+      "field": "original_value",
+      "value_raw": "2,031",
+      "unit_raw": "g",
+      "value_normalized": "2,031",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Carcass weight行，TNT列；41日龄，n=15/group"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R050",
+      "field": "original_value",
+      "value_raw": "1,753",
+      "unit_raw": "g",
+      "value_normalized": "1,753",
+      "unit_normalized": "g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Carcass weight行，HS列；41日龄，n=15/group"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R051",
+      "field": "original_value",
+      "value_raw": "39.0",
+      "unit_raw": "%",
+      "value_normalized": "39.0",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Breast yield行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R052",
+      "field": "original_value",
+      "value_raw": "35.3",
+      "unit_raw": "%",
+      "value_normalized": "35.3",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Breast yield行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R053",
+      "field": "original_value",
+      "value_raw": "76.0",
+      "unit_raw": "%",
+      "value_normalized": "76.0",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Moisture行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R054",
+      "field": "original_value",
+      "value_raw": "75.0",
+      "unit_raw": "%",
+      "value_normalized": "75.0",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Moisture行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R055",
+      "field": "original_value",
+      "value_raw": "22.4",
+      "unit_raw": "%",
+      "value_normalized": "22.4",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Crude protein行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R056",
+      "field": "original_value",
+      "value_raw": "23.7",
+      "unit_raw": "%",
+      "value_normalized": "23.7",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Crude protein行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R057",
+      "field": "original_value",
+      "value_raw": "1.38",
+      "unit_raw": "%",
+      "value_normalized": "1.38",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Total lipid行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R058",
+      "field": "original_value",
+      "value_raw": "1.55",
+      "unit_raw": "%",
+      "value_normalized": "1.55",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Total lipid行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R059",
+      "field": "original_value",
+      "value_raw": "1.40",
+      "unit_raw": "%",
+      "value_normalized": "1.40",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Ash行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R060",
+      "field": "original_value",
+      "value_raw": "1.49",
+      "unit_raw": "%",
+      "value_normalized": "1.49",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Ash行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R061",
+      "field": "original_value",
+      "value_raw": "3.17",
+      "unit_raw": "",
+      "value_normalized": "3.17",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Moisture:protein ratio行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R062",
+      "field": "original_value",
+      "value_raw": "3.01",
+      "unit_raw": "",
+      "value_normalized": "3.01",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Moisture:protein ratio行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R063",
+      "field": "original_value",
+      "value_raw": "56.9",
+      "unit_raw": "L*",
+      "value_normalized": "56.9",
+      "unit_normalized": "L*",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Lightness行，TNT列；2.4：24 h post-mortem"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R064",
+      "field": "original_value",
+      "value_raw": "54.8",
+      "unit_raw": "L*",
+      "value_normalized": "54.8",
+      "unit_normalized": "L*",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Lightness行，HS列；2.4：24 h post-mortem"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R065",
+      "field": "original_value",
+      "value_raw": "1.12",
+      "unit_raw": "a*",
+      "value_normalized": "1.12",
+      "unit_normalized": "a*",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Redness行，TNT列；24 h post-mortem"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R066",
+      "field": "original_value",
+      "value_raw": "1.14",
+      "unit_raw": "a*",
+      "value_normalized": "1.14",
+      "unit_normalized": "a*",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Redness行，HS列；24 h post-mortem"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R067",
+      "field": "original_value",
+      "value_raw": "6.05",
+      "unit_raw": "b*",
+      "value_normalized": "6.05",
+      "unit_normalized": "b*",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Yellowness行，TNT列；24 h post-mortem"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R068",
+      "field": "original_value",
+      "value_raw": "5.94",
+      "unit_raw": "b*",
+      "value_normalized": "5.94",
+      "unit_normalized": "b*",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Yellowness行，HS列；24 h post-mortem"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R069",
+      "field": "original_value",
+      "value_raw": "5.81",
+      "unit_raw": "",
+      "value_normalized": "5.81",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，pHu行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R070",
+      "field": "original_value",
+      "value_raw": "6.00",
+      "unit_raw": "",
+      "value_normalized": "6.00",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，pHu行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R071",
+      "field": "original_value",
+      "value_raw": "1.61",
+      "unit_raw": "%",
+      "value_normalized": "1.61",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Drip loss行，TNT列；2.4：48 h，4°C ± 1°C"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R072",
+      "field": "original_value",
+      "value_raw": "1.19",
+      "unit_raw": "%",
+      "value_normalized": "1.19",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Drip loss行，HS列；2.4：48 h，4°C ± 1°C"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R073",
+      "field": "original_value",
+      "value_raw": "22.8",
+      "unit_raw": "%",
+      "value_normalized": "22.8",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Cooking loss行，TNT列；2.4：真空包装水浴至中心80°C"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R074",
+      "field": "original_value",
+      "value_raw": "15.3",
+      "unit_raw": "%",
+      "value_normalized": "15.3",
+      "unit_normalized": "%",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Cooking loss行，HS列；2.4：真空包装水浴至中心80°C"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R075",
+      "field": "original_value",
+      "value_raw": "3.11",
+      "unit_raw": "kg/g",
+      "value_normalized": "3.11",
+      "unit_normalized": "kg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Shear force行，TNT列；熟肉Allo-Kramer剪切"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R076",
+      "field": "original_value",
+      "value_raw": "2.71",
+      "unit_raw": "kg/g",
+      "value_normalized": "2.71",
+      "unit_normalized": "kg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 5，Shear force行，HS列；熟肉Allo-Kramer剪切"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R077",
+      "field": "original_value",
+      "value_raw": "5.23",
+      "unit_raw": "mg MDA/kg of meat",
+      "value_normalized": "5.23",
+      "unit_normalized": "mg MDA/kg of meat",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，TBARS行，TNT列；41日龄，n=12/group"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R078",
+      "field": "original_value",
+      "value_raw": "4.70",
+      "unit_raw": "mg MDA/kg of meat",
+      "value_normalized": "4.70",
+      "unit_normalized": "mg MDA/kg of meat",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，TBARS行，HS列；41日龄，n=12/group"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R079",
+      "field": "original_value",
+      "value_raw": "1.52",
+      "unit_raw": "nmol/mg of protein",
+      "value_normalized": "1.52",
+      "unit_normalized": "nmol/mg of protein",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，Carbonyls行，TNT列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R080",
+      "field": "original_value",
+      "value_raw": "1.77",
+      "unit_raw": "nmol/mg of protein",
+      "value_normalized": "1.77",
+      "unit_normalized": "nmol/mg of protein",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，Carbonyls行，HS列；41日龄"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R081",
+      "field": "original_value",
+      "value_raw": "4.79",
+      "unit_raw": "µg/g",
+      "value_normalized": "4.79",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，Retinol行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R082",
+      "field": "original_value",
+      "value_raw": "3.11",
+      "unit_raw": "µg/g",
+      "value_normalized": "3.11",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，Retinol行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R083",
+      "field": "original_value",
+      "value_raw": "0.12",
+      "unit_raw": "µg/g",
+      "value_normalized": "0.12",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，γ-tocotrienol行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R084",
+      "field": "original_value",
+      "value_raw": "0.09",
+      "unit_raw": "µg/g",
+      "value_normalized": "0.09",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，γ-tocotrienol行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R085",
+      "field": "original_value",
+      "value_raw": "0.01",
+      "unit_raw": "µg/g",
+      "value_normalized": "0.01",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，α-tocotrienol行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R086",
+      "field": "original_value",
+      "value_raw": "0.01",
+      "unit_raw": "µg/g",
+      "value_normalized": "0.01",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，α-tocotrienol行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R087",
+      "field": "original_value",
+      "value_raw": "0.02",
+      "unit_raw": "µg/g",
+      "value_normalized": "0.02",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，δ-tocopherol行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R088",
+      "field": "original_value",
+      "value_raw": "0.02",
+      "unit_raw": "µg/g",
+      "value_normalized": "0.02",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，δ-tocopherol行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R089",
+      "field": "original_value",
+      "value_raw": "0.10",
+      "unit_raw": "µg/g",
+      "value_normalized": "0.10",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，γ-tocopherol行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R090",
+      "field": "original_value",
+      "value_raw": "0.07",
+      "unit_raw": "µg/g",
+      "value_normalized": "0.07",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，γ-tocopherol行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R091",
+      "field": "original_value",
+      "value_raw": "5.10",
+      "unit_raw": "µg/g",
+      "value_normalized": "5.10",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，α-tocopherol行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R092",
+      "field": "original_value",
+      "value_raw": "3.76",
+      "unit_raw": "µg/g",
+      "value_normalized": "3.76",
+      "unit_normalized": "µg/g",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，α-tocopherol行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R093",
+      "field": "original_value",
+      "value_raw": "15.0",
+      "unit_raw": "",
+      "value_normalized": "15.0",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，Peroxidability index行，TNT列"
+      },
+      "conditions": {},
+      "provenance": ""
+    },
+    {
+      "row_id": "PMID-006-R094",
+      "field": "original_value",
+      "value_raw": "18.1",
+      "unit_raw": "",
+      "value_normalized": "18.1",
+      "unit_normalized": "",
+      "conversion": null,
+      "evidence": {
+        "where": "PMID-006.txt，Table 6，Peroxidability index行，HS列"
+      },
+      "conditions": {},
+      "provenance": ""
+    }
+  ],
+  "warnings": [
+    "材料完整性：main_pdf_status=missing；本次仅依据用户提供的网页正文和题录，未读取原始PDF，不能提供PDF页码或宣称完成原件核查。",
+    "补充材料：supplement_check.status=unknown，原记录说明权限核查暂停、补材待核查；未提供可读取补充文件，不能断言没有补充材料。",
+    "正文状态存在口径差异：独立提供的正文标记为chars=52658、truncated=false，但main-html材料读取结果为partial，定位摘录仅到12000字符。本次表格取值来自独立提供的正文，不能将其说成材料摘录已完整读取。",
+    "record_id、study_id、experiment_id：未提供已确认的关联编号；未将自动生成编号冒充论文报告值。related_reports仅能记录Zampiga et al. (2021)，其项目文献ID及跨报告重复数据关系待核查。",
+    "authors、publication_year、publication_source、fulltext_url：提供的正文没有完整题录头或明确全文地址；未从作者缩写、DOI字符串或题录链接推定。",
+    "measured_temperature：2.1说明使用数据记录仪，但未提供完整实测温度序列；2.2报告35日龄升温18°C至30°C，与2.1对照设定20°C口径不同，未合并或以设定值代填。",
+    "thi_value、thi_name、thi_definition：所提供正文未报告；未自行计算THI。",
+    "experimental_unit、independent_replicates、birds_per_replicate：温度处理按房间分配，每温度一个房间、每房间六栏；2.6则以鸡或单块胸肉作为分析单位。房间、栏与统计单位的独立性需核查，未将六栏或测量鸡数直接记为温度处理独立重复。",
+    "birds_per_group：正文明确总数300和25 chickens/pen，但没有直接写出每组总鸡数；未通过乘法或除法补值。",
+    "additive、other_interventions：没有明确无添加剂或无其他干预的声明，未默认填写为无；日粮具体营养组成未在提供正文中列出。",
+    "result_sample_size、sample_size_level：Table 5为15/group，Tables 6和7为12/group；三次分析属技术重复，不能代替生物样本量；各表样本选择和对应关系待核查。",
+    "variation_value、variation_type：Tables 2、5、6明确列出共享SEM，当前仅在各结果证据摘录中保留，尚未逐项生成SEM字段行；未将SEM当作SD或为各处理复制为组别特异误差。",
+    "original_value、central_value、outcome：Tables 3和7脂肪酸结果、Table 4主成分结果尚未逐值结构化；已提取结果的指标和处理保留在evidence.where，尚未另拆为outcome、central_value等字段行。",
+    "statistic_type：Figure 1、2图注明确mean和SEM；Tables 2、5、6列出SEM但表头未逐项定义中心统计量类型，未对这些结果另行默认填写statistic_type。",
+    "Figures 1、2：未提供图像及标定数字化数据；只提取3.1文字明确报告的数值，其余图示行为值和误差线待数字化。正文明确写未表达某行为，不据此生成精确零值。",
+    "来源冲突：3.2对ΣMUFA写为HS更低，却将12.75%和15.57%标注为分别TNT和HS；Table 3则TNT=15.6、HS=12.8。该段组别顺序明显需核查，未擅自更正文献。",
+    "来源冲突：Table 2将carbonyls及δ、γ-tocopherol标为***，脚注定义p<0.001，而3.2描述为p<0.01；保留表格原值和标记，不将两种阈值混写为同一精确p值。",
+    "Table 4的PC2特征值4.98与解释比例12.3%之间存在待核查问题；未自行重算或纠正。",
+    "range_lower、range_upper、ci_lower、ci_upper、confidence_level：未将日龄范围、环境湿度范围或SEM转作结果范围及置信区间。",
+    "standardized_value、standardized_unit、conversion_notes：统一单位方案尚待确认，本次未做单位换算；value_normalized均照抄value_raw。",
+    "source_section、source_filename、source_locator、source_evidence等独立字段行尚未逐结果展开；实际文件、小节、表格、处理列和原文证据已保留在evidence中。condition_keys为空，因此所有conditions均为空对象。",
+    "eligibility、eligibility_reason：按题目所示肉鸡温度研究范围可纳入，但未提供更细的预设资格规则；classification_reason不代表完成系统综述全部资格核查。",
+    "extraction_status为部分提取；verification_status尚未人工回原件核查。rule_version采用输入所给extract-contract-v1，未生成其他版本。"
+  ],
+  "skip_reason": "",
+  "publication_note": "Source quotations omitted for repository distribution; verify against the linked originals. This snapshot does not grant scientific approval."
+}

@@ -138,7 +138,12 @@ class CodexBridge {
   session(id) {
     if (!ID.test(id || '')) throw new Error('无效任务标识');
     const dir = path.join(this.root, id);
-    if (!fs.existsSync(path.join(dir, 'input'))) throw new Error('任务不存在，请重新创建');
+    try { fs.statSync(dir); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      throw Object.assign(new Error('任务不存在，请重新创建'), { code: 'SESSION_NOT_FOUND', sessionId: id });
+    }
+    if (!fs.existsSync(path.join(dir, 'input'))) throw Object.assign(new Error('任务文件目录不完整，已保留原目录，请检查后恢复'), { code: 'SESSION_INCOMPLETE', sessionId: id });
     return dir;
   }
   createSession() {

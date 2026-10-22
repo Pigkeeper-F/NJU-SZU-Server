@@ -13,7 +13,69 @@ async function terminal(downloads, session, id) {
   while (Date.now() < deadline) { const job = downloads.snapshot(session, id); if (job.status !== 'running') return job; await new Promise(resolve => setTimeout(resolve, 20)); }
   throw new Error('fixture job timeout');
 }
+async function testPlanInterpretation() {
+  // Same structure and technical pending notes as the real failed task; this is
+  // a standalone fixture, so regression tests never load or change user state.
+  const structured = `## 环节目标
+
+制定并提交 **FAOSTAT 详细贸易矩阵（Detailed trade matrix，TM）2024 年小麦（Wheat）贸易数量数据**下载方案。
+
+## 输入与数据说明
+
+| 项目 | 已确认规则或待确认事项 |
+|---|---|
+| 数据来源 | FAOSTAT 官方详细贸易矩阵（TM）；具体入口、访问时的数据集名称和可用下载地址待官方核对 |
+| 目标年份 | 已确认采用 2024 年；数据可用性待官方核对 |
+| 商品范围 | 已确认仅为小麦（Wheat）；正式名称及商品代码待官方核对，不扩展至小麦制品或其他相关商品；如有多个可能对应条目，须交研究者选择 |
+| 报告国范围 | 已确认采用全部报告国，以 TM 官方实际分类为准，包含官方提供的区域等汇总项及代码 |
+| 贸易伙伴范围 | 已确认采用全部贸易伙伴，以 TM 官方实际分类为准，包含官方提供的区域等汇总项及代码 |
+| 进出口指标 | 已确认采用进口数量、出口数量，不含贸易金额；正式指标名称、代码和单位待官方核对 |
+| 获取方式 | 待研究者确认；优先核对官方按条件导出 CSV 的路径，同时核对官方完整压缩包路径 |
+| 完整压缩包 | 仅为候选方式；具体链接、文件大小、覆盖范围、内部文件构成和版本待官方核对 |
+| 超过 20MB 的文件 | 旧 AI 草稿：先提出调整后的获取方案并记录原因，经研究者确认后执行；具体替代方式待确认 |
+
+## 注意事项
+
+- 官方完整压缩包仍为候选获取方式，尚未批准采用。
+- 本文仅修订方案文字，不代表已完成官方核验、下载、解压、检查或运行。`;
+  const parsed = await interpretPlan(structured);
+  assert.deepEqual(parsed.years, [2024]);
+  assert.deepEqual(parsed.filters, { elementNames: ['Import quantity', 'Export quantity'], itemNames: ['Wheat'] }, '自然语言范围交给官方字典核对，不添加猜测代码或隐含国家筛选');
+  let generated = 0;
+  const parsedWithAssistant = await interpretPlan(structured, async () => { generated++; throw new Error('确定范围不应交回模型索要代码/链接'); });
+  assert.deepEqual(parsedWithAssistant, parsed);
+  assert.equal(generated, 0, '已确认的表格范围应确定性提取，旧技术待核对文字不阻挡');
+  for (const [label, modified] of [
+    ['禁止整包', structured + '\n- 禁止整包下载，仅允许按条件直接导出。'],
+    ['不允许完整压缩包', structured + '\n- 不允许下载完整压缩包。'],
+    ['限定报告国', structured.replace('已确认采用全部报告国，以 TM 官方实际分类为准', '已确认仅限中国（China），以 TM 官方实际分类为准')],
+    ['限定伙伴国', structured.replace('已确认采用全部贸易伙伴，以 TM 官方实际分类为准', '已确认仅限阿富汗（Afghanistan），以 TM 官方实际分类为准')],
+    ['全部中的子集', structured.replace('已确认采用全部报告国，以 TM 官方实际分类为准', '全部报告国中仅选择中国（China），以 TM 官方实际分类为准')],
+    ['混合金额', structured.replace('进口数量、出口数量，不含贸易金额', '进口数量、出口数量、进口金额')]
+  ]) {
+    let consulted = false;
+    await assert.rejects(interpretPlan(modified, async () => {
+      consulted = true;
+      return JSON.stringify({ dataset: 'TM', years: [2024], unresolved: ['复杂或受限方案须另行解析'] });
+    }), /复杂或受限方案/, label);
+    assert.equal(consulted, true, '显式禁止整包、非全部国家、混合金额范围均不得走确定性捷径');
+  }
+  const scoped = 'FAOSTAT TM 2024 年；商品 Wheat；报告国 China；贸易伙伴 Afghanistan；进口数量和出口数量。';
+  const config = validatePlan({ dataset: 'TM', years: [2024], filters: {
+    itemNames: ['Wheat'], reporterNames: ['China'], partnerNames: ['Afghanistan'], elementNames: ['IMPORT QUANTITY', 'Export quantity']
+  } }, scoped);
+  assert.deepEqual(config.filters.itemNames, ['Wheat']);
+  assert.deepEqual(config.filters.reporterNames, ['China']);
+  assert.deepEqual(config.filters.partnerNames, ['Afghanistan']);
+  assert.deepEqual(config.filters.elementNames, ['IMPORT QUANTITY', 'Export quantity']);
+  for (const filters of [
+    { itemCodes: ['15'] }, { reporterCodes: ['41'] }, { partnerCodes: ['2'] }, { elementCodes: ['5610'] },
+    { itemNames: ['Maize'] }, { reporterNames: ['France'] }, { partnerNames: ['Pakistan'] },
+    { elementNames: ['Import Value'] }, { elementNames: ['invented element'] }
+  ]) assert.throws(() => validatePlan({ dataset: 'TM', years: [2024], filters }, scoped), /明确|名称|依据/, '模型不能制造方案未提供的名称、代码或指标');
+}
 async function main() {
+  await testPlanInterpretation();
   const base = path.join(project, '.workbench/test-fixtures'); fs.mkdirSync(base, { recursive: true });
   const root = fs.mkdtempSync(path.join(base, 'faostat-job-'));
   try {

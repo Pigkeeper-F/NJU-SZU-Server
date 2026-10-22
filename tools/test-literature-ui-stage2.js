@@ -41,7 +41,7 @@ assert.ok(codex.includes('下一阶段：') && codex.includes('本次运行到�
 
 // 3) awaiting_confirmation 关口：确认表单 + advance 提交
 assert.ok(codex.includes("job.stage === 'awaiting_confirmation'"), '应按 stage 区分字段确认关口与验证码关口');
-assert.ok(codex.includes('确认并继续提取'), '确认按钮文案');
+assert.ok(codex.includes('核对表格并开始提取'), '确认按钮文案');
 assert.ok(codex.includes('confirmations: { fields }'), '确认记录应以 confirmations.fields 提交');
 assert.ok(codex.includes("'/api/literature/advance'"), '多阶段推进应走 advance');
 assert.ok(codex.includes('function literatureConfirmFields'), '应从 fieldDefinitions/targetFields 预填确认表单');

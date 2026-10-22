@@ -12,6 +12,7 @@ class Element {
   replaceChildren(...children) { this.children = children; }
   get firstElementChild() { return this.children[0]; }
   addEventListener(type, listener) { this.listeners[type] = listener; }
+  setAttribute(name, value) { this[name] = value; }
   dispatchEvent(event) { return this.listeners[event.type]?.call(this, event); }
   showModal() { this.open = true; }
   close() { this.open = false; }

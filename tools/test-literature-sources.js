@@ -4,7 +4,7 @@
 
 const assert = require('node:assert/strict');
 const { SOURCES, listSources, isKnown, stateOf, executableSources, assertExecutable } = require('./literature-sources');
-const { normalizeConfig, DEFAULT_LIMITS } = require('./literature-config');
+const { normalizeConfig, DEFAULT_LIMITS, MAX_FIELD_DEFINITIONS } = require('./literature-config');
 
 const base = { topic: '气候变化与养殖', query: 'climate change aquaculture China', sources: ['google-scholar'], publicationYearFrom: 2000, publicationYearTo: 2026,
   geography: '中国', language: '', studyTypes: ['原始研究'], inclusion: [], exclusion: [], targetFields: ['产量'], limit: 10 };
@@ -99,6 +99,15 @@ function main() {
   assert.throws(() => normalizeConfig({ ...base, fieldDefinitions: [{ key: 'a' }, { key: 'a' }] }), /key 重复/);
   assert.throws(() => normalizeConfig({ ...base, fieldDefinitions: [{ label: 'x' }] }), /缺少 key/);
   assert.throws(() => normalizeConfig({ ...base, fieldDefinitions: 'soc' }), /字段定义必须是列表/);
+  assert.equal(MAX_FIELD_DEFINITIONS, 200);
+  const expandedFields = Array.from({ length: MAX_FIELD_DEFINITIONS }, (_, index) => ({
+    key: `field_${index}`, label: `变量${index}`, meaning: `讨论后拆开的独立变量${index}`, unit: '原文单位', valueType: 'text', required: false
+  }));
+  const expanded = normalizeConfig({ ...base, targetFields: expandedFields.map(field => field.label), fieldDefinitions: expandedFields });
+  assert.deepEqual(expanded.fieldDefinitions, expandedFields, 'Expanded columns remain complete and ordered');
+  assert.equal(expanded.targetFields.length, MAX_FIELD_DEFINITIONS);
+  assert.throws(() => normalizeConfig({ ...base, fieldDefinitions: [...expandedFields, { key: 'overflow' }] }), /不超过 200 项/);
+  assert.throws(() => normalizeConfig({ ...base, targetFields: [...expanded.targetFields, 'overflow'] }), /目标字段必须是列表/);
 
   console.log('LITERATURE_SOURCES_TESTS_PASS');
 }

@@ -30,6 +30,7 @@ const EXTRACT_INSTRUCTIONS = [
   '  conversion, evidence {where, quote}, conditions {…}, provenance',
   '  · field 必须取自输入 field_definitions 的 key，不得自造字段；',
   '  · evidence.where（页码/表号/小节）与 evidence.quote（≤300 字原文摘录）至少一项非空——这是可追溯性的硬要求；',
+  '  · 若报告值来自补充材料，evidence.where 必须写出材料文件名及页码/工作表/单元格/Word表格等实际位置；不得把附件数据写成正文来源。',
   '  · value_normalized 仅在按文中给出的规则做单位换算后填写；没有换算就照抄原值，unit_normalized 与 unit_raw 相同；',
   '  · conversion 无换算时为 null，有换算时写明规则；',
   '  · conditions 只填输入 condition_keys 中给出的键（原文可得才填）。',
@@ -45,7 +46,8 @@ const EXTRACT_INSTRUCTIONS = [
   '6) 未给出换算规则时不得把 SOM 折算为 SOC；7) 不得把 POC/MAOC 当作 SOC；',
   '8) 无标定数字化的肉眼读图值不得直接当已提取值（应写进 warnings）。',
   '',
-  '【降级】如果输入正文为空或标注 degraded，直接输出 status="skipped" 且 skip_reason 说明正文缺失（待补充），rows 为空数组。',
+  '【材料状态】补充材料按原格式读取后的文本与位置见材料清单。missing、needs_attention、unreadable、unsupported 的材料不能假装已经读取；partial 或 truncated 只代表当前提供的部分内容。材料未齐或不可读必须写入 warnings，不得宣称全文与补充材料均已核查。',
+  '【降级】只有正文及所有材料都没有可用内容时才输出 status="skipped" 并说明原因；正文 degraded 但补充表格有真实报告值时可从该材料提取，明确来源及未完成部分。',
 ].join('\n');
 
 function readEffectiveSchema(jobDir) {
@@ -82,6 +84,8 @@ function buildExtractPrompt(bundle) {
     `【正文】kind=${fulltext.kind || ''} chars=${fulltext.chars || 0} truncated=${fulltext.truncated ? 'true' : 'false'}` +
       (bundle.degraded ? `\n【降级标记】${bundle.degraded.reason || ''}` : ''),
     String(fulltext.text || ''),
+    '【材料完整性与可读性】\n' + JSON.stringify(bundle.materials_check || { manifest_present: false, supplement_check: { status: 'uninspected' } }, null, 2),
+    '【同篇原始材料及读取结果】（content_ref=fulltext 的正文见上文；其余只使用实际提供的内容和位置）\n' + JSON.stringify(Array.isArray(bundle.materials) ? bundle.materials : [], null, 2),
   ];
   return sections.join('\n\n');
 }

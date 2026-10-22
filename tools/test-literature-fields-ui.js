@@ -48,6 +48,8 @@ function elements(parent) {
 
 const PRODUCTION_FUNCTIONS = ['literatureConfigKey', 'sameLiteratureConfig', 'literatureConfirmFields', 'ensureLiteratureFieldDrafts', 'saveLiteratureFieldDrafts',
   'addLiteratureField', 'removeLiteratureField', 'validatedLiteratureFields', 'literatureConfirmForm',
+  'literatureFieldsAssistState', 'saveLiteratureFieldsAssist', 'literatureFieldsAssistSignature', 'parseLiteratureFieldsPreview',
+  'watchLiteratureFieldsAssist', 'requestLiteratureFieldsAssist', 'applyLiteratureFieldsPreview', 'literatureFieldsAssistForm',
   'closeLiteratureFields', 'renderLiteratureFieldsDialog', 'openLiteratureFields', 'confirmLiteratureFields'];
 
 function createHarness(storage = new Map()) {
@@ -191,7 +193,7 @@ async function main() {
   // Every invalid schema fails locally before the first request.
   const invalidSchemas = [[], [field({ label: ' ' })], [field({ meaning: '' })], [field({ meaning: '含'.repeat(501) })], [field({ unit: ' ' })], [field({ key: '' })],
     [field(), field({ label: '不同表头' })], [field(), field({ key: 'another' })],
-    Array.from({ length: 51 }, (_, index) => field({ key: 'f_' + index, label: '字段' + index }))];
+    Array.from({ length: 201 }, (_, index) => field({ key: 'f_' + index, label: '字段' + index }))];
   for (const fields of invalidSchemas) {
     setFields(harness, fields); harness.current.literatureError = ''; harness.current.literatureFieldsError = '';
     assert.throws(() => subject.validatedLiteratureFields(harness.current), 'Invalid field schema must be rejected');
@@ -217,9 +219,10 @@ async function main() {
   assert.match(harness.current.literatureFieldsError, /总量超过/);
   assert.deepEqual(plain(harness.current.literatureConfirmDrafts), oversizedFields, 'Oversized drafts remain editable');
   assert.deepEqual(JSON.parse(harness.storage.get(STORAGE_KEY))[advancedJob.id].fields, oversizedFields, 'Oversized drafts remain saved for editing after refresh');
-  setFields(harness, Array.from({ length: 50 }, (_, index) => field({ key: 'field_' + (index + 1), label: '字段' + index })));
+  setFields(harness, Array.from({ length: 200 }, (_, index) => field({ key: 'field_' + (index + 1), label: '字段' + index })));
+  assert.equal(subject.validatedLiteratureFields(harness.current).length, 200, '200 complete ordinary fields fit within the bounded confirmation payload');
   subject.addLiteratureField(mod, harness.current, advancedJob);
-  assert.equal(harness.current.literatureConfirmDrafts.length, 50, 'Add action cannot exceed the 50-field limit');
+  assert.equal(harness.current.literatureConfirmDrafts.length, 200, 'Add action cannot exceed the 200-field limit');
 
   // Saving a modal before the true gate edits only local drafts, never search.
   const beforeGateJob = { ...makeJob('before-gate'), status: 'completed', stage: 'completed', resumeStage: 'fulltext' };
@@ -253,11 +256,13 @@ async function main() {
     const before = harness.calls.length; await subject.confirmLiteratureFields(mod);
     assert.equal(harness.calls.length, before, 'Only the real field-confirmation gate can advance extraction');
   }
-  harness.setCurrent(makeTask(advancedJob)); setFields(harness, [advanced]); harness.current.literatureUntil = 'fulltext';
-  const beforeEarly = harness.calls.length; await subject.confirmLiteratureFields(mod);
-  assert.equal(harness.calls.length, beforeEarly, 'An until boundary before extract cannot confirm fields');
+  const staleBoundary = createHarness(); staleBoundary.setCurrent(makeTask(advancedJob)); setFields(staleBoundary, [advanced]); staleBoundary.current.literatureUntil = 'fulltext';
+  await staleBoundary.subject.confirmLiteratureFields(mod);
+  assert.equal(staleBoundary.calls.length, 1, 'An explicit field confirmation advances the existing checkpoint despite a stale outer selector');
+  assert.equal(staleBoundary.calls[0].body.until, 'extract', 'Field-table next step runs extraction only');
+  harness.setCurrent(makeTask(advancedJob)); setFields(harness, [advanced]);
 
-  // HTTP failure retains drafts; success uses exactly the original job/until.
+  // HTTP failure retains drafts; success extracts only on the original job.
   harness.current.literatureUntil = 'validate';
   harness.setRequestError(new Error('fixture advance rejected'));
   await subject.confirmLiteratureFields(mod);
@@ -271,7 +276,7 @@ async function main() {
   assert.equal(harness.calls.length, beforeSuccess + 1);
   const last = harness.calls.at(-1);
   assert.equal(last.url, '/api/literature/advance');
-  assert.equal(last.body.id, advancedJob.id); assert.equal(last.body.until, 'validate');
+  assert.equal(last.body.id, advancedJob.id); assert.equal(last.body.until, 'extract');
   assert.deepEqual(last.body.confirmations.fields, [advanced]);
   assert.ok(!harness.calls.some(call => call.url === '/api/literature/search'), 'Field changes never restart candidate retrieval');
   assert.equal(harness.watches.at(-1).jobId, advancedJob.id);
@@ -280,7 +285,7 @@ async function main() {
   const fallback = createHarness(); fallback.setCurrent(makeTask(advancedJob)); setFields(fallback, [advanced]);
   fallback.current.literatureUntil = '';
   await fallback.subject.confirmLiteratureFields(mod);
-  assert.equal(fallback.calls[0].body.until, advancedJob.until, 'Missing local boundary must keep the original task until');
+  assert.equal(fallback.calls[0].body.until, 'extract', 'A missing local boundary cannot broaden the table next step beyond extraction');
 
   harness.setCurrent(makeTask(makeJob('storage-failure'))); setFields(harness, [field()]); harness.setStorageError(true);
   assert.equal(subject.saveLiteratureFieldDrafts(harness.current, harness.current.literatureJob), false, 'Storage failure must be reported');

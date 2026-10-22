@@ -7,7 +7,9 @@ resume and extraction from old incorrectly labeled caches.
 
 One task page is reused while resolving a paper. After a confirmed file and
 its status are saved, the task page closes. Browser login/access/rate/page
-errors stop the batch and leave that page for the researcher. Requests use a
+errors normally stop the batch and leave that page for the researcher. The
+explicit --skip-unavailable policy records remote access gaps and moves on;
+local file/evidence failures still pause. Requests use a
 fixed conservative interval; file downloads wait for the actual browser
 artifact, under the outer stage budget and explicit stop control.
 
@@ -28,12 +30,16 @@ import os
 import re
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 from literature_fulltext_evidence import (EVIDENCE_VERSION, assess_html, revalidate_saved_html, verified_saved_html)
 from literature_fulltext_browser import FulltextBrowserFetcher
+from literature_fulltext_reuse import ReuseCatalog, inspect_saved, pdf_proof, artifact_destination
+from literature_materials import MaterialsStore, MaterialsError
+from literature_material_collection import MaterialCollection
 
 ROOT = Path(__file__).resolve().parents[1]
 SOC_FETCH = ROOT / "SOC-database-pipeline-clean" / ".codex" / "skills" / "soc-paper-fetch" / "scripts"
@@ -47,7 +53,7 @@ MIN_PDF_BYTES = 50 * 1024  # %PDF magic + >=50KB, same thresholds as SOC downloa
 HTML_MIN_TEXT_CHARS = 300
 HTML_MIN_FULLTEXT_CHARS = 2000
 
-POLICY_TEXT = "HTML 正文优先、PDF 备选；无法合法获取标为待补充，不绕过访问控制。"
+POLICY_TEXT = "正文优先原版PDF，保留网页正文；补充材料保留原格式并逐件核查，缺失标待补充，不可读明确登记。"
 
 ATTENTION_VERIFICATION_MESSAGE = (
     "全文获取遇到人机验证。请在持久浏览器窗口中完成验证，然后点击继续或重跑本阶段；"
@@ -123,7 +129,18 @@ def _atomic_write(path: Path, write) -> None:
     try:
         with os.fdopen(fd, "wb") as stream:
             write(stream)
-        os.replace(tmp_name, path)
+        # Windows readers / security scanners may briefly deny replacing a
+        # file they have open. Retry only those Windows sharing/access codes,
+        # for 1.5s total; never remove or directly overwrite the old target.
+        delays = (0.05, 0.1, 0.15, 0.2, 0.25, 0.25, 0.25, 0.25)
+        for attempt in range(len(delays) + 1):
+            try:
+                os.replace(tmp_name, path)
+                break
+            except OSError as error:
+                if getattr(error, "winerror", None) not in {5, 32, 33} or attempt == len(delays):
+                    raise
+                time.sleep(delays[attempt])
     except BaseException:
         try:
             os.unlink(tmp_name)
@@ -173,9 +190,32 @@ def _collect_links(record: dict) -> list[dict]:
         if not isinstance(link, dict):
             continue
         url = safe_url(link.get("url"))
-        if url:
+        if url and not _supplement_link(link):
             links.append({"label": str(link.get("label") or "")[:100], "url": url})
     return links
+
+
+def _supplement_link(link: dict) -> bool:
+    if link.get("role") == "supplement" or link.get("kind") == "supplement":
+        return True
+    label = str(link.get("label") or link.get("text") or "")
+    return bool(re.search(r"supplement(?:ary|al)?|supporting (?:information|material|data)|additional (?:file|material)|补充材料|附件", label, re.I))
+
+
+def _observe_materials(result: dict, opts: dict, paper_id: str) -> None:
+    discovery = result.get("material_discovery")
+    callback = opts.get("on_material_discovery")
+    if isinstance(discovery, dict) and callable(callback):
+        attention = callback(discovery)
+        if isinstance(attention, dict):
+            _raise_page_attention(attention, paper_id, "")
+
+
+def _checkpoint_main(item: dict, opts: dict) -> dict:
+    callback = opts.get("on_main_saved")
+    if callable(callback):
+        callback(dict(item))
+    return item
 
 
 def _record_result_url(record: dict) -> str:
@@ -302,7 +342,9 @@ def _target_from_candidate(record: dict) -> dict | None:
         record.get("snippet"),
     )
     target.update(source_key=str(record.get("source_key") or ""),
-                  source_candidate_id=str(record.get("candidate_id") or ""))
+                  source_candidate_id=str(record.get("candidate_id") or ""),
+                  year=record.get("year"), authors=record.get("authors") or "",
+                  reuse_disabled=bool(record.get("reuse_disabled")))
     return target
 
 
@@ -323,7 +365,9 @@ def _target_from_group(group: dict) -> dict | None:
         source.get("snippet"),
     )
     target.update(source_key=str(source.get("source_key") or ""),
-                  source_candidate_id=str(source.get("candidate_id") or ""))
+                  source_candidate_id=str(source.get("candidate_id") or ""),
+                  year=group.get("year") or source.get("year"), authors=source.get("authors") or "",
+                  reuse_disabled=bool(group.get("needs_review") or group.get("merge_confidence") == "probable"))
     return target
 
 
@@ -344,7 +388,8 @@ def load_targets(job_dir: Path, config: dict) -> list[dict]:
         if isinstance(dedupe, dict) and isinstance(dedupe.get("groups"), list):
             targets: list[dict] = []
             seen: set[str] = set()
-            for group in dedupe["groups"]:
+            from literature_target_groups import expanded_target_groups
+            for group in expanded_target_groups(dedupe["groups"]):
                 if not isinstance(group, dict):
                     continue
                 target = _target_from_group(group)
@@ -406,7 +451,7 @@ def _item_skeleton(record: dict) -> dict:
     }
 
 
-def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int) -> dict:
+def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int, record=None, *, cnki_navigation=False) -> dict:
     item.update(
         fulltext_url=url,
         kind="pdf",
@@ -417,6 +462,9 @@ def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int)
         evidence_level="fulltext_pdf",
         reason="",
     )
+    blob = out_path.read_bytes()
+    item.update(content_sha256=hashlib.sha256(blob).hexdigest(),
+                pdf_evidence=pdf_proof(blob, record or item, cnki_navigation=cnki_navigation))
     return item
 
 
@@ -430,13 +478,12 @@ def _raise_page_attention(result: dict, paper_id: str, url: str) -> None:
 
 
 def _settle_html(item, job_dir, text, url, verdict, reason, evidence):
-    name = _sanitize_stem(item["paper_id"]) + ".txt"
-    path = job_dir / "fulltext" / "files" / name
+    path = artifact_destination(job_dir, item["paper_id"], "txt")
     saved = text.strip() + "\n"
     atomic_write_text(path, saved)
     item.update(fulltext_url=safe_url(url), kind="html",
                 status="fetched_html" if verdict == "fulltext" else "abstract_only",
-                path=f"fulltext/files/{name}", size=path.stat().st_size, retrieved_at=now_iso(),
+                path=path.relative_to(Path(job_dir).absolute()).as_posix(), size=path.stat().st_size, retrieved_at=now_iso(),
                 evidence_level="fulltext_html" if verdict == "fulltext" else "abstract_only", reason=reason)
     if verdict == "fulltext":
         # Keep structural proof, not a duplicate of the entire article/HTML.
@@ -460,10 +507,10 @@ def _settle_cnki_result(result, record, job_dir, item):
         if not valid:
             raise FulltextPause(item["paper_id"], page_url, reason="page_error",
                                 message="知网下载文件未通过PDF校验，已暂停；请在原页面核对文件格式。")
-        relative = f"fulltext/files/{_sanitize_stem(item['paper_id'])}.pdf"
-        path = job_dir / relative
+        path = artifact_destination(job_dir, item["paper_id"], "pdf")
+        relative = path.relative_to(Path(job_dir).absolute()).as_posix()
         atomic_write_bytes(path, blob)
-        return _settle_pdf(item, path, relative, page_url, size)
+        return _settle_pdf(item, path, relative, page_url, size, record, cnki_navigation=True)
     if result.get("status") == "ok":
         proof = result.get("html_evidence") if isinstance(result.get("html_evidence"), dict) else {}
         text = str(result.get("text") or "")
@@ -487,9 +534,24 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     files_dir.mkdir(parents=True, exist_ok=True)
     paper_id = str(record.get("paper_id") or "")
     stem, item = _sanitize_stem(paper_id), _item_skeleton(record)
+    existing_pdf = files_dir / f"{stem}.pdf"
+    if existing_pdf.exists() or existing_pdf.is_symlink():
+        raise FulltextPause(paper_id, reason="local_fulltext_verification",
+                            message="本任务已有尚未通过来源记录核验的同名PDF，已暂停；请先核查本地文件，不会重新下载或覆盖原件。")
+    opts = {**opts, "record": record}
+    cached = opts.get("cached_main")
+    html_main = dict(cached) if isinstance(cached, dict) and cached.get("status") == "fetched_html" else None
     if record.get("source_key") == "cnki" and callable(getattr(fetcher, "fetch_cnki", None)):
-        return _settle_cnki_result(fetcher.fetch_cnki(record, opts), record, job_dir, item)
+        result = fetcher.fetch_cnki(record, opts)
+        saved = _checkpoint_main(_settle_cnki_result(result, record, job_dir, item), opts)
+        _observe_materials(result, opts, paper_id)
+        return saved
     attempts = candidate_urls(record)
+    # Inspect the already observed landing page before leaving it for a PDF,
+    # so supplementary files can be captured while their real links remain.
+    source = _record_result_url(record)
+    if callable(getattr(fetcher, "fetch_material", None)) and source and ("html", source) in attempts and not _url_looks_pdf(source):
+        attempts = [("html", source), *[entry for entry in attempts if entry[1] != source]]
     if not attempts:
         if any(_cnki_transfer_url(link["url"]) for link in _collect_links(record)) or _cnki_transfer_url(_record_result_url(record)):
             raise FulltextPause(paper_id, reason="page_error", message=CNKI_ENTRY_MESSAGE)
@@ -509,10 +571,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             break
         seen.add(url)
         if kind == "pdf":
-            name = f"{stem}.pdf"
-            path, relative = files_dir / name, f"fulltext/files/{name}"
-            if path.exists() and _looks_like_valid_pdf(path):
-                return _settle_pdf(item, path, relative, url, path.stat().st_size)
+            path = artifact_destination(job_dir, paper_id, "pdf")
+            relative = path.relative_to(Path(job_dir).absolute()).as_posix()
             result = fetcher.fetch_pdf(url, path, opts)
             _raise_page_attention(result, paper_id, url)
             if result.get("status") in {"saved", "already_exists"}:
@@ -522,7 +582,10 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
                     if path.exists():
                         path.unlink(missing_ok=True)
                     continue
-                return _settle_pdf(item, path, relative, url, path.stat().st_size)
+                saved = _checkpoint_main(_settle_pdf(item, path, relative, url, path.stat().st_size, record), opts)
+                _observe_materials(result, opts, paper_id)
+                return saved
+            _observe_materials(result, opts, paper_id)
             failures.append(f"PDF 获取失败（{url}）：{result.get('status') or '未知'}")
             continue
         result = fetcher.fetch_page(url, opts)
@@ -533,20 +596,25 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             if not valid:
                 failures.append(f"页面返回的 PDF 校验失败：{why}")
                 continue
-            name, path = f"{stem}.pdf", files_dir / f"{stem}.pdf"
+            path = artifact_destination(job_dir, paper_id, "pdf")
             atomic_write_bytes(path, blob)
-            return _settle_pdf(item, path, f"fulltext/files/{name}", result.get("url") or url, size)
+            saved = _checkpoint_main(_settle_pdf(item, path, path.relative_to(Path(job_dir).absolute()).as_posix(), result.get("url") or url, size, record), opts)
+            _observe_materials(result, opts, paper_id)
+            return saved
         if result.get("status") == "ok":
             text, page_url = str(result.get("text") or ""), safe_url(result.get("url") or url)
             proof = result.get("html_evidence") if isinstance(result.get("html_evidence"), dict) else {}
             verdict, reason = assess_html_text(text, page_url, proof, record.get("title") or "", record.get("doi") or "")
             if verdict == "fulltext":
-                return _settle_html(item, job_dir, str(proof.get("article_text") or text), page_url, verdict, reason, proof)
+                if html_main is None:
+                    html_main = _settle_html(dict(item), job_dir, str(proof.get("article_text") or text), page_url, verdict, reason, proof)
+                    _checkpoint_main(html_main, opts)
+            _observe_materials(result, opts, paper_id)
             if verdict == "abstract" and abstract is None:
                 abstract = (str(proof.get("article_text") or text), page_url, verdict, reason, proof)
             # These are visible page links, never guessed database/session URLs.
             for link in (proof.get("links") or result.get("fulltext_links") or [])[:8]:
-                if not isinstance(link, dict):
+                if not isinstance(link, dict) or _supplement_link(link):
                     continue
                 linked = safe_url(link.get("url"))
                 if _cnki_transfer_url(linked):
@@ -554,12 +622,18 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
                     # official click context. Do not simulate headers/tickets.
                     blocked_transfer = True
                     continue
+                is_pdf = _url_looks_pdf(linked) or link.get("kind") == "pdf"
+                if html_main is not None and not is_pdf:
+                    continue  # Keep the confirmed body; seek only its original PDF.
                 if linked and linked not in seen and all(other != linked for _, other in attempts):
-                    attempts.append(("pdf" if _url_looks_pdf(linked) else "html", linked))
+                    attempts.append(("pdf" if is_pdf else "html", linked))
             if verdict == "unavailable":
                 failures.append(f"页面不可用（{url}）：{reason}")
             continue
+        _observe_materials(result, opts, paper_id)
         failures.append(f"页面导航失败（{url}）：{result.get('status') or '未知'}")
+    if html_main is not None:
+        return html_main
     if blocked_transfer:
         raise FulltextPause(paper_id, reason="page_error", message=CNKI_ENTRY_MESSAGE)
     if abstract:
@@ -600,7 +674,7 @@ def _carry_previous(target: dict, prev: dict | None, job_dir: Path) -> dict:
     item = _item_skeleton(target)
     if not prev:
         return item
-    for key in ("fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "evidence_version", "html_evidence", "content_sha256", "reviewed_at"):
+    for key in ("fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "evidence_version", "html_evidence", "content_sha256", "reviewed_at", "pdf_evidence", "reused_from", "observed_content_sha256", "local_verification", "acquisition_skip", "pause_reason"):
         if key in prev:
             item[key] = prev[key]
     if item["status"] == "fetched_html":
@@ -609,6 +683,18 @@ def _carry_previous(target: dict, prev: dict | None, job_dir: Path) -> dict:
             valid, reason = verified_saved_html(item, path.read_text(encoding="utf-8", errors="replace"))
             if not valid:
                 item.update(status="unavailable", evidence_level="unverified_cache", reason=reason)
+    if item["status"] == "fetched_pdf":
+        checked = inspect_saved(job_dir, item, target, for_reuse=False)
+        if checked.get("missing_file"):
+            item.update(status="pending", kind="none", path="", size=0, retrieved_at="", evidence_level="",
+                        fulltext_url="", reason="上次获取的文件缺失，已重新排队")
+            for key in ("pdf_evidence", "content_sha256", "observed_content_sha256", "local_verification"):
+                item.pop(key, None)
+        elif checked["status"] != "valid":
+            item.update(status="needs_attention", evidence_level="local_verification_required",
+                        reason=checked["reason"], local_verification={"status": checked["status"], "reason": checked["reason"]})
+        elif checked.get("observed_sha256"):
+            item["observed_content_sha256"] = checked["sha256"]
     if item["status"] in FETCHED_STATUSES:
         rel = str(item.get("path") or "")
         if not rel or not (job_dir / rel).exists():
@@ -645,8 +731,12 @@ def _counts(items: list[dict]) -> dict:
     return counts
 
 
-def _write_status(job_dir: Path, items: list[dict]) -> dict:
+def _write_status(job_dir: Path, items: list[dict], *, materials=None) -> dict:
     counts = _counts(items)
+    if any(item.get("acquisition_skip") for item in items):
+        counts["acquisition_skipped"] = sum(bool(item.get("acquisition_skip")) for item in items)
+        if materials is not None:
+            counts["material_incomplete"] = sum(not materials.paper_ready(item) for item in items)
     doc = {
         "version": 1,
         "generated_at": now_iso(),
@@ -695,20 +785,21 @@ def review_saved_fulltext(job_dir: Path, *, emit_result=True) -> dict:
                 changes.append({"paper_id": str(item.get("paper_id") or ""), "previous_status": prior,
                                 "status": prior, "reason": CNKI_ENTRY_MESSAGE})
             continue
-        if prior not in FETCHED_STATUSES:
+        if prior not in FETCHED_STATUSES | {"abstract_only"}:
             continue
         reviewed += 1
         path = _safe_cache_path(job_dir, item.get("path") or "")
         if path is None:
             verdict, reason = "unavailable", "已保存文件缺失或路径无效（待补充）"
         elif prior == "fetched_pdf":
-            if _looks_like_valid_pdf(path):
+            checked = inspect_saved(job_dir, item, item, for_reuse=False)
+            if checked["status"] == "valid":
                 continue
-            verdict, reason = "unavailable", "缓存PDF未通过格式校验（待补充）"
+            verdict, reason = "unavailable", checked["reason"]
         else:
             text = path.read_text(encoding="utf-8", errors="replace")
             verdict, reason = revalidate_saved_html(item, text)
-            if verdict == "fulltext":
+            if verdict == "fulltext" or (prior == "abstract_only" and verdict == "abstract"):
                 continue
         item.update(status="abstract_only" if verdict == "abstract" else "unavailable",
                     evidence_level="abstract_only" if verdict == "abstract" else "unverified_cache",
@@ -745,6 +836,58 @@ def _parse_only(only: object) -> list[str] | None:
     return values
 
 
+def _remote_pause(reason: str) -> bool:
+    """Only remote acquisition gaps may be skipped; storage/evidence stays gated."""
+    reason = str(reason or "")
+    return bool(reason and not reason.startswith("local_") and reason != "material_cleanup")
+
+
+def _previous_remote_pause(item: dict, paper: dict) -> FulltextPause | None:
+    """Migrate an already paused remote item without repeating its failed request.
+
+    Older status files lack a machine-readable reason. Only explicit access /
+    loading messages in an attention record are recognized; ambiguous local
+    verification or file errors remain paused for inspection.
+    """
+    if item.get("local_verification"):
+        return None
+    reason = str(item.get("pause_reason") or "")
+    if reason and not _remote_pause(reason):
+        return None
+    messages = []
+    if item.get("status") == "needs_attention":
+        messages.append(str(item.get("reason") or ""))
+    if paper.get("main_pdf_status") == "needs_attention":
+        messages.append(str(paper.get("main_pdf_reason") or ""))
+    if paper.get("supplement_check", {}).get("status") == "needs_attention":
+        messages.append(str(paper["supplement_check"].get("reason") or ""))
+    messages += [str(material.get("download_reason") or material.get("read_reason") or "")
+                 for material in paper.get("materials", [])
+                 if material.get("download_status") == "needs_attention"]
+    message = next((value for value in messages if value), "")
+    if not message:
+        return None
+    if re.search(r"SHA|缓存|本地|暂存|清理|大小.*不符|清单.*不|保存.*失败|文件.*冲突", message, re.I):
+        return None
+    if not reason:
+        if re.search(r"验证码|人机验证|verification|captcha", message, re.I):
+            reason = "verification"
+        elif re.search(r"登录|log.?in|sign.?in", message, re.I):
+            reason = "login"
+        elif re.search(r"权限|订阅|access.required|paywall", message, re.I):
+            reason = "access_required"
+        elif re.search(r"限流|频繁|rate.limit", message, re.I):
+            reason = "rate_limited"
+        elif re.search(r"超时|超过1分钟|未就绪|timeout", message, re.I):
+            reason = "load_timeout"
+        elif re.search(r"404|页面返回错误|未能核对完整题名|尚未取得可确认的全文|尚不能确认.*结果页面", message):
+            reason = "page_error"
+        else:
+            return None
+    return FulltextPause(str(item["paper_id"]), str(item.get("fulltext_url") or ""),
+                         reason=reason, message=message)
+
+
 def _run_fulltext(
     config: dict,
     job_dir: Path,
@@ -754,6 +897,7 @@ def _run_fulltext(
     only: list[str] | str | None = None,
     retry_unavailable: bool = False,
     restart_cnki: bool = False,
+    skip_unavailable: bool = False,
     fetcher=None,
 ) -> int:
     """Execute the fulltext stage; returns the process exit code (0/1)."""
@@ -782,6 +926,11 @@ def _run_fulltext(
              else _carry_previous(target, previous.get(target["paper_id"]), job_dir) for target in targets]
     target_by_id = {target["paper_id"]: target for target in targets}
     position = {item["paper_id"]: index for index, item in enumerate(items)}
+    try:
+        materials = MaterialsStore(job_dir, targets)
+    except MaterialsError as error:
+        emit("error", stage="fulltext", message=f"材料清单无法安全读取，已保留原任务：{error}")
+        return 1
 
     emit(
         "stage",
@@ -806,8 +955,49 @@ def _run_fulltext(
     else:
         allowed = set(position)
 
+    explicit_retry = retry_unavailable and only_ids is not None and len(only_ids) == 1
+
+    def skip_remote(item, target, pause):
+        nonlocal fetcher
+        saved = items[position[item["paper_id"]]]
+        marker = {"policy": "skip_unavailable", "reason": pause.reason,
+                  "message": pause.message, "skipped_at": now_iso()}
+        if saved.get("status") not in FETCHED_STATUSES:
+            saved.update(fulltext_url=pause.url or str(saved.get("fulltext_url") or ""),
+                         status="unavailable", reason=pause.message + "（本轮已跳过，待补充）")
+        saved.update(acquisition_skip=marker, pause_reason=pause.reason)
+        paper = materials.paper(target)
+        paper["acquisition_skip"] = dict(marker)
+        if paper.get("main_pdf_status") != "downloaded":
+            paper.update(main_pdf_status="missing", main_pdf_reason=pause.message + "（本轮已跳过，待补充）")
+        if paper.get("supplement_check", {}).get("status") not in {"checked", "none_declared"}:
+            paper["supplement_check"] = {"status": "unknown", "reason": pause.message + "（本轮已跳过，补充材料待核查）"}
+        for material in paper.get("materials", []):
+            if material.get("download_status") != "downloaded":
+                material.update(download_status="missing", download_reason=pause.message + "（本轮已跳过，待补充）")
+        materials.flush()
+        _write_status(job_dir, items, materials=materials)
+        if fetcher is None:
+            fetcher = make_fetcher(config, job_dir)
+        defer = getattr(fetcher, "defer_paper", None)
+        if callable(defer):
+            defer(reason=pause.reason, url=pause.url)
+        emit("stage", stage="fulltext", reason=pause.reason, paper_id=item["paper_id"],
+             message=f"本轮跳过 {item['paper_id']}：{pause.message}；已存材料保留，继续下一篇。")
+
+    if skip_unavailable and resume and not explicit_retry:
+        for item in items:
+            if item["paper_id"] not in allowed or item.get("acquisition_skip"):
+                continue
+            target = target_by_id[item["paper_id"]]
+            previous_pause = _previous_remote_pause(item, materials.paper(target))
+            if previous_pause is not None:
+                skip_remote(item, target, previous_pause)
+
     def eligible(item: dict) -> bool:
         status = str(item.get("status") or "pending")
+        if item.get("acquisition_skip") and not explicit_retry and not item.get("local_verification"):
+            return False
         if status in RETRYABLE_ON_RESUME:
             return True
         if status in GATED_ON_RESUME:
@@ -815,6 +1005,18 @@ def _run_fulltext(
         return False
 
     eligible_items = [item for item in items if item["paper_id"] in allowed and eligible(item)]
+    # Keep the paused acquisition first; complete material inventories for old
+    # successes afterwards. A saved body is never permission to download it again.
+    backfill = []
+    if fetcher is None or callable(getattr(fetcher, "inspect_materials", None)):
+        for item in items:
+            if item["paper_id"] not in allowed or item.get("status") not in FETCHED_STATUSES:
+                continue
+            if item.get("acquisition_skip") and not explicit_retry:
+                continue
+            paper = materials.paper(target_by_id[item["paper_id"]])
+            if not materials.paper_ready(target_by_id[item["paper_id"]]):
+                backfill.append(item)
 
     # Quota: min(--limit, fulltext.maxPapers - already fetched)
     quota: int | None = None
@@ -830,6 +1032,9 @@ def _run_fulltext(
             message=f"本次最多获取 {quota} 篇（其余保持待处理；可放宽 --limit / fulltext.maxPapers 后续跑）",
         )
         eligible_items = eligible_items[:quota]
+    eligible_items += backfill
+    if limit is not None:
+        eligible_items = eligible_items[:limit]
 
     gated = [
         item for item in items
@@ -844,13 +1049,22 @@ def _run_fulltext(
 
     skipped = len(items) - len(eligible_items)
 
+    def incomplete_counts():
+        return {"acquisition_skipped": sum(bool(item.get("acquisition_skip")) for item in items),
+                "material_incomplete": sum(not materials.paper_ready(target) for target in targets)}
+
     if not eligible_items:
-        counts = _write_status(job_dir, items)
+        for target in targets:
+            saved = items[position[target["paper_id"]]]
+            if target["paper_id"] in allowed and saved.get("status") in FETCHED_STATUSES:
+                materials.register_main(target, saved)
+        materials.flush()
+        counts = _write_status(job_dir, items, materials=materials)
         fetched = counts["fetched_pdf"] + counts["fetched_html"]
         emit(
             "result",
             stage="fulltext",
-            message=f"全文获取完成：无需获取（{counts['total']} 篇目标中 {fetched} 篇已获取）",
+            message=f"材料获取阶段已结束：本轮无新增获取（{counts['total']} 篇目标中 {fetched} 篇已获取）；缺失材料仍待补充。",
             count=fetched,
             counts={
                 "fetched": fetched,
@@ -861,35 +1075,118 @@ def _run_fulltext(
                 "needs_attention": counts["needs_attention"],
                 "pending": counts["pending"],
                 "skipped": skipped,
+                **incomplete_counts(),
             },
-            files=["fulltext/status.json"],
+            files=["fulltext/status.json", "fulltext/materials.json"],
         )
         return 0
 
     if fetcher is None:
         fetcher = make_fetcher(config, job_dir)
-    try:
-        ready = fetcher.ensure_ready()
-    except Exception as error:
-        emit("error", stage="fulltext", message=f"全文获取失败：浏览器连接失败（{error}）")
-        return 1
-    if str((ready or {}).get("status")) != "ok":
-        emit("error", stage="fulltext", message=str((ready or {}).get("message") or "浏览器启动失败"))
-        return 1
-
+    browser_ready = False
+    catalog = ReuseCatalog(job_dir, targets, load_targets)
     opts = {"fetcher": fetcher, "per_paper_timeout_sec": options["per_paper_timeout_sec"],
             "cnki_restart": restart_cnki}
+
+    def ensure_browser():
+        nonlocal browser_ready
+        if not browser_ready:
+            ready = fetcher.ensure_ready()
+            if str((ready or {}).get("status")) != "ok":
+                return ready or {"status": "error", "message": "浏览器尚未就绪。"}
+            browser_ready = True
+        return {"status": "ok"}
+
     for index, item in enumerate(eligible_items, start=1):
         target = target_by_id[item["paper_id"]]
+        if explicit_retry:
+            item.pop("acquisition_skip", None)
+            item.pop("pause_reason", None)
+            materials.paper(target).pop("acquisition_skip", None)
+        collector = MaterialCollection(materials, target, fetcher, ensure_browser,
+            progress=lambda message: emit("stage", stage="fulltext", message=message))
+
+        def checkpoint(saved, target=target):
+            items[position[target["paper_id"]]] = saved
+            _write_status(job_dir, items, materials=materials)
+            if saved.get("status") in FETCHED_STATUSES:
+                materials.register_main(target, saved)
+                materials.flush()
+
+        paper_opts = {**opts, "record": target, "on_material_discovery": collector.observe, "on_main_saved": checkpoint}
         emit(
             "stage",
             stage="fulltext",
             message=f"获取全文 {index}/{len(eligible_items)}：{_short(target.get('title')) or item['paper_id']}",
         )
+        # Reuse is entirely local and precedes even opening the browser. It
+        # never changes a source task or uses a local candidate number as a
+        # cross-task paper identifier.
+        reused = ({"status": "reused", "item": item} if item.get("status") in FETCHED_STATUSES
+                  else catalog.try_reuse(target, _item_skeleton(target)))
+        if reused["status"] == "reused":
+            checkpoint(reused["item"])
+            emit("stage", stage="fulltext", message=f"已复用本地已核验全文：{_short(target.get('title')) or item['paper_id']}；未重新下载。")
+        local_check = item.get("local_verification")
+        if reused["status"] == "blocked" or (reused["status"] != "reused" and isinstance(local_check, dict) and local_check.get("status") != "valid"):
+            message = reused.get("reason") or local_check.get("reason") or "已保存全文需先人工核查，未重新下载。"
+            item.update(status="needs_attention", reason=message, pause_reason="local_fulltext_verification")
+            _write_status(job_dir, items, materials=materials)
+            emit("attention", stage="fulltext", reason="local_fulltext_verification", paper_id=item["paper_id"], message=message)
+            return 0
+        if reused["status"] != "reused":
+            try:
+                ready = ensure_browser()
+            except Exception:
+                emit("error", stage="fulltext", message="全文获取失败：浏览器连接失败，请检查本机浏览器。")
+                return 1
+            if str((ready or {}).get("status")) != "ok":
+                emit("error", stage="fulltext", message=str((ready or {}).get("message") or "浏览器启动失败"))
+                return 1
         try:
-            updated = fetch_one(target, job_dir, opts)
+            current = items[position[item["paper_id"]]]
+            if current.get("status") == "fetched_pdf":
+                updated = current
+                attention = collector.inspect_existing(paper_opts)
+                if attention:
+                    _raise_page_attention(attention, item["paper_id"], "")
+            elif current.get("status") == "fetched_html" and (
+                    not callable(getattr(fetcher, "inspect_materials", None))
+                    or materials.paper(target).get("main_pdf_status") == "downloaded"):
+                updated = current
+                attention = collector.inspect_existing(paper_opts)
+                if attention:
+                    _raise_page_attention(attention, item["paper_id"], "")
+            else:
+                if current.get("status") == "fetched_html":
+                    paper_opts["cached_main"] = current
+                    ready = ensure_browser()
+                    if ready.get("status") != "ok":
+                        raise FulltextPause(item["paper_id"], reason="page_error", message=str(ready.get("message") or "PDF检查浏览器尚未就绪。"))
+                updated = fetch_one(target, job_dir, paper_opts)
+            checkpoint(updated)
+            if updated.get("status") in FETCHED_STATUSES:
+                if not collector.checked and not collector.inspected:
+                    attention = collector.inspect_existing(paper_opts)
+                    if attention:
+                        _raise_page_attention(attention, item["paper_id"], "")
+                paper = materials.paper(target)
+                if paper.get("main_pdf_status") != "downloaded":
+                    paper.update(main_pdf_status="missing", main_pdf_reason="已保留可确认的网页正文，本次尚未取得原版PDF；请核查原文章页。")
+                materials.read_materials(target)
+                materials.flush()
+            else:
+                paper = materials.paper(target)
+                paper.update(main_pdf_status="missing", main_pdf_reason=str(updated.get("reason") or "本次未取得正文PDF。"))
+                materials.flush()
         except FulltextPause as pause:
-            item.update(
+            if skip_unavailable and _remote_pause(pause.reason):
+                skip_remote(item, target, pause)
+                continue
+            saved = items[position[item["paper_id"]]]
+            saved["pause_reason"] = pause.reason
+            if saved.get("status") not in FETCHED_STATUSES:
+                item.update(
                 fulltext_url=pause.url or str(item.get("fulltext_url") or ""),
                 kind="none",
                 status="needs_attention",
@@ -898,25 +1195,41 @@ def _run_fulltext(
                 retrieved_at="",
                 evidence_level="",
                 reason=pause.message,
-            )
-            _write_status(job_dir, items)
+                pause_reason=pause.reason,
+                )
+                items[position[item["paper_id"]]] = item
+            paper = materials.paper(target)
+            if paper.get("main_pdf_status") != "downloaded":
+                paper.update(main_pdf_status="needs_attention", main_pdf_reason=pause.message)
+            materials.flush()
+            _write_status(job_dir, items, materials=materials)
             emit("attention", stage="verification", reason=pause.reason, paper_id=pause.paper_id, message=pause.message)
             return 0
+        except MaterialsError as error:
+            items[position[item["paper_id"]]]["pause_reason"] = "local_material_verification"
+            materials.flush()
+            _write_status(job_dir, items, materials=materials)
+            emit("attention", stage="verification", reason="local_material_verification", paper_id=item["paper_id"], message=str(error))
+            return 0
         items[position[item["paper_id"]]] = updated
-        _write_status(job_dir, items)
-        if updated.get("status") in FETCHED_STATUSES:
+        _write_status(job_dir, items, materials=materials)
+        catalog.register(target, updated)
+        if updated.get("status") in FETCHED_STATUSES and (
+                reused["status"] != "reused" or
+                (collector.inspected and callable(getattr(fetcher, "inspect_materials", None)))):
             complete = getattr(fetcher, "complete_paper", None)
             if callable(complete):
                 complete()  # Close only our page, after validated file and status are saved.
 
-    counts = _write_status(job_dir, items)
+    materials.flush()
+    counts = _write_status(job_dir, items, materials=materials)
     fetched = counts["fetched_pdf"] + counts["fetched_html"]
     emit(
         "result",
         stage="fulltext",
         message=(
-            f"全文获取完成：已获取 {fetched} 篇（PDF {counts['fetched_pdf']} / HTML {counts['fetched_html']}），"
-            f"摘要级 {counts['abstract_only']} 篇，待补充 {counts['unavailable']} 篇"
+            f"材料获取阶段已结束：已获取正文 {fetched} 篇（PDF {counts['fetched_pdf']} / HTML {counts['fetched_html']}）；"
+            f"请逐篇核对材料清单中的PDF、补充材料与可读性。题录/摘要 {counts['abstract_only']} 篇，待补充 {counts['unavailable']} 篇"
         ),
         count=fetched,
         counts={
@@ -928,13 +1241,14 @@ def _run_fulltext(
             "needs_attention": counts["needs_attention"],
             "pending": counts["pending"],
             "skipped": skipped,
+            **incomplete_counts(),
         },
-        files=["fulltext/status.json"],
+        files=["fulltext/status.json", "fulltext/materials.json"],
     )
     return 0
 
 
-def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, fetcher=None):
+def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, skip_unavailable=False, fetcher=None):
     job_dir = Path(job_dir)
     if restart_cnki:
         try:
@@ -966,7 +1280,8 @@ def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailab
     actual = fetcher if fetcher is not None else make_fetcher(config, job_dir)
     try:
         return _run_fulltext(config, job_dir, resume=resume, limit=limit, only=only,
-                             retry_unavailable=retry_unavailable, restart_cnki=restart_cnki, fetcher=actual)
+                             retry_unavailable=retry_unavailable, restart_cnki=restart_cnki,
+                             skip_unavailable=skip_unavailable, fetcher=actual)
     finally:
         close = getattr(actual, "close", None)
         if callable(close):
@@ -981,6 +1296,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, help="本次最多获取的篇数")
     parser.add_argument("--only", help="仅处理指定论文标识，逗号分隔（如 GSC-001,GSC-002）")
     parser.add_argument("--retry-unavailable", action="store_true", help="重试此前标为待补充（unavailable/abstract_only）的项")
+    parser.add_argument("--skip-unavailable", action="store_true", help="远程登录、权限、验证或超时项登记待补充并继续；本地材料核验异常仍暂停")
     parser.add_argument("--restart-cnki", action="store_true", help="显式重新定位已选知网单篇，从正常检索页开始一次")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review-only", action="store_true", help="仅离线复核缓存，不访问网站")
@@ -1014,6 +1330,7 @@ def main(argv: list[str] | None = None) -> int:
             only=args.only,
             retry_unavailable=args.retry_unavailable,
             restart_cnki=args.restart_cnki,
+            skip_unavailable=args.skip_unavailable,
         )
     except Exception as error:
         emit("error", stage="fulltext", message=f"全文获取失败：{error}")

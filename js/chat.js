@@ -1464,6 +1464,7 @@
    * 无模块 / 未选中模块时禁用输入框，并给出对应占位提示。
    */
   function render() {
+    if (root.TaskManager && root.TaskManager.refreshControls) root.TaskManager.refreshControls();
     if (!spaceEl) spaceEl = document.getElementById('module-space');
     if (!spaceEl) return;
 
