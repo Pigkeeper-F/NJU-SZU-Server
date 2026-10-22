@@ -6,7 +6,10 @@
       "label": "Google Scholar",
       "state": "executable",
       "access": "browser",
-      "adapter": { "kind": "soc-script", "script": "SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/scripts/google_scholar_search.py" },
+      "adapter": {
+        "kind": "soc-script",
+        "script": "SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/scripts/google_scholar_search.py"
+      },
       "idPrefix": "GSC",
       "fulltext": "publisher-only",
       "notes": "首批连接器（2026-10-15）；需要人工过人机验证"
@@ -16,9 +19,16 @@
       "label": "PubMed",
       "state": "executable",
       "access": "api",
-      "adapter": { "kind": "open-api", "module": "pubmed", "endpoint": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/" },
+      "adapter": {
+        "kind": "open-api",
+        "module": "pubmed",
+        "endpoint": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+      },
       "idPrefix": "PMD",
-      "credentialEnv": ["NCBI_API_KEY", "NCBI_EMAIL"],
+      "credentialEnv": [
+        "NCBI_API_KEY",
+        "NCBI_EMAIL"
+      ],
       "rateLimit": "3 请求/秒（配置 NCBI_API_KEY 后 10 请求/秒）",
       "fulltext": "abstract-always；正文仅 PMC 开放获取子集可用",
       "notes": "NCBI E-utilities：esearch → esummary → efetch(abstract)；无需登录"
@@ -28,9 +38,16 @@
       "label": "PMC",
       "state": "executable",
       "access": "api",
-      "adapter": { "kind": "open-api", "module": "pmc", "endpoint": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/" },
+      "adapter": {
+        "kind": "open-api",
+        "module": "pmc",
+        "endpoint": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+      },
       "idPrefix": "PMC",
-      "credentialEnv": ["NCBI_API_KEY", "NCBI_EMAIL"],
+      "credentialEnv": [
+        "NCBI_API_KEY",
+        "NCBI_EMAIL"
+      ],
       "rateLimit": "3 请求/秒（配置 NCBI_API_KEY 后 10 请求/秒）",
       "fulltext": "开放获取子集有正文（其余仅题录）",
       "notes": "PubMed Central 开放获取子集；版权与 OA 许可限制，取不到即标待补充"
@@ -40,19 +57,48 @@
       "label": "OpenAlex",
       "state": "executable",
       "access": "api",
-      "adapter": { "kind": "open-api", "module": "openalex", "endpoint": "https://api.openalex.org/works" },
+      "adapter": {
+        "kind": "open-api",
+        "module": "openalex",
+        "endpoint": "https://api.openalex.org/works"
+      },
       "idPrefix": "OAX",
-      "credentialEnv": ["OPENALEX_API_KEY", "OPENALEX_MAILTO"],
+      "credentialEnv": [
+        "OPENALEX_API_KEY",
+        "OPENALEX_MAILTO"
+      ],
       "rateLimit": "单请求 100 请求/秒上限；免密时按共享 IP 日配额计费，可能返回 429",
       "fulltext": "metadata-only；附开放获取链接（OA landing/pdf）",
       "notes": "无需登录；建议配置 OPENALEX_API_KEY 与 OPENALEX_MAILTO 进入 polite pool"
+    },
+    {
+      "key": "semantic-scholar",
+      "label": "Semantic Scholar",
+      "state": "executable",
+      "access": "api",
+      "adapter": {
+        "kind": "open-api",
+        "module": "semantic-scholar",
+        "endpoint": "https://api.semanticscholar.org/graph/v1/paper/search"
+      },
+      "idPrefix": "SS",
+      "credentialEnv": [
+        "SEMANTIC_SCHOLAR_API_KEY"
+      ],
+      "rateLimit": "无 key 走共享池（常 429）；申请免费 key 后约 100 请求/秒",
+      "fulltext": "abstract；开放获取 PDF 走 openAccessPdf 链接",
+      "notes": "覆盖中英文期刊（中文期刊元数据来自 CNKI/Wanfang），无登录；建议申请免费 API Key（semanticscholar.org/product/api）"
     },
     {
       "key": "europe-pmc",
       "label": "Europe PMC",
       "state": "executable",
       "access": "api",
-      "adapter": { "kind": "open-api", "module": "europe-pmc", "endpoint": "https://www.ebi.ac.uk/europepmc/webservices/rest/search" },
+      "adapter": {
+        "kind": "open-api",
+        "module": "europe-pmc",
+        "endpoint": "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+      },
       "idPrefix": "EPMC",
       "credentialEnv": [],
       "rateLimit": "约 10 请求/秒（共享 IP 共享配额）",
@@ -73,7 +119,11 @@
         "把清单放到作业目录并执行：python tools/literature_import.py --job-dir <作业目录> --file <清单> --source cnki",
         "导入的记录以 source_key=cnki 进入候选池，交给下游去重/全文/提取/校验/导出"
       ],
-      "importFormats": ["ris", "bibtex", "csv"],
+      "importFormats": [
+        "ris",
+        "bibtex",
+        "csv"
+      ],
       "notes": "SOC cnki_search.py 存在但未接入网页线；本轮走人工导入路径"
     },
     {
@@ -90,7 +140,11 @@
         "执行：python tools/literature_import.py --job-dir <作业目录> --file <清单> --source wanfang",
         "导入的记录以 source_key=wanfang 进入候选池"
       ],
-      "importFormats": ["ris", "bibtex", "csv"],
+      "importFormats": [
+        "ris",
+        "bibtex",
+        "csv"
+      ],
       "notes": ""
     },
     {
@@ -107,7 +161,11 @@
         "执行：python tools/literature_import.py --job-dir <作业目录> --file <清单> --source web-of-science",
         "导入的记录以 source_key=web-of-science 进入候选池"
       ],
-      "importFormats": ["ris", "bibtex", "csv"],
+      "importFormats": [
+        "ris",
+        "bibtex",
+        "csv"
+      ],
       "notes": "订阅制：走「订阅账号导出 → 清单导入」"
     },
     {
@@ -124,7 +182,11 @@
         "执行：python tools/literature_import.py --job-dir <作业目录> --file <清单> --source scopus",
         "导入的记录以 source_key=scopus 进入候选池"
       ],
-      "importFormats": ["ris", "bibtex", "csv"],
+      "importFormats": [
+        "ris",
+        "bibtex",
+        "csv"
+      ],
       "notes": "订阅制：走「订阅账号导出 → 清单导入」"
     }
   ]

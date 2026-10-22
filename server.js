@@ -586,6 +586,65 @@ async function handleLiterature(req, res, url) {
     }
     // 【环节② · 2026-10-20】POST /api/research/questions 由独立的 handleResearch 处理
     // （它不在 /api/literature/ 前缀下，见请求分发处的分支）。
+    // 【文献清单导入 · 2026-10-21】POST /api/literature/import
+    // 知网/万方/WoS/Scopus 检索不到（登录态+验证码+订阅），唯一诚实的路径是：
+    // 用自己的账号在源站检索 → 导出 RIS/BibTeX/CSV → 在这里导入候选池。
+    // 导入的条目与检索来的条目同构，下游五个阶段零改动。
+    if (req.method === 'POST' && route === '/api/literature/import') {
+      const data = JSON.parse(await readBody(req, 4 * 1024 * 1024));
+      const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
+      const sourceKey = typeof data.source === 'string' ? data.source.trim() : 'cnki';
+      const content = typeof data.content === 'string' ? data.content : '';
+      const format = typeof data.format === 'string' ? data.format : null;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
+        return sendJson(res, 400, { error: '检索作业标识无效。' });
+      }
+      if (!content.trim()) return sendJson(res, 400, { error: '清单内容为空。' });
+      const registry = require('./tools/literature-sources');
+      if (!registry.isKnown(sourceKey)) {
+        return sendJson(res, 400, { error: '未知的来源：' + sourceKey });
+      }
+      // 解析与并入由 Python 脚本做（Node 不能 require .py）——与其它阶段同一套 spawn 机制。
+      const jobDir = path.join(ROOT, '.workbench', 'literature', jobId);
+      const tempPath = path.join(os.tmpdir(), 'fa-import-' + Date.now() + '.tmp');
+      const configPath = path.join(jobDir, 'run_config.json');
+      try {
+        fs.writeFileSync(tempPath, content, 'utf8');
+        const args = [
+          path.join(ROOT, 'tools', 'literature_import.py'),
+          '--output-dir', jobDir,
+          '--file', tempPath,
+          '--source', sourceKey
+        ];
+        if (format) args.push('--format', format);
+        if (fs.existsSync(configPath)) args.splice(1, 0, '--config', configPath);
+        else args.splice(1, 0, '--config', tempPath + '.cfg.json');
+        const outcome = await new Promise((resolve) => {
+          const child = spawn('python', args, { cwd: ROOT, windowsHide: true });
+          let out = '';
+          let err = '';
+          child.stdout.on('data', (chunk) => { out += chunk; });
+          child.stderr.on('data', (chunk) => { err += chunk; });
+          child.on('error', (error) => resolve({ code: 1, out: '', err: String(error && error.message) }));
+          child.on('close', (code) => resolve({ code, out, err }));
+        });
+        let parsed = null;
+        // 过滤空行再取最后一行（stdout 末尾常带空行，直接取最后一段会拿到空串）
+        const outLines = String(outcome.out || '').trim().split(String.fromCharCode(10)).map((line) => line.trim()).filter((line) => line.length > 0);
+        try { parsed = JSON.parse(outLines.length ? outLines[outLines.length - 1] : '{}'); } catch (error) { parsed = null; }
+        if (outcome.code !== 0 || !parsed || parsed.status !== 'ok') {
+          const message = (parsed && parsed.message) || String(outcome.out || outcome.err || '').trim().slice(0, 300) || '导入失败';
+          return sendJson(res, 400, { error: message });
+        }
+        return sendJson(res, 200, { ok: true, added: parsed.added, total: parsed.total, files: parsed.files });
+      } catch (error) {
+        console.error('[server] literature import failed:', error);
+        return sendJson(res, 500, { error: '导入失败：' + ((error && error.message) || '未知错误') });
+      } finally {
+        try { fs.unlinkSync(tempPath); } catch (error) { /* 临时文件清理失败不影响结果 */ }
+      }
+    }
+
     // 【stage2】POST /advance：从 resumeStage 续跑（缺省 until=export），支持字段确认关口（§21.2.2）。
     if (req.method === 'POST' && route === '/api/literature/advance') {
       const data = JSON.parse(await readBody(req, 64 * 1024));

@@ -788,6 +788,29 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
   color: var(--muted);
 }
 
+/* 文献清单导入行（知网/万方等检索不到的源） */
+.research-import {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+.research-import-label { flex: 0 0 auto; }
+.research-import-select {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+}
+
 /* 调研状态条：长等待时必须显眼（阶段 + 已等待秒数 + 取消） */
 .research-statusbar {
   display: flex;

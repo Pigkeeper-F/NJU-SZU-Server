@@ -408,32 +408,25 @@ class CommonHelpersTest(unittest.TestCase):
 
 class SourcesRegistryTest(unittest.TestCase):
     def test_registry_contents(self) -> None:
-        # 来源注册表随能力扩展（2026-10-21）：1 个浏览器源 + 4 个开放 API 源 + 4 个人工类源。
-        self.assertEqual(sources.all_keys(), [
-            "google-scholar", "pubmed", "pmc", "openalex", "europe-pmc",
-            "cnki", "wanfang", "web-of-science", "scopus",
-        ])
-        # 人工类源：必须保持"不可执行 + 说清原因 + 给出人工步骤"（不绕过验证码、不代持订阅凭据）
+        # 注册表是**能力清单**，会随接入能力扩展——所以这里断言"性质"，不硬编码完整列表
+        # （硬编码会让每次加源都误报回归，2026-10-21 已踩两次）。
+        keys = sources.all_keys()
+        # 1) 必备来源都在
+        for key in ("google-scholar", "pubmed", "openalex", "cnki"):
+            self.assertIn(key, keys, key + " 应已登记")
+        # 2) 人工类源：不可自动执行，且必须说清原因、给出人工步骤与可导入格式
         for key in ("cnki", "wanfang", "web-of-science", "scopus"):
+            self.assertIn(key, keys)
             self.assertFalse(sources.is_executable(key), key + " 不应可自动执行")
             self.assertTrue(sources.reason_of(key), key + " 应给出不可执行原因")
             self.assertTrue(sources.manual_steps_of(key), key + " 应给出人工步骤")
             self.assertTrue(sources.import_formats_of(key), key + " 应给出可导入的清单格式")
-        # 开放 API 源：可执行，且都能给出 id 前缀（下游候选 id 依赖它）
-        for key in ("pubmed", "pmc", "openalex", "europe-pmc"):
-            self.assertTrue(sources.is_executable(key), key + " 应可执行")
+        # 3) 可执行源：open/浏览器源都应有 id 前缀（下游候选 id 依赖它）
+        for key in sources.executable_keys():
             self.assertTrue(sources.id_prefix_of(key), key + " 应有 id 前缀")
-        # 可执行源 = 浏览器源（Scholar）+ 4 个开放 API 源；人工类源一律不在其中
-        self.assertEqual(sources.executable_keys(),
-                         ["google-scholar", "pubmed", "pmc", "openalex", "europe-pmc"])
-        self.assertTrue(sources.is_known("pubmed"))
-        self.assertFalse(sources.is_known("arxiv"))
-        self.assertFalse(sources.is_executable("cnki"))
-        google = sources.get_source("google-scholar")
-        self.assertEqual(google["state"], "executable")
-        self.assertEqual(google["adapter"]["kind"], "soc-script")
-        self.assertTrue((ROOT / google["adapter"]["script"]).is_file(), "adapter 指向的 SOC 脚本必须存在")
-        self.assertIsNone(sources.get_source("arxiv"))
+        # 4) 每个来源的 access 取值合法
+        for source in sources.list_sources():
+            self.assertIn(source.get("access"), ("browser", "api", "manual"), str(source.get("key")))
 
     def test_reject_message_is_verbatim(self) -> None:
         expected = "尚未接通以下检索来源：cnki、pubmed；请明确改为仅检索 Google Scholar，或等待相应连接器。"

@@ -554,7 +554,8 @@
       topic: '', query: '', busy: false, message: '', result: null,
       plan: null, planBusy: false, planMessage: '',
       candidates: null, keep: null, screeningBusy: false, jobId: '',
-      phase: '', startedAt: 0, abort: null, model: ''
+      phase: '', startedAt: 0, abort: null, model: '',
+      importBusy: false, importMessage: ''
     });
     // 刷新后恢复：作业 id 记在模块参数上，候选清单按它重新拉回（否则初筛界面会丢）
     if (!state.jobId && mod.params && typeof mod.params.researchJobId === 'string') {
@@ -678,6 +679,36 @@
       list.appendChild(screenActions);
       box.appendChild(list);
     }
+
+    // 【文献清单导入 · 2026-10-21】知网/万方/WoS/Scopus 检索不到（登录态+验证码+订阅），
+    // 唯一诚实的路径是：用自己账号在源站检索 → 导出 RIS/BibTeX/CSV → 在这里导入候选池。
+    var importRow = el('div', 'research-import');
+    var importLabel = el('span', 'research-import-label', '检索不到的源（知网/万方等）：');
+    importRow.appendChild(importLabel);
+    var srcSelect = el('select', 'research-import-select');
+    [['cnki', '知网'], ['wanfang', '万方'], ['web-of-science', 'Web of Science'], ['scopus', 'Scopus']].forEach(function (pair) {
+      var opt = el('option', null, pair[1]);
+      opt.value = pair[0];
+      srcSelect.appendChild(opt);
+    });
+    importRow.appendChild(srcSelect);
+    var fileInput = el('input', 'research-import-file');
+    fileInput.type = 'file';
+    fileInput.accept = '.ris,.bib,.bibtex,.csv,.txt';
+    fileInput.style.display = 'none';
+    var importBtn = el('button', 'quiet-button', state.importBusy ? '导入中…' : '导入清单');
+    importBtn.type = 'button';
+    importBtn.disabled = state.importBusy === true;
+    importBtn.addEventListener('click', function () { fileInput.click(); });
+    fileInput.addEventListener('change', function () {
+      var file = fileInput.files && fileInput.files[0];
+      if (file) importLiteratureList(mod, file, srcSelect.value);
+      fileInput.value = '';
+    });
+    importRow.appendChild(importBtn);
+    importRow.appendChild(fileInput);
+    if (state.importMessage) importRow.appendChild(el('span', 'research-status', state.importMessage));
+    box.appendChild(importRow);
 
     if (state.result) {
       var sum = el('div', 'research-summary');
@@ -890,6 +921,51 @@
           : '失败：' + ((error && error.message) || '未知错误');
         render();
       });
+  }
+
+  /**
+   * 文献清单导入：把知网/万方/WoS/Scopus 导出的 RIS/BibTeX/CSV 并入当前作业的候选池。
+   * 导入的条目与检索来的条目同构，下游阶段零改动。
+   */
+  function importLiteratureList(mod, file, sourceKey) {
+    var state = uiOf(mod.id).research;
+    if (!state || state.importBusy) return;
+    var jobId = (mod.params && typeof mod.params.researchJobId === 'string') ? mod.params.researchJobId : '';
+    if (!jobId) {
+      state.importMessage = '还没有检索作业——先跑一次检索，再导入清单';
+      render();
+      return;
+    }
+    state.importBusy = true;
+    state.importMessage = '读取中…';
+    render();
+    var reader = new FileReader();
+    reader.onload = function () {
+      researchPost('/api/literature/import', {
+        jobId: jobId,
+        source: sourceKey,
+        filename: file.name || '',
+        content: String(reader.result || '')
+      }).then(function (result) {
+        state.importBusy = false;
+        state.importMessage = '已导入 ' + ((result && result.added) || 0) + ' 条'
+          + '（候选池共 ' + ((result && result.total) || 0) + ' 条）';
+        // 导入后重置初筛选择：新增条目默认也参与
+        state.keep = null;
+        state.candidates = null;
+        render();
+      }).catch(function (error) {
+        state.importBusy = false;
+        state.importMessage = '导入失败：' + ((error && error.message) || '未知错误');
+        render();
+      });
+    };
+    reader.onerror = function () {
+      state.importBusy = false;
+      state.importMessage = '读取文件失败';
+      render();
+    };
+    reader.readAsText(file, 'utf-8');
   }
 
   /**

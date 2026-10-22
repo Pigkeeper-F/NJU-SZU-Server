@@ -57,9 +57,10 @@ EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 OPENALEX_WORKS = "https://api.openalex.org/works"
 #: Europe PMC Articles RESTful 检索端点
 EUROPE_PMC_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+SEMANTIC_SCHOLAR_SEARCH = "https://api.semanticscholar.org/graph/v1/paper/search"
 
 #: 本模块支持的来源 key（与 tools/literature-sources.json 的 adapter.module 对应）
-SUPPORTED_SOURCES = ("pubmed", "pmc", "openalex", "europe-pmc")
+SUPPORTED_SOURCES = ("pubmed", "pmc", "openalex", "europe-pmc", "semantic-scholar")
 
 #: NCBI 建议的 tool 名（官方要求：便于 NCBI 在异常时联系调用方）
 TOOL_NAME = "flow-agent-web"
@@ -256,6 +257,17 @@ def search_request(
                 "pageSize": str(limit),
             },
         }
+    if source_key == "semantic-scholar":
+        params: dict[str, str] = {
+            "query": query,
+            "limit": str(limit),
+            "fields": "title,abstract,authors,year,venue,externalIds,openAccessPdf,url",
+        }
+        if year_from is not None:
+            params["year"] = f"{year_from}-" + (str(year_to) if year_to is not None else "")
+        elif year_to is not None:
+            params["year"] = "-" + str(year_to)
+        return {"name": "search", "url": SEMANTIC_SCHOLAR_SEARCH, "params": params}
     raise ValueError(f"未支持的开放来源：{source_key}")
 
 
@@ -712,11 +724,77 @@ def _run_europe_pmc(query: str, limit: int, year_from: int | None, year_to: int 
     }
 
 
+def _parse_semantic_scholar(body: str) -> list[dict]:
+    """解析 Semantic Scholar paper/search 响应。"""
+    try:
+        payload = json.loads(body)
+    except ValueError as error:
+        raise SourceError(f"Semantic Scholar 响应不是合法 JSON：{_short(error)}") from error
+    results: list[dict] = []
+    for work in (payload.get("data") or []) if isinstance(payload, dict) else []:
+        if not isinstance(work, dict):
+            continue
+        title = str(work.get("title") or "").strip()
+        if not title:
+            continue
+        authors = [str((a or {}).get("name") or "") for a in (work.get("authors") or [])]
+        external = work.get("externalIds") or {}
+        doi = str(external.get("DOI") or "").strip()
+        links: list[dict] = []
+        oa = work.get("openAccessPdf") or {}
+        if isinstance(oa, dict) and oa.get("url"):
+            links.append({"label": "开放获取 PDF", "url": str(oa["url"])})
+        results.append({
+            "title": title,
+            "abstract": str(work.get("abstract") or ""),
+            "authors": ", ".join(a for a in authors if a),
+            "venue": str(work.get("venue") or ""),
+            "year": work.get("year"),
+            "doi": doi,
+            "result_url": str(work.get("url") or ""),
+            "fulltext_links": links,
+            "paperId": str(work.get("paperId") or ""),
+        })
+    return results
+
+
+def _run_semantic_scholar(query: str, limit: int, year_from: int | None, year_to: int | None) -> dict:
+    """Semantic Scholar：单次 /paper/search 检索。
+
+    无 key 也能用，但共享池限流很紧（429 常见）——所以这里带退避重试；
+    有 SEMANTIC_SCHOLAR_API_KEY 时走专用配额，稳得多。
+    """
+    request = search_request("semantic-scholar", query, limit, year_from, year_to)
+    api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+    headers = {"x-api-key": api_key} if api_key else None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            status, body = http_get(request["url"], request["params"], headers=headers)
+            if status >= 400:
+                raise SourceError(f"Semantic Scholar 返回 HTTP {status}", status=status)
+            results = _parse_semantic_scholar(body)
+            return {
+                "status": "ok" if results else "no_results",
+                "url": _request_url(request),
+                "results": results,
+                "requests": [request],
+                "count": len(results),
+            }
+        except SourceError as error:
+            last_error = error
+            if error.kind != "rate_limited" or attempt == 2:
+                raise
+            time.sleep(2.0 * (attempt + 1))
+    raise last_error or SourceError("Semantic Scholar 检索失败")
+
+
 _RUNNERS = {
     "pubmed": _run_pubmed,
     "pmc": _run_pmc,
     "openalex": _run_openalex,
     "europe-pmc": _run_europe_pmc,
+    "semantic-scholar": _run_semantic_scholar,
 }
 
 

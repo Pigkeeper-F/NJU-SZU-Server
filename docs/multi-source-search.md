@@ -111,3 +111,54 @@ python tools/literature_search_open.py --source pubmed --query "soil carbon" --l
    PubMed/PMC/Europe PMC 能拿到开放获取子集的正文。
 5. `tools/literature_fulltext.py` 目前只对 Scholar 作业验证过全文抓取路径；
    开放源作业的全文获取**还需要一轮联调**（这是下一步）。
+
+---
+
+## 八、人工源怎么用：清单导入（已实现，2026-10-21）
+
+知网 / 万方 / Web of Science / Scopus 程序化直连必被拦，**本工具不绕过验证码、不代持订阅凭据**。
+唯一诚实的路径是「**源站自己检索 → 导出题录 → 导入候选池**」，这条路现在已经做实了。
+
+### 8.1 操作步骤（以知网为例）
+
+1. 在知网检索，勾选要用的文献 → 点「**导出/参考文献**」→ 选 **RIS**（或 EndNote / BibTeX）
+   → 下载得到 `.ris`（或 `.bib`）文件。
+   > 万方：检索结果页「导出」→ 选 RIS / EndNote。
+   > Web of Science：结果页「Export」→ **RIS** 或 **BibTeX**。
+   > Scopus：结果页「Export」→ **RIS**。
+2. 回到工作台，进「① 文献调研」模块，把当前环节跑过一次检索（这样才有作业可挂靠）。
+3. 调研面板底部那行「**检索不到的源（知网/万方等）**」→ 选来源 → 点「**导入清单**」→ 选刚才的文件。
+4. 提示「已导入 N 条（候选池共 M 条）」即成功；候选池里这些条目带
+   `CNK-I001` 这样的 id（来源前缀 + `-I` 表示导入批次），可直接参与初筛与后续全流程。
+
+### 8.2 语义（重要）
+
+- **导入批次 `batch_index = 0`**，与检索批次（1/2/…）分开记，便于回溯"这条是导进来的"。
+- **同一份清单重复导入 = 整批替换**，不会越导越多。
+- 导入条目一律 `screening_status = pending_review`：**不自动判"不相关"**，
+  是否纳入由人工初筛决定——与检索来的条目完全同权。
+- 产物仍是 `candidates.json / candidates.csv`，下游去重 → 全文 → 提取 → 校验 → 导出**零改动**。
+
+### 8.3 格式支持
+
+| 格式 | 说明 |
+|---|---|
+| **RIS** | 知网/万方/WoS/Scopus 导出通用；字段 AU/TI/JO/PY/DO/AB/UR |
+| **BibTeX** | 字段 title/author/journal/year/doi/abstract/url；`and` 连接的多作者会转成逗号 |
+| **CSV** | 表头支持中英文（标题/作者/期刊/年份/DOI/摘要 或 title/author/journal/year/doi/abstract） |
+
+格式可自动识别（按扩展名 + 内容特征），也可在界面上显式选择。
+
+### 8.4 相关代码
+
+| 文件 | 作用 |
+|---|---|
+| `tools/literature_import.py` | RIS/BibTeX/CSV 解析 + 并入候选池（batch_index=0，整批替换） |
+| `server.js` `POST /api/literature/import` | 端点：`{jobId, source, content, format?}` → 写入作业候选池 |
+| `js/chat.js` | ①调研面板底部的「导入清单」入口（选来源 + 选文件） |
+| `tools/test_literature_import.py` | 离线回归：38 项断言（解析/识别/并入/整批替换/坏输入） |
+
+### 8.5 知网能导入多少？
+
+知网免费账号通常**单次导出有条数上限**（常见 20–50 条，视版本），建议分批导出、分次导入——
+同一份清单重复导入会整批替换，但**不同清单会累加**，所以分批要换文件名/内容。
