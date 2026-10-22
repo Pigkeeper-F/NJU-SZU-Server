@@ -2084,6 +2084,48 @@
     }
     body.appendChild(actions);
 
+    // 【2026-10-22】文档已批准后，把「环节推进」的操作**就近**放进卡片里。
+    // 文档卡常常很长、内部还有滚动，而状态条在模块空间顶部——批准完要往上滚才点得到，很别扭。
+    // 这里给的按钮与状态条是同一套动作，只是位置就近。
+    if (st === 'approved') {
+      var advStore = getStore();
+      var advState = (advStore && advStore.getState) ? advStore.getState() : null;
+      var advMods = (advState && advState.modules) || [];
+      var modStatus = statusOf(mod);
+      var nextMod = null;
+      for (var mi = 0; mi < advMods.length; mi++) {
+        if (advMods[mi].id === mod.id) {
+          nextMod = (mi + 1 < advMods.length) ? advMods[mi + 1] : null;
+          break;
+        }
+      }
+      var advance = el('div', 'doc-advance');
+      if (modStatus === 'todo' || modStatus === 'doing') {
+        advance.appendChild(docButton('提交本环节审核', 'primary', false, function () {
+          getStore().submitModule(mod.id);
+          render();
+        }));
+      } else if (modStatus === 'review') {
+        advance.appendChild(docButton('通过本环节 → 下一模块', 'primary', false, function () {
+          getStore().approveModule(mod.id);
+          render();
+        }));
+        advance.appendChild(docButton('打回重做', '', false, function () {
+          getStore().rejectModule(mod.id, '需要补充后再提交');
+          render();
+        }));
+      } else if (modStatus === 'approved' && nextMod) {
+        advance.appendChild(docButton('进入下一模块：' + nextMod.name + ' →', 'primary', false, function () {
+          getStore().selectModule(nextMod.id);
+          render();
+        }));
+      }
+      if (advance.childNodes.length) {
+        advance.appendChild(el('span', 'doc-advance-hint', '与上方状态条是同一个动作，就近放在这里'));
+        body.appendChild(advance);
+      }
+    }
+
     // 【X2】迭代闭环提示：上次执行失败 → 本次「生成代码并执行」已附带 stderr 反馈（仅在按钮可见时显示）
     if (st === 'approved' && !(mod.run && mod.run.status === 'confirmed') &&
         ui.exec && ui.exec.ok === false) {

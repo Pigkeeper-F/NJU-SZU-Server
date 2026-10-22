@@ -788,6 +788,18 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
   color: var(--muted);
 }
 
+/* 文档卡内的「环节推进」就近按钮组（与顶部状态条同一套动作） */
+.doc-advance {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.doc-advance-hint { font-size: 11.5px; color: var(--muted); }
+
 /* 文献清单导入行（知网/万方等检索不到的源） */
 .research-import {
   display: flex;
