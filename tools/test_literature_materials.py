@@ -140,6 +140,18 @@ class StoreTests(unittest.TestCase):
             (job / saved["path"]).unlink()
             self.assertFalse(store.paper_ready(target))
 
+    def test_completeness_requires_inspection_and_all_supplements(self):
+        with tempfile.TemporaryDirectory() as root:
+            job, target, store = self.make_store(root)
+            self.assertEqual(store.completeness(target)["status"], "unverified")
+            store.record_discovery(target, {"status": "none_declared", "links": []})
+            self.assertEqual(store.completeness(target)["status"], "complete")
+            store.record_discovery(target, {"status": "checked", "links": [descriptor()]})
+            report = store.completeness(target)
+            self.assertEqual(report["status"], "partial")
+            self.assertEqual(report["pending"], 1)
+            self.assertEqual(report["missing"][0]["download_status"], "pending")
+
     def test_material_id_dots_cannot_change_the_storage_directory(self):
         with tempfile.TemporaryDirectory() as root:
             job, target, store = self.make_store(root)

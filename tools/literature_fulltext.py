@@ -31,11 +31,14 @@ import re
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
-from literature_fulltext_evidence import (EVIDENCE_VERSION, assess_html, revalidate_saved_html, verified_saved_html)
+from literature_fulltext_evidence import (EVIDENCE_VERSION, assess_html, assess_completeness, revalidate_saved_html, verified_saved_html)
 from literature_fulltext_browser import FulltextBrowserFetcher
 from literature_fulltext_reuse import ReuseCatalog, inspect_saved, pdf_proof, artifact_destination
 from literature_materials import MaterialsStore, MaterialsError
@@ -44,9 +47,9 @@ from literature_material_collection import MaterialCollection
 ROOT = Path(__file__).resolve().parents[1]
 SOC_FETCH = ROOT / "SOC-database-pipeline-clean" / ".codex" / "skills" / "soc-paper-fetch" / "scripts"
 
-STATUS_ORDER = ["fetched_pdf", "fetched_html", "abstract_only", "unavailable", "needs_attention", "pending"]
+STATUS_ORDER = ["fetched_pdf", "fetched_html", "partial", "abstract_only", "unavailable", "needs_attention", "pending"]
 FETCHED_STATUSES = {"fetched_pdf", "fetched_html"}
-RETRYABLE_ON_RESUME = {"pending", "needs_attention"}
+RETRYABLE_ON_RESUME = {"pending", "needs_attention", "partial"}
 GATED_ON_RESUME = {"unavailable", "abstract_only"}
 
 MIN_PDF_BYTES = 50 * 1024  # %PDF magic + >=50KB, same thresholds as SOC download_pdf
@@ -190,6 +193,52 @@ def _pmc_article_url(url: str) -> bool:
             and re.fullmatch(r"/articles/PMC[1-9]\d*/?", parsed.path, re.I) is not None)
 
 
+def _pmc_pdf_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return ((parsed.hostname or "").lower() == "pmc.ncbi.nlm.nih.gov"
+            and re.fullmatch(r"/articles/PMC[1-9]\d*/pdf/?", parsed.path, re.I) is not None)
+
+
+def _pmc_id(value: str) -> str:
+    match = re.search(r"PMC[1-9]\d*", str(value or ""), re.I)
+    return match.group(0).upper() if match else ""
+
+
+def _europe_pmc_pdf_urls(record: dict, timeout: int = 30) -> list[str]:
+    """Open-access PDF entry URLs reported by Europe PMC for this record."""
+    pmid = str(record.get("pmid") or "")
+    if not pmid:
+        match = re.fullmatch(r"https?://pubmed\.ncbi\.nlm\.nih\.gov/([1-9]\d*)/?", _record_result_url(record), re.I)
+        pmid = match.group(1) if match else ""
+    pmcid = _pmc_id(str(record.get("pmcid") or "")) or _pmc_id(_record_result_url(record))
+    query = f"EXT_ID:{pmid}" if pmid else (f"PMCID:{pmcid}" if pmcid else "")
+    if not query:
+        return []
+    endpoint = ("https://www.ebi.ac.uk/europepmc/webservices/rest/search?query="
+                + quote(query) + "&resultType=core&format=json")
+    try:
+        request = Request(endpoint, headers={"User-Agent": "NJU-SZU-Workbench/1.0"})
+        with urlopen(request, timeout=max(5, min(30, timeout))) as response:
+            payload = json.loads(response.read(4 * 1024 * 1024).decode("utf-8", "replace"))
+    except Exception:
+        return []
+    results = ((payload.get("resultList") or {}).get("result") or []) if isinstance(payload, dict) else []
+    urls: list[str] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        listing = ((result.get("fullTextUrlList") or {}).get("fullTextUrl") or [])
+        for entry in listing if isinstance(listing, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("availabilityCode") != "OA" or entry.get("documentStyle") != "pdf":
+                continue
+            url = safe_url(entry.get("url"))
+            if url and url not in urls:
+                urls.append(url)
+    return urls[:4]
+
+
 def _pubmed_article_url(url: str) -> bool:
     parsed = urlparse(url)
     return ((parsed.hostname or "").lower() == "pubmed.ncbi.nlm.nih.gov"
@@ -235,6 +284,29 @@ def _record_result_url(record: dict) -> str:
     return safe_url(record.get("result_url") or record.get("source_url"))
 
 
+def _materials_page_url(record: dict, item: dict) -> str:
+    """The verified article page to inspect for supplementary materials.
+
+    A main PDF is not an article page, and PubMed is bibliographic. Prefer the
+    PMC article page (or the verified HTML/XML fulltext URL), then a non-PDF
+    landing page.
+    """
+    # Prefer the candidate's verified PMC article link over a reused item's
+    # stored URL: old tasks may carry a stale/wrong fulltext_url.
+    for link in _collect_links(record):
+        url = safe_url(link.get("url"))
+        if _pmc_article_url(url):
+            return url
+    if item.get("kind") in {"html", "xml"} and item.get("fulltext_url"):
+        return safe_url(item["fulltext_url"])
+    for link in _collect_links(record):
+        url = safe_url(link.get("url"))
+        if url and not _url_looks_pdf(url):
+            return url
+    source = _record_result_url(record)
+    return source if source and not _url_looks_pdf(source) else ""
+
+
 def _cnki_transfer_url(url: str) -> bool:
     parsed = urlparse(url)
     return ((parsed.hostname or "").lower() == "bar.cnki.net"
@@ -271,8 +343,10 @@ def candidate_urls(record: dict) -> list[tuple[str, str]]:
     if _pubmed_article_url(result_url):
         # PMC is the official full-text copy; a PubMed record is bibliographic
         # and must only be the fallback when its known PMC entry fails.
+        # Prefer the PMC PDF, then its HTML body, then the bibliographic page.
         for link in links:
             if _pmc_article_url(link["url"]):
+                add("pdf", link["url"].rstrip("/") + "/pdf/")
                 add("html", link["url"])
         add("html", result_url)
         for link in links:
@@ -280,6 +354,8 @@ def candidate_urls(record: dict) -> list[tuple[str, str]]:
                 add("pdf" if _url_looks_pdf(link["url"]) else "html", link["url"])
         return out
     for link in links:
+        if _pmc_article_url(link["url"]):
+            add("pdf", link["url"].rstrip("/") + "/pdf/")
         if _url_looks_pdf(link["url"]):
             add("pdf", link["url"])
     if _url_looks_pdf(result_url):
@@ -487,8 +563,22 @@ def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int,
         reason="",
     )
     blob = out_path.read_bytes()
-    item.update(content_sha256=hashlib.sha256(blob).hexdigest(),
-                pdf_evidence=pdf_proof(blob, record or item, cnki_navigation=cnki_navigation))
+    proof = pdf_proof(blob, record or item, cnki_navigation=cnki_navigation)
+    text_chars = int(proof.get("text_chars") or 0)
+    # “下载完整”以文件完整性为准：PDF 魔数、EOF、传输完成、大小阈值。
+    # 文本能否抽取是独立事实（扫描版可完整但没有可提取文本），不据此
+    # 把已完整下载的 PDF 误标为 partial。
+    file_complete = bool(proof.get("pdf_magic") and proof.get("eof_marker")
+                         and proof.get("transfer_completed") and int(item.get("size") or 0) >= MIN_PDF_BYTES)
+    item.update(content_sha256=hashlib.sha256(blob).hexdigest(), pdf_evidence=proof,
+                completeness={"status": "complete" if file_complete else "partial",
+                              "article_type": "pdf", "found_sections": [], "missing_sections": [],
+                              "section_count": 0, "char_count": text_chars,
+                              "page_count": proof.get("pages"),
+                              "text_extractable": proof.get("parser_status") == "valid" and text_chars >= 800})
+    if not file_complete:
+        item.update(status="partial", evidence_level="fulltext_pdf_partial",
+                    reason="PDF 文件未通过完整性校验（魔数/EOF/大小/传输）")
     return item
 
 
@@ -505,10 +595,17 @@ def _settle_html(item, job_dir, text, url, verdict, reason, evidence):
     path = artifact_destination(job_dir, item["paper_id"], "txt")
     saved = text.strip() + "\n"
     atomic_write_text(path, saved)
+    completeness = assess_completeness(evidence, text) if verdict == "fulltext" else None
+    status = "fetched_html" if verdict == "fulltext" else "abstract_only"
+    evidence_level = "fulltext_html" if verdict == "fulltext" else "abstract_only"
+    if completeness is not None and completeness["status"] != "complete":
+        status, evidence_level = "partial", "fulltext_html_partial"
+        missing = "、".join(completeness.get("missing_sections") or [])
+        reason = (reason + "；" if reason else "") + "正文结构不完整，缺少：" + (missing or "核心章节")
     item.update(fulltext_url=safe_url(url), kind="html",
-                status="fetched_html" if verdict == "fulltext" else "abstract_only",
+                status=status,
                 path=path.relative_to(Path(job_dir).absolute()).as_posix(), size=path.stat().st_size, retrieved_at=now_iso(),
-                evidence_level="fulltext_html" if verdict == "fulltext" else "abstract_only", reason=reason)
+                evidence_level=evidence_level, reason=reason, completeness=completeness)
     if verdict == "fulltext":
         # Keep structural proof, not a duplicate of the entire article/HTML.
         proof = {key: evidence.get(key) for key in
@@ -519,6 +616,144 @@ def _settle_html(item, job_dir, text, url, verdict, reason, evidence):
         item.update(evidence_version=EVIDENCE_VERSION, html_evidence=proof,
                     content_sha256=hashlib.sha256(saved.encode("utf-8")).hexdigest())
     return item
+
+
+def _direct_pdf_blob(url: str, timeout: int = 30) -> bytes | None:
+    """Fetch a public OA PDF directly; returns None for HTML/paywall/errors."""
+    try:
+        request = Request(url, headers={"User-Agent": "NJU-SZU-Workbench/1.0",
+                                        "Accept": "application/pdf,*/*;q=0.5"})
+        with urlopen(request, timeout=max(5, min(60, timeout))) as response:
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+            blob = response.read(64 * 1024 * 1024 + 1)
+    except Exception:
+        return None
+    if (not blob or len(blob) > 64 * 1024 * 1024 or len(blob) < MIN_PDF_BYTES
+            or not blob.startswith(b"%PDF")):
+        return None
+    if "pdf" not in content_type and not blob.startswith(b"%PDF"):
+        return None
+    return blob
+
+
+def _pmc_pdf_from_record(record: dict) -> str:
+    """The PMC PDF entry for a record that already has a PMC article link."""
+    for link in _collect_links(record):
+        url = safe_url(link.get("url"))
+        if _pmc_pdf_url(url):
+            return url
+        if _pmc_article_url(url):
+            return url.rstrip("/") + "/pdf/"
+    source = _record_result_url(record)
+    if _pmc_pdf_url(source):
+        return source
+    if _pmc_article_url(source):
+        return source.rstrip("/") + "/pdf/"
+    return ""
+
+
+def _pmc_xml_item(record: dict, job_dir: Path, opts: dict) -> dict | None:
+    """Fetch the canonical PMC JATS body from Europe PMC.
+
+    This is a completeness baseline for open-access PMC papers: all JATS
+    ``sec`` blocks are captured instead of whichever DOM region a page happened
+    to render. Failure falls back to the normal HTML/PDF path.
+    """
+    pmcid = _pmc_id(str(record.get("pmcid") or ""))
+    if not pmcid:
+        for link in _collect_links(record):
+            pmcid = _pmc_id(str(link.get("url") or ""))
+            if pmcid:
+                break
+    if not pmcid:
+        pmcid = _pmc_id(_record_result_url(record))
+    if not pmcid:
+        return None
+    xml_url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
+    raw = b""
+    timeout = max(5, min(30, int(opts.get("per_paper_timeout_sec") or 120)))
+    for attempt in range(3):
+        try:
+            request = Request(xml_url, headers={"User-Agent": "NJU-SZU-Workbench/1.0"})
+            with urlopen(request, timeout=timeout) as response:
+                raw = response.read(8 * 1024 * 1024 + 1)
+            break
+        except HTTPError as error:
+            if error.code not in {429, 500, 502, 503, 504} or attempt == 2:
+                return None
+            time.sleep(1.5 * (attempt + 1))
+        except Exception:
+            if attempt == 2:
+                return None
+            time.sleep(1.5 * (attempt + 1))
+    if not raw or len(raw) > 8 * 1024 * 1024:
+        return None
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return None
+
+    def text(element) -> str:
+        return " ".join("".join(element.itertext()).split()) if element is not None else ""
+
+    title = text(root.find(".//article-title"))
+    doi = ""
+    for node in root.findall(".//article-id"):
+        if str(node.get("pub-id-type") or "").lower() == "doi":
+            doi = text(node)
+            break
+    body = root.find(".//body")
+    if body is None:
+        return None
+    sections: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for sec in body.iter("sec"):
+        heading = text(sec.find("title"))
+        if not heading or re.match(r"^(?:references?|bibliography|acknowledg|附录|参考文献|致谢)", heading, re.I):
+            continue
+        # Parent sections such as "Results" often contain only child <sec>
+        # blocks and no direct <p>. Aggregate descendant paragraphs so the
+        # parent heading is still recognized as a core section.
+        parts = [value for value in (text(paragraph) for paragraph in sec.findall(".//p")) if value]
+        if not parts:
+            for child in list(sec):
+                if child.tag == "title" or child.tag in {"ref-list", "ack", "fn-group", "table-wrap-foot"}:
+                    continue
+                if child.tag in {"list", "table-wrap", "fig", "disp-quote", "boxed-text"}:
+                    value = text(child)
+                    if value:
+                        parts.append(value)
+        if not parts:
+            continue
+        key = (heading.casefold(), " ".join(" ".join(parts).split())[:200])
+        if key in seen:
+            continue
+        seen.add(key)
+        sections.append({"heading": heading[:300], "text": " ".join(parts)})
+    if not sections:
+        return None
+    abstract = text(root.find(".//abstract"))
+    article_text = "\n".join(([title] if title else []) + ([abstract] if abstract else [])
+                             + [section["heading"] + "\n" + section["text"] for section in sections])
+    evidence = {
+        "origin": "pmc_fulltext_xml",
+        "container": "pmc-jats-body",
+        "container_verified": True,
+        "page_title": title,
+        "citation_title": title,
+        "citation_doi": doi,
+        "article_text": article_text,
+        "headings": [{"level": 2, "text": section["heading"]} for section in sections],
+        "sections": sections,
+    }
+    pmc_url = f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
+    verdict, reason = assess_html(article_text, pmc_url, evidence, title, doi)
+    if verdict != "fulltext":
+        return None
+    saved = _settle_html(dict(_item_skeleton(record)), job_dir, article_text, pmc_url, verdict, reason, evidence)
+    saved.update(kind="xml", xml_url=xml_url,
+                 evidence_level="fulltext_xml" if saved.get("status") == "fetched_html" else "fulltext_xml_partial")
+    return saved
 
 
 def _settle_cnki_result(result, record, job_dir, item):
@@ -566,12 +801,58 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     opts = {**opts, "record": record}
     cached = opts.get("cached_main")
     html_main = dict(cached) if isinstance(cached, dict) and cached.get("status") == "fetched_html" else None
+    xml_fallback = None
     if record.get("source_key") == "cnki" and callable(getattr(fetcher, "fetch_cnki", None)):
         result = fetcher.fetch_cnki(record, opts)
         saved = _checkpoint_main(_settle_cnki_result(result, record, job_dir, item), opts)
         _observe_materials(result, opts, paper_id)
         return saved
+
+    # 1) PMC PDF as the preferred main artifact.
+    real_fetcher = isinstance(fetcher, FulltextBrowserFetcher)
+    if real_fetcher and opts.get("prefer_pmc_pdf", True):
+        for pdf_url in _europe_pmc_pdf_urls(record, int(opts.get("per_paper_timeout_sec") or 30)):
+            pdf_path = artifact_destination(job_dir, paper_id, "pdf")
+            pdf_relative = pdf_path.relative_to(Path(job_dir).absolute()).as_posix()
+            direct = _direct_pdf_blob(pdf_url, int(opts.get("per_paper_timeout_sec") or 30))
+            if direct is not None:
+                atomic_write_bytes(pdf_path, direct)
+                return _checkpoint_main(
+                    _settle_pdf(item, pdf_path, pdf_relative, pdf_url, len(direct), record), opts)
+            try:
+                pdf_result = fetcher.fetch_pdf(pdf_url, pdf_path, opts)
+            except Exception:
+                pdf_result = {"status": "error"}
+            if pdf_result.get("status") in {"saved", "already_exists"} and _looks_like_valid_pdf(pdf_path):
+                return _checkpoint_main(
+                    _settle_pdf(item, pdf_path, pdf_relative, pdf_url, pdf_path.stat().st_size, record), opts)
+            if pdf_path.exists():
+                pdf_path.unlink(missing_ok=True)
+    pmc_pdf = _pmc_pdf_from_record(record)
+    if pmc_pdf and opts.get("prefer_pmc_pdf", True):
+        pdf_path = artifact_destination(job_dir, paper_id, "pdf")
+        pdf_relative = pdf_path.relative_to(Path(job_dir).absolute()).as_posix()
+        try:
+            pdf_result = fetcher.fetch_pdf(pmc_pdf, pdf_path, opts)
+        except Exception:
+            pdf_result = {"status": "error"}
+        if pdf_result.get("status") in {"saved", "already_exists"} and _looks_like_valid_pdf(pdf_path):
+            return _checkpoint_main(
+                _settle_pdf(item, pdf_path, pdf_relative, pmc_pdf, pdf_path.stat().st_size, record), opts)
+        if pdf_path.exists():
+            pdf_path.unlink(missing_ok=True)
+
+    # 2) Canonical PMC JATS body (complete sections; no HTML scraping guesswork).
+    # Only the real browser fetcher opts into the stdlib Europe PMC call; the
+    # offline fixtures keep their injected fetcher and never touch the network.
+    pmc_xml = _pmc_xml_item(record, job_dir, opts) if isinstance(fetcher, FulltextBrowserFetcher) else None
+    if pmc_xml is not None and pmc_xml.get("status") in FETCHED_STATUSES:
+        return pmc_xml
+    xml_fallback = pmc_xml if pmc_xml is not None else None
+
     attempts = candidate_urls(record)
+    if pmc_pdf:
+        attempts = [entry for entry in attempts if entry[1] != pmc_pdf]
     # Inspect the already observed landing page before leaving it for a PDF,
     # so supplementary files can be captured while their real links remain.
     source = _record_result_url(record)
@@ -628,6 +909,12 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
                     release(reason=pause.reason, url=pause.url)
                 failures.append(f"PMC 正文暂不可用：{pause.reason}")
                 continue
+            # A PMC article page may 404 while its JATS XML/PDF entry is
+            # already available. Do not abort the whole batch for this page;
+            # record the failure and let XML/PDF fallbacks or the next paper run.
+            if _pmc_article_url(url) and pause.reason in {"page_error", "load_timeout", "results_unrecognized"}:
+                failures.append(f"PMC 文章页不可用：{pause.reason}")
+                continue
             raise
         if result.get("status") == "pdf_page":
             blob = result.get("bytes") or b""
@@ -674,6 +961,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
         failures.append(f"页面导航失败（{url}）：{result.get('status') or '未知'}")
     if html_main is not None:
         return html_main
+    if xml_fallback is not None:
+        return xml_fallback
     if blocked_transfer:
         raise FulltextPause(paper_id, reason="page_error", message=CNKI_ENTRY_MESSAGE)
     if abstract:
@@ -772,11 +1061,28 @@ def _counts(items: list[dict]) -> dict:
     counts = {"total": len(items)}
     for status in STATUS_ORDER:
         counts[status] = sum(1 for item in items if item.get("status") == status)
+    counts["complete_main"] = sum(
+        1 for item in items
+        if item.get("status") in FETCHED_STATUSES
+        and (item.get("completeness") or {}).get("status") == "complete")
     return counts
 
 
 def _write_status(job_dir: Path, items: list[dict], *, materials=None) -> dict:
     counts = _counts(items)
+    if materials is not None:
+        material_counts = {"complete": 0, "partial": 0, "unverified": 0}
+        for item in items:
+            if item.get("status") not in FETCHED_STATUSES:
+                continue
+            try:
+                state = materials.completeness({"paper_id": item.get("paper_id")}).get("status", "unverified")
+            except Exception:
+                state = "unverified"
+            material_counts[state] = material_counts.get(state, 0) + 1
+        counts.update(materials_complete=material_counts["complete"],
+                      materials_partial=material_counts["partial"],
+                      materials_unverified=material_counts["unverified"])
     if any(item.get("acquisition_skip") for item in items):
         counts["acquisition_skipped"] = sum(bool(item.get("acquisition_skip")) for item in items)
         if materials is not None:
@@ -1154,12 +1460,47 @@ def _run_fulltext(
         collector = MaterialCollection(materials, target, fetcher, ensure_browser,
             progress=lambda message: emit("stage", stage="fulltext", message=message))
 
+        def ensure_completeness(saved, target=target):
+            if saved.get("status") not in FETCHED_STATUSES or saved.get("completeness"):
+                return
+            rel = str(saved.get("path") or "")
+            path = (job_dir / rel).resolve()
+            files_root = (job_dir / "fulltext" / "files").resolve()
+            try:
+                path.relative_to(files_root)
+            except ValueError:
+                return
+            if not path.is_file():
+                return
+            if saved["status"] == "fetched_html":
+                text = path.read_text(encoding="utf-8", errors="replace")
+                saved["completeness"] = assess_completeness(saved.get("html_evidence") or {}, text)
+            else:
+                blob = path.read_bytes()
+                proof = saved.get("pdf_evidence") or pdf_proof(blob, target)
+                text_chars = int(proof.get("text_chars") or 0)
+                file_complete = bool(proof.get("pdf_magic") and proof.get("eof_marker")
+                                     and proof.get("transfer_completed")
+                                     and int(saved.get("size") or 0) >= MIN_PDF_BYTES)
+                saved["pdf_evidence"] = proof
+                saved["completeness"] = {"status": "complete" if file_complete else "partial",
+                                         "article_type": "pdf", "found_sections": [], "missing_sections": [],
+                                         "section_count": 0, "char_count": text_chars,
+                                         "page_count": proof.get("pages"),
+                                         "text_extractable": proof.get("parser_status") == "valid" and text_chars >= 800}
+
         def checkpoint(saved, target=target):
+            ensure_completeness(saved)
             items[position[target["paper_id"]]] = saved
-            _write_status(job_dir, items, materials=materials)
             if saved.get("status") in FETCHED_STATUSES:
                 materials.register_main(target, saved)
                 materials.flush()
+            try:
+                saved["materials_completeness"] = materials.completeness(target)
+            except Exception:
+                saved["materials_completeness"] = {"status": "unverified", "check_status": "error",
+                                                   "expected": 0, "downloaded": 0, "pending": 0, "missing": []}
+            _write_status(job_dir, items, materials=materials)
 
         paper_opts = {**opts, "record": target, "on_material_discovery": collector.observe, "on_main_saved": checkpoint}
         emit(
@@ -1192,19 +1533,30 @@ def _run_fulltext(
                 emit("error", stage="fulltext", message=str((ready or {}).get("message") or "浏览器启动失败"))
                 return 1
         try:
+            def inspect_materials_safely():
+                if (updated.get("materials_completeness") or {}).get("status") == "complete":
+                    return
+                attention = collector.inspect_existing(paper_opts)
+                if not attention:
+                    return
+                reason = str(attention.get("reason") or "")
+                if reason in {"login", "verification", "access_required", "captcha"}:
+                    _raise_page_attention(attention, item["paper_id"], "")
+                # A 404/timeout while checking supplements must not discard a
+                # valid main text or block the remaining papers.
+                materials.record_discovery(target, {"status": "needs_attention",
+                                                    "reason": str(attention.get("message") or reason)})
+                materials.flush()
+
             current = items[position[item["paper_id"]]]
             if current.get("status") == "fetched_pdf":
                 updated = current
-                attention = collector.inspect_existing(paper_opts)
-                if attention:
-                    _raise_page_attention(attention, item["paper_id"], "")
+                inspect_materials_safely()
             elif current.get("status") == "fetched_html" and (
                     not callable(getattr(fetcher, "inspect_materials", None))
                     or materials.paper(target).get("main_pdf_status") == "downloaded"):
                 updated = current
-                attention = collector.inspect_existing(paper_opts)
-                if attention:
-                    _raise_page_attention(attention, item["paper_id"], "")
+                inspect_materials_safely()
             else:
                 if current.get("status") == "fetched_html":
                     paper_opts["cached_main"] = current
@@ -1212,12 +1564,11 @@ def _run_fulltext(
                     if ready.get("status") != "ok":
                         raise FulltextPause(item["paper_id"], reason="page_error", message=str(ready.get("message") or "PDF检查浏览器尚未就绪。"))
                 updated = fetch_one(target, job_dir, paper_opts)
+            target["materials_url"] = _materials_page_url(target, updated)
             checkpoint(updated)
             if updated.get("status") in FETCHED_STATUSES:
                 if not collector.checked and not collector.inspected:
-                    attention = collector.inspect_existing(paper_opts)
-                    if attention:
-                        _raise_page_attention(attention, item["paper_id"], "")
+                    inspect_materials_safely()
                 paper = materials.paper(target)
                 if paper.get("main_pdf_status") != "downloaded":
                     paper.update(main_pdf_status="missing", main_pdf_reason="已保留可确认的网页正文，本次尚未取得原版PDF；请核查原文章页。")
@@ -1225,7 +1576,8 @@ def _run_fulltext(
                 materials.flush()
             else:
                 paper = materials.paper(target)
-                paper.update(main_pdf_status="missing", main_pdf_reason=str(updated.get("reason") or "本次未取得正文PDF。"))
+                paper.update(main_pdf_status=("needs_attention" if updated.get("status") == "partial" else "missing"),
+                             main_pdf_reason=str(updated.get("reason") or "本次未取得正文PDF。"))
                 materials.flush()
         except FulltextPause as pause:
             if skip_unavailable and _remote_pause(pause.reason):
@@ -1260,6 +1612,11 @@ def _run_fulltext(
             _write_status(job_dir, items, materials=materials)
             emit("attention", stage="verification", reason="local_material_verification", paper_id=item["paper_id"], message=str(error))
             return 0
+        try:
+            updated["materials_completeness"] = materials.completeness(target)
+        except Exception:
+            updated["materials_completeness"] = {"status": "unverified", "check_status": "error",
+                                                 "expected": 0, "downloaded": 0, "pending": 0, "missing": []}
         items[position[item["paper_id"]]] = updated
         _write_status(job_dir, items, materials=materials)
         catalog.register(target, updated)
@@ -1277,14 +1634,20 @@ def _run_fulltext(
         "result",
         stage="fulltext",
         message=(
-            f"材料获取阶段已结束：已获取正文 {fetched} 篇（PDF {counts['fetched_pdf']} / HTML {counts['fetched_html']}）；"
-            f"请逐篇核对材料清单中的PDF、补充材料与可读性。题录/摘要 {counts['abstract_only']} 篇，待补充 {counts['unavailable']} 篇"
+            f"材料获取阶段已结束：正文完整 {counts['complete_main']} 篇（PDF {counts['fetched_pdf']} / HTML {counts['fetched_html']}）；"
+            f"结构不完整 {counts['partial']} 篇；补充材料完整 {counts['materials_complete']} 篇、部分 {counts['materials_partial']} 篇；"
+            f"题录/摘要 {counts['abstract_only']} 篇，待补充 {counts['unavailable']} 篇"
         ),
         count=fetched,
         counts={
             "fetched": fetched,
             "fetched_pdf": counts["fetched_pdf"],
             "fetched_html": counts["fetched_html"],
+            "complete_main": counts["complete_main"],
+            "partial": counts["partial"],
+            "materials_complete": counts["materials_complete"],
+            "materials_partial": counts["materials_partial"],
+            "materials_unverified": counts["materials_unverified"],
             "abstract_only": counts["abstract_only"],
             "unavailable": counts["unavailable"],
             "needs_attention": counts["needs_attention"],

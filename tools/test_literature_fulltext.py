@@ -190,7 +190,8 @@ class ClassifyTargetTest(unittest.TestCase):
             {"label": "Publisher PDF", "url": "https://publisher.test/paper.pdf"},
             {"label": "PubMed Central full text", "url": pmc},
         ])
-        self.assertEqual(lf.candidate_urls(record)[:2], [("html", pmc), ("html", pubmed)])
+        self.assertEqual(lf.candidate_urls(record)[:3],
+                         [("pdf", pmc.rstrip("/") + "/pdf/"), ("html", pmc), ("html", pubmed)])
 
 
 class AssessHtmlTextTest(unittest.TestCase):
@@ -257,7 +258,7 @@ class FetchOneTest(unittest.TestCase):
         self.temp.cleanup()
 
     def _opts(self, fetcher) -> dict:
-        return {"fetcher": fetcher, "per_paper_timeout_sec": 120}
+        return {"fetcher": fetcher, "per_paper_timeout_sec": 120, "prefer_pmc_pdf": False}
 
     def _target(self, **kwargs) -> dict:
         return lf._target_from_candidate(candidate("GSC-001", **kwargs))
@@ -466,6 +467,32 @@ class FetchOneTest(unittest.TestCase):
 # Input loading
 # ---------------------------------------------------------------------------
 
+    def test_pubmed_prefers_pmc_pdf_when_enabled(self) -> None:
+        pubmed = "https://pubmed.ncbi.nlm.nih.gov/33142538/"
+        pmc = "https://pmc.ncbi.nlm.nih.gov/articles/PMC7647856/"
+        pdf = pmc.rstrip("/") + "/pdf/"
+        fetcher = FakeFetcher(pdf={pdf: {"status": "saved"}})
+        item = lf.fetch_one(self._target(source_key="pubmed", result_url=pubmed,
+            links=[{"label": "PMC", "url": pmc}]), self.job,
+            {**self._opts(fetcher), "prefer_pmc_pdf": True})
+        self.assertEqual(item["status"], "fetched_pdf")
+        self.assertEqual(item["completeness"]["status"], "complete")
+        self.assertEqual(fetcher.calls, [("fetch_pdf", pdf)])
+
+    def test_incomplete_html_is_partial_and_lists_missing_sections(self) -> None:
+        intro = "Introduction " + ("This introduction describes the study rationale and prior evidence. " * 6)
+        results = "Results " + ("The measured growth response was higher in the treatment group. " * 6)
+        body = intro + chr(10) + results
+        page = {"status": "ok", "text": body,
+                "html_evidence": {"origin": "dom_article_region", "container_verified": True,
+                                  "citation_title": "论文 GSC-001", "article_text": body,
+                                  "sections": [{"heading": "Introduction", "text": intro},
+                                               {"heading": "Results", "text": results}]}}
+        fetcher = FakeFetcher(page={"https://example.org/article": page})
+        item = lf.fetch_one(self._target(result_url="https://example.org/article"), self.job, self._opts(fetcher))
+        self.assertEqual(item["status"], "partial")
+        self.assertIn("Conclusions/结论", item["completeness"]["missing_sections"])
+
 class LoadTargetsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -579,7 +606,7 @@ class RunFlowTest(unittest.TestCase):
         # §3.5 item key set
         self.assertEqual(
             set(items["GSC-001"].keys()),
-            {"paper_id", "title", "doi", "source_url", "fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "content_sha256", "pdf_evidence"},
+            {"paper_id", "title", "doi", "source_url", "fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "content_sha256", "pdf_evidence", "completeness", "materials_completeness"},
         )
 
     def test_captcha_pauses_with_attention_and_resume_completes(self) -> None:
@@ -1047,7 +1074,8 @@ class LocalHttpFixtureTest(unittest.TestCase):
 
             self.assertEqual(items["GSC-005"]["status"], "unavailable")
 
-            self.assertEqual(doc["counts"], {
+            self.assertEqual({key: doc["counts"][key] for key in (
+                "total", "fetched_pdf", "fetched_html", "abstract_only", "unavailable", "needs_attention", "pending")}, {
                 "total": 5,
                 "fetched_pdf": 1,
                 "fetched_html": 1,

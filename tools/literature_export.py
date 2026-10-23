@@ -273,12 +273,21 @@ def literature_rows(inputs: dict) -> list[dict]:
                 status = str(item.get("status") or "")
                 if status in {"unavailable", "needs_attention"}:
                     notes.append(f"全文待补充：{item.get('reason') or status}")
+                elif status == "partial":
+                    missing = (item.get("completeness") or {}).get("missing_sections") or []
+                    notes.append("正文结构不完整：" + ("、".join(missing) if missing else (item.get("reason") or "缺少核心章节")))
                 elif status == "abstract_only":
                     notes.append("仅有摘要：未取得全文正文")
                 elif status == "pending":
                     notes.append("全文获取未完成")
                 elif not notes and status not in FULLTEXT_READY:
                     notes.append(f"全文状态：{status}")
+                materials_state = item.get("materials_completeness") or {}
+                if status in FULLTEXT_READY | {"partial"} and materials_state:
+                    if materials_state.get("status") == "partial":
+                        notes.append("补充材料未下载完整：" + str(materials_state.get("pending") or 0) + " 项待补")
+                    elif materials_state.get("status") == "unverified":
+                        notes.append("补充材料尚未核查")
         screening_status = str(record.get("screening_status") or ("pending_review" if is_canonical else "auto_excluded_duplicate"))
         screening_reason = str(record.get("screening_reason") or "")
         if not screening_reason:

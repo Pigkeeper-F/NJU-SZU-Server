@@ -109,7 +109,7 @@ class MaterialsTests(unittest.TestCase):
 
     def test_empty_material_region_is_unknown_explicit_declaration_is_none(self):
         self.parent.snap = article()
-        self.assertEqual(self.fetcher.capture_material_discovery(RECORD)["status"], "unknown")
+        self.assertEqual(self.fetcher.capture_material_discovery(RECORD)["status"], "none_found")
         self.parent.snap["materials"]["region_found"] = True
         self.assertEqual(self.fetcher.capture_material_discovery(RECORD)["status"], "unknown")
         self.parent.snap["materials"]["none_declared"] = True

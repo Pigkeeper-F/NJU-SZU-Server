@@ -640,7 +640,10 @@
     'completed': '已完成', 'failed': '失败', 'cancelled': '已停止', 'interrupted': '已中断', 'running': '进行中' };
   const LITERATURE_STAGE_STATES = { 'pending': '待运行', 'running': '进行中', 'done': '已完成', 'failed': '失败', 'skipped': '已跳过' };
   const LITERATURE_COUNTER_LABELS = { 'candidates': '候选', 'uniqueGroups': '去重组', 'fulltextFetched': '已获取全文',
-    'fulltextPdf': 'PDF正文', 'fulltextHtml': '网页正文文本', 'fulltextAbstract': '仅题录/摘要（非全文）', 'fulltextUnavailable': '待补充',
+    'fulltextPdf': 'PDF正文', 'fulltextHtml': '网页正文文本', 'fulltextPartial': '正文结构不完整',
+    'fulltextComplete': '正文完整', 'materialsComplete': '补充材料完整', 'materialsPartial': '补充材料不全',
+    'materialsUnverified': '补充材料未核查',
+    'fulltextAbstract': '仅题录/摘要（非全文）', 'fulltextUnavailable': '待补充',
     'fulltextAttention': '待人工处理', 'fulltextPending': '尚未处理', 'fulltextSkipped': '本轮跳过（含补材）',
     'materialsIncomplete': '材料不完整', 'extractedPapers': '已提取论文', 'parameterRows': '参数行' };
   const LITERATURE_UNTIL_OPTIONS = [['discover', '仅检索候选'], ['dedupe', '续跑到去重'], ['fulltext', '续跑到全文获取'],

@@ -625,10 +625,13 @@ class LiteratureConnector {
   syncFulltextSnapshot(job) {
     const status = loadJsonFile(path.join(job.dir, 'fulltext', 'status.json'));
     if (!Array.isArray(status?.items)) return;
-    const counts = Object.fromEntries(['fetched_pdf', 'fetched_html', 'abstract_only', 'unavailable', 'needs_attention', 'pending'].map(key => [key, 0]));
+    const counts = Object.fromEntries(['fetched_pdf', 'fetched_html', 'partial', 'abstract_only', 'unavailable', 'needs_attention', 'pending'].map(key => [key, 0]));
     for (const item of status.items) if (item && Object.hasOwn(counts, item.status)) counts[item.status]++;
     counts.acquisition_skipped = status.items.filter(item => item?.acquisition_skip?.policy === 'skip_unavailable').length;
     if (Number.isInteger(status.counts?.material_incomplete)) counts.material_incomplete = status.counts.material_incomplete;
+    for (const key of ['complete_main', 'materials_complete', 'materials_partial', 'materials_unverified']) {
+      if (Number.isInteger(status.counts?.[key])) counts[key] = status.counts[key];
+    }
     const count = counts.fetched_pdf + counts.fetched_html;
     job.count = count; this.mergeCounters(job, 'fulltext', { count, counts });
     this.registerFiles(job, ['fulltext/status.json']); this.registerFulltextFiles(job);
@@ -645,6 +648,8 @@ class LiteratureConnector {
     }
     if (['fulltext', 'fulltext_review'].includes(stage)) {
       for (const [field, key] of Object.entries({ fetched_pdf: 'fulltextPdf', fetched_html: 'fulltextHtml',
+        partial: 'fulltextPartial', complete_main: 'fulltextComplete',
+        materials_complete: 'materialsComplete', materials_partial: 'materialsPartial', materials_unverified: 'materialsUnverified',
         abstract_only: 'fulltextAbstract', unavailable: 'fulltextUnavailable', needs_attention: 'fulltextAttention', pending: 'fulltextPending',
         acquisition_skipped: 'fulltextSkipped', material_incomplete: 'materialsIncomplete' })) {
         if (integer(counts[field]) !== null) counters[key] = counts[field];

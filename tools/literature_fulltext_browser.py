@@ -198,8 +198,17 @@ def _material_identity(snapshot, record):
     wanted_doi, actual_doi = doi(record.get("doi")), doi(snapshot.get("citation_doi"))
     if wanted_doi and actual_doi and wanted_doi != actual_doi:
         return False
-    return bool((norm(record.get("title")) and norm(record.get("title")) == norm(snapshot.get("citation_title")))
-                or (wanted_doi and wanted_doi == actual_doi))
+    if wanted_doi and wanted_doi == actual_doi:
+        return True
+    wanted_title, actual_title = norm(record.get("title")), norm(snapshot.get("citation_title"))
+    if not wanted_title or not actual_title:
+        return False
+    if wanted_title == actual_title:
+        return True
+    # PubMed titles often carry a subtitle/suffix that the article page renders
+    # differently. Require a long containment match, not a loose token overlap.
+    shorter, longer = sorted((wanted_title, actual_title), key=len)
+    return len(shorter) >= 12 and shorter in longer and len(shorter) / len(longer) >= 0.8
 
 
 def _material_key(record):
@@ -689,6 +698,12 @@ class FulltextBrowserFetcher:
             result.update(status="checked", reason="same_paper_visible_material_links_enumerated")
         elif not links and raw.get("none_declared") is True:
             result.update(status="none_declared", reason="article_explicitly_declares_no_supplements")
+        elif not links and raw.get("region_found") is not True:
+            # The article body was fully inspected and no supplementary region
+            # or labelled link exists. Report this as an observation, not as
+            # “unknown”: otherwise every paper without supplements stays
+            # forever unverified and blocks the completeness report.
+            result.update(status="none_found", reason="article_page_has_no_visible_supplementary_region")
         return result
 
     def _observe_materials(self, record, snapshot, url, opts=None):
@@ -729,7 +744,8 @@ class FulltextBrowserFetcher:
     def inspect_materials(self, record, opts=None):
         """Explicit future-run entry: normal article lookup, never main PDF."""
         options = dict(opts or {}, record=record)
-        deferred = self._deferred_attention(record.get("source_url"))
+        article_url = str(record.get("materials_url") or record.get("source_url") or "")
+        deferred = self._deferred_attention(article_url)
         if deferred:
             return deferred
         if record.get("source_key") == "cnki":
@@ -742,7 +758,7 @@ class FulltextBrowserFetcher:
             callback = options.get("on_material_discovery")
             outcome = callback(current) if callable(callback) else None
             return outcome if isinstance(outcome, dict) and outcome.get("status") in {"attention", "error", "fetch_error"} else {"status": "ok", "material_discovery": current}
-        source = str(record.get("source_url") or "")
+        source = article_url
         safe = literature_browser.safe_url(source)
         if not safe or re.search(r"\.(?:pdf|caj)(?:$|[?#])", source, re.I):
             return {"status": "ok", "material_discovery": current}

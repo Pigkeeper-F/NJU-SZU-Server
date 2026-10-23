@@ -159,8 +159,10 @@ def _pdf_text_check(blob, expected):
     doi_matches = bool(wanted and wanted in _norm(text))
     title_matches = bool(len(title) >= 8 and title in _title(text))
     if not (doi_matches or title_matches):
-        return _result("unavailable", "既有PDF可读，但尚不能核对为目标文献；请人工核查，不会将同名文件直接复用。")
+        return _result("unavailable", "既有PDF可读，但尚不能核对为目标文献；请人工核查，不会将同名文件直接复用。",
+                       pages=pages, text_chars=len(text.strip()))
     return _result("valid", "已核对PDF结构与目标文献正文身份。", pages=pages,
+                   text_chars=len(text.strip()),
                    identity_method="pdf_text_doi" if doi_matches else "pdf_text_title")
 
 
@@ -173,7 +175,8 @@ def pdf_proof(blob, record, *, cnki_navigation=False):
             "pdf_magic": blob.startswith(b"%PDF"), "eof_marker": b"%%EOF" in blob[-2048:],
             "transfer_completed": True, "identity": expected, "identity_method": method,
             "parser_status": checked["status"],
-            **({"pages": checked["pages"]} if checked.get("pages") else {})}
+            **({"pages": checked["pages"]} if checked.get("pages") else {}),
+            **({"text_chars": checked["text_chars"]} if checked.get("text_chars") is not None else {})}
 
 
 def inspect_saved(job_dir, item, record, *, for_reuse=False):

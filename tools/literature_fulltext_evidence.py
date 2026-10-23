@@ -196,7 +196,7 @@ def assess_html(text: str, url: str = "", evidence: dict | None = None,
         return "unavailable", "仅有题录、导航或空页面，尚未取得可确认的摘要或正文。"
     body = _string(evidence.get("article_text"))
     fallback = "abstract" if has_abstract else "unavailable"
-    if evidence.get("container_verified") is not True or evidence.get("origin") != "dom_article_region":
+    if evidence.get("container_verified") is not True or evidence.get("origin") not in {"dom_article_region", "pmc_fulltext_xml"}:
         return fallback, "尚无可验证的文章正文区域；整页长度不能证明取得全文。"
     if len(body.strip()) < MIN_ARTICLE_CHARS:
         return fallback, "正文区域内容不足，尚不能确认完整文章。"
@@ -217,6 +217,59 @@ def assess_html(text: str, url: str = "", evidence: dict | None = None,
     if not (structured or review_structured):
         return fallback, "尚不能核验正文分节；摘要、目录和参考文献列表不算全文。"
     return "fulltext", "已核对目标文献及可见正文区域、正文分节。"
+
+
+_COMPLETENESS_LABELS = {
+    "introduction": "Introduction/引言",
+    "methods": "Methods/方法",
+    "results": "Results/结果",
+    "discussion": "Discussion/讨论",
+    "conclusions": "Conclusions/结论",
+}
+
+
+def assess_completeness(evidence: dict, article_text: str = "") -> dict:
+    """Structural completeness beyond “page has a body”.
+
+    Complete research articles need an introduction, results and a
+    discussion/conclusion (plus methods when the article has a methods
+    section). Reviews need an introduction, a conclusion/discussion and at
+    least three substantive sections. This cannot prove that no sentence is
+    missing, but it prevents a preview/partial page from being accepted as a
+    complete article.
+    """
+    evidence = evidence if isinstance(evidence, dict) else {}
+    body = _string(article_text) or _string(evidence.get("article_text"))
+    sections = _substantive_sections(evidence, body)
+    categories = set()
+    for heading, _ in sections:
+        for category, pattern in _CORE_PATTERNS:
+            if re.fullmatch(pattern, heading, re.I):
+                categories.add(category)
+    if categories & {"methods", "results"}:
+        article_type = "research" if "methods" in categories else "research_short"
+    else:
+        article_type = "review"
+    missing: set[str] = set()
+    if article_type == "research":
+        required = {"introduction", "methods", "results"}
+        required.add("discussion" if "discussion" in categories else "conclusions")
+    elif article_type == "research_short":
+        required = {"introduction", "results"}
+        required.add("discussion" if "discussion" in categories else "conclusions")
+    else:
+        required = {"introduction", "conclusions" if "conclusions" in categories else "discussion"}
+        if len(sections) < 3:
+            missing.add("substantive_sections")
+    missing |= (required - categories)
+    return {
+        "status": "complete" if not missing else "partial",
+        "article_type": article_type,
+        "found_sections": [_COMPLETENESS_LABELS[category] for category, _ in _CORE_PATTERNS if category in categories],
+        "missing_sections": sorted(_COMPLETENESS_LABELS.get(item, item) for item in missing),
+        "section_count": len(sections),
+        "char_count": len(body.strip()),
+    }
 
 
 def verified_saved_html(item: dict, filetext: str) -> tuple[bool, str]:

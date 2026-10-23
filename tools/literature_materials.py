@@ -38,7 +38,7 @@ MAX_ZIP_EXPANDED_BYTES = 32 * 1024 * 1024
 MAX_ZIP_RATIO = 200
 ROLES = {"main_pdf", "main_html", "supplement"}
 DOWNLOAD_STATES = {"pending", "downloaded", "missing", "needs_attention"}
-CHECK_STATES = {"uninspected", "checked", "none_declared", "unknown", "needs_attention"}
+CHECK_STATES = {"uninspected", "checked", "none_declared", "none_found", "unknown", "needs_attention"}
 READ_STATES = {"not_checked", "readable", "partial", "unreadable", "unsupported"}
 
 
@@ -503,6 +503,43 @@ class MaterialsStore:
         """Return this task's mutable paper record; flush explicitly after edits."""
         return self._paper(record)
 
+    def completeness(self, record):
+        """Whether every observed supplement for this paper is on disk.
+
+        ``complete`` requires the article page to have been inspected and every
+        observed supplement to have a verified/downloaded local file. A paper
+        that declares no supplements is complete after a ``none_declared`` or
+        ``checked`` inspection; an uninspected page is ``unverified``.
+        """
+        paper = self._paper(record)
+        supplements = [material for material in paper.get("materials", [])
+                       if material.get("role") == "supplement"]
+        downloaded = [material for material in supplements
+                      if material.get("download_status") == "downloaded"
+                      and _material_file(self.job_dir, material) is not None]
+        pending = [material for material in supplements if material not in downloaded]
+        check = paper.get("supplement_check") or {}
+        state = str(check.get("status") or "uninspected")
+        if state in {"checked", "none_declared", "none_found"} and not pending:
+            status = "complete"
+        elif state in {"checked", "none_declared", "none_found"}:
+            status = "partial"
+        else:
+            status = "unverified"
+        return {
+            "status": status,
+            "check_status": state,
+            "expected": len(supplements),
+            "downloaded": len(downloaded),
+            "pending": len(pending),
+            "missing": [
+                {"material_id": str(material.get("material_id") or ""),
+                 "label": str(material.get("label") or material.get("filename") or ""),
+                 "download_status": str(material.get("download_status") or "")}
+                for material in pending
+            ],
+        }
+
     def _descriptor(self, record, descriptor):
         role = descriptor.get("role") or "supplement"
         if role not in ROLES:
@@ -731,7 +768,7 @@ class MaterialsStore:
         paper = self._paper(record)
         main = paper.get("main_pdf_status") == "downloaded" or (paper.get("main_pdf_status") == "missing"
             and any(material.get("role") == "main_html" and material.get("download_status") == "downloaded" for material in paper["materials"]))
-        checked = paper.get("supplement_check", {}).get("status") in {"checked", "none_declared"}
+        checked = paper.get("supplement_check", {}).get("status") in {"checked", "none_declared", "none_found"}
         if not main or not checked:
             return False
         try:

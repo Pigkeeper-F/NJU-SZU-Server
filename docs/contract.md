@@ -1574,15 +1574,47 @@ node tools/test-literature-ui-stage2.js       # 多源面板静态检查
 node tools/check-contract.js                  # ALL_CHECKS_PASS
 ```
 
-### 26.7 全文获取：PMC 首次加载与陈旧链接
+### 26.7 全文获取：完整性与 PDF/补充材料
 
-- PubMed 候选现在带 PMC 全文链接时**优先取 PMC**；PubMed 题录页只作后备。
-- PMC 首次加载可能在 `domcontentloaded` 之后才完成正文区渲染。`literature_fulltext_browser.py`
-  在“页面正文较长但未验证文章容器”时等待一次（最多 4s + 1.2s）并重拍快照；
-  登录/验证/错误页不等待。避免把全文误判成摘要。
-- 失败或未核实的 `fulltext_url` 不再沿用：批次状态记录 `attempted_url`，
-  导出只对 `fetched_pdf` / `fetched_html` 写 `fulltext_url`。
-- 没有 PMC/开放全文入口的论文按“待补充”保留，不绕过订阅或登录。
+**主文优先级（2026-10-23）**
+
+1. Europe PMC `fullTextUrlList` 中 `OA + pdf` 的直链，直接 HTTP 下载并校验 `%PDF`/EOF/大小；
+2. PMC PDF（浏览器下载，能拿到时）；
+3. Europe PMC **JATS fullTextXML**（按 `<sec>` 聚合全部正文，作为完整结构基准）；
+4. 文章页 HTML（首次加载未验证正文时等待一次并重拍快照）；
+5. PubMed/DOI 落地页只作后备。
+
+**正文完整性门禁**
+
+- HTML/XML 保存前计算 `completeness`：
+  - research：Introduction + Methods + Results + (Discussion/Conclusions)；
+  - research_short：Introduction + Results + (Discussion/Conclusions)；
+  - review：Introduction + (Conclusion/Discussion) + ≥3 个实质分节。
+- 缺核心章节 → `status="partial"`、`evidence_level="fulltext_*_partial"`，
+  `completeness.missing_sections` 记录缺项；`partial` **不进入** `FULLTEXT_READY`，
+  不能被提取阶段当作完整正文。
+- PDF 完整性按**文件**判定：`pdf_magic` + `%%EOF` + 传输完成 + ≥50KB；
+  `completeness.text_extractable` 单独记录文本能否抽取（扫描版仍算完整 PDF，提取需 OCR）。
+- 旧任务/复用条目若没有 `completeness`，加载时按已保存文件补算。
+
+**补充材料完整性**
+
+- 正文成功后检查**已验证的文章页**（PMC 记录用 PMC 文章页，PDF 不用 PDF 当文章页），
+  枚举并下载全部可见补充材料；`materials_completeness` 记录
+  `expected / downloaded / pending / missing`。
+- `supplement_check` 为 `checked` / `none_declared` / `none_found` 且无 pending → complete；
+  有 pending → partial；页面未核查/权限问题 → unverified。
+- 补充材料页 404/超时不再中断整批正文；该篇材料标 unverified/needs_attention，
+  其余文献继续。
+- `fulltext/status.json` 的 `counts` 新增 `complete_main`、`partial`、
+  `materials_complete/partial/unverified`；前端与导出按这些字段展示缺口。
+
+**其他**
+
+- 失败或未核实的 `fulltext_url` 不再沿用：记录 `attempted_url`，导出只对
+  `fetched_pdf` / `fetched_html` 写 `fulltext_url`。
+- 没有 PMC/开放全文入口的论文按“待补充”保留，不绕过订阅或登录；PDF 端点被
+  Cloudflare/订阅拦截时不伪造 PDF，保存完整 JATS 正文并标 `kind="xml"`。
 
 ## 2026-10-19 本地整合：六阶段与已审核方案流程
 
