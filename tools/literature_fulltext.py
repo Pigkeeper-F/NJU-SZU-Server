@@ -38,7 +38,7 @@ from urllib.parse import quote, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from literature_fulltext_evidence import (EVIDENCE_VERSION, assess_html, assess_completeness, revalidate_saved_html, verified_saved_html)
+from literature_fulltext_evidence import (COMPLETENESS_VERSION, EVIDENCE_VERSION, assess_html, assess_completeness, revalidate_saved_html, verified_saved_html)
 from literature_fulltext_browser import FulltextBrowserFetcher
 from literature_fulltext_reuse import ReuseCatalog, inspect_saved, pdf_proof, artifact_destination
 from literature_materials import MaterialsStore, MaterialsError
@@ -1068,17 +1068,59 @@ def _counts(items: list[dict]) -> dict:
     return counts
 
 
+def _ensure_item_completeness(job_dir: Path, item: dict, record: dict | None = None) -> None:
+    """Fill completeness for old/reused items from their saved artifact."""
+    if item.get("status") not in FETCHED_STATUSES | {"partial"}:
+        return
+    # Always re-read the saved artifact: an earlier version may have
+    # mislabeled a partial HTML item as a PDF, and patterns can improve.
+    rel = str(item.get("path") or "")
+    path = (Path(job_dir) / rel).resolve()
+    files_root = (Path(job_dir) / "fulltext" / "files").resolve()
+    try:
+        path.relative_to(files_root)
+    except ValueError:
+        return
+    if not path.is_file():
+        return
+    if item.get("kind") in {"html", "xml"} or item["status"] == "fetched_html":
+        text = path.read_text(encoding="utf-8", errors="replace")
+        item["completeness"] = assess_completeness(item.get("html_evidence") or {}, text)
+    else:
+        blob = path.read_bytes()
+        proof = item.get("pdf_evidence") or pdf_proof(blob, record or item)
+        text_chars = int(proof.get("text_chars") or 0)
+        file_complete = bool(proof.get("pdf_magic") and proof.get("eof_marker")
+                             and proof.get("transfer_completed")
+                             and int(item.get("size") or 0) >= MIN_PDF_BYTES)
+        item["completeness"] = {"version": COMPLETENESS_VERSION,
+                                "status": "complete" if file_complete else "partial",
+                                "article_type": "pdf", "found_sections": [], "missing_sections": [],
+                                "section_count": 0, "char_count": text_chars,
+                                "page_count": proof.get("pages"),
+                                "text_extractable": proof.get("parser_status") == "valid" and text_chars >= 800}
+        # Backfill only annotates completeness; it must not promote a legacy
+        # item past the existing local-verification/attention gate.
+
+
 def _write_status(job_dir: Path, items: list[dict], *, materials=None) -> dict:
+    for item in items:
+        if isinstance(item, dict):
+            _ensure_item_completeness(job_dir, item)
     counts = _counts(items)
     if materials is not None:
         material_counts = {"complete": 0, "partial": 0, "unverified": 0}
         for item in items:
-            if item.get("status") not in FETCHED_STATUSES:
+            if item.get("status") not in FETCHED_STATUSES | {"partial"}:
                 continue
             try:
-                state = materials.completeness({"paper_id": item.get("paper_id")}).get("status", "unverified")
+                report = materials.completeness({"paper_id": item.get("paper_id")})
+                item["materials_completeness"] = report
+                state = report.get("status", "unverified")
             except Exception:
                 state = "unverified"
+                item["materials_completeness"] = {"status": "unverified", "check_status": "error",
+                                                  "expected": 0, "downloaded": 0, "pending": 0, "missing": []}
             material_counts[state] = material_counts.get(state, 0) + 1
         counts.update(materials_complete=material_counts["complete"],
                       materials_partial=material_counts["partial"],
@@ -1461,33 +1503,7 @@ def _run_fulltext(
             progress=lambda message: emit("stage", stage="fulltext", message=message))
 
         def ensure_completeness(saved, target=target):
-            if saved.get("status") not in FETCHED_STATUSES or saved.get("completeness"):
-                return
-            rel = str(saved.get("path") or "")
-            path = (job_dir / rel).resolve()
-            files_root = (job_dir / "fulltext" / "files").resolve()
-            try:
-                path.relative_to(files_root)
-            except ValueError:
-                return
-            if not path.is_file():
-                return
-            if saved["status"] == "fetched_html":
-                text = path.read_text(encoding="utf-8", errors="replace")
-                saved["completeness"] = assess_completeness(saved.get("html_evidence") or {}, text)
-            else:
-                blob = path.read_bytes()
-                proof = saved.get("pdf_evidence") or pdf_proof(blob, target)
-                text_chars = int(proof.get("text_chars") or 0)
-                file_complete = bool(proof.get("pdf_magic") and proof.get("eof_marker")
-                                     and proof.get("transfer_completed")
-                                     and int(saved.get("size") or 0) >= MIN_PDF_BYTES)
-                saved["pdf_evidence"] = proof
-                saved["completeness"] = {"status": "complete" if file_complete else "partial",
-                                         "article_type": "pdf", "found_sections": [], "missing_sections": [],
-                                         "section_count": 0, "char_count": text_chars,
-                                         "page_count": proof.get("pages"),
-                                         "text_extractable": proof.get("parser_status") == "valid" and text_chars >= 800}
+            _ensure_item_completeness(job_dir, saved, target)
 
         def checkpoint(saved, target=target):
             ensure_completeness(saved)

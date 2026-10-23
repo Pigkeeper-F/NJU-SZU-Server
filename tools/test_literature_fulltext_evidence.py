@@ -5,7 +5,7 @@ import copy
 import unittest
 
 from literature_fulltext_evidence import (
-    EVIDENCE_VERSION, assess_html, content_sha256,
+    EVIDENCE_VERSION, assess_html, assess_completeness, content_sha256,
     revalidate_saved_html, verified_saved_html,
 )
 
@@ -122,6 +122,14 @@ class EvidenceTests(unittest.TestCase):
         for section in evidence["sections"]:
             section["text"] = "Unrelated text that was not captured from this body region. " * 10
         self.assertNotEqual(assess_html(text, evidence=evidence, expected_title=TITLE)[0], "fulltext")
+
+    def test_common_conclusion_variants_count_as_complete(self):
+        for conclusion in ("Conclusion and recommendation", "Final considerations"):
+            with self.subTest(conclusion=conclusion):
+                text, evidence = body_fixture(["Introduction", "Materials and methods", "Results", conclusion])
+                self.assertEqual(assess_completeness(evidence, text)["status"], "complete")
+        text, evidence = body_fixture(["Introduction", "Subject area one", "Subject area two", "Final considerations"])
+        self.assertEqual(assess_completeness(evidence, text)["status"], "complete")
 
     def test_review_without_methods_supported(self):
         text, evidence = body_fixture(["Introduction", "Heat stress and oxidative pathways", "Dietary polyphenols", "Conclusions"])

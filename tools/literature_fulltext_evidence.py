@@ -43,7 +43,7 @@ _CORE_PATTERNS = (
     ("methods", r"^(?:materials?(?: and| &)? methods?|methods?(?: and materials?)?|methodology|experimental(?: procedures?| design| methods?)?|材料与方法|材料和方法|研究方法|实验方法|试验方法|试验材料与方法)$"),
     ("results", r"^(?:results?(?: and| &)? discussion|results?|结果(?:与分析|与讨论|和讨论)?|研究结果|试验结果|实验结果)$"),
     ("discussion", r"^(?:discussion|讨论)$"),
-    ("conclusions", r"^(?:conclusions?|concluding remarks|conclusions? and (?:perspectives|future directions)|结论(?:与展望)?|结语|总结与展望)$"),
+    ("conclusions", r"^(?:conclusions?|concluding remarks|conclusions? and (?:perspectives|future directions|recommendations?|implications?)|conclusion and recommendations?|final considerations?|结论(?:与展望|与建议)?|结语|总结(?:与展望)?)$"),
 )
 
 
@@ -219,6 +219,8 @@ def assess_html(text: str, url: str = "", evidence: dict | None = None,
     return "fulltext", "已核对目标文献及可见正文区域、正文分节。"
 
 
+COMPLETENESS_VERSION = "completeness-v2"
+
 _COMPLETENESS_LABELS = {
     "introduction": "Introduction/引言",
     "methods": "Methods/方法",
@@ -263,6 +265,7 @@ def assess_completeness(evidence: dict, article_text: str = "") -> dict:
             missing.add("substantive_sections")
     missing |= (required - categories)
     return {
+        "version": COMPLETENESS_VERSION,
         "status": "complete" if not missing else "partial",
         "article_type": article_type,
         "found_sections": [_COMPLETENESS_LABELS[category] for category, _ in _CORE_PATTERNS if category in categories],
