@@ -1222,7 +1222,7 @@
     const job = t.literatureJob;
     const awaitingConfirm = !!job && job.status === 'needs_attention' && job.stage === 'awaiting_confirmation';
     const awaitingAccess = !!job && job.status === 'needs_attention' && !awaitingConfirm;
-    const sameConfig = !!job && sameLiteratureConfig(job.config, t.literatureConfig);
+    const sameConfig = !t.literatureConfig || !job?.config || sameLiteratureConfig(job.config, t.literatureConfig);
     const start = node('button', '确认配置并检索', 'primary-button');
     start.type = 'button'; start.disabled = t.literatureBusy || !!root.LiteratureUI?.isBusy() || t.busy || !t.literatureConfig || (awaitingAccess && sameConfig);
     if (awaitingAccess && sameConfig) start.title = '原任务等待人工处理；请用下方“检查并继续”，保留已有来源的结果。';
@@ -1344,7 +1344,7 @@
         : continueLiterature(mod, fulltextPaused ? { until: 'fulltext' } : {});
       actions.append(resume);
       if (fulltextPaused && !job.cnkiRetryPaperId) {
-        const skip = node('button', '跳过无法获取的文献，继续', 'quiet-button'); skip.type = 'button';
+        const skip = node('button', '跳过无法获取的文献，继续', 'primary-button'); skip.type = 'button';
         skip.title = '本任务无法取得的正文或补充材料记入待补充清单，继续下一篇；保留已保存材料，只运行到全文获取。';
         skip.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
         skip.onclick = () => continueLiterature(mod, { until: 'fulltext', skipUnavailable: true });
