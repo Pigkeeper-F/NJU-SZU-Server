@@ -43,6 +43,8 @@ class SkipUnavailableTests(unittest.TestCase):
                 rows = status_map(read_status(job))
                 self.assertEqual(code, 0)
                 self.assertEqual(rows["ONE"]["status"], "unavailable")
+                self.assertEqual(rows["ONE"]["fulltext_url"], "")
+                self.assertEqual(rows["ONE"]["attempted_url"], first)
                 self.assertEqual(rows["ONE"]["acquisition_skip"]["reason"], reason)
                 self.assertEqual(read_status(job)["counts"]["acquisition_skipped"], 1)
                 self.assertGreater(read_status(job)["counts"]["material_incomplete"], 0)
@@ -75,6 +77,8 @@ class SkipUnavailableTests(unittest.TestCase):
             self.assertEqual(events[-1]["type"], "attention")
             self.assertEqual(rows["ONE"]["status"], "needs_attention")
             self.assertEqual(rows["ONE"]["pause_reason"], "access_required")
+            self.assertEqual(rows["ONE"]["fulltext_url"], "")
+            self.assertEqual(rows["ONE"]["attempted_url"], url)
             self.assertEqual(rows["TWO"]["status"], "pending")
             self.assertEqual(fetcher.deferred, [])
 
@@ -124,6 +128,47 @@ class SkipUnavailableTests(unittest.TestCase):
             self.assertEqual(rows["TWO"]["status"], "fetched_pdf")
             self.assertEqual(len(resumed.deferred), 1)
             self.assertEqual(events[-1]["type"], "result")
+
+    def test_legacy_failed_link_is_not_carried_to_another_paper_on_resume(self):
+        with tempfile.TemporaryDirectory() as folder:
+            job = Path(folder)
+            own = "https://pubmed.ncbi.nlm.nih.gov/33132728/"
+            other = "https://pmc.ncbi.nlm.nih.gov/articles/PMC10522860/"
+            write_candidates(job, [candidate("PMID-010", result_url=own)])
+            first = SkipFetcher(page={own: {"status": "attention", "reason": "load_timeout", "message": "页面超过1分钟未就绪"}})
+            run_stage(job, fetcher=first)
+            legacy = read_status(job)
+            legacy["items"][0]["fulltext_url"] = other
+            legacy["items"][0].pop("attempted_url", None)
+            lf.atomic_write_json(job / "fulltext/status.json", legacy)
+
+            resumed = SkipFetcher()
+            code, _ = run_stage(job, fetcher=resumed, resume=True, skip_unavailable=True)
+            saved = status_map(read_status(job))["PMID-010"]
+            self.assertEqual(code, 0)
+            self.assertEqual(saved["status"], "unavailable")
+            self.assertEqual(saved["fulltext_url"], "")
+            self.assertEqual(saved["attempted_url"], own)
+            self.assertEqual(resumed.deferred, [("load_timeout", own)])
+
+    def test_only_run_does_not_preserve_a_failed_link_on_untouched_paper(self):
+        with tempfile.TemporaryDirectory() as folder:
+            job = Path(folder)
+            own = "https://pubmed.ncbi.nlm.nih.gov/33132728/"
+            other = "https://pmc.ncbi.nlm.nih.gov/articles/PMC10522860/"
+            write_candidates(job, [candidate("PMID-010", result_url=own),
+                                   candidate("PMID-006", result_url="https://example.org/six.pdf")])
+            first = SkipFetcher(page={own: {"status": "attention", "reason": "load_timeout", "message": "Timeout"}})
+            run_stage(job, fetcher=first)
+            legacy = read_status(job)
+            legacy["items"][0]["fulltext_url"] = other
+            lf.atomic_write_json(job / "fulltext/status.json", legacy)
+
+            code, _ = run_stage(job, fetcher=SkipFetcher(), resume=True, only="PMID-006")
+            saved = status_map(read_status(job))["PMID-010"]
+            self.assertEqual(code, 0)
+            self.assertEqual(saved["status"], "needs_attention")
+            self.assertEqual(saved["fulltext_url"], "")
 
     def test_supplement_timeout_retains_earlier_original_and_main_body(self):
         with tempfile.TemporaryDirectory() as folder:

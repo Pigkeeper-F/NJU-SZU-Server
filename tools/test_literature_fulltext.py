@@ -183,6 +183,15 @@ class ClassifyTargetTest(unittest.TestCase):
             [("pdf", "https://example.org/p.pdf"), ("html", "https://example.org/article"), ("html", "https://example.org/h")],
         )
 
+    def test_pubmed_candidate_tries_pmc_before_pubmed_and_other_links(self) -> None:
+        pubmed = "https://pubmed.ncbi.nlm.nih.gov/33142538/"
+        pmc = "https://pmc.ncbi.nlm.nih.gov/articles/PMC7647856/"
+        record = candidate("PMID-001", source_key="pubmed", result_url=pubmed, links=[
+            {"label": "Publisher PDF", "url": "https://publisher.test/paper.pdf"},
+            {"label": "PubMed Central full text", "url": pmc},
+        ])
+        self.assertEqual(lf.candidate_urls(record)[:2], [("html", pmc), ("html", pubmed)])
+
 
 class AssessHtmlTextTest(unittest.TestCase):
     def test_long_text_without_dom_proof_is_not_fulltext(self) -> None:
@@ -252,6 +261,39 @@ class FetchOneTest(unittest.TestCase):
 
     def _target(self, **kwargs) -> dict:
         return lf._target_from_candidate(candidate("GSC-001", **kwargs))
+
+    def test_pubmed_tries_pmc_first_and_stops_after_verified_fulltext(self) -> None:
+        pubmed = "https://pubmed.ncbi.nlm.nih.gov/33142538/"
+        pmc = "https://pmc.ncbi.nlm.nih.gov/articles/PMC7647856/"
+        fetcher = FakeFetcher(page={pmc: article_page("论文 GSC-001")})
+        item = lf.fetch_one(self._target(source_key="pubmed", result_url=pubmed,
+            links=[{"label": "PubMed Central full text", "url": pmc}]), self.job, self._opts(fetcher))
+        self.assertEqual(item["status"], "fetched_html")
+        self.assertEqual(fetcher.calls, [("fetch_page", pmc)])
+
+    def test_pubmed_falls_back_after_pmc_access_error(self) -> None:
+        pubmed = "https://pubmed.ncbi.nlm.nih.gov/33142538/"
+        pmc = "https://pmc.ncbi.nlm.nih.gov/articles/PMC7647856/"
+        class ReleasableFetcher(FakeFetcher):
+            def defer_paper(self, **kwargs):
+                self.calls.append(("defer_paper", kwargs["url"]))
+        fetcher = ReleasableFetcher(page={
+            pmc: {"status": "attention", "reason": "access_required", "url": pmc},
+            pubmed: {"status": "ok", "text": "Abstract\n" + "Study details. " * 30, "url": pubmed},
+        })
+        item = lf.fetch_one(self._target(source_key="pubmed", result_url=pubmed,
+            links=[{"label": "PubMed Central full text", "url": pmc}]), self.job, self._opts(fetcher))
+        self.assertEqual(item["status"], "abstract_only")
+        self.assertEqual(fetcher.calls[:3], [("fetch_page", pmc), ("defer_paper", pmc), ("fetch_page", pubmed)])
+
+    def test_pubmed_does_not_continue_after_pmc_verification(self) -> None:
+        pubmed = "https://pubmed.ncbi.nlm.nih.gov/33142538/"
+        pmc = "https://pmc.ncbi.nlm.nih.gov/articles/PMC7647856/"
+        fetcher = FakeFetcher(page={pmc: {"status": "captcha", "url": pmc}})
+        with self.assertRaises(lf.CaptchaPause):
+            lf.fetch_one(self._target(source_key="pubmed", result_url=pubmed,
+                links=[{"label": "PubMed Central full text", "url": pmc}]), self.job, self._opts(fetcher))
+        self.assertEqual(fetcher.calls, [("fetch_page", pmc)])
 
     def test_pdf_success_records_file_status_and_evidence(self) -> None:
         fetcher = FakeFetcher()

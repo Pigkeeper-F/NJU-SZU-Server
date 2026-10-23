@@ -184,6 +184,18 @@ def _url_looks_pdf(url: str) -> bool:
     return urlparse(url).path.lower().endswith(".pdf")
 
 
+def _pmc_article_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return ((parsed.hostname or "").lower() == "pmc.ncbi.nlm.nih.gov"
+            and re.fullmatch(r"/articles/PMC[1-9]\d*/?", parsed.path, re.I) is not None)
+
+
+def _pubmed_article_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return ((parsed.hostname or "").lower() == "pubmed.ncbi.nlm.nih.gov"
+            and re.fullmatch(r"/[1-9]\d*/?", parsed.path) is not None)
+
+
 def _collect_links(record: dict) -> list[dict]:
     links: list[dict] = []
     for link in record.get("fulltext_links") or []:
@@ -238,6 +250,7 @@ def candidate_urls(record: dict) -> list[tuple[str, str]]:
 
     Accepts both raw candidate records (``result_url``) and normalized targets
     (``source_url``) so ``classify_target`` and ``fetch_one`` share one logic.
+    A PubMed record with an observed PMC article link tries PMC first.
     """
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -254,10 +267,21 @@ def candidate_urls(record: dict) -> list[tuple[str, str]]:
             out.append((kind, url))
 
     links = _collect_links(record)
+    result_url = _record_result_url(record)
+    if _pubmed_article_url(result_url):
+        # PMC is the official full-text copy; a PubMed record is bibliographic
+        # and must only be the fallback when its known PMC entry fails.
+        for link in links:
+            if _pmc_article_url(link["url"]):
+                add("html", link["url"])
+        add("html", result_url)
+        for link in links:
+            if not _pmc_article_url(link["url"]):
+                add("pdf" if _url_looks_pdf(link["url"]) else "html", link["url"])
+        return out
     for link in links:
         if _url_looks_pdf(link["url"]):
             add("pdf", link["url"])
-    result_url = _record_result_url(record)
     if _url_looks_pdf(result_url):
         add("pdf", result_url)
     if result_url:
@@ -527,7 +551,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     """Fetch one paper, following only its observed legal entry links.
 
     An abstract is retained as a fallback while observed full-text links are
-    tried. Any access/loading issue stops the batch immediately.
+    tried. Access/loading issues pause the batch, except that a failed PMC
+    article entry may fall back to its paired PubMed bibliographic page.
     """
     fetcher, job_dir = opts["fetcher"], Path(out_dir)
     files_dir = job_dir / "fulltext" / "files"
@@ -563,6 +588,7 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             item.update(status="unavailable", reason=("知网入口缺少单篇文献标识，请从官方页面补充有效入口（待补充）" if missing_cnki else "无合法全文入口（待补充）"))
         return item
     failures, seen, abstract = [], set(), None
+    confirmed_html_this_run = False
     blocked_transfer = any(_cnki_transfer_url(link["url"]) for link in _collect_links(record))
     for kind, url in attempts:
         if url in seen:
@@ -570,6 +596,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
         if len(seen) >= 8:
             break
         seen.add(url)
+        if confirmed_html_this_run and kind == "html":
+            continue  # Confirmed body: only try remaining PDF links, not PubMed metadata.
         if kind == "pdf":
             path = artifact_destination(job_dir, paper_id, "pdf")
             relative = path.relative_to(Path(job_dir).absolute()).as_posix()
@@ -589,7 +617,18 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             failures.append(f"PDF 获取失败（{url}）：{result.get('status') or '未知'}")
             continue
         result = fetcher.fetch_page(url, opts)
-        _raise_page_attention(result, paper_id, url)
+        try:
+            _raise_page_attention(result, paper_id, url)
+        except FulltextPause as pause:
+            if (_pmc_article_url(url) and _pubmed_article_url(source)
+                    and pause.reason in {"access_required", "login", "page_error", "load_timeout"}
+                    and any(candidate_url == source for _, candidate_url in attempts)):
+                release = getattr(fetcher, "defer_paper", None)
+                if callable(release):
+                    release(reason=pause.reason, url=pause.url)
+                failures.append(f"PMC 正文暂不可用：{pause.reason}")
+                continue
+            raise
         if result.get("status") == "pdf_page":
             blob = result.get("bytes") or b""
             valid, why, size = validate_pdf_bytes(blob)
@@ -606,6 +645,7 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             proof = result.get("html_evidence") if isinstance(result.get("html_evidence"), dict) else {}
             verdict, reason = assess_html_text(text, page_url, proof, record.get("title") or "", record.get("doi") or "")
             if verdict == "fulltext":
+                confirmed_html_this_run = True
                 if html_main is None:
                     html_main = _settle_html(dict(item), job_dir, str(proof.get("article_text") or text), page_url, verdict, reason, proof)
                     _checkpoint_main(html_main, opts)
@@ -674,7 +714,7 @@ def _carry_previous(target: dict, prev: dict | None, job_dir: Path) -> dict:
     item = _item_skeleton(target)
     if not prev:
         return item
-    for key in ("fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "evidence_version", "html_evidence", "content_sha256", "reviewed_at", "pdf_evidence", "reused_from", "observed_content_sha256", "local_verification", "acquisition_skip", "pause_reason"):
+    for key in ("fulltext_url", "attempted_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "evidence_version", "html_evidence", "content_sha256", "reviewed_at", "pdf_evidence", "reused_from", "observed_content_sha256", "local_verification", "acquisition_skip", "pause_reason"):
         if key in prev:
             item[key] = prev[key]
     if item["status"] == "fetched_html":
@@ -708,6 +748,10 @@ def _carry_previous(target: dict, prev: dict | None, job_dir: Path) -> dict:
                 fulltext_url="",
                 reason="上次获取的文件缺失，已重新排队",
             )
+    if item["status"] in {"needs_attention", "unavailable"}:
+        # Old runs could put a failed (or stale previous-tab) URL here. It was
+        # never verified as this paper's full text, so never carry it forward.
+        item["fulltext_url"] = ""
     return item
 
 
@@ -884,7 +928,7 @@ def _previous_remote_pause(item: dict, paper: dict) -> FulltextPause | None:
             reason = "page_error"
         else:
             return None
-    return FulltextPause(str(item["paper_id"]), str(item.get("fulltext_url") or ""),
+    return FulltextPause(str(item["paper_id"]), str(item.get("source_url") or ""),
                          reason=reason, message=message)
 
 
@@ -924,6 +968,10 @@ def _run_fulltext(
     items = [dict(previous[target["paper_id"]])
              if only_set is not None and target["paper_id"] not in only_set and target["paper_id"] in previous
              else _carry_previous(target, previous.get(target["paper_id"]), job_dir) for target in targets]
+    for item in items:
+        if item.get("status") in {"needs_attention", "unavailable"}:
+            # --only preserves unrelated statuses, but not unverified URLs.
+            item["fulltext_url"] = ""
     target_by_id = {target["paper_id"]: target for target in targets}
     position = {item["paper_id"]: index for index, item in enumerate(items)}
     try:
@@ -963,7 +1011,7 @@ def _run_fulltext(
         marker = {"policy": "skip_unavailable", "reason": pause.reason,
                   "message": pause.message, "skipped_at": now_iso()}
         if saved.get("status") not in FETCHED_STATUSES:
-            saved.update(fulltext_url=pause.url or str(saved.get("fulltext_url") or ""),
+            saved.update(fulltext_url="", attempted_url=pause.url or str(saved.get("source_url") or ""),
                          status="unavailable", reason=pause.message + "（本轮已跳过，待补充）")
         saved.update(acquisition_skip=marker, pause_reason=pause.reason)
         paper = materials.paper(target)
@@ -1187,7 +1235,8 @@ def _run_fulltext(
             saved["pause_reason"] = pause.reason
             if saved.get("status") not in FETCHED_STATUSES:
                 item.update(
-                fulltext_url=pause.url or str(item.get("fulltext_url") or ""),
+                fulltext_url="",
+                attempted_url=pause.url or str(item.get("source_url") or ""),
                 kind="none",
                 status="needs_attention",
                 path="",

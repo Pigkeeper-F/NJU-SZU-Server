@@ -51,6 +51,7 @@ def main():
     assert all(row['evidence_where'] for row in rows)
     assert all(row['review_status'] == 'unreviewed' for row in literature)
     assert all(row['screening_status'] == 'pending_review' for row in literature)
+    assert all(not row['fulltext_url'] for row in literature if row['fulltext_status'] in ('unavailable', 'needs_attention'))
     assert Counter(row['validation_status'] for row in rows) == {'ok': 251, 'pending_review': 8}
 
     extracted = {}
@@ -82,6 +83,7 @@ def main():
     assert len(status['papers']) == len(ids)
     assert all(paper['local_files_included'] is False for paper in status['papers'])
     assert Counter(paper['source_fulltext_status'] for paper in status['papers']) == {'fetched_html': 3, 'abstract_only': 1, 'unavailable': 6}
+    assert all(not paper['fulltext_url'] for paper in status['papers'] if paper['source_fulltext_status'] in ('unavailable', 'needs_attention'))
     assert load('extraction-check.json')['ok'] == 3
 
     for file in ROOT.rglob('*'):

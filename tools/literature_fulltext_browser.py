@@ -434,8 +434,12 @@ class FulltextBrowserFetcher:
         # DOI resolvers and the common PubMed entry are shared gateways, not
         # evidence that every publisher linked from them is inaccessible.
         gateways = {"doi.org", "dx.doi.org", "pubmed.ncbi.nlm.nih.gov"}
+        # The visible tab may still be on the preceding article after a failed
+        # navigation. Keep its actual site for pacing, but attribute the failed
+        # entry to the URL requested for this paper.
+        reported = literature_browser.safe_url(blocked.get("url") or url) if blocked else literature_browser.safe_url(actual)
         result = {"status": "attention", "reason": why,
-                  "url": literature_browser.safe_url(actual),
+                  "url": reported,
                   "message": blocked.get("message") or _MESSAGES.get(why, "该材料尚未取得，原页面保留待处理。")}
         if why in {"login", "verification", "access_required", "rate_limited"} and destination and destination not in gateways:
             self._deferred_sites[destination] = dict(result)
@@ -452,7 +456,7 @@ class FulltextBrowserFetcher:
         self._page = None
         self._blocked = None
         self._blocked_url = ""
-        self._progress("全文获取：本篇暂未取得的材料已记入待处理，保留原页面，继续下一篇可访问文献。")
+        self._progress("全文获取：暂未取得的页面已保留，继续尝试可访问入口。")
         return {"deferred": True, "reason": why, "url": result["url"]}
 
     def close(self):
@@ -529,8 +533,10 @@ class FulltextBrowserFetcher:
             self._binding["last_request_at"] = self._last_request
             self._write_binding()
 
-    def _attention(self, reason, url, *, snapshot=None):
+    def _attention(self, reason, url, *, snapshot=None, observed_url=None):
         safe = literature_browser.safe_url(url)
+        if observed_url and urlsplit(str(observed_url)).scheme in {"http", "https"} and not literature_browser.safe_url(observed_url):
+            safe = ""  # Do not expose a redirected login/token URL or replace it with an apparent article link.
         self._binding["pending_url_hash"] = _url_hash(self._request_url)
         self._binding["attention_reason"] = reason
         self._write_binding()
@@ -539,7 +545,7 @@ class FulltextBrowserFetcher:
             message = "知网提示来源应用不正确或下载入口失效，已暂停；请从知网正常详情或检索页面核对入口后继续。"
         result = {"status": "attention", "reason": reason, "url": safe, "message": message}
         self._blocked = result
-        self._blocked_url = str(url or "")
+        self._blocked_url = str(observed_url or url or "")
         return result
 
     def _clear_pending(self):
@@ -1088,7 +1094,7 @@ class FulltextBrowserFetcher:
                                 "bytes": blob, "size": len(blob)}
                 if nav_error is not None:
                     reason = "load_timeout" if "timeout" in type(nav_error).__name__.lower() or "timeout" in str(nav_error).lower() else "page_error"
-                    return self._attention(reason, page.url or url)
+                    return self._attention(reason, safe, observed_url=page.url)
                 status = int(getattr(response, "status", 0) or 0)
                 if status in (401, 403, 404, 429) or status >= 500:
                     try:
@@ -1097,14 +1103,14 @@ class FulltextBrowserFetcher:
                         error_snapshot = {}
                     if not isinstance(error_snapshot, dict):
                         error_snapshot = {}
-                    return self._attention(self._reason(error_snapshot, status), page.url or url, snapshot=error_snapshot)
+                    return self._attention(self._reason(error_snapshot, status), safe, snapshot=error_snapshot, observed_url=page.url)
                 content_type = str((getattr(response, "headers", {}) or {}).get("content-type", "")).lower()
                 if "application/pdf" in content_type:
                     self._progress("全文获取：文件正在生成或下载，等待实际传输完成后再保存。")
                     try:
                         blob = response.body()
                     except Exception:
-                        return self._attention("load_timeout", page.url or url)
+                        return self._attention("load_timeout", safe, observed_url=page.url)
                     if not isinstance(blob, bytes) or not blob.startswith(b"%PDF") or not MIN_PDF_BYTES <= len(blob) <= MAX_PDF_BYTES:
                         return {"status": "fetch_error", "error": "页面响应未通过PDF内容校验。", "url": literature_browser.safe_url(page.url) or safe}
                     if out_path is not None:
@@ -1114,10 +1120,10 @@ class FulltextBrowserFetcher:
                             "bytes": blob, "size": len(blob)}
                 snapshot = page.evaluate(_SNAPSHOT_JS)
                 if not isinstance(snapshot, dict):
-                    return self._attention("page_error", page.url or url)
+                    return self._attention("page_error", safe, observed_url=page.url)
                 reason = self._reason(snapshot, status)
                 if reason:
-                    return self._attention(reason, page.url or url, snapshot=snapshot)
+                    return self._attention(reason, safe, snapshot=snapshot, observed_url=page.url)
                 self._clear_pending()
                 final_url = literature_browser.safe_url(page.url) or safe
                 links = []

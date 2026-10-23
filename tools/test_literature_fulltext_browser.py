@@ -234,6 +234,43 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(context.pages[-1].gotos[0][1]["timeout"], 60000)
         self.assertFalse(context.pages[-1].closed)
 
+    def test_access_error_records_requested_article_not_previous_page(self):
+        previous = "https://pmc.ncbi.nlm.nih.gov/articles/PMC10522860/"
+        requested = "https://pmc.ncbi.nlm.nih.gov/articles/PMC7596036/"
+        context = Context([{"url": previous, "response": Response(403)}])
+        fetcher = self.fetcher(context)
+        result = fetcher.fetch_page(requested, {})
+        self.assertEqual(result["reason"], "access_required")
+        self.assertEqual(result["url"], requested)
+        self.assertEqual(fetcher._blocked_url, previous)
+        deferred = fetcher.defer_paper(reason=result["reason"], url=result["url"])
+        self.assertEqual(deferred["url"], requested)
+        self.assertEqual(fetcher._binding["last_deferred_paper"]["url"], requested)
+
+    def test_failed_pmc_page_can_be_retained_before_pubmed_fallback(self):
+        class FallbackContext(Context):
+            def __init__(self):
+                super().__init__()
+                self.page_steps = [[{"response": Response(403)}], [{"response": Response(200)}]]
+
+            def new_page(self):
+                self.creates += 1
+                page = Page(f"owned-{self.creates}", self.page_steps.pop(0))
+                self.pages.append(page)
+                return page
+
+        context = FallbackContext()
+        fetcher = self.fetcher(context)
+        pmc = "https://pmc.ncbi.nlm.nih.gov/articles/PMC7647856/"
+        pubmed = "https://pubmed.ncbi.nlm.nih.gov/33142538/"
+        first = fetcher.fetch_page(pmc, {})
+        self.assertEqual(first["reason"], "access_required")
+        fetcher.defer_paper(reason=first["reason"], url=first["url"])
+        second = fetcher.fetch_page(pubmed, {})
+        self.assertEqual(second["status"], "ok")
+        self.assertEqual(context.creates, 2)
+        self.assertFalse(context.pages[-2].closed)
+
     def test_cnki_http_200_entry_error_stops_batch_and_pending_resume_without_navigating(self):
         context = Context([
             {"response": Response(200), "snapshot": snapshot(

@@ -192,15 +192,6 @@ def _fulltext_items(inputs: dict) -> list[dict]:
     return [item for item in (inputs["fulltext"].get("items") or []) if isinstance(item, dict)]
 
 
-def _first_fulltext_link(record: dict) -> str:
-    for link in record.get("fulltext_links") or []:
-        if isinstance(link, dict):
-            url = safe_url(link.get("url"))
-            if url:
-                return url
-    return ""
-
-
 def _int_or_blank(value: object) -> object:
     return value if isinstance(value, int) and not isinstance(value, bool) else ""
 
@@ -296,8 +287,10 @@ def literature_rows(inputs: dict) -> list[dict]:
             elif group.get("needs_review"):
                 screening_reason = f"probable duplicate group {canonical_id}（待人工确认）"
         fulltext_url = ""
-        if item is not None:
-            fulltext_url = safe_url(item.get("fulltext_url")) or _first_fulltext_link(record)
+        if item is not None and str(item.get("status") or "") in FULLTEXT_READY:
+            # Candidate links are only unverified leads. A failed/stale URL
+            # must not appear in the exported column for acquired full text.
+            fulltext_url = safe_url(item.get("fulltext_url"))
         evidence_level = str(record.get("evidence_level") or "")
         if item is not None and str(item.get("evidence_level") or ""):
             evidence_level = str(item["evidence_level"])

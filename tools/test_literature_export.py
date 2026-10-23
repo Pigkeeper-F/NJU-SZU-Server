@@ -84,6 +84,19 @@ class ExportTests(unittest.TestCase):
 
     # ------------------------------------------------------------------ tables
 
+    def test_failed_legacy_fulltext_link_is_not_exported_as_verified(self):
+        other = "https://pmc.ncbi.nlm.nih.gov/articles/PMC10522860/"
+        inputs = {
+            "candidates": [{"candidate_id": "PMID-010", "title": "Target paper",
+                            "result_url": "https://pubmed.ncbi.nlm.nih.gov/33132728/",
+                            "fulltext_links": [{"url": other}]}],
+            "fulltext": {"items": [{"paper_id": "PMID-010", "status": "unavailable",
+                                    "fulltext_url": other, "reason": "Access failed"}]},
+        }
+        rows = export.literature_rows(inputs)
+        self.assertEqual(rows[0]["fulltext_url"], "")
+        self.assertEqual(rows[0]["fulltext_status"], "unavailable")
+
     def test_export_writes_pair_of_csv_and_xlsx(self):
         job = self.default_job()
         code, events = self.export(job)
