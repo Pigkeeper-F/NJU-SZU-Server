@@ -11,7 +11,8 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'js', 'codex.js'), 'ut
 const copy = value => JSON.parse(JSON.stringify(value));
 const MODULE = 'module-fixture';
 const mod = { id: MODULE };
-const SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
+const SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed',
+  'pmc', 'openalex', 'europe-pmc', 'semantic-scholar'];
 const RUNTIME = { protocolVersion: 1, restartRequired: false, supportedSources: SOURCES,
   browserSession: 'persistent-research-browser', instanceId: 'fixture-instance' };
 
@@ -245,6 +246,33 @@ async function main() {
     const auth = harness(); auth.setJob(job({ attention: { source: 'cnki', reason } }));
     await auth.subject.watchLiterature(MODULE, 'original-job');
     assert.equal(auth.count('/api/literature/browser'), 1, 'Auth-related wait opens once: ' + reason);
+  }
+  // PubMed normally uses E-utilities, but an API failure can persist the same
+  // source's browser fallback. A genuine verification wait must retain its
+  // manual page and skip-source controls; the other open API sources never
+  // acquire browser controls merely because they need attention.
+  const pubmedFallback = harness();
+  const pubmedJob = job({ config: { ...job().config, sources: ['pubmed'] },
+    attention: { source: 'pubmed', reason: 'verification' }, message: 'PubMed 官方网页需要人工验证' });
+  pubmedFallback.setJob(pubmedJob);
+  await pubmedFallback.subject.watchLiterature(MODULE, pubmedJob.id);
+  assert.equal(pubmedFallback.count('/api/literature/browser'), 1, 'PubMed browser fallback can open its actual verification page');
+  assert.match(pubmedFallback.subject.literatureAttentionMessage(pubmedJob), /平台专用检索浏览器/);
+  pubmedFallback.setJob(pubmedJob);
+  await pubmedFallback.subject.continueLiterature(mod, { deferSource: 'pubmed' });
+  assert.deepEqual(pubmedFallback.posts().find(call => call.url === '/api/literature/advance').body,
+    { id: pubmedJob.id, until: 'discover', deferSource: 'pubmed' }, 'PubMed fallback can be deferred without losing the original task');
+  const pubmedApi = harness();
+  pubmedApi.setJob({ ...pubmedJob, attention: null, stage: 'interrupted', message: 'PubMed API 网络请求暂停' });
+  await pubmedApi.subject.watchLiterature(MODULE, pubmedJob.id);
+  assert.equal(pubmedApi.count('/api/literature/browser'), 0, 'An ordinary PubMed API error does not open a browser');
+  for (const sourceKey of ['pmc', 'openalex', 'europe-pmc', 'semantic-scholar']) {
+    const apiOnly = harness();
+    apiOnly.setJob(job({ config: { ...job().config, sources: [sourceKey] }, attention: { source: sourceKey, reason: 'verification' } }));
+    await apiOnly.subject.watchLiterature(MODULE, 'original-job');
+    assert.equal(apiOnly.count('/api/literature/browser'), 0, 'Open API source cannot auto-open a login window: ' + sourceKey);
+    await apiOnly.subject.continueLiterature(mod, { deferSource: sourceKey });
+    assert.equal(apiOnly.count('/api/literature/advance'), 0, 'Browser source deferral must not be offered for an open API source: ' + sourceKey);
   }
   const failedOpen = harness(); failedOpen.setBrowserError(new Error('fixture browser unavailable'));
   await failedOpen.subject.watchLiterature(MODULE, 'original-job');

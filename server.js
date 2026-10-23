@@ -20,6 +20,7 @@ const { LiteratureConnector } = require('./tools/literature-connector');
 const { runFieldsAssist } = require('./tools/literature-fields-assist');
 const { scholarSearch } = require('./tools/scholar-flow');
 const { createLiteratureRuntime } = require('./tools/literature-runtime');
+const { LiteratureAuxiliary } = require('./tools/literature-auxiliary');
 
 const ROOT = __dirname;
 const codex = new CodexBridge(ROOT);
@@ -30,6 +31,7 @@ const scholar = new LiteratureConnector(ROOT, {
   })
 });
 const literature = new LiteratureFlow(codex, { scholarSearch: options => scholarSearch(scholar, options) });
+const literatureAuxiliary = new LiteratureAuxiliary(ROOT, scholar);
 // 【W2 · 2026-10-14】请求体上限 64KB → 2MB：exec 端点需要携带数据文件（文本），
 // 单文件 ≤512KB、files 总量 ≤1MB（业务校验见 §19），故整体上限统一抬高。
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -139,7 +141,7 @@ const literatureRuntime = createLiteratureRuntime({
   isBusy: () => [...scholar.jobs.values()].some(job => job.status === 'running' || job.browserOpening)
     || [...codex.jobs.values()].some(job => job.status === 'running')
     || codex.sourceBusy.size > 0 || codex.pending.size > 0 || !!codex.loginStarting || !!codex.loginAttempt
-    || literature.active.size > 0
+    || literature.active.size > 0 || literatureAuxiliary.busy
 });
 
 // 【安全修复 · 2026-10-13】同源校验 + 限流，堵住「恶意网页借本机服务外发 .env 密钥」的攻击链：
@@ -535,8 +537,11 @@ async function handleDebug(req, res, url) {
 // 前端不需要也不应该把文件内容原样回传。
 // ==================================================================
 async function handleResearch(req, res, url) {
+  let release;
+  try {
   const route = url.pathname;
   if (req.method === 'POST' && route === '/api/research/questions') {
+    release = literatureAuxiliary.acquire();
     const data = JSON.parse(await readBody(req, 256 * 1024));
     const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
     if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
@@ -546,9 +551,8 @@ async function handleResearch(req, res, url) {
     let topic = '';
     const jobIds = Array.isArray(data.upstreamJobIds) ? data.upstreamJobIds : [];
     for (const jobId of jobIds) {
-      if (typeof jobId !== 'string') continue;
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) continue;
-      const out = rq.loadResearchOutputs(path.join(ROOT, '.workbench', 'literature', jobId));
+      const upstream = literatureAuxiliary.job(jobId);
+      const out = rq.loadResearchOutputs(upstream.dir);
       gaps = gaps.concat(out.gaps);
       notes = notes.concat(out.notes);
       topic = topic || out.topic;
@@ -572,18 +576,31 @@ async function handleResearch(req, res, url) {
   }
   res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify({ error: '未知的接口' }));
+  } catch (error) { return sendJson(res, error.status || 400, { error: error.message }); }
+  finally { release?.(); }
 }
 
 async function handleLiterature(req, res, url) {
+  let release;
   try {
     const route = url.pathname;
+    const protectedRequest = (req.method === 'POST' && !['/api/literature/fields-assist', '/api/literature/prepare'].includes(route)) || route === '/api/literature/cancel';
+    const readLiteratureBody = async (request, limit) => {
+      const content = await readBody(request, limit);
+      if (protectedRequest && !release) literatureAuxiliary.assertIdle();
+      return content;
+    };
+    if ((req.method === 'POST' && !['/api/literature/fields-assist', '/api/literature/prepare'].includes(route))
+        || route === '/api/literature/cancel') {
+      literatureAuxiliary.assertIdle();
+    }
     if (req.method === 'GET' && route === '/api/literature/runtime') return sendJson(res, 200, literatureRuntime.snapshot());
     if (req.method === 'POST' && route === '/api/literature/fields-assist') {
-      const data = JSON.parse(await readBody(req, 192 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 192 * 1024));
       return sendJson(res, 202, await runFieldsAssist({ scholar, codex }, data));
     }
     if (req.method === 'POST' && route === '/api/literature/prepare') {
-      const data = JSON.parse(await readBody(req, 128 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 128 * 1024));
       const messages = normalizeMessages(data.messages);
       if (!messages.some(message => message.role === 'user')) throw new Error('请先在文献挖掘模块提出检索需求');
       const approvedDoc = data.approvedDoc == null ? '' : String(data.approvedDoc).slice(0, 12000);
@@ -601,7 +618,7 @@ async function handleLiterature(req, res, url) {
       return sendJson(res, 202, await codex.run(data.sessionId, sourceMessages, instructions, false, extractionModel, 'literature-mining', null));
     }
     if (req.method === 'POST' && route === '/api/literature/search') {
-      const data = JSON.parse(await readBody(req, 64 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
       return sendJson(res, 202, scholar.start(data.config, data.resumeCurrent === true, data.until));
     }
     // 【文献调研 · 2026-10-20】POST /api/literature/research：环节①的要点抽取与研究空白归纳。
@@ -609,18 +626,16 @@ async function handleLiterature(req, res, url) {
     // research 在这批候选（及已有全文）上做「逐篇要点 + 共识分歧 + 研究空白」，
     // 走服务端已有的模型通道（resolveModelConfig + callModel），不依赖本机 Codex 登录。
     if (req.method === 'POST' && route === '/api/literature/research') {
-      const data = JSON.parse(await readBody(req, 64 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
       const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
-      if (!jobId) return sendJson(res, 400, { error: '缺少 jobId。' });
+      release = literatureAuxiliary.acquire();
+      const job = literatureAuxiliary.job(jobId);
       const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
       if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
-      let job;
-      try { job = literature.loadPersisted(jobId); }
-      catch (error) { return sendJson(res, 404, { error: '检索任务不存在。' }); }
       try {
         const result = await require('./tools/literature-research').runResearchStage({ job, modelCfg: cfg, callModel: callModelWithRetry });
-        literature.registerFiles(job, result.files);
-        literature.persist(job);
+        scholar.registerFiles(job, result.files);
+        scholar.persist(job);
         return sendJson(res, 200, {
           ok: result.ok, meta: result.meta, files: result.files,
           notes: result.notes, synthesis: result.synthesis, gaps: result.gaps, error: result.error
@@ -634,7 +649,8 @@ async function handleLiterature(req, res, url) {
     // 【选题冷启动 · 2026-10-20】POST /api/literature/research-plan：模糊想法 → 检索维度 + 候选检索式。
     // 环节①的入口：真实场景里人手上往往只有一个模糊想法，先把它转成可执行的检索再开跑。
     if (req.method === 'POST' && route === '/api/literature/research-plan') {
-      const data = JSON.parse(await readBody(req, 64 * 1024));
+      release = literatureAuxiliary.acquire();
+      const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
       const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
       if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
       try {
@@ -648,8 +664,10 @@ async function handleLiterature(req, res, url) {
     // 【人工初筛 · 2026-10-20】POST /api/literature/research-screen：把人的初筛结果写进作业目录。
     // 要点抽取只对保留的候选做；被排除的条目连同理由一起留档（可溯源、可回看）。
     if (req.method === 'POST' && route === '/api/literature/research-screen') {
-      const data = JSON.parse(await readBody(req, 64 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
       const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
+      release = literatureAuxiliary.acquire();
+      const job = literatureAuxiliary.job(jobId);
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
         return sendJson(res, 400, { error: '检索任务标识无效。' });
       }
@@ -657,7 +675,7 @@ async function handleLiterature(req, res, url) {
       const exclude = (Array.isArray(data.exclude) ? data.exclude : [])
         .map((item) => ({ id: String((item && item.id) || ''), reason: String((item && item.reason) || '') }))
         .filter((item) => item.id).slice(0, 200);
-      const dir = path.join(ROOT, '.workbench', 'literature', jobId, 'research');
+      const dir = path.join(job.dir, 'research');
       try {
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(
@@ -665,6 +683,8 @@ async function handleLiterature(req, res, url) {
           JSON.stringify({ keep, exclude, screenedAt: new Date().toISOString() }, null, 2) + '\n',
           'utf8'
         );
+        scholar.registerFiles(job, ['research/screening.json']);
+        scholar.persist(job);
       } catch (error) {
         return sendJson(res, 500, { error: '初筛结果写入失败：' + ((error && error.message) || '未知错误') });
       }
@@ -677,7 +697,7 @@ async function handleLiterature(req, res, url) {
     // 用自己的账号在源站检索 → 导出 RIS/BibTeX/CSV → 在这里导入候选池。
     // 导入的条目与检索来的条目同构，下游五个阶段零改动。
     if (req.method === 'POST' && route === '/api/literature/import') {
-      const data = JSON.parse(await readBody(req, 4 * 1024 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 4 * 1024 * 1024));
       const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
       const sourceKey = typeof data.source === 'string' ? data.source.trim() : 'cnki';
       const content = typeof data.content === 'string' ? data.content : '';
@@ -686,13 +706,15 @@ async function handleLiterature(req, res, url) {
         return sendJson(res, 400, { error: '检索作业标识无效。' });
       }
       if (!content.trim()) return sendJson(res, 400, { error: '清单内容为空。' });
+      release = literatureAuxiliary.acquire();
+      const job = literatureAuxiliary.job(jobId, { importing: true });
       const registry = require('./tools/literature-sources');
       if (!registry.isKnown(sourceKey)) {
         return sendJson(res, 400, { error: '未知的来源：' + sourceKey });
       }
       // 解析与并入由 Python 脚本做（Node 不能 require .py）——与其它阶段同一套 spawn 机制。
-      const jobDir = path.join(ROOT, '.workbench', 'literature', jobId);
-      const tempPath = path.join(os.tmpdir(), 'fa-import-' + Date.now() + '.tmp');
+      const jobDir = job.dir;
+      const tempPath = path.join(jobDir, '.import-' + require('node:crypto').randomUUID() + '.tmp');
       const configPath = path.join(jobDir, 'run_config.json');
       try {
         fs.writeFileSync(tempPath, content, 'utf8');
@@ -706,7 +728,8 @@ async function handleLiterature(req, res, url) {
         if (fs.existsSync(configPath)) args.splice(1, 0, '--config', configPath);
         else args.splice(1, 0, '--config', tempPath + '.cfg.json');
         const outcome = await new Promise((resolve) => {
-          const child = spawn('python', args, { cwd: ROOT, windowsHide: true });
+          const python = [process.env.WORKBENCH_PYTHON, path.join(ROOT, '.venv', 'Scripts', 'python.exe'), path.join(ROOT, '.venv', 'bin', 'python')].find(file => file && fs.existsSync(file)) || 'python';
+          const child = spawn(python, args, { cwd: ROOT, windowsHide: true });
           let out = '';
           let err = '';
           child.stdout.on('data', (chunk) => { out += chunk; });
@@ -722,6 +745,10 @@ async function handleLiterature(req, res, url) {
           const message = (parsed && parsed.message) || String(outcome.out || outcome.err || '').trim().slice(0, 300) || '导入失败';
           return sendJson(res, 400, { error: message });
         }
+        job.count = parsed.total;
+        job.counters = { ...job.counters, candidates: parsed.total };
+        scholar.registerFiles(job, parsed.files);
+        scholar.persist(job);
         return sendJson(res, 200, { ok: true, added: parsed.added, total: parsed.total, files: parsed.files });
       } catch (error) {
         console.error('[server] literature import failed:', error);
@@ -733,27 +760,27 @@ async function handleLiterature(req, res, url) {
 
     // 【stage2】POST /advance：从 resumeStage 续跑（缺省 until=export），支持字段确认关口（§21.2.2）。
     if (req.method === 'POST' && route === '/api/literature/advance') {
-      const data = JSON.parse(await readBody(req, 64 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
       return sendJson(res, 200, scholar.advance(data.id, { until: data.until, confirmations: data.confirmations,
         ...(Object.hasOwn(data, 'skipUnavailable') ? { skipUnavailable: data.skipUnavailable } : {}),
         ...(Object.hasOwn(data, 'deferSource') ? { deferSource: data.deferSource } : {}) }));
     }
     if (req.method === 'POST' && route === '/api/literature/continue-available') {
-      const data = JSON.parse(await readBody(req, 4 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => !['id', 'until'].includes(key))) {
         throw new Error('只需提供原任务标识与后续处理阶段');
       }
       return sendJson(res, 200, scholar.continueAvailable(data.id, { until: data.until }));
     }
     if (req.method === 'POST' && route === '/api/literature/review-fulltext') {
-      const data = JSON.parse(await readBody(req, 4 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => key !== 'id')) {
         throw new Error('只需提供当前全文任务标识');
       }
       return sendJson(res, 202, scholar.reviewFulltext(data.id));
     }
     if (req.method === 'POST' && ['/api/literature/retry-cnki', '/api/literature/restart-cnki'].includes(route)) {
-      const data = JSON.parse(await readBody(req, 4 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Array.isArray(data)
           || Object.keys(data).length !== 2 || !Object.hasOwn(data, 'id') || !Object.hasOwn(data, 'paperId')
           || Object.keys(data).some(key => !['id', 'paperId'].includes(key))) {
@@ -762,12 +789,12 @@ async function handleLiterature(req, res, url) {
       return sendJson(res, 202, route.endsWith('/restart-cnki') ? scholar.restartCnki(data.id, data.paperId) : scholar.retryCnki(data.id, data.paperId));
     }
     if (req.method === 'POST' && route === '/api/literature/browser') {
-      const data = JSON.parse(await readBody(req, 4 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Object.keys(data).some(key => key !== 'id')) throw new Error('只需提供当前检索任务标识');
       return sendJson(res, 200, await scholar.openLogin(data.id));
     }
     if (req.method === 'POST' && ['/api/literature/delete', '/api/literature/restore'].includes(route)) {
-      const data = JSON.parse(await readBody(req, 4 * 1024));
+      const data = JSON.parse(await readLiteratureBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => key !== 'id')) throw new Error('只需提供当前检索任务标识');
       return sendJson(res, 200, route.endsWith('/delete') ? scholar.deleteJob(data.id) : scholar.restoreJob(data.id));
     }
@@ -872,7 +899,8 @@ async function handleLiterature(req, res, url) {
       return;
     }
     sendJson(res, 404, { error: '接口不存在' });
-  } catch (error) { sendJson(res, 400, { error: error.message }); }
+  } catch (error) { sendJson(res, error.status || 400, { error: error.message }); }
+  finally { release?.(); }
 }
 
 function normalizeMessages(raw) {

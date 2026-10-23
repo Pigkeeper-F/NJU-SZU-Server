@@ -16,6 +16,9 @@ const BACKEND_FILES = [
   'tools/literature-common.py',
   'tools/literature-config.js',
   'tools/literature-fields-assist.js',
+  'tools/literature-research.js',
+  'tools/literature-auxiliary.js',
+  'tools/research-question.js',
   'tools/literature-connector.js',
   'tools/literature-extract.js',
   'tools/literature-flow.js',
@@ -26,6 +29,8 @@ const BACKEND_FILES = [
   'tools/literature_extra_sources.py',
   'tools/literature_pubmed.py',
   'tools/literature_search.py',
+  'tools/literature_search_open.py',
+  'tools/literature_import.py',
   'tools/literature_sources.py',
   'tools/literature_source_runner.py',
   'tools/literature_source_worker.py',
@@ -44,7 +49,8 @@ const BACKEND_FILES = [
   'tools/source-download.js',
   'tools/source-transfer.js',
   'tools/faostat-download.js',
-  'tools/faostat_filter.py'
+  'tools/faostat_filter.py',
+  'tools/writing_build.py'
 ];
 
 function normalizedRoot(root) {

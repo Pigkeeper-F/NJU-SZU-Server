@@ -1,0 +1,159 @@
+{
+  "version": 1,
+  "snapshot_date": "2026-10-23",
+  "records": [
+    {
+      "record_type": "literature_job",
+      "task_id": "b743c327-b0f6-4a01-9ba8-feb370feda00",
+      "status": "cancelled",
+      "stage": "cancelled",
+      "sources": [
+        "pubmed"
+      ],
+      "recorded_at": "2026-10-20T13:43:02.016Z",
+      "message": "任务已停止；已完成的阶段产物保留",
+      "error_class": "stopped",
+      "interpretation": "任务记录显示已停止；不能据此推断技术故障或由谁停止。",
+      "suggested_next_step": "在原电脑核对停止原因、保留产物和原配置，确需继续时再明确恢复。",
+      "counters": {
+        "candidates": 10,
+        "uniqueGroups": 10
+      },
+      "retained_files": [
+        {
+          "name": "candidates.csv",
+          "bytes": 24084,
+          "sha256": "00c8dc92c179a98926e5970f182c761e692116fa25fb68b182b43abd20448415",
+          "content_included": false
+        },
+        {
+          "name": "candidates.json",
+          "bytes": 35574,
+          "sha256": "f08114072b5bbf71fda2fa267cad8e7f09dca84859895d45315e91a9d38838d5",
+          "content_included": false
+        },
+        {
+          "name": "dedupe/dedupe.csv",
+          "bytes": 1890,
+          "sha256": "1937a6ff89d5efc75e9e8b16102098af6e022b6c0296a2125fcdcb3de20086e1",
+          "content_included": false
+        },
+        {
+          "name": "dedupe/dedupe.json",
+          "bytes": 34564,
+          "sha256": "a58df48280971dbc40f87b6c620afd4a080a7086a37784f76129f5d2d99b5235",
+          "content_included": false
+        },
+        {
+          "name": "run_config.json",
+          "bytes": 3962,
+          "sha256": "51202fd053213136e78c4ef6780dbdf1d0f52dd9313fcc291c025a83a556dc97",
+          "content_included": false
+        }
+      ],
+      "source_ref": "literature/b743c327-b0f6-4a01-9ba8-feb370feda00/job.json"
+    },
+    {
+      "record_type": "workbench_run",
+      "task_id": "52019f8a-7dc9-4304-9e15-a9607463a465",
+      "status": "failed",
+      "stage": "plan",
+      "kind": "faostat-tm",
+      "sources": [],
+      "created_at": "2026-10-20T12:38:21.506Z",
+      "recorded_at": "2026-10-20T12:38:37.303Z",
+      "message": "任务未完成：请先在对话中明确并修订方案：已明确仅限小麦（Wheat），但未提供官方商品代码，无法落实商品筛选；如有多个对应条目，须由研究者选择。；2024年TM数据可用性尚待官方核对。；官方整包尚为候选获取方式，未提供已核验的下载地址，具体获取方案尚未经研究者确认，不能视为已批准执行。；官方整包的文件大小、覆盖范围、内部文件构成及版本尚待核对；超过20MB时，须按方案另行确认调整后的获取方式。",
+      "questions": [],
+      "error_class": "reported_plan_blocker",
+      "interpretation": "原执行器当时报告缺少官方代码或获取方案；这不证明研究需求确实不完整，也不证明当前版本仍存在同一阻断。",
+      "suggested_next_step": "使用新版 FAOSTAT 执行器，按原已审核业务范围自动核对官方代码和数据可用性；只有实际业务范围存在歧义时再讨论，不重复向研究者索取技术参数。",
+      "retained_files": [
+        {
+          "name": "approved-plan.md",
+          "bytes": 10576,
+          "sha256": "61a2a562c3e7cf165fc1fc0cbc0a9d48b9ce1143f319c1ea6677b187d56f31d2",
+          "content_included": false
+        }
+      ],
+      "source_ref": "529c754f-445b-4575-9404-ff19a1103d35/output/52019f8a-7dc9-4304-9e15-a9607463a465/run-state.json"
+    },
+    {
+      "record_type": "workbench_run",
+      "task_id": "6511d8bd-915f-4948-b10c-b3ad53634cf6",
+      "status": "failed",
+      "stage": "plan",
+      "kind": "faostat-tm",
+      "sources": [],
+      "created_at": "2026-10-20T12:19:29.054Z",
+      "recorded_at": "2026-10-20T12:20:04.988Z",
+      "message": "任务未完成：请先在对话中明确并修订方案：商品明确限定为小麦（Wheat），但方案未提供官方商品代码，无法落实商品筛选；须核对正式名称及代码，如对应多个条目须确认具体条目，不自行扩展商品范围。；官方完整压缩包的具体链接及获取方案尚未确认，方案未提供可用下载地址。；2024年数据可用性及进口数量、出口数量的正式指标名称、代码和单位尚待官方核对。",
+      "questions": [],
+      "error_class": "reported_plan_blocker",
+      "interpretation": "原执行器当时报告缺少官方代码或获取方案；这不证明研究需求确实不完整，也不证明当前版本仍存在同一阻断。",
+      "suggested_next_step": "使用新版 FAOSTAT 执行器，按原已审核业务范围自动核对官方代码和数据可用性；只有实际业务范围存在歧义时再讨论，不重复向研究者索取技术参数。",
+      "retained_files": [
+        {
+          "name": "approved-plan.md",
+          "bytes": 9621,
+          "sha256": "c5998ec4d2cbf3c4d07fdd1711e3f03d82918e55565585a22729b7ea751a8adb",
+          "content_included": false
+        }
+      ],
+      "source_ref": "529c754f-445b-4575-9404-ff19a1103d35/output/6511d8bd-915f-4948-b10c-b3ad53634cf6/run-state.json"
+    },
+    {
+      "record_type": "workbench_run",
+      "task_id": "b2cc9cc2-2a05-4c29-8efd-2565da113767",
+      "status": "failed",
+      "stage": "plan",
+      "kind": "faostat-tm",
+      "sources": [],
+      "created_at": "2026-10-20T12:26:12.209Z",
+      "recorded_at": "2026-10-20T12:29:48.746Z",
+      "message": "任务未完成：请先在对话中明确并修订方案：已明确仅限小麦（Wheat），但方案未提供官方商品代码，无法落实商品筛选；如有多个对应条目，须由研究者选择。；2024年TM数据可用性尚待官方核对。；进口数量和出口数量的官方正式名称、代码及单位尚待核对；elementNames依据已确认的指标含义填写，不代表正式名称已核验。；官方整包下载地址、文件大小、覆盖范围、内部文件构成和版本尚待核对，具体整包获取方案尚待研究者批准；文件超过20MB时还须按方案确认调整后的获取方式。",
+      "questions": [],
+      "error_class": "reported_plan_blocker",
+      "interpretation": "原执行器当时报告缺少官方代码或获取方案；这不证明研究需求确实不完整，也不证明当前版本仍存在同一阻断。",
+      "suggested_next_step": "使用新版 FAOSTAT 执行器，按原已审核业务范围自动核对官方代码和数据可用性；只有实际业务范围存在歧义时再讨论，不重复向研究者索取技术参数。",
+      "retained_files": [
+        {
+          "name": "approved-plan.md",
+          "bytes": 10576,
+          "sha256": "61a2a562c3e7cf165fc1fc0cbc0a9d48b9ce1143f319c1ea6677b187d56f31d2",
+          "content_included": false
+        }
+      ],
+      "source_ref": "529c754f-445b-4575-9404-ff19a1103d35/output/b2cc9cc2-2a05-4c29-8efd-2565da113767/run-state.json"
+    },
+    {
+      "record_type": "workbench_run",
+      "task_id": "bd4dde61-d341-4eea-981d-fe62f0187cdd",
+      "status": "waiting",
+      "stage": "plan",
+      "kind": "legacy_literature_flow",
+      "sources": [],
+      "created_at": "2026-10-20T11:06:49.897Z",
+      "recorded_at": "2026-10-20T11:07:01.109Z",
+      "message": "需要与你讨论，答复后可继续",
+      "questions": [
+        "本任务是 FAOSTAT 活动数据下载，指定来源不属于本模块支持的 europepmc、crossref 或 google-scholar。是否转交具备下载能力的网页下载面板，通过 FAOSTAT 官方 TM 入口核对 2024 年数据及 CSV 获取方式，并提交具体链接和下载方案供确认？",
+        "请确认商品、报告国、贸易伙伴及进出口指标四类范围：是否均采用 TM 官方实际提供的全部分类，并保留来源汇总项及代码？如需限定，请明确所选范围；正式名称、代码和单位由下载面板从官方来源核对。",
+        "若来源文件超过 20MB，拟采用的其他官方获取方式应如何选择和确认？当前尚无已批准的替代方式。",
+        "请明确本次检索主题或检索式。",
+        "请明确要提取的字段及单位、实验条件等要求。"
+      ],
+      "error_class": "discussion_required",
+      "interpretation": "原任务正在等待讨论或人工处理，未自动等同技术失败。",
+      "suggested_next_step": "在原平台查看待讨论问题，明确需求和模块后再继续。",
+      "retained_files": [
+        {
+          "name": "approved-plan.json",
+          "bytes": 6316,
+          "sha256": "70d01ad0d0253c8b2d302462edb25ae4497883b71218f31854254d81415eeb02",
+          "content_included": false
+        }
+      ],
+      "source_ref": "529c754f-445b-4575-9404-ff19a1103d35/output/bd4dde61-d341-4eea-981d-fe62f0187cdd/run-state.json"
+    }
+  ]
+}

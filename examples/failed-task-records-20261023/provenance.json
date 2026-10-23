@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "snapshot_date": "2026-10-23",
+  "literature_deleted_excluded": 9,
+  "nondeleted_literature_completed_not_classified_failed": 1,
+  "codex_run_states_scanned": 6,
+  "record_status_counts": {
+    "cancelled": 1,
+    "failed": 3,
+    "waiting": 1
+  },
+  "record_type_counts": {
+    "literature_job": 1,
+    "workbench_run": 4
+  },
+  "historical_event_type_counts": {
+    "attention": 9,
+    "error": 1
+  },
+  "source_sha256": {
+    "literature/13fd91ea-3bbd-449c-a799-2d09c0f1ef1b/job.json": "d212d169961a88c412aced39dfe9037abff7e9409fa2cf0ead1a3e3efc4692fe",
+    "literature/13fd91ea-3bbd-449c-a799-2d09c0f1ef1b/events.jsonl": "f9b903d6093bd8de5cb2282ffa822defc6a5ab65f95819075f0d00dc1d34ea2b",
+    "literature/b743c327-b0f6-4a01-9ba8-feb370feda00/job.json": "58fa048804c83ac204e633bb18f430f7f087b6bbfc7b670bdc1975adb87995b3",
+    "literature/b743c327-b0f6-4a01-9ba8-feb370feda00/events.jsonl": "6e6ee4c73708c7074c8d8da6b05fe165fa60d9c428115d269a184250246cded6",
+    "529c754f-445b-4575-9404-ff19a1103d35/output/52019f8a-7dc9-4304-9e15-a9607463a465/run-state.json": "c2bc9253aed0d004784a72502d91cadf60e3bb2d8a776da32e8aa3cabe5870b9",
+    "529c754f-445b-4575-9404-ff19a1103d35/output/6511d8bd-915f-4948-b10c-b3ad53634cf6/run-state.json": "06400302a6a6c20abe44d4cb57890fbaf0628c7835f64a1fce6f34d96aec3274",
+    "529c754f-445b-4575-9404-ff19a1103d35/output/b2cc9cc2-2a05-4c29-8efd-2565da113767/run-state.json": "201915ed6bf6322d5ff4cb8d7f9872adea2a90e9db3a4845bd21dab70ec1509c",
+    "529c754f-445b-4575-9404-ff19a1103d35/output/bd4dde61-d341-4eea-981d-fe62f0187cdd/run-state.json": "ec8d39625d7230b6332a57c383622a45a77b728d099eb918c5dfead1cafc5bba"
+  },
+  "omitted": [
+    "deleted task contents",
+    "browser/session credentials",
+    "source URLs and download/session tokens",
+    "full text and quotations",
+    "raw plans/payloads/model inputs",
+    "absolute local paths",
+    "retained file contents"
+  ],
+  "classification_note": "error_class and suggested_next_step are packaging annotations, not original verified root-cause findings"
+}

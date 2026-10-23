@@ -87,10 +87,14 @@ function unitCases(root) {
   assert.ok(!JSON.stringify(runtime.snapshot()).includes('fixture-secret-not-in-runtime'));
   assert.ok(!JSON.stringify(runtime.snapshot()).includes(root), 'Runtime response must not reveal the absolute workspace path');
 
-  for (const moduleName of ['literature_fulltext_reuse.py', 'literature_target_groups.py']) {
+  for (const moduleName of ['literature_fulltext_reuse.py', 'literature_target_groups.py',
+    'literature-research.js', 'literature-auxiliary.js', 'research-question.js', 'literature_search_open.py', 'literature_import.py', 'writing_build.py']) {
     const prior = backendFingerprint(root);
+    const loaded = createLiteratureRuntime({ root, port: 8123 });
+    assert.equal(loaded.snapshot().restartRequired, false);
     write(path.join(root, 'tools', moduleName), '# changed local full-text behavior\n');
     assert.notEqual(backendFingerprint(root), prior, moduleName + ' must invalidate the loaded backend');
+    assert.equal(loaded.snapshot().restartRequired, true, moduleName + ' changes must require a restart');
   }
 
   const changed = { sources: [{ key: 'google-scholar', state: 'executable' }, { key: 'pubmed', state: 'registered' }] };
@@ -110,7 +114,7 @@ async function httpCases(root) {
   sourceFixture(root);
   for (const name of ['server.js', 'tools/literature-runtime.js', 'tools/source-download.js', 'tools/scholar-flow.js', 'tools/plotting.js',
     'tools/clean-results-view.js', 'tools/clean-results-archive.js', 'tools/faostat-download.js', 'tools/source-transfer.js',
-    'tools/literature-fields-assist.js', 'tools/literature-config.js']) {
+    'tools/literature-fields-assist.js', 'tools/literature-auxiliary.js', 'tools/literature-config.js']) {
     write(path.join(root, name), fs.readFileSync(path.join(ROOT, name)));
   }
   // The real server's busy predicate sees fake job holders. Any actual model/login access fails the fixture.

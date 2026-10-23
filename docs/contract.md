@@ -1900,3 +1900,14 @@ GET /api/codex/clean-results?session=<UUID>&run=<可选UUID> 返回 {sessionId,r
 GET /api/codex/clean-results/archive?session=<UUID>&run=<UUID> 返回当前所选运行ZIP，含该运行的结果、代码及说明，不含其他运行或原始input。运行中拒绝打包；仅普通受控文件，拒绝路径越界、符号链接及敏感文件，跳过内部run-state.json，最多300文件、整体2GiB；以流式方式制作临时ZIP并在响应结束后清理，不改源文件。接口沿用Host/Origin/X-Workbench保护；普通同源附件导航沿用download接口许可。
 
 展示使用 .clean-results、.clean-result-section、.clean-result-file、.clean-result-heading、.clean-result-meta、.clean-result-aux。只更改clean-data结果区，其他模块的文件展示不变。
+## 2026-10-23 双流程融合保护
+
+九步研究流程与原数据准备路径并存，既有任务、候选、字段确认和材料不因同步代码被重建。文献调研接口使用 `LiteratureConnector`（`scholar`）加载和登记成果；旧 `LiteratureFlow` 继续处理原方案批次，不承担新调研作业的持久化。
+
+`tools/literature-auxiliary.js` 为调研、选题、人工初筛和清单导入记录操作状态，运行时 `busy` 包含这些请求。写入期间其他文献执行或删除操作返回 409；读取请求体后的检查也须执行，防止请求在等待数据期间穿过锁。GET 查询不取得写锁；异常与提前返回均在 finally 释放状态。
+
+清单导入必须指向存在、未删除、未运行且已有冻结配置与候选的原任务。仅 `status=completed`、`resumeStage=dedupe`、检索阶段已完成且没有任何下游/研究/字段确认成果时允许更改候选；其余任务返回 409 并要求新建独立检索任务，原成果保持。无效 ID 返回 400、不存在或记录不完整返回 404。成功导入更新候选数量和文件登记，不改变运行边界或自动继续下游。
+
+导入 `batch_index=0` 按来源独立替换：重新导入万方只能替换原万方导入，其他来源、检索批次与记录必须保留，JSON/CSV 候选保持一致。未确认的条目继续为 `pending_review`。
+
+PubMed 默认公开 API 检索；真实转为官方网页并等待验证时仍保留原页与暂缓入口。新增四个开放 API 来源不使用浏览器登录入口。研究、问题凝练、开放检索、清单导入、写作及辅助操作模块全部加入后台指纹，修改后必须加载新版后台。

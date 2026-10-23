@@ -649,8 +649,9 @@
   const LITERATURE_SOURCE_LABELS = { 'google-scholar': 'Google Scholar', 'cnki': '中国知网', 'web-of-science': 'Web of Science 核心合集',
     'wanfang': '万方', 'scopus': 'Scopus', 'pubmed': 'PubMed',
     'pmc': 'PMC', 'openalex': 'OpenAlex', 'europe-pmc': 'Europe PMC', 'semantic-scholar': 'Semantic Scholar' };
-  // 需要平台专用浏览器/人工登录的来源（开放 API 源不在此列，不会自动开浏览器）。
-  const LITERATURE_EXECUTABLE_SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus'];
+  // 可使用平台专用浏览器的来源。PubMed 默认走 API，仅在已转官方网页且
+  // 实际等待登录/验证时显示浏览器入口；其他开放 API 源不在此列。
+  const LITERATURE_EXECUTABLE_SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
   const LITERATURE_FILE_LABELS = { 'run_config.json': '运行配置（冻结）', 'processing-basis.json': '本次处理依据', 'candidates.json': '候选清单 JSON（累计）', 'candidates.csv': '候选清单 CSV（累计）',
     'dedupe/dedupe.json': '去重结果 JSON', 'dedupe/dedupe.csv': '去重结果 CSV', 'fulltext/status.json': '全文获取状态',
     'fulltext/review.json': '全文缓存复核报告', 'fulltext/materials.json': '每篇材料清单 JSON',

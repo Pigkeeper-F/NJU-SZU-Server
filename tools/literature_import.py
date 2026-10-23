@@ -13,7 +13,7 @@
 ----------
 * 导入的条目**与检索来的条目同构**，直接进 ``candidates.json`` 的 ``records``，
   后续的去重 → 全文获取 → 参数提取 → 校验 → 导出五个阶段**零改动**。
-* 导入批次 ``batch_index = 0``（与检索批次 1/2/… 区分开），来源前缀取注册表的 idPrefix
+* 导入批次 ``batch_index = 0``（与检索批次 1/2/… 区分开），按来源独立替换，来源前缀取注册表的 idPrefix
   （CNK / WFX / WOS / SCP），便于回溯"这条是哪来的"。
 * 同批重复导入 = **整批替换**（与检索重跑同语义），不会越导越多。
 * 导入的条目一律 ``screening_status = pending_review``：**不自动判"不相关"**，
@@ -271,7 +271,7 @@ def parse_list(path: Path, fmt: str | None = None, source_key: str = "cnki") -> 
 # ---------------------------------------------------------------------------
 
 def append_imported(job_dir: Path, items: list[dict], source_key: str, query: str = "") -> dict:
-    """把导入条目并入作业的 candidates.json（整批替换，batch_index=0）。
+    """把导入条目并入作业的 candidates.json（同来源整批替换，batch_index=0）。
 
     返回 ``{"added": n, "total": m, "files": [...]}``。
     """
@@ -281,14 +281,17 @@ def append_imported(job_dir: Path, items: list[dict], source_key: str, query: st
     records = [r for r in (existing.get("records") or []) if isinstance(r, dict)]
     kept = []
     for record in records:
-        if record.get("batch_index") == IMPORT_BATCH_INDEX:
-            continue          # 同批替换
+        if record.get("batch_index") == IMPORT_BATCH_INDEX and record.get("source_key") == source_key:
+            continue          # 只替换该来源的导入批次，保留其他来源及检索批次。
         kept.append(record)
 
     retrieved_at = datetime.now(timezone.utc).isoformat()
     import literature_search as _search
+    # The selected import source owns the whole batch. A parsed item's source
+    # must not disagree with the batch key used for replacement and identifiers.
+    source_items = [{**item, "source_key": source_key} for item in items if isinstance(item, dict)]
     new_records = _search.normalize_candidates(
-        items, query or (existing.get("query") or ""), retrieved_at,
+        source_items, query or (existing.get("query") or ""), retrieved_at,
         batch_index=IMPORT_BATCH_INDEX, source_key=source_key,
         source_label=_sources.label_of(source_key) or source_key,
     )
@@ -312,7 +315,8 @@ def append_imported(job_dir: Path, items: list[dict], source_key: str, query: st
         "imported": True,
     }
     batches = [b for b in (existing.get("batches") or [])
-               if isinstance(b, dict) and b.get("batch_index") != IMPORT_BATCH_INDEX]
+               if isinstance(b, dict) and not (
+                   b.get("batch_index") == IMPORT_BATCH_INDEX and b.get("source_key") == source_key)]
     batches.append(batch)
     batches.sort(key=lambda item: item.get("batch_index") if isinstance(item.get("batch_index"), int) else 0)
 
