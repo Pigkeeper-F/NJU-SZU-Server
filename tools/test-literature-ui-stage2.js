@@ -485,7 +485,8 @@ async function multiSourceTests() {
   container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
   assert.equal(scrolls.length, 3, 'Polling the same fulltext timeout does not steal scroll again');
   // 9b) 多源检索面板：状态必须进 docSigOf（否则增量快速路径会吞掉勾选/逐源命中）
-  for (const token of ['rs.sources', 'perSourceSig', 'sourceResultSig', '/api/literature/sources']) {
+  for (const token of ['rs.sources', 'perSourceSig', 'sourceResultSig', '/api/literature/sources',
+    'searchMode', 'stopMode', 'perSourceLimit', '到可访问末页', '/api/literature/cancel']) {
     assert.ok(chat.includes(token), '多源检索面板应包含: ' + token);
   }
   assert.ok(!chat.includes("sources: ['google-scholar'], limit: 10"), '调研面板不得把来源写死为 Scholar');

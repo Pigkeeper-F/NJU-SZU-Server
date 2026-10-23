@@ -150,6 +150,48 @@ _SNAPSHOT_JS = r"""/* literature_fulltext_snapshot */ () => {
 }""".replace("__MATERIALS_FUNCTION__", _MATERIALS_FUNCTION_JS)
 
 
+#: A long visible page without a verified article container is usually a body
+#: that is still rendering (PMC finishes its DOM just after domcontentloaded).
+#: Login/verification/error pages are excluded: waiting there cannot help.
+def _needs_article_settle(snapshot: object) -> bool:
+    if not isinstance(snapshot, dict) or snapshot.get("container_verified"):
+        return False
+    if any(snapshot.get(key) for key in
+           ("page_error", "verification", "rate_limited", "source_application_error", "login", "access_required")):
+        return False
+    body = str(snapshot.get("text") or "")
+    headings = snapshot.get("headings")
+    return len(body) >= 1500 and isinstance(headings, list) and len(headings) >= 1
+
+
+def _settle_article_snapshot(page, snapshot: object, *, timeout_ms: int = 4000, pause_ms: int = 1200):
+    """Wait once for a delayed article body, then re-snapshot.
+
+    Keeps the original snapshot unless the retry found a verified container or
+    strictly more article text. This makes first-pass PMC access deterministic
+    without treating paywall/login pages as articles.
+    """
+    if not _needs_article_settle(snapshot):
+        return snapshot
+    try:
+        page.wait_for_selector(
+            '[itemprop="articleBody"], #bodymatter, .main-article-body, .article-body, article section',
+            timeout=timeout_ms,
+        )
+    except Exception:
+        # No section markup is not a failure; the re-snapshot below still runs.
+        pass
+    page.wait_for_timeout(pause_ms)
+    retry = page.evaluate(_SNAPSHOT_JS)
+    if not isinstance(retry, dict):
+        return snapshot
+    if retry.get("container_verified"):
+        return retry
+    if len(str(retry.get("article_text") or "")) > len(str(snapshot.get("article_text") or "")):
+        return retry
+    return snapshot
+
+
 def _material_identity(snapshot, record):
     norm = lambda value: " ".join(unicodedata.normalize("NFKC", str(value or "")).split()).casefold()
     doi = lambda value: re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", norm(value))
@@ -1121,6 +1163,9 @@ class FulltextBrowserFetcher:
                 snapshot = page.evaluate(_SNAPSHOT_JS)
                 if not isinstance(snapshot, dict):
                     return self._attention("page_error", safe, observed_url=page.url)
+                # 首次加载可能晚于 domcontentloaded 完成正文区渲染（PMC 常见）；
+                # 只在“长页面但未验证正文容器”时多等一次，避免把全文误判成摘要。
+                snapshot = _settle_article_snapshot(page, snapshot)
                 reason = self._reason(snapshot, status)
                 if reason:
                     return self._attention(reason, safe, snapshot=snapshot, observed_url=page.url)

@@ -545,6 +545,10 @@
 
   function cancelResearch(mod) {
     var st = uiOf(mod.id).research;
+    if (st && st.busy && st.jobId) {
+      // 只取消轮询不会停掉服务端作业；正式检索可能翻很多页，必须显式取消。
+      researchPost('/api/literature/cancel?id=' + encodeURIComponent(st.jobId), {}).catch(function () { /* 作业已结束或已取消 */ });
+    }
     if (st && st.abort) { try { st.abort.abort(); } catch (error) { /* 忽略 */ } }
     stopResearchTimer();
     if (st) {
@@ -587,10 +591,12 @@
       candidates: null, keep: null, screeningBusy: false, jobId: '',
       phase: '', startedAt: 0, abort: null, model: '',
       importBusy: false, importMessage: '',
-      sources: ['google-scholar'], perSource: {}, sourceResults: null
+      sources: ['google-scholar'], perSource: {}, sourceResults: null,
+      searchMode: 'test', stopMode: 'count', perSourceLimit: 10
     });
     if (!Array.isArray(state.sources) || !state.sources.length) state.sources = ['google-scholar'];
     if (!state.perSource || typeof state.perSource !== 'object') state.perSource = {};
+    if (state.searchMode !== 'formal') { state.searchMode = 'test'; state.stopMode = 'count'; state.perSourceLimit = 10; }
     if (!literatureSourceCache) {
       loadLiteratureSources(function (list) { if (list && list.length) render(); });
     }
@@ -698,6 +704,43 @@
         })(state.sources[psi]);
       }
       box.appendChild(perSourceBox);
+    }
+
+    // 检索规模：测试运行只取 10 条/源；正式检索可放大候选数或翻到末页。
+    var modeRow = el('label', 'research-field');
+    modeRow.appendChild(el('span', 'research-label', '规模'));
+    var modeSelect = el('select', 'research-input research-select');
+    modeSelect.setAttribute('aria-label', '检索规模');
+    [['test', '测试运行（每来源最多 10 条）'],
+      ['count:50', '正式检索（每来源最多 50 条）'],
+      ['count:100', '正式检索（每来源最多 100 条）'],
+      ['end', '正式检索（到可访问末页）']].forEach(function (pair) {
+      var option = el('option', null, pair[1]);
+      option.value = pair[0];
+      modeSelect.appendChild(option);
+    });
+    modeSelect.value = state.searchMode === 'formal'
+      ? (state.stopMode === 'end' ? 'end' : 'count:' + (state.perSourceLimit || 100))
+      : 'test';
+    modeSelect.disabled = state.busy === true;
+    modeSelect.addEventListener('change', function () {
+      var value = modeSelect.value;
+      if (value === 'end') {
+        state.searchMode = 'formal'; state.stopMode = 'end'; state.perSourceLimit = null;
+      } else if (value.indexOf('count:') === 0) {
+        state.searchMode = 'formal'; state.stopMode = 'count'; state.perSourceLimit = Number(value.slice(6)) || 100;
+      } else {
+        state.searchMode = 'test'; state.stopMode = 'count'; state.perSourceLimit = 10;
+      }
+      render();
+    });
+    modeRow.appendChild(modeSelect);
+    box.appendChild(modeRow);
+    if (state.searchMode === 'formal') {
+      box.appendChild(el('div', 'research-status',
+        state.stopMode === 'end'
+          ? '正式检索会逐页翻到来源可访问末页，可能较久；遇到登录/验证/权限会暂停并保留已下载候选。'
+          : '正式检索按每来源 ' + state.perSourceLimit + ' 条上限分页获取；遇到登录/验证/权限会暂停并保留已下载候选。'));
     }
 
     // 候选检索式（冷启动结果）：点一条即填入检索式框
@@ -983,11 +1026,28 @@
     startResearchTimer(mod);
 
     var jobId = '';
+    var finalJob = null;
+    var searchConfig = {
+      topic: state.topic, query: query, sources: sources,
+      sourceQueries: sourceQueries, limit: 10
+    };
+    if (state.searchMode === 'formal') {
+      searchConfig.searchMode = 'formal';
+      searchConfig.stopMode = state.stopMode === 'end' ? 'end' : 'count';
+      searchConfig.perSourceLimit = state.stopMode === 'end' ? null : Number(state.perSourceLimit || 100);
+    }
+    var pollLimitMs = state.searchMode === 'formal'
+      ? (state.stopMode === 'end' ? 45 * 60 * 1000 : 20 * 60 * 1000)
+      : 4 * 60 * 1000;
+    var pollLimitText = state.searchMode === 'formal'
+      ? (state.stopMode === 'end' ? '45 分钟' : '20 分钟')
+      : '4 分钟';
     researchPost('/api/literature/search', {
-      config: { topic: state.topic, query: query, sources: sources, sourceQueries: sourceQueries, limit: 10 }
+      config: searchConfig
     }, state.abort.signal).then(function (started) {
       jobId = started && started.id ? started.id : '';
       if (!jobId) throw new Error('检索作业没有返回标识');
+      state.jobId = jobId;
       state.message = '检索中（作业 ' + jobId.slice(0, 8) + '…）…';
       render();
       // 轮询作业状态：检索阶段完成后才进初筛
@@ -996,12 +1056,13 @@
         return researchGet('/api/literature/job?id=' + encodeURIComponent(jobId)).then(function (job) {
           waited += 1500;
           if (job.status === 'running' || job.status === 'queued') {
-            if (waited > 240000) throw new Error('检索超时（超过 4 分钟）');
-            state.message = '检索中（作业 ' + jobId.slice(0, 8) + '…）…';
+            if (waited > pollLimitMs) throw new Error('检索超时（超过 ' + pollLimitText + '）');
+            state.message = '检索中：' + String(job.message || ('作业 ' + jobId.slice(0, 8) + '…'));
             render();
             return new Promise(function (resolve) { setTimeout(resolve, 1500); }).then(poll);
           }
           if (job.status === 'failed') throw new Error(job.error || '检索失败');
+          finalJob = job;
           return job;
         });
       }
@@ -1035,6 +1096,10 @@
         ? ('检索到 ' + state.candidates.length + ' 篇' + perSource + '，请初筛后生成要点')
         : ('检索没有结果——换条检索式或放宽条件'
           + (failed.length ? '（' + failed.map(function (meta) { return (meta.label || meta.source_key) + '：' + (meta.error || meta.status); }).join('；') + '）' : ''));
+      if (finalJob && finalJob.status === 'needs_attention') {
+        state.message = (state.candidates.length ? ('已保存 ' + state.candidates.length + ' 篇候选') : '尚未保存候选')
+          + '；部分来源需要人工登录/验证，可到「文献挖掘」面板继续原任务。';
+      }
       render();
     }).catch(function (error) {
       stopResearchTimer();
@@ -1551,7 +1616,8 @@
         + '|' + (rs.message || '') + '|' + (rs.planMessage || '') + '|' + (rs.model || '')
         // 【多源检索 · 2026-10-22】来源多选 / 逐源检索式 / 逐源命中也必须进签名，
         // 否则勾选来源或检索完成时会被增量快速路径吞掉（本文件已知坑，踩过两次）。
-        + '|' + ((rs.sources || []).join(',')) + '|' + perSourceSig + '|' + sourceResultSig;
+        + '|' + ((rs.sources || []).join(',')) + '|' + perSourceSig + '|' + sourceResultSig
+        + '|' + (rs.searchMode || 'test') + ':' + (rs.stopMode || 'count') + ':' + String(rs.perSourceLimit);
     }
     var qs = uiOf(mod.id).question;
     if (qs) {

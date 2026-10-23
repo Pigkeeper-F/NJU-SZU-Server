@@ -72,6 +72,10 @@ python tools/literature_search_open.py --source pubmed --query "soil carbon" --l
   开放源已拿到的候选会先落盘**（批次 `status: "partial"`），完成验证后重新检索即可补齐。
 - 同批内跨源去重：**DOI 相同或标题（去标点/大小写）相同**即视为同一篇，保留先到的结构化来源
   （PubMed/OpenAlex 的摘要比 Scholar 片段完整，所以开放源排在前面）。
+- **翻页**：`searchMode="formal"` 时按 `stopMode` 执行。PubMed/PMC 用 `retstart`、
+  OpenAlex 用 `page`、Semantic Scholar 用 `offset`、Europe PMC 取到页尾再切片；
+  测试模式仍每来源最多 10 条。来源硬上限（OpenAlex 10000、Semantic Scholar/Europe PMC
+  1000、PMC 10000）到顶时返回 `attention + source_limit_reached`，不冒充末页。
 - 前端逐源显示命中数与失败原因；`candidates.json` 的 `sources` 字段记录每个源的
   检索式、URL、条数、状态与错误，`source_counts` 给出逐源计数。
 
@@ -135,8 +139,10 @@ python tools/literature_search_open.py --source pubmed --query "soil carbon" --l
 3. Europe PMC 的 `pubYear` 真实返回是字符串，解析两种都收。
 4. 开放源的**全文**覆盖率低于出版方授权源：OpenAlex 基本只有元数据 + 开放获取链接，
    PubMed/PMC/Europe PMC 能拿到开放获取子集的正文。
-5. `tools/literature_fulltext.py` 目前只对 Scholar 作业验证过全文抓取路径；
-   开放源作业的全文获取**还需要一轮联调**（这是下一步）。
+5. 全文获取已对 PMC 增加“首次加载未验证正文时等待并重拍快照”，
+   并对失败/未核实 URL 清空 `fulltext_url`；没有 PMC 或开放全文入口的论文仍按访问权限标待补充。
+6. 开放源翻页依赖各接口的 offset/page/retstart；Europe PMC 采用“取到页尾再切片”，
+   受 1000 条上限约束。
 6. 跨源去重只按 DOI 与标题；同一篇论文在不同库里的标题差异过大时会漏合并，
    由下游 `dedupe` 阶段继续处理。
 

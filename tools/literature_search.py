@@ -40,13 +40,25 @@ def _open_api_source(source: str, query: str, limit: int, year_from, year_to, pa
     """开放 API 源（PMC / OpenAlex / Europe PMC / Semantic Scholar）的单页检索。
 
     走 ``literature_search_open`` 的官方 REST 适配器，不启动浏览器、不需要验证码。
-    这些源目前只取一页（最多 100 条），正式检索到末页请改用支持分页的来源。
+    PMC/PubMed 用 retstart、OpenAlex 用 page、Semantic Scholar 用 offset、
+    Europe PMC 用“取到本页末尾再切片”的方式翻页；到来源上限时返回空页，
+    由调度器如实停止，不声称已穷尽。
     """
     adapter = _sources.adapter_of(source)
     module = str(adapter.get("module") or source)
     open_mod = importlib.import_module("literature_search_open")
+    page = max(0, int(page_index or 0))
+    # 官方接口的硬上限：到顶时如实暂停，不能把“来源上限”说成“已到末页”。
+    caps = {"openalex": 10000, "semantic-scholar": 1000, "europe-pmc": 1000, "pmc": 10000}
+    cap = caps.get(module)
+    if cap and page * limit >= cap:
+        return {
+            "status": "attention", "reason": "results_unrecognized",
+            "source_limit_reached": True, "results": [],
+            "message": f"{_sources.label_of(source)}单检索式最多返回 {cap} 条；已到来源上限，已有结果保留。",
+        }
     try:
-        outcome = open_mod.run(module, query, limit, year_from, year_to)
+        outcome = open_mod.run(module, query, limit, year_from, year_to, page)
     except Exception as error:  # 单源失败不拖垮整批；由调度器记录并继续
         return {"status": "error", "source_key": source, "results": [],
                 "message": f"{_sources.label_of(source)}检索失败：{error}"}
@@ -72,9 +84,9 @@ def _open_api_source(source: str, query: str, limit: int, year_from, year_to, pa
         "results": results,
         "url": outcome.get("url") or "",
         "transport": "api",
-        "has_next": False,
-        "page_index": int(page_index or 0),
-        "total_count": len(results),
+        "has_next": len(results) >= limit,
+        "page_index": page,
+        "total_count": None,
     }
 
 
@@ -722,13 +734,6 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
     validate_config(config)
     to_end = config.get("stopMode") == "end"
     target = None if to_end else config.get("perSourceLimit", 100)
-    # 开放 API 适配器目前只取单页（最多 100 条），不声称已到末页。
-    if to_end:
-        open_api_sources = [key for key in config["sources"] if _sources.adapter_of(key).get("kind") == "open-api"]
-        if open_api_sources:
-            emit("error", message="开放 API 来源（" + "、".join(_sources.label_of(key) for key in open_api_sources)
-                 + "）暂不支持“检索到末页”；请改用测试运行，或从本次正式检索中移除这些来源。")
-            return 1
     checkpoint_path = output_dir / "discovery-state.json"
     state = _common.load_json(checkpoint_path, default=None)
     fingerprint = config_fingerprint(config)

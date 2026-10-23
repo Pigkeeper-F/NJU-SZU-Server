@@ -1495,19 +1495,23 @@ README 的「调试」段给了一条命令的用法。
 
 ### 26.1 来源注册表
 
-单一真相仍是 `tools/literature-sources.json`；`state=executable` 的 6 个来源可自动执行：
+单一真相仍是 `tools/literature-sources.json`；`state=executable` 的 10 个来源可自动执行：
 
 | key | 显示名 | 接入 | 人工 |
 |---|---|---|---|
 | `google-scholar` | Google Scholar | browser | 可能需过验证码 |
-| `pubmed` | PubMed | api | 否 |
-| `pmc` | PMC | api | 否 |
-| `openalex` | OpenAlex | api | 否 |
-| `semantic-scholar` | Semantic Scholar | api | 否（无 Key 时共享池限流） |
-| `europe-pmc` | Europe PMC | api | 否 |
+| `cnki` | 知网 | browser | 登录/验证/机构权限 |
+| `wanfang` | 万方 | browser | 登录/验证/机构权限 |
+| `web-of-science` | Web of Science | browser | 机构订阅 |
+| `scopus` | Scopus | browser | 机构订阅 |
+| `pubmed` | PubMed | api（public-api） | 否 |
+| `pmc` | PMC | api（open-api） | 否 |
+| `openalex` | OpenAlex | api（open-api） | 否 |
+| `semantic-scholar` | Semantic Scholar | api（open-api） | 否（无 Key 时共享池限流） |
+| `europe-pmc` | Europe PMC | api（open-api） | 否 |
 
-`cnki` / `wanfang` / `web-of-science` / `scopus` 是 `state=registered`（人工源），
-程序化启动仍按冻结文案拒绝，只能走导出清单导入。
+浏览器来源在需要人工登录/验证/权限时暂停并保留已下载候选；
+开放 API 来源（PubMed/PMC/OpenAlex/Europe PMC/Semantic Scholar）不启动浏览器、不需要验证码。
 
 ### 26.2 运行配置新增 `sourceQueries`（可选）
 
@@ -1530,6 +1534,13 @@ README 的「调试」段给了一条命令的用法。
   发 `result` + `attention` 两个事件；作业状态为 `needs_attention`，验证后重新检索补齐。
 - 批次 `scope`：纯开放源 `open_api_candidates`，混合 `mixed_candidates`，
   纯 Scholar 仍 `first_page_candidates_only`。
+- **翻页**：`searchMode="formal"` 时按 `stopMode` 执行——`count` 取到 `perSourceLimit`
+  或来源末页，`end` 取到可访问末页。浏览器来源用页面分页；PubMed/PMC 用 `retstart`、
+  OpenAlex 用 `page`、Semantic Scholar 用 `offset`、Europe PMC 取到页尾再切片。
+- **来源硬上限**：OpenAlex 10000 条、Semantic Scholar 1000 条、Europe PMC 1000 条、
+  PMC 10000 条；到顶返回 `attention + source_limit_reached`，不把上限说成末页。
+- ①调研面板支持测试（10 条/源）与正式（50/100 条/源、到末页）两档；正式检索可取消，
+  取消会同时停止服务端作业。
 
 ### 26.4 端点
 
@@ -1549,18 +1560,29 @@ README 的「调试」段给了一条命令的用法。
   按源检索计划「用这条」、检索完成后逐源显示命中数/失败原因。
 - 上述面板状态（`sources` / `perSource` / `sourceResults`）必须进 `js/chat.js` 的 `docSigOf()`，
   否则会被增量渲染快速路径吞掉（§22 已知坑）。
-- 文献挖掘配置面板的来源清单同步为 6 个可执行源 + 4 个人工源。
+- 文献挖掘配置面板的来源清单同步为 10 个可执行源（浏览器 + 开放 API）。
 
 ### 26.6 验收
 
 ```bash
-python tools/test_literature_search.py        # 19 项，含混合来源/DOI 去重/部分落盘
-python tools/test_literature_search_open.py   # 80 项，来源注册表与请求构造
+python tools/test_literature_search.py        # 含混合来源/DOI 去重/部分落盘
+python tools/test_literature_search_open.py   # 开放源请求构造、翻页与调度器接入
+python tools/test_literature_fulltext_browser.py  # 全文快照、PMC 等待/重试
 node tools/test-literature-sources.js         # 注册表 + normalizeConfig（含 sourceQueries）
 node tools/test-research-question.js          # 选题拆解（含 perSource）
 node tools/test-literature-ui-stage2.js       # 多源面板静态检查
 node tools/check-contract.js                  # ALL_CHECKS_PASS
 ```
+
+### 26.7 全文获取：PMC 首次加载与陈旧链接
+
+- PubMed 候选现在带 PMC 全文链接时**优先取 PMC**；PubMed 题录页只作后备。
+- PMC 首次加载可能在 `domcontentloaded` 之后才完成正文区渲染。`literature_fulltext_browser.py`
+  在“页面正文较长但未验证文章容器”时等待一次（最多 4s + 1.2s）并重拍快照；
+  登录/验证/错误页不等待。避免把全文误判成摘要。
+- 失败或未核实的 `fulltext_url` 不再沿用：批次状态记录 `attempted_url`，
+  导出只对 `fetched_pdf` / `fetched_html` 写 `fulltext_url`。
+- 没有 PMC/开放全文入口的论文按“待补充”保留，不绕过订阅或登录。
 
 ## 2026-10-19 本地整合：六阶段与已审核方案流程
 

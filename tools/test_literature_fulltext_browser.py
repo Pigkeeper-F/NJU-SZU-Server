@@ -511,5 +511,59 @@ class LocalDOMTests(unittest.TestCase):
         self.assertFalse(self.evaluate('<nav>中国知网 登录 / 注册</nav><h1>Publication abstract</h1>')["source_application_error"])
 
 
+
+class ArticleSettleTests(unittest.TestCase):
+    class FakePage:
+        def __init__(self, snapshots):
+            self.snapshots = list(snapshots)
+            self.waits = []
+            self.evaluations = 0
+
+        def wait_for_selector(self, selector, timeout=None):
+            self.waits.append(("selector", selector, timeout))
+
+        def wait_for_timeout(self, ms):
+            self.waits.append(("timeout", ms))
+
+        def evaluate(self, script):
+            index = min(self.evaluations, len(self.snapshots) - 1)
+            self.evaluations += 1
+            return self.snapshots[index]
+
+    def test_long_unverified_article_waits_and_uses_verified_retry(self):
+        first = snapshot(text="x" * 3000, headings=[{"level": 2, "text": "Introduction"}],
+                         article_text="short", container_verified=False)
+        second = snapshot(text="x" * 3000, headings=[{"level": 2, "text": "Introduction"}],
+                          article_text="full body " * 400, container_verified=True)
+        page = self.FakePage([second])
+        result = mod._settle_article_snapshot(page, first)
+        self.assertTrue(result["container_verified"])
+        self.assertGreater(len(result["article_text"]), len(first["article_text"]))
+        self.assertEqual([item[0] for item in page.waits], ["selector", "timeout"])
+        self.assertEqual(page.evaluations, 1)
+
+    def test_login_error_and_short_pages_are_not_waited(self):
+        for page_snapshot in (
+            snapshot(text="x" * 3000, headings=[{"level": 2, "text": "Introduction"}], login=True),
+            snapshot(text="x" * 3000, headings=[{"level": 2, "text": "Introduction"}], page_error=True),
+            snapshot(text="short", headings=[{"level": 2, "text": "Introduction"}]),
+            snapshot(text="x" * 3000, headings=[{"level": 2, "text": "Introduction"}], container_verified=True),
+        ):
+            page = self.FakePage([page_snapshot])
+            result = mod._settle_article_snapshot(page, page_snapshot)
+            self.assertIs(result, page_snapshot)
+            self.assertEqual(page.waits, [])
+            self.assertEqual(page.evaluations, 0)
+
+    def test_retry_with_more_article_text_is_kept_even_if_container_unverified(self):
+        first = snapshot(text="x" * 3000, headings=[{"level": 2, "text": "Introduction"}],
+                         article_text="a" * 100, container_verified=False)
+        second = snapshot(text="x" * 3000, headings=[{"level": 2, "text": "Introduction"}],
+                          article_text="b" * 300, container_verified=False)
+        page = self.FakePage([second])
+        result = mod._settle_article_snapshot(page, first)
+        self.assertEqual(result["article_text"], "b" * 300)
+
+
 if __name__ == "__main__":
     unittest.main()

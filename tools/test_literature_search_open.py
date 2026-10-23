@@ -86,6 +86,18 @@ req = _open.search_request("europe-pmc", "soil carbon", 4)
 ok("europepmc" in req["url"], "Europe PMC 端点正确")
 ok(req["params"]["resultType"] == "core", "Europe PMC 取 core（带摘要）")
 
+# 翻页参数：各源用官方自己的 offset/page/retstart，不能用同一检索式重复取第一页
+req = _open.search_request("pubmed", "soil carbon", 5, None, None, 2)
+ok(req["params"].get("retstart") == "10", "PubMed 第3页用 retstart=10")
+req = _open.search_request("pmc", "soil carbon", 5, None, None, 2)
+ok(req["params"].get("retstart") == "10", "PMC 第3页用 retstart=10")
+req = _open.search_request("openalex", "soil carbon", 5, None, None, 2)
+ok(req["params"].get("page") == "3", "OpenAlex 第3页用 page=3")
+req = _open.search_request("semantic-scholar", "soil carbon", 5, None, None, 2)
+ok(req["params"].get("offset") == "10", "Semantic Scholar 第3页用 offset=10")
+req = _open.search_request("europe-pmc", "soil carbon", 5, None, None, 2)
+ok(req["params"].get("pageSize") == "15" and req.get("_page_offset") == 10, "Europe PMC 取到页尾再切片")
+
 try:
     _open.search_request("cnki", "x", 1)
     ok(False, "未支持来源应抛错")
@@ -223,12 +235,14 @@ finally:
     _open.run = original_run
 
 print("\nS6 调度器接入开放 API")
-def fake_open_run(source_key, query, limit, year_from=None, year_to=None):
-    return {
-        "status": "ok", "url": "https://api.example/" + source_key, "count": 1,
-        "results": [{"title": "Open paper", "abstract": "A", "authors": "X", "year": 2021,
-                     "venue": "J", "doi": "10.1/o", "result_url": "https://x"}],
-    }
+def fake_open_run(source_key, query, limit, year_from=None, year_to=None, page_index=0):
+    if page_index:
+        return {"status": "no_results", "url": "https://api.example/" + source_key, "count": 0, "results": []}
+    results = [{"title": f"Open paper {i}", "abstract": "A", "authors": "X", "year": 2021,
+                "venue": "J", "doi": f"10.1/o{i}", "result_url": f"https://x/{i}"}
+               for i in range(limit)]
+    return {"status": "ok", "url": "https://api.example/" + source_key,
+            "count": len(results), "results": results}
 
 
 original = _open.run
@@ -236,21 +250,30 @@ _open.run = fake_open_run
 try:
     page = _search._run_source("openalex", "q", False, 10, 2020, 2024,
                                job_dir=Path("."), page_index=0, full_page=True)
-    ok(page["status"] == "ok" and len(page["results"]) == 1, "调度器直接调用开放 API")
+    ok(page["status"] == "ok" and len(page["results"]) == 10, "调度器直接调用开放 API")
     ok(page["results"][0]["snippet"] == "A", "摘要映射到 snippet")
-    ok(page["has_next"] is False and page["transport"] == "api", "单页来源如实标记")
+    ok(page["has_next"] is True and page["transport"] == "api", "满页时标记还有下一页")
+    last = _search._run_source("openalex", "q", False, 10, 2020, 2024,
+                               job_dir=Path("."), page_index=1, full_page=True)
+    ok(last["status"] == "no_results" and last["has_next"] is False, "空页时如实停止")
 finally:
     _open.run = original
 
-with tempfile.TemporaryDirectory() as temp:
-    out = io.StringIO()
-    cfg = {"topic": "t", "query": "q", "sources": ["openalex"], "limit": 10,
-           "searchMode": "formal", "stopMode": "end", "perSourceLimit": None}
-    with redirect_stdout(out):
-        code = _search.run(cfg, Path(temp))
-    events = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
-    ok(code == 1 and events and events[-1]["type"] == "error", "正式检索到末页时开放 API 源明确报错")
-    ok("暂不支持" in events[-1]["message"], "报错说明原因")
+_open.run = fake_open_run
+try:
+    with tempfile.TemporaryDirectory() as temp:
+        out = io.StringIO()
+        cfg = {"topic": "t", "query": "q", "sources": ["openalex"], "limit": 10,
+               "searchMode": "formal", "stopMode": "end", "perSourceLimit": None}
+        with redirect_stdout(out):
+            code = _search.run(cfg, Path(temp))
+        events = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+        ok(code == 0 and events and events[-1]["type"] == "result", "开放 API 源也能正式检索到末页")
+        report = json.loads((Path(temp) / "candidates.json").read_text(encoding="utf-8"))
+        ok(report["count"] == 10 and report["source_status"]["openalex"]["stop_reason"] == "exhausted",
+           "分页结果落盘并如实标记末页")
+finally:
+    _open.run = original
 
 print("\n结果：%d 通过 / %d 失败" % (PASS, FAIL))
 if FAIL:

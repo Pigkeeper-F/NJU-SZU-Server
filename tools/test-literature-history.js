@@ -86,6 +86,8 @@ async function main() {
   // connector. The wrapper keeps the same POST X-Workbench check as server.js.
   const allowedHosts = new Set(), allowedOrigins = new Set();
   const context = vm.createContext({ scholar: service, fs, path, Buffer, URL, MAX_BODY_BYTES: 2 * 1024 * 1024,
+    literatureAuxiliary: { active: false, busy: false, assertIdle() {}, acquire() { return () => {}; },
+      job() { throw new Error('fixture does not exercise auxiliary jobs'); } },
     ALLOWED_HOSTS: allowedHosts, ALLOWED_ORIGINS: allowedOrigins, RATE_LIMIT: { max: 30, windowMs: 60000 }, rateCount: 0, rateWindowStart: 0 });
   vm.runInContext(['sendJson', 'readBody', 'checkRequestGuards', 'handleLiterature'].map(serverFunction).join('\n')
     + '\nglobalThis.handlers = { sendJson, checkRequestGuards, handleLiterature };', context);

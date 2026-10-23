@@ -166,7 +166,8 @@ async function routeAndUiTests() {
   for (const body of [{ id: 'fixture', until: 'fulltext', skipUnavailable: true }, { id: 'fixture', until: 'fulltext' }]) {
     const captured = [];
     const context = vm.createContext({ req: { method: 'POST' }, res: {}, route: '/api/literature/advance',
-      readBody: async () => JSON.stringify(body), sendJson: (_res, status, data) => ({ status, data }),
+      readBody: async () => JSON.stringify(body), readLiteratureBody: async () => JSON.stringify(body),
+      sendJson: (_res, status, data) => ({ status, data }),
       scholar: { advance: (id, options) => { captured.push({ id, options: copy(options), hasSkip: Object.hasOwn(options, 'skipUnavailable') }); return {}; } } });
     await vm.runInContext('(async () => {' + route + '})()', context);
     assert.equal(captured[0].id, body.id);

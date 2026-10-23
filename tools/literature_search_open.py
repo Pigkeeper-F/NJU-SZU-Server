@@ -218,27 +218,34 @@ def search_request(
     limit: int,
     year_from: int | None = None,
     year_to: int | None = None,
+    page_index: int = 0,
 ) -> dict:
-    """该来源的**首个**检索请求（URL + 参数）；不发网络请求。
+    """该来源某一页的检索请求（URL + 参数）；不发网络请求。
 
     供离线测试与审计使用；PMID→efetch 这类派生请求见 :func:`run`。
     """
     limit = max(1, min(int(limit or 1), MAX_RESULTS))
+    offset = max(0, int(page_index or 0)) * limit
     if source_key in ("pubmed", "pmc"):
         db = "pubmed" if source_key == "pubmed" else "pmc"
+        params = {
+            "db": db,
+            "term": _pubmed_term(query, year_from, year_to),
+            "retmax": str(limit),
+            "retmode": "json",
+            "sort": "relevance",
+        }
+        if offset:
+            params["retstart"] = str(offset)
         return {
             "name": "esearch",
             "url": f"{EUTILS_BASE}esearch.fcgi",
-            "params": _ncbi_params({
-                "db": db,
-                "term": _pubmed_term(query, year_from, year_to),
-                "retmax": str(limit),
-                "retmode": "json",
-                "sort": "relevance",
-            }),
+            "params": _ncbi_params(params),
         }
     if source_key == "openalex":
         params: dict[str, str] = {"search": query, "per_page": str(limit)}
+        if offset:
+            params["page"] = str(offset // limit + 1)
         filters = _openalex_filter(year_from, year_to)
         if filters:
             params["filter"] = filters
@@ -247,22 +254,30 @@ def search_request(
             params["api_key"] = api_key
         return {"name": "works", "url": OPENALEX_WORKS, "params": params}
     if source_key == "europe-pmc":
-        return {
+        # Europe PMC 没有稳定页码参数，用 cursor 才严谨；这里先用“取到本页末尾
+        # 再切片”的方式支持有限翻页（<=1000 条），超过即由调度器视为到来源上限。
+        page_size = min(1000, offset + limit)
+        request = {
             "name": "search",
             "url": EUROPE_PMC_SEARCH,
             "params": {
                 "query": _europe_pmc_query(query, year_from, year_to),
                 "format": "json",
                 "resultType": "core",
-                "pageSize": str(limit),
+                "pageSize": str(page_size),
             },
         }
+        if offset:
+            request["_page_offset"] = offset
+        return request
     if source_key == "semantic-scholar":
         params: dict[str, str] = {
             "query": query,
             "limit": str(limit),
             "fields": "title,abstract,authors,year,venue,externalIds,openAccessPdf,url",
         }
+        if offset:
+            params["offset"] = str(offset)
         if year_from is not None:
             params["year"] = f"{year_from}-" + (str(year_to) if year_to is not None else "")
         elif year_to is not None:
@@ -580,10 +595,10 @@ def _pmc_landing(pmcid: str) -> str:
     return f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/" if pmcid else ""
 
 
-def _run_pubmed(query: str, limit: int, year_from: int | None, year_to: int | None) -> dict:
+def _run_pubmed(query: str, limit: int, year_from: int | None, year_to: int | None, page_index: int = 0) -> dict:
     """PubMed：esearch（PMID）→ efetch（题名/摘要/作者/期刊/年份/DOI）。"""
     requests: list[dict] = []
-    search = search_request("pubmed", query, limit, year_from, year_to)
+    search = search_request("pubmed", query, limit, year_from, year_to, page_index)
     requests.append(search)
     status, body = http_get(search["url"], search["params"])
     if status >= 400:
@@ -631,14 +646,14 @@ def _run_pubmed(query: str, limit: int, year_from: int | None, year_to: int | No
     }
 
 
-def _run_pmc(query: str, limit: int, year_from: int | None, year_to: int | None) -> dict:
+def _run_pmc(query: str, limit: int, year_from: int | None, year_to: int | None, page_index: int = 0) -> dict:
     """PMC：esearch（PMC 编号）→ esummary（题录 + OA 落地页）。
 
     刻意不拉 JATS 正文：discover 阶段只要题录，正文由 fulltext 阶段从 PMC 落地页取，
     避免为 10 条候选下载数百 KB 的 XML。
     """
     requests: list[dict] = []
-    search = search_request("pmc", query, limit, year_from, year_to)
+    search = search_request("pmc", query, limit, year_from, year_to, page_index)
     requests.append(search)
     status, body = http_get(search["url"], search["params"])
     if status >= 400:
@@ -692,9 +707,9 @@ def _run_pmc(query: str, limit: int, year_from: int | None, year_to: int | None)
     }
 
 
-def _run_openalex(query: str, limit: int, year_from: int | None, year_to: int | None) -> dict:
+def _run_openalex(query: str, limit: int, year_from: int | None, year_to: int | None, page_index: int = 0) -> dict:
     """OpenAlex：单次 /works 检索（纯元数据 + 开放获取链接）。"""
-    request = search_request("openalex", query, limit, year_from, year_to)
+    request = search_request("openalex", query, limit, year_from, year_to, page_index)
     status, body = http_get(request["url"], request["params"])
     if status >= 400:
         raise SourceError(f"OpenAlex 返回 HTTP {status}", status=status)
@@ -708,13 +723,16 @@ def _run_openalex(query: str, limit: int, year_from: int | None, year_to: int | 
     }
 
 
-def _run_europe_pmc(query: str, limit: int, year_from: int | None, year_to: int | None) -> dict:
+def _run_europe_pmc(query: str, limit: int, year_from: int | None, year_to: int | None, page_index: int = 0) -> dict:
     """Europe PMC：单次 /search 检索（resultType=core，含摘要与 OA 全文链接）。"""
-    request = search_request("europe-pmc", query, limit, year_from, year_to)
+    request = search_request("europe-pmc", query, limit, year_from, year_to, page_index)
     status, body = http_get(request["url"], request["params"])
     if status >= 400:
         raise SourceError(f"Europe PMC 返回 HTTP {status}", status=status)
     results = _parse_europe_pmc(body)
+    offset = int(request.get("_page_offset") or 0)
+    if offset:
+        results = results[offset:offset + limit]
     return {
         "status": "ok" if results else "no_results",
         "url": _request_url(request),
@@ -758,13 +776,13 @@ def _parse_semantic_scholar(body: str) -> list[dict]:
     return results
 
 
-def _run_semantic_scholar(query: str, limit: int, year_from: int | None, year_to: int | None) -> dict:
+def _run_semantic_scholar(query: str, limit: int, year_from: int | None, year_to: int | None, page_index: int = 0) -> dict:
     """Semantic Scholar：单次 /paper/search 检索。
 
     无 key 也能用，但共享池限流很紧（429 常见）——所以这里带退避重试；
     有 SEMANTIC_SCHOLAR_API_KEY 时走专用配额，稳得多。
     """
-    request = search_request("semantic-scholar", query, limit, year_from, year_to)
+    request = search_request("semantic-scholar", query, limit, year_from, year_to, page_index)
     api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
     headers = {"x-api-key": api_key} if api_key else None
     last_error: Exception | None = None
@@ -809,6 +827,7 @@ def run(
     limit: int,
     year_from: int | None = None,
     year_to: int | None = None,
+    page_index: int = 0,
 ) -> dict:
     """执行一次开放 API 检索。
 
@@ -821,7 +840,7 @@ def run(
     if not text:
         raise ValueError("检索式为空")
     runner = _RUNNERS[source_key]
-    return runner(text, max(1, min(int(limit or 1), MAX_RESULTS)), year_from, year_to)
+    return runner(text, max(1, min(int(limit or 1), MAX_RESULTS)), year_from, year_to, max(0, int(page_index or 0)))
 
 
 if __name__ == "__main__":  # pragma: no cover - 手工联调用
@@ -833,9 +852,10 @@ if __name__ == "__main__":  # pragma: no cover - 手工联调用
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--year-from", type=int)
     parser.add_argument("--year-to", type=int)
+    parser.add_argument("--page-index", type=int, default=0)
     args = parser.parse_args()
     try:
-        outcome = run(args.source, args.query, args.limit, args.year_from, args.year_to)
+        outcome = run(args.source, args.query, args.limit, args.year_from, args.year_to, args.page_index)
     except SourceError as error:
         print(json.dumps({"status": "error", "message": str(error), "kind": error.kind}, ensure_ascii=False))
         raise SystemExit(1)
