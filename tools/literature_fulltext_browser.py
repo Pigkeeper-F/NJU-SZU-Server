@@ -44,6 +44,12 @@ _MATERIALS_FUNCTION_JS = r"""() => {
   // Bare labels qualify only when the entire label is the section name.
   const label = /\bsupplement(?:ary|al)?[\s_-]+(?:materials?|data|files?|information|figures?|tables?|appendi(?:x|ces))\b|\bsupporting[\s_-]+(?:information|materials?|data|files?)\b|\badditional[\s_-]+(?:files?|materials?|data)\b|补充(?:材料|信息|数据|文件)|附件|附录文件/i;
   const labelled = value => label.test(value) || /^\s*supplement(?:ary|al|s)?\s*$/i.test(value);
+  for (const d of document.querySelectorAll('details:not([open])')) {
+    const s = d.querySelector?.('summary');
+    if ((s && visible(s) && labelled(text(s))) || [d.id, d.className, d.getAttribute?.('aria-label')].some(v => labelled(String(v || '')))) {
+      try { d.open = true; } catch (_) {}
+    }
+  }
   const areas = new Set();
   for (const e of document.querySelectorAll('[id],[class],[aria-label]')) {
     if (visible(e) && [e.id,e.className,e.getAttribute('aria-label')].some(value=>labelled(String(value||'')))
@@ -126,7 +132,9 @@ _SNAPSHOT_JS = r"""/* literature_fulltext_snapshot */ () => {
   const fulltextAnchors = Array.from(document.querySelectorAll('.full-text-links a[href],.full-text-links-list a[href],.linkout-list a[href]')).filter(a=>visible(a)&&!materialUrls.has(a.href)&&!supplementalUrl(a.href)).slice(0,8).map(linkValue);
   const labelledAnchors = Array.from(document.querySelectorAll('a[href]')).filter(visible).map(linkValue)
     .filter(a=>!materialUrls.has(a.url)&&!supplementalUrl(a.url)&&/pdf|full[ -]?text|全文|阅读全文|view article/i.test(a.text+' '+a.url)).slice(0,50);
-  const links = [...new Map([...fulltextAnchors,...labelledAnchors].map(a=>[a.url,a])).values()];
+  const metaPdfUrls = [meta(['citation_pdf_url']), ...Array.from(document.querySelectorAll('link[rel="alternate"][type="application/pdf"][href]')).map(e=>e.href)]
+    .filter(u=>u&&!materialUrls.has(u)&&!supplementalUrl(u)).map(url=>({url,text:'PDF'}));
+  const links = [...new Map([...fulltextAnchors,...labelledAnchors,...metaPdfUrls].map(a=>[a.url,a])).values()];
   const bodyText=(document.body?.innerText || '').slice(0,2000000);
   const prefix=bodyText.slice(0,5000);
   const headline=Array.from(document.querySelectorAll('h1,h2,[role="alert"]')).filter(visible).map(text).join(' ').slice(0,2000);
@@ -234,11 +242,15 @@ def _material_url(value):
         return ""
 
 
-def _non_material_navigation(target, record):
+def _non_material_navigation(target, record, page_url=""):
     """Exclude positively identified author/navigation links, not data DOIs."""
     parsed = urlsplit(target)
     host, path = (parsed.hostname or "").lower(), unquote(parsed.path).lower()
-    if host == "orcid.org" or host.endswith(".orcid.org"):
+    if page_url and parsed.fragment and target.split("#", 1)[0] == str(page_url).split("#", 1)[0]:
+        return True
+    if host == "orcid.org" or host.endswith(".orcid.org") or host == "creativecommons.org" or host.endswith(".creativecommons.org"):
+        return True
+    if host in {"s100.copyright.com", "rightslink.com", "crossmark.crossref.org"} or host.endswith(".rightslink.com"):
         return True
     if (re.search(r"/(?:authors?|profile|profiles)(?:/|$)", path)
         and not re.search(r"\.(?:pdf|docx?|xlsx?|csv|tsv|zip|rar|7z|gz|txt|xml|json|png|jpe?g|tiff?|r|rds|sav|dta)$", path)):
@@ -247,11 +259,47 @@ def _non_material_navigation(target, record):
         terms = parse_qs(parsed.query).get("term", [])
         if any(re.search(r"\[(?:author|au|fau)\]", term, re.I) for term in terms):
             return True
-    if parsed.fragment and re.match(r"(?:affiliation|aff\d|author|fn\d)", parsed.fragment, re.I):
+    if parsed.fragment and re.match(r"(?:affiliation|aff\d|author|fn\d|ref\b|bib\b|cit\b|sec\b)", parsed.fragment, re.I):
         return True
     if host in {"doi.org", "dx.doi.org"}:
         wanted = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", str(record.get("doi") or "").strip(), flags=re.I)
         if wanted and unquote(parsed.path).lstrip("/").casefold() == wanted.casefold():
+            return True
+    return False
+
+
+_CDN_EQUIVALENT_FAMILIES = (
+    {"nih.gov", "europepmc.org"},
+    {"sciencedirect.com", "elsevier.com", "els-cdn.com", "sciencedirectassets.com", "cell.com"},
+    {"springer.com", "nature.com", "springernature.com", "biomedcentral.com"},
+    {"wiley.com", "onlinelibrary.wiley.com"},
+    {"oup.com", "silverchair-cdn.com"},
+)
+
+
+def _registrable_domain(host: str) -> str:
+    clean = (host or "").lower().strip(".").removeprefix("www.")
+    parts = [p for p in clean.split(".") if p]
+    if len(parts) >= 3 and parts[-2] in {"ac", "co", "edu", "gov", "org", "com"} and len(parts[-1]) <= 3:
+        return ".".join(parts[-3:])
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return clean
+
+
+def _material_host_allowed(actual_host: str, origin_hosts: set[str]) -> bool:
+    actual = (actual_host or "").lower().strip(".")
+    if not actual:
+        return False
+    valid_origins = {h.lower().strip(".") for h in origin_hosts if h}
+    if actual in valid_origins:
+        return True
+    actual_reg = _registrable_domain(actual)
+    origin_regs = {_registrable_domain(h) for h in valid_origins if h}
+    if actual_reg and actual_reg in origin_regs:
+        return True
+    for family in _CDN_EQUIVALENT_FAMILIES:
+        if actual_reg in family and (origin_regs & family):
             return True
     return False
 
@@ -296,7 +344,7 @@ class FulltextBrowserFetcher:
                  runtime_factory=None, clock=time.time, sleep=time.sleep):
         if job_dir is None:
             raise ValueError("全文浏览器必须绑定原任务目录。")
-        self.job_dir = Path(job_dir)
+        self.job_dir = Path(job_dir).resolve()
         self.binding_path = self.job_dir / "fulltext-browser.json"
         self.on_progress = on_progress
         self._runtime_factory = runtime_factory or literature_browser._runtime
@@ -684,7 +732,7 @@ class FulltextBrowserFetcher:
             if not target:
                 rejected = True
                 continue
-            if _non_material_navigation(target, record):
+            if _non_material_navigation(target, record, url):
                 # Author/affiliation/main-article metadata was never an
                 # attachment. Do not treat it as a missing material either.
                 continue
@@ -1116,7 +1164,12 @@ class FulltextBrowserFetcher:
                     return attention("page_error", "补充材料入口在等待期间变化，未点击其他链接。")
                 elements = []
                 for element in parent.query_selector_all("a[href]"):
-                    value = element.evaluate("e => ({url:e.href,label:(e.innerText||e.title||e.querySelector('img')?.alt||'').trim()})")
+                    value = element.evaluate(
+                        "e => { if (typeof e.addEventListener === 'function' && /Mac/i.test(navigator.platform || '')) {"
+                        " e.addEventListener('click', ev => { if (ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); window.open(e.href, '_blank'); } }, {once: true, capture: true});"
+                        " e.addEventListener('contextmenu', ev => { if (ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); } }, {once: true, capture: true});"
+                        " } return {url:e.href,label:(e.innerText||e.title||e.querySelector('img')?.alt||'').trim()}; }"
+                    )
                     if element.is_visible() and value.get("url") == target and value.get("label", "")[:300] == descriptor.get("label", ""):
                         elements.append(element)
                     else:
@@ -1147,7 +1200,7 @@ class FulltextBrowserFetcher:
                     download, _ = downloads.pop(0)
                     actual = str(getattr(download, "url", "") or "")
                     parsed = urlsplit(actual[5:] if actual.startswith("blob:") else actual)
-                    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or (parsed.hostname or "").lower() not in origin_hosts:
+                    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or not _material_host_allowed(parsed.hostname or "", origin_hosts):
                         return attention("page_error", "补充材料文件来源与本次实际链接无法核对，已暂停。")
                     result = self._read_material_download(download, descriptor)
                     if result is None:
@@ -1159,7 +1212,7 @@ class FulltextBrowserFetcher:
                     if response_reason:
                         return attention(response_reason, url=str(response.url))
                     parsed = urlsplit(str(response.url))
-                    if parsed.scheme not in {"http", "https"} or (parsed.hostname or "").lower() not in origin_hosts or parsed.username or parsed.password:
+                    if parsed.scheme not in {"http", "https"} or not _material_host_allowed(parsed.hostname or "", origin_hosts) or parsed.username or parsed.password:
                         return attention("page_error", "补充材料响应来源无法核对，已暂停。")
                     blob = response.body()
                     if not isinstance(blob, bytes) or not 0 < len(blob) <= MAX_MATERIAL_BYTES:
@@ -1222,8 +1275,13 @@ class FulltextBrowserFetcher:
                         nav_error = exc
                         # Chromium aborts normal navigation when an attachment
                         # download begins. Drain only this page's event queue.
-                        if "ERR_ABORTED" in str(exc):
+                        if "ERR_ABORTED" in str(exc) or "Download is starting" in str(exc):
                             page.wait_for_timeout(200)
+                            if not downloads and getattr(self._context, "request", None) is not None:
+                                for _ in range(15):
+                                    if downloads:
+                                        break
+                                    page.wait_for_timeout(200)
                     self._record_destination(page.url or url)
                 if opts.get("materials_only") and (downloads or "application/pdf" in str((getattr(response, "headers", {}) or {}).get("content-type", "")).lower()):
                     return {"status": "ok", "url": literature_browser.safe_url(page.url) or safe,
@@ -1309,6 +1367,33 @@ class FulltextBrowserFetcher:
             {"status": "unknown", "reason": "article_materials_not_observed", "source_url": "", "links": []}))
         return result
 
+    def _fetch_pdf_via_context_request(self, target_url, out_path):
+        api_request = getattr(self._context, "request", None)
+        if api_request is None:
+            return None
+        candidates = [target_url]
+        pmc_match = re.search(r"pmc\.ncbi\.nlm\.nih\.gov/articles/(PMC[1-9]\d*)", str(target_url), re.I)
+        if pmc_match:
+            pmcid = pmc_match.group(1).upper()
+            candidates.append(f"https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmcid}&blobtype=pdf")
+        for candidate in candidates:
+            safe = literature_browser.safe_url(candidate)
+            if not safe:
+                continue
+            try:
+                resp = api_request.get(safe, timeout=MAX_PAGE_TIMEOUT_MS)
+                if int(getattr(resp, "status", 0) or 0) != 200:
+                    continue
+                blob = resp.body()
+                if isinstance(blob, bytes) and blob.startswith(b"%PDF") and MIN_PDF_BYTES <= len(blob) <= MAX_PDF_BYTES:
+                    if out_path is not None:
+                        _save_pdf(out_path, blob)
+                    self._clear_pending()
+                    return {"status": "saved" if out_path else "pdf_page", "url": safe, "bytes": blob, "size": len(blob)}
+            except Exception:
+                continue
+        return None
+
     def fetch_pdf(self, url, out_path, opts):
         result = self._visit(url, opts, out_path=out_path)
         discovery = result.get("material_discovery") or self._material_discoveries.get(_material_key(opts.get("record") or {}))
@@ -1321,6 +1406,13 @@ class FulltextBrowserFetcher:
                 if link.get("kind") == "pdf" and target and target not in {url, result.get("url")}:
                     result = self._visit(target, opts, out_path=out_path)
                     break
+        if result.get("status") not in {"saved", "pdf_page"} and getattr(self._context, "request", None) is not None:
+            direct = self._fetch_pdf_via_context_request(result.get("url") or url, out_path)
+            if direct is not None:
+                if self._blocked:
+                    self._blocked = None
+                    self._blocked_url = ""
+                result = direct
         result.setdefault("material_discovery", discovery or {"status": "unknown", "reason": "article_materials_not_observed", "source_url": literature_browser.safe_url(url), "links": []})
         if result.get("status") == "ok":
             # A visible HTML page or an enabled PDF button alone is not a PDF.

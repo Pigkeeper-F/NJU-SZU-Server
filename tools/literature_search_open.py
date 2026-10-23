@@ -346,13 +346,17 @@ def _parse_pubmed_xml(body: str) -> dict[str, dict]:
                     if match:
                         year = int(match.group(1))
         doi = ""
+        pmcid = ""
         # DOI 有两个常见位置：ArticleIdList/ArticleId[@IdType='doi']（老记录）
         # 与 Article/ELocationID[@EIdType='doi']（2010 年后的多数记录）——两个都要认，
-        # 只认一个会丢掉大批文章的 DOI。
+        # 只认一个会丢掉大批文章的 DOI。同时提取 ArticleId[@IdType='pmc']。
         for node in article.findall("./PubmedData/ArticleIdList/ArticleId"):
-            if node.attrib.get("IdType") == "doi":
-                doi = _xml_text(node)
-                break
+            id_type = str(node.attrib.get("IdType") or "").lower()
+            value = _xml_text(node)
+            if id_type == "doi" and not doi:
+                doi = value
+            elif id_type == "pmc" and re.fullmatch(r"PMC[1-9]\d*", value, flags=re.I):
+                pmcid = value.upper()
         if not doi:
             for node in article.findall("./Article/ELocationID"):
                 if str(node.attrib.get("EIdType") or "").lower() == "doi":
@@ -371,6 +375,7 @@ def _parse_pubmed_xml(body: str) -> dict[str, dict]:
             "year": year,
             "doi": doi,
             "pmid": pmid,
+            "pmcid": pmcid,
         }
     return records
 
@@ -572,6 +577,9 @@ def _parse_europe_pmc(body: str) -> list[dict]:
             landing = f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
             if not any(link["url"] == landing for link in links):
                 links.append({"label": "PMC 全文页", "url": landing})
+            pmc_pdf = f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/"
+            if not any(link["url"] == pmc_pdf for link in links):
+                links.append({"label": "PMC PDF", "url": pmc_pdf})
         records.append({
             "title": title,
             "abstract": str(item.get("abstractText") or "").strip(),
@@ -626,6 +634,16 @@ def _run_pubmed(query: str, limit: int, year_from: int | None, year_to: int | No
         item = parsed.get(pmid)
         if not item:
             continue
+        pmcid = str(item.get("pmcid") or "").strip()
+        doi = str(item.get("doi") or "").strip()
+        links: list[dict] = []
+        if pmcid:
+            links.append({"label": "PubMed Central full text", "url": f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"})
+            links.append({"label": "PubMed Central PDF", "url": f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/"})
+        if doi:
+            clean_doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", doi, flags=re.I)
+            if clean_doi:
+                links.append({"label": "DOI landing page (full-text access unverified)", "url": f"https://doi.org/{clean_doi}"})
         results.append({
             "title": item["title"],
             "abstract": item["abstract"],
@@ -634,8 +652,9 @@ def _run_pubmed(query: str, limit: int, year_from: int | None, year_to: int | No
             "year": item["year"],
             "doi": item["doi"],
             "result_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            "fulltext_links": [],
+            "fulltext_links": links,
             "pmid": pmid,
+            "pmcid": pmcid,
         })
     return {
         "status": "ok" if results else "no_results",
@@ -686,6 +705,7 @@ def _run_pmc(query: str, limit: int, year_from: int | None, year_to: int | None,
         landing = _pmc_landing(pmcid)
         if landing:
             links.append({"label": "PMC 全文页", "url": landing})
+            links.append({"label": "PMC PDF", "url": f"{landing.rstrip('/')}/pdf/"})
         results.append({
             "title": item["title"],
             "abstract": "",

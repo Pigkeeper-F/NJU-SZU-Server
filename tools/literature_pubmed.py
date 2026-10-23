@@ -178,6 +178,7 @@ def _record(node) -> dict:
     links = []
     if pmc:
         links.append({"label": "PubMed Central full text", "url": f"https://pmc.ncbi.nlm.nih.gov/articles/{pmc}/"})
+        links.append({"label": "PubMed Central PDF", "url": f"https://pmc.ncbi.nlm.nih.gov/articles/{pmc}/pdf/"})
     if doi:
         links.append({"label": "DOI landing page (full-text access unverified)",
                       "url": "https://doi.org/" + quote(doi, safe="/()_-.:;")})

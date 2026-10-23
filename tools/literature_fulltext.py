@@ -184,7 +184,17 @@ def _short(text: str, limit: int = 60) -> str:
 def _url_looks_pdf(url: str) -> bool:
     if not url:
         return False
-    return urlparse(url).path.lower().endswith(".pdf")
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+    return (
+        path.endswith(".pdf")
+        or path.endswith("/pdf")
+        or path.endswith("/pdf/")
+        or bool(re.search(r"/doi/(?:e)?pdf/|/article-pdf/", path))
+        or "blobtype=pdf" in query
+        or "format=pdf" in query
+    )
 
 
 def _pmc_article_url(url: str) -> bool:
@@ -456,13 +466,24 @@ def _target_from_group(group: dict) -> dict | None:
     source = next((r for r in records if str(r.get("candidate_id") or "") == canonical_id), records[0] if records else {})
     title = group.get("title") or source.get("title")
     doi = group.get("doi") or source.get("doi")
+    merged_links: list[dict] = []
+    seen_link_urls: set[str] = set()
+    for rec in [source, *[r for r in records if r is not source]]:
+        for link in _collect_links(rec):
+            if link["url"] not in seen_link_urls:
+                seen_link_urls.add(link["url"])
+                merged_links.append(link)
+        rec_url = safe_url(rec.get("result_url"))
+        if rec is not source and rec_url and rec_url != safe_url(source.get("result_url")) and rec_url not in seen_link_urls:
+            seen_link_urls.add(rec_url)
+            merged_links.append({"label": str(rec.get("source_key") or "Merged source")[:100], "url": rec_url})
     target = _target(
         canonical_id,
         title,
         doi,
         safe_url(source.get("result_url")),
-        _collect_links(source),
-        source.get("snippet"),
+        merged_links,
+        source.get("snippet") or next((r.get("snippet") for r in records if r.get("snippet")), ""),
     )
     target.update(source_key=str(source.get("source_key") or ""),
                   source_candidate_id=str(source.get("candidate_id") or ""),
@@ -855,8 +876,12 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
         attempts = [entry for entry in attempts if entry[1] != pmc_pdf]
     # Inspect the already observed landing page before leaving it for a PDF,
     # so supplementary files can be captured while their real links remain.
+    # For PubMed records that already have an official PMC full-text copy first,
+    # keep PMC ahead of the bibliographic PubMed abstract page.
     source = _record_result_url(record)
-    if callable(getattr(fetcher, "fetch_material", None)) and source and ("html", source) in attempts and not _url_looks_pdf(source):
+    if (callable(getattr(fetcher, "fetch_material", None)) and source and ("html", source) in attempts
+            and not _url_looks_pdf(source)
+            and not (_pubmed_article_url(source) and attempts and _pmc_article_url(attempts[0][1]))):
         attempts = [("html", source), *[entry for entry in attempts if entry[1] != source]]
     if not attempts:
         if any(_cnki_transfer_url(link["url"]) for link in _collect_links(record)) or _cnki_transfer_url(_record_result_url(record)):

@@ -335,8 +335,9 @@
       t.literatureError = '只能暂缓当前等待人工处理的检索来源；请刷新任务状态后重试。'; render(); return;
     }
     const until = options.until || (deferSource !== undefined ? job.until || t.literatureUntil || 'discover' : t.literatureUntil || job.until || 'discover');
-    if (job.resumeStage && LITERATURE_STAGE_ORDER.indexOf(until) < LITERATURE_STAGE_ORDER.indexOf(job.resumeStage)) {
-      t.literatureError = '请先在“本次做到哪一步”选择“' + literatureStageLabel(job.resumeStage) + '”或更后的阶段，再继续原任务'; render(); return;
+    const effectiveResumeStage = job.resumeStage || (job.status === 'completed' && (job.files?.includes('candidates.json') || job.files?.includes('candidates.csv')) ? (job.files?.includes('dedupe/dedupe.json') ? 'fulltext' : 'dedupe') : null);
+    if (effectiveResumeStage && LITERATURE_STAGE_ORDER.indexOf(until) < LITERATURE_STAGE_ORDER.indexOf(effectiveResumeStage)) {
+      t.literatureError = '请先在“本次做到哪一步”选择“' + literatureStageLabel(effectiveResumeStage) + '”或更后的阶段，再继续原任务'; render(); return;
     }
     t.literatureBusy = true; t.literatureError = ''; render();
     try {
@@ -1207,8 +1208,7 @@
     let timeoutAttention = null;
     const overview = node('div', undefined, 'literature-overview');
     const introduction = node('div');
-    introduction.append(node('h3', '文献任务'), node('p', '讨论需求 → 确认设置 → 执行 → 核查结果', 'codex-status'));
-    introduction.append(node('p', '候选检索支持 ' + Object.values(LITERATURE_SOURCE_LABELS).join(' / ') + '；开放 API 源免验证码。', 'codex-status'));
+    introduction.append(node('h3', '文献任务'));
     const help = node('button', '使用说明', 'quiet-button'); help.type = 'button';
     help.onclick = () => document.dispatchEvent(new CustomEvent('literature-help-open'));
     overview.append(introduction, help); box.append(overview);
@@ -1237,11 +1237,12 @@
       };
       row.append(stop);
     }
-    const canAdvance = !!job && !!job.resumeStage && ['completed', 'failed', 'needs_attention'].includes(job.status)
+    const effectiveResumeStage = job?.resumeStage || (job?.status === 'completed' && (job?.files?.includes('candidates.json') || job?.files?.includes('candidates.csv')) ? (job?.files?.includes('dedupe/dedupe.json') ? 'fulltext' : 'dedupe') : null);
+    const canAdvance = !!job && !!effectiveResumeStage && ['completed', 'failed', 'needs_attention'].includes(job.status)
       && job.status !== 'needs_attention';
     if (canAdvance && !job.cnkiRetryPaperId) {
       const label = job.status === 'completed' ? '继续下一阶段' : job.status === 'failed' ? (job.stage === 'interrupted' ? '继续中断的任务' : '重试当前阶段') : '继续';
-      const advance = node('button', label, 'quiet-button'); advance.type = 'button'; advance.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+      const advance = node('button', label, job.status === 'completed' ? 'primary-button' : 'quiet-button'); advance.type = 'button'; advance.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
       advance.title = '继续原任务，运行到上方所选阶段；请先选择下一阶段或更后的目标。';
       advance.onclick = () => continueLiterature(mod); row.append(advance);
     }
@@ -1273,13 +1274,18 @@
     until.onchange = () => { t.literatureUntil = until.value; saved[mod.id] = { ...saved[mod.id], literatureUntil: t.literatureUntil }; persist(); };
     untilWrap.append(until); row.append(untilWrap);
     box.append(row);
-    box.append(node('p', '登录流程：需要登录、验证或机构权限时，平台会尝试自动打开本任务的官方页面。请在平台专用检索浏览器操作，它会保存该浏览器的登录状态；普通 Edge/Chrome 的登录不会自动共享。完成后回到本平台点击“检查并继续”，任务才会恢复。', 'codex-status'));
-    box.append(node('p', '后台对每次页面加载或候选获取设置1分钟时限，超时后暂停并保留已保存结果；正式检索每页单独计时，依赖准备另行提示。', 'codex-status'));
+    const flowNotes = node('details', undefined, 'literature-deliverable-group');
+    flowNotes.append(node('summary', '流程与登录说明（点击展开）'));
+    flowNotes.append(node('p', '讨论需求 → 确认设置 → 执行 → 核查结果', 'codex-status'));
+    flowNotes.append(node('p', '候选检索支持 ' + Object.values(LITERATURE_SOURCE_LABELS).join(' / ') + '；开放 API 源免验证码。', 'codex-status'));
+    flowNotes.append(node('p', '登录流程：需要登录、验证或机构权限时，平台会尝试自动打开本任务的官方页面。请在平台专用检索浏览器操作，它会保存该浏览器的登录状态；普通 Edge/Chrome 的登录不会自动共享。完成后回到本平台点击“检查并继续”，任务才会恢复。', 'codex-status'));
+    flowNotes.append(node('p', '后台对每次页面加载或候选获取设置1分钟时限，超时后暂停并保留已保存结果；正式检索每页单独计时，依赖准备另行提示。', 'codex-status'));
     if (job?.files?.includes('fulltext/status.json') || job?.resumeStage === 'fulltext') {
-      box.append(node('p', job.fulltextFailurePolicy === 'skip'
+      flowNotes.append(node('p', job.fulltextFailurePolicy === 'skip'
         ? '全文获取逐篇处理：无法取得的正文或补充材料记录原因后跳过，继续下一篇；登录、验证或限流页面保留，同一受限站点本轮不反复请求。已有材料保留，不重复下载；本地文件校验问题仍需处理。'
         : '全文获取逐篇处理：同篇文献复用任务页，确认文件和状态已保存后关闭；文件生成或下载中会等待完成，登录、验证、限流或错误时保留原页并暂停。摘要与待补充项不自动重复请求。', 'codex-status'));
     }
+    box.append(flowNotes);
     if (job?.processingBasis) box.append(node('p', literatureProcessingBasisMessage(job), 'codex-status'));
     const executionOrder = job ? Array.isArray(job.executionOrder) ? job.executionOrder : job.config?.sources : newLiteratureSourceOrder(t.literatureConfig?.sources);
     if (!job?.processingBasis && Array.isArray(executionOrder) && executionOrder.length) box.append(node('p', (job ? '当前任务执行顺序：' : '新检索执行顺序：')

@@ -357,7 +357,12 @@ async function runStageProcess(root, job, python, scriptName, extraArgs, onEvent
     const stage = job.activeStage || 'discover';
     const seconds = job.limits?.[stage] || STAGE_TIMEOUTS[stage] || 180;
     const script = path.join(root, 'tools', scriptName);
-    const args = ['-u', script, '--config', path.join(job.dir, 'run_config.json'), '--output-dir', job.dir, ...(extraArgs || [])];
+    const configPath = path.join(job.dir, 'run_config.json');
+    if (!fs.existsSync(configPath)) {
+      const fallbackConfig = job.config || { topic: job.query || '', query: job.query || '', sources: ['google-scholar'], limit: job.limit || 10 };
+      try { fs.writeFileSync(configPath, JSON.stringify(fallbackConfig, null, 2), 'utf8'); } catch (_) {}
+    }
+    const args = ['-u', script, '--config', configPath, '--output-dir', job.dir, ...(extraArgs || [])];
     const child = spawn(spec.executable, args, { cwd: root, env: { ...pythonEnv(), ...spec.environment }, windowsHide: true });
     job.child = child;
     let buffer = '';
