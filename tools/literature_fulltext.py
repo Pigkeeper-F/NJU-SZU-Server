@@ -1555,13 +1555,12 @@ def _run_fulltext(
                 attention = collector.inspect_existing(paper_opts)
                 if not attention:
                     return
-                reason = str(attention.get("reason") or "")
-                if reason in {"login", "verification", "access_required", "captcha"}:
-                    _raise_page_attention(attention, item["paper_id"], "")
-                # A 404/timeout while checking supplements must not discard a
-                # valid main text or block the remaining papers.
+                # A supplement page that needs login/verification, 404s or
+                # times out must not discard a valid main text or block the
+                # remaining papers. Record it as unverified for a later retry.
                 materials.record_discovery(target, {"status": "needs_attention",
-                                                    "reason": str(attention.get("message") or reason)})
+                                                    "reason": str(attention.get("message")
+                                                                  or attention.get("reason") or "")})
                 materials.flush()
 
             current = items[position[item["paper_id"]]]

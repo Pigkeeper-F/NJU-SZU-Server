@@ -18,7 +18,8 @@ import re
 import tempfile
 import time
 import unicodedata
-from urllib.parse import parse_qs, unquote, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
+from urllib.request import Request, urlopen
 
 import literature_browser
 atomic_write_json = importlib.import_module("literature-common").atomic_write_json
@@ -27,6 +28,7 @@ atomic_write_json = importlib.import_module("literature-common").atomic_write_js
 DEFAULT_SITE_INTERVAL_SECONDS = 8.0
 CNKI_SITE_INTERVAL_SECONDS = 10.0
 MAX_PAGE_TIMEOUT_MS = 60_000
+MATERIAL_DOWNLOAD_TIMEOUT_MS = 180_000
 MAX_PDF_BYTES = 64 * 1024 * 1024
 MIN_PDF_BYTES = 50 * 1024
 MAX_MATERIAL_BYTES = 256 * 1024 * 1024
@@ -754,24 +756,55 @@ class FulltextBrowserFetcher:
         current = self.capture_material_discovery(record)
         if self._blocked:
             return dict(self._blocked, material_discovery=current)
-        if current["status"] != "unknown":
+
+        def accept(discovery):
             callback = options.get("on_material_discovery")
-            outcome = callback(current) if callable(callback) else None
-            return outcome if isinstance(outcome, dict) and outcome.get("status") in {"attention", "error", "fetch_error"} else {"status": "ok", "material_discovery": current}
-        source = article_url
-        safe = literature_browser.safe_url(source)
-        if not safe or re.search(r"\.(?:pdf|caj)(?:$|[?#])", source, re.I):
-            return {"status": "ok", "material_discovery": current}
+            outcome = callback(discovery) if callable(callback) else None
+            if isinstance(outcome, dict) and outcome.get("status") in {"attention", "error", "fetch_error"}:
+                return outcome
+            return {"status": "ok", "material_discovery": discovery}
+
+        if current.get("status") in {"checked", "none_declared"}:
+            return accept(current)
+        candidates: list[str] = []
+        raw_links = [article_url] + [str(item.get("url") or "") for item in (record.get("fulltext_links") or [])
+                                     if isinstance(item, dict)]
+        for source in raw_links:
+            safe = literature_browser.safe_url(source)
+            if (safe and safe not in candidates
+                    and not re.search(r"\.(?:pdf|caj)(?:$|[?#])", safe, re.I)
+                    and _site(safe) != "cnki.net"):
+                candidates.append(safe)
         options["materials_only"] = True
-        result = self.fetch_page(source, options)
-        if result.get("status") == "ok" and result.get("material_discovery", {}).get("status") == "unknown":
-            # At most one actually visible non-PDF full-text link from the
-            # observed article landing page, never an invented URL or a search.
-            links = [item.get("url") for item in result.get("html_evidence", {}).get("links", [])
-                     if item.get("kind") == "fulltext" and item.get("url") and item.get("url") not in {source, result.get("url")}
-                     and not re.search(r"\.(?:pdf|caj)(?:$|[?#])", item["url"], re.I) and _site(item["url"]) != "cnki.net"]
-            if len(set(links)) == 1:
-                return self.fetch_page(links[0], options)
+        last = current
+        blocked = None
+        for source in candidates:
+            result = self.fetch_page(source, options)
+            if result.get("status") in {"attention", "captcha"}:
+                blocked = blocked or result
+                continue
+            discovery = result.get("material_discovery")
+            if isinstance(discovery, dict):
+                if discovery.get("status") in {"checked", "none_declared"}:
+                    return accept(discovery)
+                if discovery.get("status") == "needs_attention":
+                    blocked = blocked or result
+                last = discovery or last
+            if result.get("status") == "ok" and (discovery or {}).get("status") == "unknown":
+                links = [item.get("url") for item in result.get("html_evidence", {}).get("links", [])
+                         if item.get("kind") == "fulltext" and item.get("url") and item.get("url") not in {source, result.get("url")}
+                         and not re.search(r"\.(?:pdf|caj)(?:$|[?#])", item["url"], re.I) and _site(item["url"]) != "cnki.net"]
+                if len(set(links)) == 1 and links[0] not in candidates:
+                    extra = self.fetch_page(links[0], options)
+                    extra_discovery = extra.get("material_discovery")
+                    if isinstance(extra_discovery, dict) and extra_discovery.get("status") in {"checked", "none_declared"}:
+                        return accept(extra_discovery)
+                    if extra.get("status") in {"attention", "captcha"}:
+                        blocked = blocked or extra
+                    last = extra_discovery or last
+        if blocked is not None:
+            return blocked
+        return accept(last)
         return result
 
     def _read_material_download(self, download, descriptor):
@@ -890,6 +923,41 @@ class FulltextBrowserFetcher:
         return {"status": "file_received", "material_id": flow.get("material_id", ""),
                 "sha256": digest, "size": size, "source_key": str(record.get("source_key") or "")}
 
+    def _direct_material(self, target: str, descriptor: dict, timeout: int = 60):
+        """Fetch a witnessed public attachment URL directly, before click fallback.
+
+        This never uses browser cookies or replays a session/ticket URL; the
+        URL comes from the current article snapshot and is only accepted when
+        the HTTP response is an actual file rather than an HTML/login page.
+        """
+        if not target or _site(target) == "cnki.net":
+            return None
+        host = (urlsplit(target).hostname or "").lower()
+        if host in {"localhost", "127.0.0.1", "::1"} or host.endswith((".invalid", ".test", ".example")):
+            return None  # offline fixtures and never a real public attachment
+        try:
+            request = Request(target, headers={"User-Agent": "NJU-SZU-Workbench/1.0", "Accept": "*/*"})
+            with urlopen(request, timeout=max(5, min(120, timeout))) as response:
+                mime = str(response.headers.get("Content-Type") or "").lower()
+                if "html" in mime or "javascript" in mime:
+                    return None
+                declared = response.headers.get("Content-Length")
+                if declared and declared.isdigit() and int(declared) > MAX_MATERIAL_BYTES:
+                    return None
+                blob = response.read(MAX_MATERIAL_BYTES + 1)
+        except Exception:
+            return None
+        if not blob or len(blob) > MAX_MATERIAL_BYTES:
+            return None
+        if re.match(br"\s*(?:<!doctype\s+html|<html|<form)", blob[:300], re.I):
+            return None
+        disposition = Message()
+        disposition["content-disposition"] = str(response.headers.get("content-disposition") or "")
+        filename = disposition.get_filename() or descriptor.get("filename") or Path(urlsplit(target).path).name or "material"
+        return {"status": "file", "bytes": blob, "suggested_filename": str(filename),
+                "mime_type": mime or str(descriptor.get("mime_type") or "application/octet-stream"),
+                "url": target}
+
     def fetch_material(self, descriptor, record, opts=None):
         """Click one currently witnessed supplementary link, exactly once.
 
@@ -904,6 +972,11 @@ class FulltextBrowserFetcher:
         deferred = self._deferred_attention(target) or self._deferred_attention(record.get("source_url"))
         if deferred:
             return deferred
+        direct = self._direct_material(target, descriptor,
+                                       int((options or {}).get("per_paper_timeout_sec") or 60))
+        if direct is not None:
+            self._material_results[key] = direct
+            return dict(direct)
         listeners, downloads, children, responses = [], [], [], []
         clicked = False
         popup_error = False
@@ -941,8 +1014,13 @@ class FulltextBrowserFetcher:
                 if self._blocked:
                     return dict(self._blocked)
                 discovery = self.capture_material_discovery(record)
-                matches = [item for item in discovery.get("links", []) if item.get("url") == target and item.get("label") == descriptor.get("label")]
-                if len(matches) != 1 or discovery.get("status") not in {"checked", "unknown"}:
+                matches = [item for item in discovery.get("links", [])
+                           if item.get("url") == target and item.get("label") == descriptor.get("label")]
+                # The same attachment is commonly rendered twice (top and
+                # bottom supplement blocks). Duplicate DOM anchors with the
+                # same href+label are one material, not an ambiguity.
+                if (not matches or len({item.get("url") for item in matches}) != 1
+                        or discovery.get("status") not in {"checked", "unknown"}):
                     return attention("page_error", "当前同篇详情中无法唯一核对该补充材料，未点击链接。")
             self._blocked = None
             attached = set()
@@ -954,9 +1032,12 @@ class FulltextBrowserFetcher:
                     request = response.request
                     headers = response.headers or {}
                     mime = str(headers.get("content-type") or "").lower()
-                    if (id(response) not in seen_responses and clicked and request.is_navigation_request() and request.frame == page.main_frame
-                        and ("attachment" in str(headers.get("content-disposition") or "").lower()
-                             or (mime and not any(kind in mime for kind in ("html", "javascript"))))):
+                    attachment = "attachment" in str(headers.get("content-disposition") or "").lower()
+                    main_navigation = request.is_navigation_request() and request.frame == page.main_frame
+                    pdf_response = "application/pdf" in mime
+                    if (id(response) not in seen_responses and clicked
+                        and (main_navigation or pdf_response)
+                        and (attachment or (mime and not any(kind in mime for kind in ("html", "javascript"))))):
                         seen_responses.add(id(response))
                         responses.append((response, page_id))
                 except Exception:
@@ -1040,10 +1121,13 @@ class FulltextBrowserFetcher:
                         elements.append(element)
                     else:
                         element.dispose()
-                if len(elements) != 1:
-                    for element in elements:
-                        element.dispose()
-                    return attention("page_error", "补充材料可见链接不唯一，未点击。")
+                if not elements:
+                    return attention("page_error", "补充材料可见链接已变化，未点击。")
+                # Multiple anchors with the identical href+label are duplicate
+                # renderings of the same attachment; click the first one.
+                element = elements[0]
+                for duplicate in elements[1:]:
+                    duplicate.dispose()
                 self._binding["material_flow"] = {"key": key, "paper_hash": _material_key(record), "parent_target_id": parent_id, "step": "download_clicked"}
                 material_id = str(descriptor.get("material_id") or "")
                 if re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", material_id):
@@ -1051,12 +1135,12 @@ class FulltextBrowserFetcher:
                 self._write_binding()
                 clicked = True
                 try:
-                    elements[0].click(modifiers=["Control"], timeout=15_000, no_wait_after=True)
+                    element.click(modifiers=["Control"], timeout=15_000, no_wait_after=True)
                 finally:
-                    elements[0].dispose()
+                    element.dispose()
             started = self._clock()
             self._progress("补充材料：已打开本篇实际附件链接，等待下载完成；不会重复点击。")
-            while self._clock() - started < MAX_PAGE_TIMEOUT_MS / 1000:
+            while self._clock() - started < MATERIAL_DOWNLOAD_TIMEOUT_MS / 1000:
                 if popup_error:
                     return attention("page_error", "补充材料打开了额外或无法核对来源关系的窗口，已暂停；不会操作其他窗口。")
                 while downloads:
@@ -1098,7 +1182,7 @@ class FulltextBrowserFetcher:
                     return attention("page_error", "补充材料操作后原文详情发生变化，已暂停；不会继续打开附件。")
                 parent.wait_for_timeout(200)
                 self._sleep(0.01)
-            return attention("load_timeout", "补充材料超过1分钟未就绪，原窗口已保留；处理后继续，不会重复点击。")
+            return attention("load_timeout", "补充材料超过3分钟未就绪，原窗口已保留；处理后继续，不会重复点击。")
         except Exception:
             return {"status": "fetch_error", "error": "补充材料任务页面或下载未能核对，原窗口已保留。"}
         finally:
