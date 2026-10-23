@@ -202,6 +202,31 @@ def _settle_article_snapshot(page, snapshot: object, *, timeout_ms: int = 4000, 
     return snapshot
 
 
+_FILE_SUFFIX = re.compile(r"\.(?:pdf|docx?|xlsx?|pptx?|csv|tsv|zip|rar|7z|gz|tgz|txt|xml|json|png|jpe?g|tiff?|r|rds|sav|dta)$", re.I)
+
+
+def _file_like_url(url: str) -> bool:
+    try:
+        path = unquote(urlsplit(str(url or "")).path)
+    except (ValueError, TypeError):
+        return False
+    # Publishers often put the filename in a middle segment, e.g.
+    # /file/Data_Sheet_1.PDF/551993_supplementary.../1
+    return any(_FILE_SUFFIX.search(segment) for segment in path.split("/") if segment)
+
+
+def _material_file_score(discovery: object) -> int:
+    if not isinstance(discovery, dict):
+        return 0
+    score = 0
+    for link in discovery.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        if _file_like_url(str(link.get("url") or "")):
+            score += 1
+    return score
+
+
 def _material_identity(snapshot, record):
     norm = lambda value: " ".join(unicodedata.normalize("NFKC", str(value or "")).split()).casefold()
     doi = lambda value: re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", norm(value))
@@ -721,7 +746,9 @@ class FulltextBrowserFetcher:
         except (ValueError, TypeError):
             return result
         raw = snapshot.get("materials")
-        if not isinstance(raw, dict) or raw.get("complete") is not True:
+        if not isinstance(raw, dict):
+            return result
+        if raw.get("complete") is not True and not (raw.get("region_found") is True and raw.get("links")):
             return result
         links, rejected = [], False
         for item in raw.get("links", []):
@@ -738,6 +765,15 @@ class FulltextBrowserFetcher:
                 continue
             label = str(item.get("label") or "")[:300]
             filename = str(item.get("filename") or "").replace("\\", "/").split("/")[-1][:200]
+            if not filename or not Path(filename).suffix:
+                # The real file URL often renders as an empty-label anchor
+                # (Frontiers: public-pages-files-.../Data_Sheet_1.PDF/.../1).
+                for segment in reversed([unquote(part) for part in urlsplit(target).path.split("/") if part]):
+                    if re.search(r"\.(?:pdf|docx?|xlsx?|pptx?|csv|tsv|zip|rar|7z|gz|tgz|txt|xml|json|png|jpe?g|tiff?|r|rds|sav|dta)$", segment, re.I):
+                        filename = segment[:200]
+                        break
+            if not label or re.match(r"^https?://", label):
+                label = filename or "supplementary material"
             extension = Path(filename or urlsplit(target).path).suffix.lower().lstrip(".")
             links.append({"url": target, "label": label, "filename": filename,
                           "format": extension, "mime_type": str(item.get("mime_type") or mimetypes.guess_type(filename or urlsplit(target).path)[0] or "application/octet-stream")})
@@ -806,14 +842,11 @@ class FulltextBrowserFetcher:
             return dict(self._blocked, material_discovery=current)
 
         def accept(discovery):
-            callback = options.get("on_material_discovery")
-            outcome = callback(discovery) if callable(callback) else None
-            if isinstance(outcome, dict) and outcome.get("status") in {"attention", "error", "fetch_error"}:
-                return outcome
+            # The outer MaterialCollection.observe() processes this final
+            # discovery exactly once. Intermediate pages must not trigger a
+            # supplement download before the publisher page is inspected.
             return {"status": "ok", "material_discovery": discovery}
 
-        if current.get("status") in {"checked", "none_declared"}:
-            return accept(current)
         candidates: list[str] = []
         raw_links = [article_url] + [str(item.get("url") or "") for item in (record.get("fulltext_links") or [])
                                      if isinstance(item, dict)]
@@ -823,36 +856,39 @@ class FulltextBrowserFetcher:
                     and not re.search(r"\.(?:pdf|caj)(?:$|[?#])", safe, re.I)
                     and _site(safe) != "cnki.net"):
                 candidates.append(safe)
+        if not candidates and re.search(r"\.(?:pdf|caj)(?:$|[?#])", article_url, re.I):
+            return accept({"status": "unknown", "reason": "only_main_pdf_page_available",
+                           "source_url": literature_browser.safe_url(article_url), "links": []})
+        best = current
+        best_score = _material_file_score(current)
+        best_status = str(current.get("status") or "")
         options["materials_only"] = True
-        last = current
+        options["on_material_discovery"] = None
         blocked = None
+        seen_urls = set()
         for source in candidates:
+            if source in seen_urls:
+                continue
+            seen_urls.add(source)
             result = self.fetch_page(source, options)
             if result.get("status") in {"attention", "captcha"}:
                 blocked = blocked or result
                 continue
             discovery = result.get("material_discovery")
             if isinstance(discovery, dict):
-                if discovery.get("status") in {"checked", "none_declared"}:
-                    return accept(discovery)
-                if discovery.get("status") == "needs_attention":
+                if (discovery.get("reason") == "only_main_pdf_page_available"
+                        and best_status not in {"checked", "none_declared"}):
+                    best = discovery
+                status = str(discovery.get("status") or "")
+                score = _material_file_score(discovery)
+                if (status in {"checked", "none_declared"}
+                        and (best_status not in {"checked", "none_declared"} or score > best_score)):
+                    best, best_score, best_status = discovery, score, status
+                if status == "needs_attention":
                     blocked = blocked or result
-                last = discovery or last
-            if result.get("status") == "ok" and (discovery or {}).get("status") == "unknown":
-                links = [item.get("url") for item in result.get("html_evidence", {}).get("links", [])
-                         if item.get("kind") == "fulltext" and item.get("url") and item.get("url") not in {source, result.get("url")}
-                         and not re.search(r"\.(?:pdf|caj)(?:$|[?#])", item["url"], re.I) and _site(item["url"]) != "cnki.net"]
-                if len(set(links)) == 1 and links[0] not in candidates:
-                    extra = self.fetch_page(links[0], options)
-                    extra_discovery = extra.get("material_discovery")
-                    if isinstance(extra_discovery, dict) and extra_discovery.get("status") in {"checked", "none_declared"}:
-                        return accept(extra_discovery)
-                    if extra.get("status") in {"attention", "captcha"}:
-                        blocked = blocked or extra
-                    last = extra_discovery or last
-        if blocked is not None:
+        if blocked is not None and best_status not in {"checked", "none_declared"}:
             return blocked
-        return accept(last)
+        return accept(best)
         return result
 
     def _read_material_download(self, download, descriptor):
@@ -1014,6 +1050,17 @@ class FulltextBrowserFetcher:
         """
         options = opts or {}
         target = _material_url(descriptor.get("url"))
+        if target and not _file_like_url(target):
+            # The descriptor may be a landing/fragment URL. Use the same
+            # attachment's real file URL from the latest page snapshot.
+            discovery = self._material_discoveries.get(_material_key(record)) or {}
+            for link in discovery.get("links") or []:
+                if not isinstance(link, dict):
+                    continue
+                if (link.get("label") == descriptor.get("label")
+                        or link.get("filename") == descriptor.get("filename")) and _file_like_url(str(link.get("url") or "")):
+                    target = _material_url(link.get("url"))
+                    break
         key = _url_hash(_material_key(record) + "\n" + str(descriptor.get("label") or "") + "\n" + str(descriptor.get("filename") or "") + "\n" + target)
         if key in self._material_results:
             return dict(self._material_results[key])

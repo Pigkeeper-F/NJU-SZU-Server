@@ -466,6 +466,15 @@ def read_material(job_dir, material, *, max_chars=DEFAULT_MAX_CHARS, max_rows=MA
     return output.result()
 
 
+def _file_like_url(url: str) -> bool:
+    try:
+        path = unquote(urlsplit(str(url or "")).path)
+    except (ValueError, TypeError):
+        return False
+    suffix = re.compile(r"\.(?:pdf|docx?|xlsx?|pptx?|csv|tsv|zip|rar|7z|gz|tgz|txt|xml|json|png|jpe?g|tiff?|r|rds|sav|dta)$", re.I)
+    return any(suffix.search(segment) for segment in path.split("/") if segment)
+
+
 class MaterialsStore:
     def __init__(self, job_dir, targets):
         targets = list(targets)
@@ -514,6 +523,12 @@ class MaterialsStore:
         paper = self._paper(record)
         supplements = [material for material in paper.get("materials", [])
                        if material.get("role") == "supplement"]
+        # When at least one real file URL was observed, fragment/landing links
+        # are navigation duplicates, not additional attachments.
+        file_like = [material for material in supplements
+                     if _file_like_url(str((self.descriptors.get((paper["paper_id"], material.get("material_id"))) or {}).get("url") or ""))]
+        if file_like:
+            supplements = file_like
         downloaded = [material for material in supplements
                       if material.get("download_status") == "downloaded"
                       and _material_file(self.job_dir, material) is not None]
@@ -568,10 +583,29 @@ class MaterialsStore:
         paper = self._paper(record)
         descriptor = self._descriptor(record, descriptor)
         matches = [material for material in paper["materials"] if material.get("material_id") == descriptor["material_id"]]
+        if not matches and descriptor.get("role") == "supplement":
+            # The same attachment can be discovered first via a landing
+            # fragment and later via its real file URL. Merge by label+filename
+            # and upgrade the recorded URL to the file-like one.
+            matches = [material for material in paper["materials"]
+                       if material.get("role") == "supplement"
+                       and material.get("label") == descriptor.get("label")
+                       and material.get("filename") == descriptor.get("filename")]
         if len(matches) > 1:
             raise MaterialsError("同一文献的材料标识重复，请先核查。")
         if matches:
             material = matches[0]
+            existing = self.descriptors.get((paper["paper_id"], material["material_id"])) or {}
+            old_url = str(existing.get("url") or "")
+            new_url = str(descriptor.get("url") or "")
+            if new_url and (not old_url or (_file_like_url(new_url) and not _file_like_url(old_url))):
+                existing.update({"url": new_url,
+                                 "mime_type": descriptor.get("mime_type") or existing.get("mime_type"),
+                                 "format": descriptor.get("format") or existing.get("format"),
+                                 "label": descriptor.get("label") or existing.get("label"),
+                                 "filename": descriptor.get("filename") or existing.get("filename"),
+                                 "source_key": descriptor.get("source_key") or existing.get("source_key")})
+                self.descriptors[(paper["paper_id"], material["material_id"])] = existing
         else:
             material = {key: value for key, value in descriptor.items() if key != "url"}
             material.update(path="", size=0, sha256="", download_status="pending", read_status="not_checked", read_reason="")
@@ -646,7 +680,7 @@ class MaterialsStore:
 
     def pending_supplements(self, record):
         paper = self._paper(record)
-        pending = []
+        candidates = []
         for material in paper["materials"]:
             if material.get("role") != "supplement":
                 continue
@@ -654,8 +688,10 @@ class MaterialsStore:
                 continue
             descriptor = self.descriptors.get((paper["paper_id"], material["material_id"]))
             if descriptor is not None:
-                pending.append(copy.deepcopy(descriptor))
-        return pending
+                candidates.append((copy.deepcopy(descriptor), _file_like_url(str(descriptor.get("url") or ""))))
+        if any(file_like for _, file_like in candidates):
+            return [descriptor for descriptor, file_like in candidates if file_like]
+        return [descriptor for descriptor, _ in candidates]
 
     def _fingerprint(self, material):
         return (material.get("role"), _norm(material.get("label")), _norm(material.get("filename")), material.get("format"))
