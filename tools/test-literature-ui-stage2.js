@@ -317,6 +317,11 @@ async function multiSourceTests() {
   assert.equal(current.literatureConfig.limits.discover, undefined, '来源变更后重算自动预算');
   calls.length = 0; responseJob = { id: 'new-formal', config: JSON.parse(JSON.stringify(current.literatureConfig)) };
   await subject.startLiterature({ id: 'module-1' });
+  assert.equal(calls.length, 0, '小样已有记录时必须先新建独立文献任务，不能直接覆盖为正式检索');
+  assert.match(current.literatureError, /新建文献任务/);
+  // A new workspace has its copied rules, but no original job binding.
+  current.literatureJob = null; delete context.saved['module-1'].literatureJobId;
+  await subject.startLiterature({ id: 'module-1' });
   assert.equal(calls[0].body.config.searchMode, 'formal'); assert.equal(calls[0].body.config.perSourceLimit, null);
   assert.equal(calls[0].body.config.stopMode, 'end');
   assert.equal(calls[0].body.config.limit, 10, '正式请求使用独立数量字段，页大小仍为10');
@@ -334,6 +339,7 @@ async function multiSourceTests() {
   calls.length = 0; await subject.continueLiterature({ id: 'module-1' });
   assert.deepEqual(calls[0], { url: '/api/literature/advance', body: { id: 'legacy-formal', until: 'discover' } }, '旧正式任务继续用原id与配置');
   calls.length = 0; responseJob = { id: 'new-end' };
+  current.literatureJob = null; delete context.saved['module-1'].literatureJobId;
   await subject.startLiterature({ id: 'module-1' });
   assert.equal(calls[0].body.config.stopMode, 'end'); assert.equal(calls[0].body.config.perSourceLimit, null);
   assert.equal(calls[0].body.config.limits.discover, undefined); assert.equal(calls[0].body.config.limits.fulltext, 3600);

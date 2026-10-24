@@ -135,6 +135,7 @@
     head.append(node('h3', '已有批次'), node('span', handedOff ? '已人工确认并交接' : run ? statusNames[run.status] : '正在读取历史记录', 'codex-status')); content.append(head);
     content.append(node('p', downloadHistory ? '这是旧版文献执行器留下的记录，不作为本次数据下载的执行依据。已有记录和成果保留；数据下载使用上方“按方案开始下载”。新的文献任务请进入文献挖掘环节。' : '这是以前按审核方案建立的批次，可查看成果或继续未完成步骤；新任务使用上方“文献任务”。', 'codex-status'));
     const actions = node('div', undefined, 'literature-actions');
+    if (!run && saved[mod.id]?.id) actions.append(button('刷新旧批次状态', () => { t.error = ''; void watch(mod.id); }, t.loading || t.watching));
     if (run) actions.append(button('刷新状态', () => { t.error = ''; void watch(mod.id); }, t.loading || t.watching));
     if (run?.status === 'running' || run?.status === 'waiting') actions.append(button('停止本批执行', async () => { try { t.run = await request('/api/codex/literature/cancel', { sessionId: run.sessionId, id: run.id }); render(); } catch (error) { t.error = error.message; render(); } }, t.loading));
     content.append(actions);
@@ -171,6 +172,24 @@
     }
     if (t.error) content.append(node('p', t.error, 'codex-error'));
   }
-  root.LiteratureUI = { render, start, isBusy: () => Object.values(states).some(t => t.loading || t.run?.status === 'running'), context: id => { if (Store.getState().modules.find(mod => mod.id === id)?.type !== 'literature-mining') return ''; const run = state(id).run; return run ? '当前文献获取状态：' + statusNames[run.status] + '；步骤：' + stageNames[run.stage] + '。待讨论问题：' + (run.questions || []).join('；') + '。对话只讨论，点击答复并继续才续跑。' : ''; } };
+  function snapshotContext(id) {
+    return JSON.parse(JSON.stringify({ binding: saved[id] || null, state: states[id] || null }));
+  }
+  function restoreContext(id, snapshot) {
+    const current = states[id];
+    if (current?.loading || current?.watching || current?.run?.status === 'running') return false;
+    const value = snapshot ? JSON.parse(JSON.stringify(snapshot)) : {};
+    const next = { ...saved };
+    if (value.binding) next[id] = value.binding; else delete next[id];
+    try { localStorage.setItem(key, JSON.stringify(next)); }
+    catch (_) { return false; }
+    saved = next;
+    states[id] = value.state || { run: null, loading: false, watching: false, error: '', answer: '', choices: {}, skip: {}, initialized: true };
+    // Reattaching a saved context is read-only. Refreshing an old batch is an
+    // explicit user action, rather than a side effect of creating/switching.
+    states[id].initialized = true; states[id].watching = false;
+    return true;
+  }
+  root.LiteratureUI = { render, start, snapshotContext, restoreContext, isBusy: () => Object.values(states).some(t => t.loading || t.watching || t.run?.status === 'running'), context: id => { if (Store.getState().modules.find(mod => mod.id === id)?.type !== 'literature-mining') return ''; const run = state(id).run; return run ? '当前文献获取状态：' + statusNames[run.status] + '；步骤：' + stageNames[run.stage] + '。待讨论问题：' + (run.questions || []).join('；') + '。对话只讨论，点击答复并继续才续跑。' : ''; } };
   Store.subscribe(render); render();
 })(window);

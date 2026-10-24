@@ -2702,6 +2702,38 @@
     });
   }
 
+  // A literature subtask keeps its discussion and unsent edits separate while
+  // retaining the same workflow module. These helpers never send a request.
+  function snapshotContext(moduleId) {
+    var active = activeModuleId() === moduleId;
+    return JSON.parse(JSON.stringify({
+      ui: docUi[moduleId] || null, template: docTemplate[moduleId] || null,
+      files: docFiles[moduleId] || [], urls: urlList[moduleId] || [], previews: previewOpen[moduleId] || {},
+      editing: docEditingId === moduleId, draftText: docEditingId === moduleId ? docDraftText : '',
+      composer: active && inputEl ? inputEl.value : ''
+    }));
+  }
+  function resetContext(moduleId, snapshot) {
+    if (isBusy()) return false;
+    var value = snapshot ? JSON.parse(JSON.stringify(snapshot)) : {};
+    delete docUi[moduleId]; delete docTemplate[moduleId]; delete docFiles[moduleId];
+    delete urlList[moduleId]; delete previewOpen[moduleId];
+    if (value.ui) docUi[moduleId] = value.ui;
+    if (value.template) docTemplate[moduleId] = value.template;
+    if (value.files) docFiles[moduleId] = value.files;
+    if (value.urls) urlList[moduleId] = value.urls;
+    if (value.previews) previewOpen[moduleId] = value.previews;
+    if (docEditingId === moduleId) { docEditingId = null; docDraftText = ''; }
+    if (value.editing) { docEditingId = moduleId; docDraftText = value.draftText || ''; }
+    if (activeModuleId() === moduleId && inputEl) { inputEl.value = value.composer || ''; autoGrow(inputEl); }
+    msgListState = { moduleId: null, count: -1, firstId: null, status: null, pending: false, docSig: null };
+    // Invalidate the old editor DOM; its guard must not preserve another task's
+    // textarea when Store emits the context replacement.
+    var editor = spaceEl && spaceEl.querySelector('.doc-card .doc-editor');
+    if (editor && typeof editor.remove === 'function') editor.remove();
+    return true;
+  }
+
   // -------------------------------------------------------------- 加载期绑定
 
   if (hintEl) hintEl.textContent = HINT_TEXT;           // 静态节点：只改文本
@@ -2725,5 +2757,5 @@
     });
   }
 
-  root.ModuleSpace = { render: render, sendText: sendText, isBusy: isBusy };
+  root.ModuleSpace = { render: render, sendText: sendText, isBusy: isBusy, snapshotContext: snapshotContext, resetContext: resetContext };
 })(typeof window !== 'undefined' ? window : this);

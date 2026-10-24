@@ -229,6 +229,7 @@
     switching = false;
     showMessage(restored ? '' : '任务记录格式有误，未切换。');
     render();
+    if (root.CodexUI && typeof root.CodexUI.render === 'function') root.CodexUI.render();
     return restored;
   }
 
@@ -256,6 +257,7 @@
     switching = false;
     showMessage(saved ? '' : '浏览器本地存储已满：当前任务暂时只能在本页使用，请导出重要结果。');
     render();
+    if (root.CodexUI && typeof root.CodexUI.render === 'function') root.CodexUI.render();
     return true;
   }
 
@@ -369,7 +371,29 @@
   }
 
   initialize();
+  function snapshotModuleRules(moduleId) {
+    var task = current();
+    var rules = task && task.rulesByModule && task.rulesByModule[moduleId];
+    return rules ? JSON.parse(JSON.stringify(rules)) : null;
+  }
+  function restoreModuleRules(moduleId, rules) {
+    if (!moduleId || busy() || pendingRules || startingExecution) return false;
+    var task = current();
+    if (!task) return false;
+    var previous = JSON.parse(JSON.stringify(task.rulesByModule || {}));
+    task.rulesByModule = task.rulesByModule || {};
+    if (rules === null || rules === undefined) delete task.rulesByModule[moduleId];
+    else {
+      if (typeof rules !== 'object' || Array.isArray(rules)) return false;
+      task.rulesByModule[moduleId] = JSON.parse(JSON.stringify(rules));
+    }
+    if (saveIndex()) return true;
+    task.rulesByModule = previous;
+    memory[INDEX_KEY] = JSON.stringify(index);
+    return false;
+  }
   root.TaskManager = { confirmedRules: confirmedRules, switchTask: switchTask, createTask: createTask, refreshControls: refreshControls,
+    currentTaskId: function () { return switching ? null : index.activeTaskId; }, snapshotModuleRules: snapshotModuleRules, restoreModuleRules: restoreModuleRules,
     openPlan: function () { $('rules-dialog').showModal(); render(); },
     rulesForModule: function (moduleId) { var rules = rulesFor(current(), moduleId); return { text: rules.confirmed || '', version: (rules.versions || []).length }; } };
   $('task-select').addEventListener('change', function (event) { switchTask(event.target.value); });

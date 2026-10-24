@@ -14,6 +14,8 @@
   let literatureFieldsDialog = null;
   const literatureFieldsAssistWatchers = new Set();
   let literatureMaterialsDialog = null;
+  let literatureNewTaskDialog = null;
+  const literatureWorkspaceManagers = new Map();
   let account = null;
   let checking = false;
   let loginBusy = false;
@@ -294,8 +296,151 @@
     if (job?.id) saved[mod.id] = { ...saved[mod.id], literatureJobId: job.id };
     persist();
   }
+  function literatureWorkspaceBusy(id) {
+    const t = task(id);
+    return !!(t.busy || t.literatureBusy || t.literatureJob?.status === 'running' || t.literatureFieldsAssistBusy
+      || t.literatureHistoryBusy || t.literatureAutoOpening || root.ModuleSpace?.isBusy() || root.LiteratureUI?.isBusy());
+  }
+  function literatureWorkspaceManager(mod) {
+    if (!root.LiteratureTaskWorkspaces || !root.TaskManager?.currentTaskId) return null;
+    const projectId = root.TaskManager.currentTaskId();
+    if (!projectId) return null;
+    const managerKey = projectId + ':' + mod.id;
+    if (!literatureWorkspaceManagers.has(managerKey)) {
+      const manager = root.LiteratureTaskWorkspaces.createManager({ moduleId: mod.id, adapter: {
+        snapshotClient: () => JSON.parse(JSON.stringify({ ...saved[mod.id], literatureConfig: task(mod.id).literatureConfig,
+          literatureUntil: task(mod.id).literatureUntil })),
+        applyClient: client => {
+          const next = { ...saved, [mod.id]: JSON.parse(JSON.stringify(client || {})) };
+          localStorage.setItem(key, JSON.stringify(next));
+          const previous = tasks[mod.id];
+          if (previous) previous.literatureWatchGeneration = (previous.literatureWatchGeneration || 0) + 1;
+          saved = next;
+          delete tasks[mod.id];
+        },
+        isBusy: () => literatureWorkspaceBusy(mod.id),
+        closeDialogs: () => {
+          const t = task(mod.id);
+          if (t.literatureJob?.id && t.literatureConfirmDrafts && !saveLiteratureFieldDrafts(t, t.literatureJob)) {
+            throw new Error(t.literatureFieldsError || '字段草稿尚未保存，未切换任务');
+          }
+          closeLiteratureFields();
+          if (literatureMaterialsDialog?.open) literatureMaterialsDialog.close();
+        }
+      } });
+      literatureWorkspaceManagers.set(managerKey, manager);
+    }
+    return literatureWorkspaceManagers.get(managerKey);
+  }
+  function literatureNewTaskSeed(mod, mode, reuse) {
+    const t = task(mod.id);
+    const source = t.literatureConfig || t.literatureJob?.config;
+    const config = reuse && source ? JSON.parse(JSON.stringify(source)) : {
+      topic: '', query: '', sources: ['google-scholar'], sourceQueries: {}, publicationYearFrom: null, publicationYearTo: null,
+      geography: '', language: '', studyTypes: [], inclusion: [], exclusion: [], targetFields: [], limit: 10
+    };
+    if (reuse && t.literatureJob?.id) {
+      const fields = literatureFieldDrafts[t.literatureJob.id]?.fields;
+      if (Array.isArray(fields) && fields.length) config.fieldDefinitions = JSON.parse(JSON.stringify(fields));
+    }
+    config.searchMode = mode === 'formal' ? 'formal' : 'test';
+    config.stopMode = mode === 'formal' ? 'end' : 'count';
+    config.perSourceLimit = mode === 'formal' ? null : 10;
+    config.limit = 10;
+    if (mode === 'formal' && config.limits) delete config.limits.discover;
+    return { backend: t.backend, model: t.model, literatureConfig: config, literatureUntil: 'discover',
+      literatureConfigOpen: false };
+  }
+  async function hydrateLiteratureWorkspace(mod) {
+    const t = task(mod.id), jobId = saved[mod.id]?.literatureJobId;
+    if (!jobId) { render(); return; }
+    t.literatureBusy = true; render();
+    try {
+      const job = await request('/api/literature/job?id=' + encodeURIComponent(jobId));
+      if (task(mod.id) !== t || saved[mod.id]?.literatureJobId !== jobId) return;
+      t.literatureJob = job;
+      t.literatureError = job.deletedAt ? '该检索记录已删除，可在历史任务中恢复；讨论和配置仍保留。' : '';
+      // Loading a context only reads its saved job. Execution and login remain explicit actions.
+    } catch (error) { if (task(mod.id) === t) t.literatureError = error.message; }
+    finally { if (task(mod.id) === t) { t.literatureBusy = false; render(); } }
+  }
+  function openNewLiteratureTask(mod) {
+    const manager = literatureWorkspaceManager(mod);
+    if (!manager || literatureWorkspaceBusy(mod.id)) return;
+    const ensured = manager.ensure();
+    if (!ensured.ok) { task(mod.id).literatureError = ensured.error; render(); return; }
+    if (literatureNewTaskDialog?.open) return;
+    const dialog = node('dialog', undefined, 'literature-new-task-dialog');
+    const form = node('form');
+    form.append(node('h2', '新建文献任务'));
+    form.append(node('p', '小样、正式检索或不同主题分别新建。原任务保留，创建后先核对设置，不会立即检索。'));
+    const nameLabel = node('label', '任务名称');
+    const nameInput = node('input'); nameInput.required = true; nameInput.maxLength = 80;
+    nameInput.placeholder = '例如：肉鸡热应激 · 正式检索'; nameLabel.append(nameInput);
+    const modeLabel = node('label', '运行模式');
+    const modeInput = node('select');
+    [['test', '小样测试（每来源10条）'], ['formal', '正式检索（到可访问末页）']].forEach(([value, label]) => {
+      const option = node('option', label); option.value = value; modeInput.append(option);
+    });
+    modeLabel.append(modeInput);
+    const reuseLabel = node('label', '初始内容');
+    const reuseInput = node('select');
+    [['blank', '空白开始（适合其他主题）'], ['reuse', '复用当前规则和表头（需重新核对）']].forEach(([value, label]) => {
+      const option = node('option', label); option.value = value; reuseInput.append(option);
+    });
+    reuseLabel.append(reuseInput);
+    const errorText = node('p', '', 'codex-error'); errorText.setAttribute('role', 'alert');
+    const actions = node('div', undefined, 'dialog-actions');
+    const cancel = node('button', '取消', 'quiet-button'); cancel.type = 'button'; cancel.onclick = () => dialog.close();
+    const create = node('button', '创建并核对设置', 'primary-button'); create.type = 'submit';
+    actions.append(cancel, create); form.append(nameLabel, modeLabel, reuseLabel,
+      node('p', '复用只复制规则和字段草稿，不复制候选、材料、提取结果或审核通过状态。'), errorText, actions);
+    form.onsubmit = event => {
+      event.preventDefault();
+      if (literatureWorkspaceBusy(mod.id)) { errorText.textContent = '当前有任务正在处理，请完成或停止后再新建。'; return; }
+      const reuse = reuseInput.value === 'reuse';
+      const result = manager.create({ name: nameInput.value, mode: modeInput.value,
+        seedClient: literatureNewTaskSeed(mod, modeInput.value, reuse), seedDoc: reuse ? mod.doc : null });
+      if (!result.ok) { errorText.textContent = result.error; return; }
+      const fresh = Store.getState().modules.find(item => item.id === mod.id);
+      saved[mod.id] = { ...saved[mod.id], literatureSource: literatureSource(fresh) }; persist();
+      dialog.close(); render(); ModuleSpace.render();
+    };
+    dialog.append(form); document.body.append(dialog); literatureNewTaskDialog = dialog;
+    dialog.addEventListener('close', () => { if (literatureNewTaskDialog === dialog) literatureNewTaskDialog = null; dialog.remove(); });
+    dialog.showModal(); nameInput.focus();
+  }
+  function literatureTaskSelector(mod, t) {
+    const manager = literatureWorkspaceManager(mod);
+    if (!manager) return null;
+    const ensured = manager.ensure();
+    const box = node('div', undefined, 'literature-task-selector');
+    const add = node('button', '＋ 新建文献任务', 'quiet-button'); add.type = 'button';
+    add.disabled = literatureWorkspaceBusy(mod.id) || !ensured.ok;
+    add.onclick = () => openNewLiteratureTask(Store.getState().modules.find(item => item.id === mod.id) || mod);
+    if (!ensured.ok) { box.append(add, node('p', ensured.error, 'codex-error')); return box; }
+    const label = node('label', '当前文献任务');
+    const select = node('select'); select.setAttribute('aria-label', '切换当前项目内的文献任务');
+    const active = manager.active();
+    manager.list().forEach(context => {
+      const option = node('option', context.name + (context.mode === 'formal' ? ' · 正式' : ' · 小样'));
+      option.value = context.id; select.append(option);
+    });
+    select.value = active?.id || ''; select.disabled = literatureWorkspaceBusy(mod.id);
+    select.onchange = () => {
+      const result = manager.switch(select.value);
+      if (!result.ok) { t.literatureError = result.error; render(); return; }
+      render(); ModuleSpace.render(); void hydrateLiteratureWorkspace(mod);
+    };
+    label.append(select); box.append(label, add);
+    if (!t.literatureJob?.id && !saved[mod.id]?.literatureJobId) box.append(node('span', '草稿 · 尚未检索', 'codex-status'));
+    return box;
+  }
   async function startLiterature(mod) {
     const t = task(mod.id);
+    if (t.literatureJob?.id || saved[mod.id]?.literatureJobId) {
+      t.literatureError = '当前文献任务已有检索记录。正式检索或其他主题请先点“新建文献任务”；继续原结果请使用“继续下一阶段”。'; render(); return;
+    }
     if (!t.literatureConfig) { t.literatureError = '请先从对话整理运行配置并核对'; render(); return; }
     let config;
     try {
@@ -313,6 +458,7 @@
       t.literatureConfig = JSON.parse(JSON.stringify(job.config || config));
       saved[mod.id] = { ...saved[mod.id], literatureJobId: job.id, literatureConfig: t.literatureConfig };
       persist();
+      if (typeof literatureWorkspaceManager === 'function') literatureWorkspaceManager(mod)?.saveActive();
       await watchLiterature(mod.id, job.id);
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
@@ -527,6 +673,21 @@
     render();
     if (job.status === 'running') watchLiterature(mod.id, job.id).catch(() => {});
   }
+  function attachLiteratureHistoryContext(mod, job) {
+    const manager = literatureWorkspaceManager(mod);
+    if (!manager) return attachLiteratureJob(mod, job);
+    if (literatureWorkspaceBusy(mod.id)) return;
+    const ready = manager.saveActive();
+    if (!ready.ok) { task(mod.id).literatureError = ready.error; render(); return; }
+    const known = manager.list().find(context => context.jobId === job.id);
+    const result = known ? manager.switch(known.id) : manager.create({ name: String(job.config?.topic || '历史文献任务 ' + job.id.slice(0, 8)).slice(0, 80),
+      mode: job.config?.searchMode === 'formal' ? 'formal' : 'test',
+      seedClient: { backend: task(mod.id).backend, model: task(mod.id).model,
+        literatureConfig: JSON.parse(JSON.stringify(job.config || {})), literatureUntil: job.until || 'discover', literatureConfigOpen: false } });
+    if (!result.ok) { task(mod.id).literatureError = result.error; render(); return; }
+    const fresh = Store.getState().modules.find(item => item.id === mod.id);
+    attachLiteratureJob(fresh, job); manager.saveActive(); ModuleSpace.render();
+  }
   function literatureSource(mod) {
     const entries = (mod.messages || []).filter(message => message.role === 'user' || message.role === 'assistant');
     return JSON.stringify({ messages: entries.map(message => [message.id, message.at]),
@@ -605,6 +766,7 @@
   }
   async function prepareLiterature(mod) {
     const t = task(mod.id);
+    const selectedMode = t.literatureConfig?.searchMode || saved[mod.id]?.literatureDraftMode;
     const messages = (mod.messages || []).filter(message => message.role === 'user' || message.role === 'assistant').slice(-30)
       .map(message => ({ role: message.role, text: message.text }));
     if (!messages.some(message => message.role === 'user')) { t.literatureError = '当前模块还没有用户提出的检索需求；请先讨论主题与检索规则'; render(); return; }
@@ -621,6 +783,7 @@
       }
       if (job.status !== 'completed') throw new Error(job.error || '整理规则失败');
       t.literatureConfig = parseLiteratureConfig(job.text);
+      if (selectedMode === 'formal') t.literatureConfig = newLiteratureSearchConfig({ ...t.literatureConfig, searchMode: 'formal', stopMode: 'end', perSourceLimit: null });
       saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureSource: source };
       persist();
     } catch (error) { t.literatureError = error.message; }
@@ -687,22 +850,58 @@
     const files = (Array.isArray(job.files) ? job.files : []).filter(name => typeof name === 'string');
     if (!files.length) return null;
     const box = node('div', undefined, 'literature-deliverables');
-    literatureFileGroups(files).forEach(group => {
-      const section = node('div', undefined, 'literature-deliverable-group');
-      section.append(node('span', group.label + ' · ' + group.files.length + ' 个', 'literature-deliverable-title'));
+    const disclosureState = literatureDeliverables.disclosureState ||= new Map();
+    const rememberDisclosure = (details, summary, groupKey, initiallyOpen = false) => {
+      const key = JSON.stringify([job.id, groupKey]);
+      details.open = disclosureState.has(key) ? disclosureState.get(key) : initiallyOpen;
+      summary.onclick = () => disclosureState.set(key, !details.open);
+      details.ontoggle = () => { if (details.isConnected) disclosureState.set(key, details.open); };
+    };
+    const link = name => {
+      const anchor = node('a', literatureFileLabel(name));
+      anchor.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name);
+      anchor.title = name;
+      return anchor;
+    };
+    const counts = job.counters || {};
+    const gaps = [
+      ['materialsIncomplete', '材料不完整'], ['fulltextPartial', '正文不完整'],
+      ['fulltextUnavailable', '全文待补'], ['fulltextAttention', '待人工处理']
+    ].filter(([key]) => Number.isInteger(counts[key]) && counts[key] > 0)
+      .map(([key, label]) => label + ' ' + counts[key] + ' 篇');
+    if (!gaps.length) {
+      for (const [key, label] of [['materialsPartial', '补充材料不全'], ['materialsUnverified', '补充材料未核查']]) {
+        if (Number.isInteger(counts[key]) && counts[key] > 0) gaps.push(label + ' ' + counts[key] + ' 篇');
+      }
+    }
+    if (gaps.length) {
+      const notice = node('div', undefined, 'literature-deliverable-notice');
+      notice.append(node('p', '材料提醒：' + gaps.join(' · ') + '。各项可能重叠，请查看每篇材料清单。'));
+      const status = ['fulltext/materials.json', 'fulltext/status.json'].find(name => files.includes(name));
+      if (status) notice.append(link(status));
+      box.append(notice);
+    }
+    if (files.includes('validation/validation.md')) {
+      const notice = node('div', undefined, 'literature-deliverable-notice');
+      notice.append(node('p', '核查提醒：请查看待审核清单并回原件确认；自动校验完成不代表已人工核查。'));
+      notice.append(link('validation/validation.md')); box.append(notice);
+    }
+    const groups = literatureFileGroups(files);
+    groups.filter(group => group.key === 'export').concat(groups.filter(group => group.key !== 'export')).forEach(group => {
+      const isExport = group.key === 'export';
+      const section = node('details', undefined, 'literature-deliverable-group' + (isExport ? ' literature-deliverable-export' : ''));
+      const summary = node('summary', (isExport ? '最终导出文件' : group.label) + ' · ' + group.files.length + ' 个', 'literature-deliverable-title');
+      rememberDisclosure(section, summary, group.key, isExport);
+      section.append(summary);
       if (group.key === 'fulltext') section.append(node('p', '保存了文件不代表已确认全文，请以全文状态和复核报告中的分类为准。', 'codex-status'));
       const list = node('div', undefined, 'literature-deliverable-list');
       const collapsed = group.files.length > 8;
-      const link = name => {
-        const anchor = node('a', literatureFileLabel(name));
-        anchor.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name);
-        anchor.title = name;
-        return anchor;
-      };
       (collapsed ? group.files.slice(0, 6) : group.files).forEach(name => list.append(link(name)));
       if (collapsed) {
         const more = node('details', undefined, 'literature-deliverable-more');
-        more.append(node('summary', '展开其余 ' + (group.files.length - 6) + ' 个文件'));
+        const moreSummary = node('summary', '展开其余 ' + (group.files.length - 6) + ' 个文件');
+        rememberDisclosure(more, moreSummary, group.key + ':more');
+        more.append(moreSummary);
         const inner = node('div', undefined, 'literature-deliverable-list');
         group.files.slice(6).forEach(name => inner.append(link(name)));
         more.append(inner); list.append(more);
@@ -726,11 +925,23 @@
     if (job.resumeStage) meta.push('下一阶段：' + literatureStageLabel(job.resumeStage));
     if (job.until) meta.push('本次运行到：' + literatureStageLabel(job.until));
     if (job.counters && typeof job.counters === 'object') {
-      Object.keys(job.counters).forEach(key => {
+      ['candidates', 'fulltextFetched', 'extractedPapers', 'parameterRows'].forEach(key => {
         if (typeof job.counters[key] === 'number') meta.push((LITERATURE_COUNTER_LABELS[key] || key) + ' ' + job.counters[key]);
       });
     }
     if (meta.length) bar.append(node('span', meta.join(' · '), 'literature-stage-meta'));
+    const counterKeys = Object.keys(job.counters || {}).filter(key => typeof job.counters[key] === 'number');
+    if (counterKeys.length) {
+      const details = node('details', undefined, 'literature-stage-statistics');
+      const summary = node('summary', '详细统计 · ' + counterKeys.length + ' 项');
+      const disclosureState = literatureStageBar.disclosureState ||= new Map();
+      details.open = disclosureState.get(job.id) === true;
+      summary.onclick = () => disclosureState.set(job.id, !details.open);
+      details.ontoggle = () => { if (details.isConnected) disclosureState.set(job.id, details.open); };
+      const list = node('div', undefined, 'literature-statistics-grid');
+      counterKeys.forEach(key => list.append(node('span', (LITERATURE_COUNTER_LABELS[key] || key) + ' ' + job.counters[key])));
+      details.append(summary, list); bar.append(details);
+    }
     return bar;
   }
   function literatureConfirmFields(t, job) {
@@ -1190,7 +1401,7 @@
           restore.onclick = () => changeLiteratureHistory(mod, job, true); row.append(restore);
         } else {
           const open = node('button', '查看', 'quiet-button'); open.type = 'button'; open.disabled = t.literatureBusy || t.busy;
-          open.onclick = () => attachLiteratureJob(mod, job);
+          open.onclick = () => typeof attachLiteratureHistoryContext === 'function' ? attachLiteratureHistoryContext(mod, job) : attachLiteratureJob(mod, job);
           const remove = node('button', '删除', 'quiet-button'); remove.type = 'button';
           remove.disabled = job.status === 'running' || !!t.literatureHistoryBusy || t.literatureJobsLoading;
           remove.title = job.status === 'running' ? '请先停止正在运行的任务' : '从历史列表隐藏，可恢复；文件和进度保留';
@@ -1212,6 +1423,10 @@
     const help = node('button', '使用说明', 'quiet-button'); help.type = 'button';
     help.onclick = () => document.dispatchEvent(new CustomEvent('literature-help-open'));
     overview.append(introduction, help); box.append(overview);
+    if (typeof literatureTaskSelector === 'function') {
+      const selector = literatureTaskSelector(mod, t);
+      if (selector) box.append(selector);
+    }
     const row = node('div', undefined, 'codex-toolbar literature-toolbar');
     const prepare = node('button', t.literatureBusy ? '处理中…' : '从对话整理规则', 'quiet-button');
     prepare.type = 'button'; prepare.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy(); prepare.onclick = () => prepareLiterature(mod); row.append(prepare);
@@ -1224,7 +1439,8 @@
     const awaitingAccess = !!job && job.status === 'needs_attention' && !awaitingConfirm;
     const sameConfig = !t.literatureConfig || !job?.config || sameLiteratureConfig(job.config, t.literatureConfig);
     const start = node('button', '确认配置并检索', 'primary-button');
-    start.type = 'button'; start.disabled = t.literatureBusy || !!root.LiteratureUI?.isBusy() || t.busy || !t.literatureConfig || (awaitingAccess && sameConfig);
+    start.type = 'button'; start.disabled = t.literatureBusy || !!root.LiteratureUI?.isBusy() || t.busy || !t.literatureConfig || !!job?.id || !!saved[mod.id]?.literatureJobId || (awaitingAccess && sameConfig);
+    if (job?.id || saved[mod.id]?.literatureJobId) start.title = '本任务已有检索记录；正式检索或其他主题请先点击“新建文献任务”。';
     if (awaitingAccess && sameConfig) start.title = '原任务等待人工处理；请用下方“检查并继续”，保留已有来源的结果。';
     if (awaitingConfirm) start.title = '当前任务停在字段确认关口；本按钮发起一次新检索，继续原任务请在字段表格点击“核对表格并开始提取”。';
     start.onclick = () => startLiterature(mod); row.append(start);
