@@ -135,11 +135,21 @@ const context = vm.createContext({
 });
 const configCode = codex.slice(codex.indexOf('  const LITERATURE_CONFIG_KEYS'), codex.indexOf('  async function prepareLiterature'));
 const labelsCode = codex.slice(codex.indexOf('  const LITERATURE_STAGE_ORDER'), codex.indexOf('  function literatureFileLabel'));
-vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureProcessingBasisMessage', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
-  + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, continueAvailableLiterature, openLiteratureBrowser, literatureAttentionMessage, literatureProcessingBasisMessage, literatureStageLabel, literatureStageBar, literaturePanel };', context);
+vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureProcessingBasisMessage', 'literatureDeliverableSummary', 'literatureStatusText', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
+  + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, continueAvailableLiterature, openLiteratureBrowser, literatureAttentionMessage, literatureProcessingBasisMessage, literatureStatusText, literatureStageLabel, literatureStageBar, literaturePanel };', context);
 const subject = context.subject;
 
 async function multiSourceTests() {
+  const exportedMaterials = { status: 'completed', count: 259, message: '已导出 10 篇文献、259 个参数行',
+    files: ['fulltext/status.json', 'export/literature.xlsx', 'export/parameters.xlsx'],
+    counters: { candidates: 10, uniqueGroups: 10, parameterRows: 259, fulltextFetched: 3, fulltextPdf: 0, fulltextHtml: 3, materialsIncomplete: 10 } };
+  const originalMaterials = JSON.stringify(exportedMaterials);
+  const materialStatus = subject.literatureStatusText(exportedMaterials);
+  for (const expected of ['10 条文献记录', '259 行', '已获取正文 3 篇', 'PDF 0 篇', '网页正文 3 篇', '材料仍有缺口 10 篇']) assert.ok(materialStatus.includes(expected), expected);
+  assert.ok(!materialStatus.includes('259 条文献') && !materialStatus.includes('259 条待复核'), 'Parameter count is neither document count nor review count');
+  assert.equal(JSON.stringify(exportedMaterials), originalMaterials, 'Display clarification preserves the saved task');
+  const unknownFormats = subject.literatureStatusText({ ...exportedMaterials, counters: { candidates: 10, fulltextFetched: 3 } });
+  assert.ok(!unknownFormats.includes('PDF 0') && !unknownFormats.includes('网页正文 0'), 'Unknown formats are not reported as zero');
   assert.equal(subject.literatureStageLabel('discover'), '检索候选', 'Discover stage should use its Chinese label');
   const pausedStageJob = { status: 'needs_attention', resumeStage: 'discover', until: 'discover', stages: { discover: 'running' } };
   const pausedStageBytes = JSON.stringify(pausedStageJob);

@@ -1051,6 +1051,24 @@ body .literature-connector,
 body dialog.literature-help-dialog,
 body dialog.literature-new-task-dialog { font-size: var(--literature-reader-size, 20px); line-height: 1.65; }
 body .literature-connector { box-sizing: border-box; width: 100%; max-width: 1400px; margin: 12px auto 18px; padding: 22px 26px; }
+/* 面板与聊天区并列占用主区高度；展开详情后只滚动这一层，保留聊天及输入区。 */
+body.literature-reading-view .codex-panel:has(> .literature-connector) {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(56dvh, calc(100dvh - 340px));
+  overflow-x: hidden;
+  overflow-y: scroll;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: #657c70 #e8eee9;
+  scroll-padding-block: 18px;
+}
+body.literature-reading-view .codex-panel:has(> .literature-connector)::-webkit-scrollbar { width: 14px; }
+body.literature-reading-view .codex-panel:has(> .literature-connector)::-webkit-scrollbar-track { background: #e8eee9; border-radius: 10px; }
+body.literature-reading-view .codex-panel:has(> .literature-connector)::-webkit-scrollbar-thumb { background: #657c70; border: 3px solid #e8eee9; border-radius: 10px; }
+body.literature-reading-view .codex-panel:has(> .literature-connector)::-webkit-scrollbar-thumb:hover { background: #3f5e4d; }
+body.literature-reading-view #module-space { min-height: min(120px, 16dvh); scrollbar-gutter: stable; }
 body .literature-connector :is(p, span, li, label, summary, small, pre, code, th, td, button, input, textarea, select, option, a, .quiet-button, .primary-button, .codex-status, .codex-error, .literature-stage, .literature-stage-meta, .literature-history-row),
 body dialog.literature-help-dialog :is(p, span, li, label, summary, small, pre, code, th, td, button, input, textarea, select, option, a, .quiet-button, .primary-button, .codex-status, .codex-error),
 body dialog.literature-new-task-dialog :is(p, span, li, label, summary, small, button, input, textarea, select, option, a, .quiet-button, .primary-button, .codex-status, .codex-error) { font-size: var(--literature-reader-size, 20px); line-height: 1.6; }

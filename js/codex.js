@@ -190,7 +190,9 @@
     delete saved[id].jobId; persist();
   }
   function literatureCompletedMessage(job) {
-    const base = '候选检索已保存 ' + job.count + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。';
+    if (job.files?.includes('fulltext/status.json')) return literatureStatusText(job) + literatureProcessingBasisMessage(job);
+    const candidateCount = Number.isSafeInteger(job.counters?.candidates) ? job.counters.candidates : job.count;
+    const base = '候选检索已保存 ' + candidateCount + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。';
     const extra = literatureDeliverableSummary(job);
     return (extra ? base + extra : base) + literatureProcessingBasisMessage(job);
   }
@@ -210,6 +212,26 @@
     if (files.includes('fulltext/status.json')) return '已记录全文获取状态（含“待补充”项）；明细见下载区。';
     if (files.includes('dedupe/dedupe.json')) return '已完成跨来源去重；疑似重复组未静默合并，见下载区待审清单。';
     return '';
+  }
+  function literatureStatusText(job) {
+    if (job.status !== 'completed' || !job.files?.includes('fulltext/status.json')) return String(job.message || '');
+    const counters = job.counters || {}, parts = [];
+    const hasCount = value => Number.isSafeInteger(value) && value >= 0;
+    if (job.files.includes('export/literature.xlsx') || job.files.includes('export/literature.csv')) {
+      const count = hasCount(counters.uniqueGroups) ? counters.uniqueGroups : counters.candidates;
+      parts.push('文献表已导出' + (hasCount(count) ? '：' + count + ' 条文献记录' : ''));
+      parts.push('参数明细表已导出' + (hasCount(counters.parameterRows) ? '：' + counters.parameterRows + ' 行' : ''));
+    } else parts.push(literatureDeliverableSummary(job) || '本轮材料处理已结束');
+    if (hasCount(counters.fulltextFetched)) {
+      let body = '已获取正文 ' + counters.fulltextFetched + ' 篇';
+      const formats = [];
+      if (hasCount(counters.fulltextPdf)) formats.push('PDF ' + counters.fulltextPdf + ' 篇');
+      if (hasCount(counters.fulltextHtml)) formats.push('网页正文 ' + counters.fulltextHtml + ' 篇');
+      if (formats.length) body += '（' + formats.join(' / ') + '）';
+      parts.push(body);
+    }
+    if (hasCount(counters.materialsIncomplete) && counters.materialsIncomplete > 0) parts.push('材料仍有缺口 ' + counters.materialsIncomplete + ' 篇');
+    return parts.join('；') + '。';
   }
   async function checkLiteratureRuntime(sources = []) {
     const restart = '当前端口后台需要更新。请关闭对应的旧启动窗口，重新打开本项目启动器，再刷新页面；已有任务和文件保留。';
@@ -1392,7 +1414,7 @@
         row.append(node('span', job.deletedAt ? '已删除，可恢复' : job.deferredOnly === true ? '已暂缓，待补检'
           : (job.processingBasis ? '现有候选后续处理 · ' : '') + (LITERATURE_STATUS_LABELS[job.status] || job.status || '') + (job.stage ? ' · ' + literatureStageLabel(job.stage) : ''), 'literature-history-status'));
         const historyMessage = job.deferredOnly === true ? '当前没有其他待检索来源，已有' + job.count + '条候选可继续处理。'
-          : job.processingBasis ? literatureProcessingBasisMessage(job) : String(job.message || '');
+          : job.processingBasis ? literatureProcessingBasisMessage(job) : literatureStatusText(job);
         const historyNote = node('span', job.processingBasis ? historyMessage : historyMessage.slice(0, 60), 'literature-history-message');
         historyNote.title = historyMessage; row.append(historyNote);
         if (job.deletedAt) {
@@ -1465,9 +1487,14 @@
       const state = LITERATURE_STATUS_LABELS[job.status] || job.status || '正在找回';
       pieces.push((job.until ? literatureStageLabel(job.until) + ' · ' : '') + state);
       const counters = job.counters || {};
-      [['candidates', '候选'], ['fulltextFetched', '已获正文'], ['parameterRows', '参数记录']].forEach(([key, label]) => {
-        if (Number.isFinite(counters[key])) pieces.push(label + ' ' + counters[key]);
-      });
+      const exported = job.status === 'completed' && job.files?.some(name => /^export\/literature\.(xlsx|csv)$/.test(name));
+      const records = Number.isSafeInteger(counters.uniqueGroups) ? counters.uniqueGroups : counters.candidates;
+      if (exported && Number.isSafeInteger(records)) pieces.push('文献表 ' + records + ' 条文献记录');
+      else if (Number.isSafeInteger(counters.candidates)) pieces.push('候选 ' + counters.candidates);
+      if (Number.isSafeInteger(counters.fulltextFetched)) pieces.push('已获取正文 ' + counters.fulltextFetched + ' 篇');
+      if (Number.isSafeInteger(counters.fulltextPdf)) pieces.push('PDF ' + counters.fulltextPdf + ' 篇');
+      if (Number.isSafeInteger(counters.fulltextHtml)) pieces.push('网页正文 ' + counters.fulltextHtml + ' 篇');
+      if (Number.isSafeInteger(counters.parameterRows)) pieces.push('参数记录 ' + counters.parameterRows + ' 行');
     } else pieces.push('尚未检索 · 先讨论需求并核对设置');
     const summary = node('p', pieces.join('　·　'), 'literature-task-summary');
     summary.setAttribute('aria-live', 'polite');
@@ -1524,6 +1551,14 @@
       finalFiles.forEach(child => exports.append(child)); body.append(exports);
     }
     body.append(settings, files); box.append(body);
+    // Keep native history/log disclosures open during the same job's polling updates.
+    Array.from(box.querySelectorAll?.('details') || []).forEach(details => {
+      const heading = Array.from(details.children).find(child => child.tagName === 'SUMMARY');
+      if (!heading || typeof heading.onclick === 'function') return;
+      const stateKey = key + ':native:' + (details.className || heading.textContent.split(' · ')[0]);
+      if (states.has(stateKey)) details.open = states.get(stateKey);
+      heading.onclick = event => { if (!event?.defaultPrevented) states.set(stateKey, !details.open); };
+    });
   }
   function literaturePanel(mod, t, container = panel) {
     const box = node('div', undefined, 'literature-connector');
@@ -1620,8 +1655,7 @@
       + executionOrder.map(source => LITERATURE_SOURCE_LABELS[source] || source).join(' → '), 'codex-status'));
     if (job) {
       const deferred = Array.isArray(job.deferredSources) ? [...new Set(job.deferredSources)].filter(source => job.config?.sources?.includes(source)) : [];
-      box.append(node('p', '状态：' + (job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : deferred.length && job.status === 'completed' ? '仍有暂缓来源待补检，检索尚未全部完成' : job.message || literatureStageLabel(job.stage) || job.status)
-        + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
+      box.append(node('p', '状态：' + (job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : deferred.length && job.status === 'completed' ? '仍有暂缓来源待补检，检索尚未全部完成' : literatureStatusText(job) || literatureStageLabel(job.stage) || job.status), 'codex-status'));
       if (deferred.length) box.append(node('p', '暂缓来源待补检：' + deferred.map(source => LITERATURE_SOURCE_LABELS[source] || source).join('、')
         + '。已有候选保留，检索尚未全部完成；可打开原页面处理后点击“' + (job.deferredOnly === true ? '补检该来源' : '检查并继续') + '”补检。', 'codex-status'));
       const stages = literatureStageBar(job);
@@ -2287,6 +2321,13 @@
     panel.hidden = !mod || !document.getElementById('records-view').hidden;
     if (panel.hidden) return;
     const t = task(mod.id);
+    const literatureView = mod.type === 'literature-mining';
+    const contextId = literatureView ? literatureWorkspaceManager(mod)?.active()?.id || '' : '';
+    const scrollKey = literatureView ? [mod.id, contextId, t.literatureJob?.id || saved[mod.id]?.literatureJobId || 'draft'].join(':') : '';
+    const previousScroll = literatureView && panel.literatureScrollKey === scrollKey ? panel.scrollTop : 0;
+    panel.literatureScrollKey = scrollKey;
+    if (literatureView) { panel.tabIndex = 0; panel.setAttribute('aria-label', '文献任务滚动区域'); }
+    else { panel.removeAttribute('tabindex'); panel.removeAttribute('aria-label'); }
     panel.replaceChildren();
     if (mod.type === 'download-data') {
       panel.append(node('h3', '按方案下载数据'));
@@ -2317,6 +2358,7 @@
     if (mod.type === 'literature-mining') {
       literaturePanel(mod, t);
       if (t.error) panel.append(node('p', t.error, 'codex-error'));
+      panel.scrollTop = previousScroll;
       return;
     }
     if (t.backend === 'api' && mod.type !== 'download-data') { panel.append(node('p', 'API 模式提供文字指导；文件上传与实际执行需切换本机 Codex。')); return; }
