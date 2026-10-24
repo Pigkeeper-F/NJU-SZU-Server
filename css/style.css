@@ -1045,66 +1045,149 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
 .literature-fields-next h3 { flex: 1 1 220px; margin: 0; font-size: 16px; }
 .literature-fields-review summary { cursor: pointer; padding: 8px 0; color: var(--muted); }
 
-/* 文献任务：保持可读字号，用分组折叠节省空间，不压小操作和文字。 */
-.literature-connector { font-size: 15px; line-height: 1.65; }
-.literature-connector .literature-overview h3 { font-size: 18px; }
-.literature-connector .codex-status,
-.literature-connector .codex-error,
-.literature-connector .literature-stage-meta,
-.literature-connector .literature-stage,
-.literature-connector .literature-config-fields > label,
-.literature-connector .literature-toolbar > label,
-.literature-connector .literature-history-row { font-size: 14px; line-height: 1.6; }
-.literature-connector .codex-status,
-.literature-connector .literature-stage-meta,
-.literature-connector .literature-stage-state { color: #64755c; }
-.literature-connector .literature-toolbar { flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
-.literature-connector .literature-toolbar > label { flex-wrap: wrap; gap: 8px; }
-.literature-connector button,
-.literature-connector .quiet-button,
-.literature-connector .primary-button,
-.literature-connector .literature-toolbar button,
-.literature-connector select,
-.literature-connector .literature-toolbar > label > select { min-height: 40px; max-width: 100%; padding: 8px 12px; font-size: 14px; line-height: 1.4; }
-.literature-connector .literature-toolbar > button { flex: 0 0 auto; white-space: normal; }
-.literature-connector .literature-config-fields { gap: 12px; }
-.literature-connector .literature-config-fields input,
-.literature-connector .literature-config-fields textarea,
-.literature-connector .literature-config-fields select { font-size: 15px; line-height: 1.5; }
-.literature-connector details > summary { cursor: pointer; padding: 9px 0; font-size: 15px; line-height: 1.5; }
-.literature-connector .literature-deliverables { display: grid; gap: 10px; margin: 14px 0; }
-.literature-connector .literature-deliverables > .literature-deliverable-group { display: block; min-width: 0; padding: 0 14px; border: 1px solid var(--border, #dfe5e1); border-radius: 9px; background: #fff; }
-.literature-connector .literature-deliverables > .literature-deliverable-export { border-color: #b8cfc3; background: #f0f7f2; }
-.literature-connector .literature-deliverable-title { color: var(--text); font-size: 15px; font-weight: 600; }
-.literature-connector .literature-deliverables > .literature-deliverable-group[open] > summary { border-bottom: 1px solid var(--border, #dfe5e1); margin-bottom: 10px; }
-.literature-connector .literature-deliverable-list { display: flex; flex-wrap: wrap; gap: 10px 16px; min-width: 0; padding-bottom: 12px; }
-.literature-connector .literature-deliverable-list a,
-.literature-connector .literature-deliverable-notice a { max-width: 100%; padding: 4px 0; overflow-wrap: anywhere; font-size: 15px; line-height: 1.6; }
-.literature-connector .literature-deliverable-export .literature-deliverable-list a { padding: 7px 12px; border: 1px solid #c6d9ce; border-radius: 7px; background: #fff; font-weight: 500; }
-.literature-connector .literature-deliverable-notice { padding: 11px 14px; border-left: 3px solid #c49a45; border-radius: 5px; background: #fff8e9; color: #73581e; font-size: 14px; }
-.literature-connector .literature-deliverable-notice p { margin: 0 0 5px; }
-.literature-connector .literature-stage-statistics { flex: 1 1 100%; width: 100%; }
-.literature-connector .literature-statistics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; padding: 8px 12px; border: 1px solid var(--border, #dfe5e1); border-radius: 8px; background: #fff; font-size: 14px; }
-.literature-connector .literature-history-row { grid-template-columns: 82px 150px minmax(0, 1fr) auto; gap: 10px; }
-.literature-connector .literature-history-message { white-space: normal; overflow-wrap: anywhere; }
-.literature-connector .literature-task-selector { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 12px 0 16px; }
-.literature-connector .literature-task-selector > label { display: grid; gap: 7px; font-size: 14px; min-width: 0; max-width: 100%; }
-.literature-connector .literature-task-selector select { width: min(440px, 100%); min-width: 180px; font-size: 15px; }
-.literature-new-task-dialog { width: min(560px, calc(100vw - 40px)); box-sizing: border-box; max-height: calc(100vh - 40px); overflow: auto; padding: 26px; font-size: 16px; }
-.literature-new-task-dialog h2 { font-size: 22px; margin-top: 0; }
-.literature-new-task-dialog p { line-height: 1.65; font-size: 15px; }
-.literature-new-task-dialog form > label { display: grid; gap: 8px; margin: 16px 0; font-size: 15px; }
-.literature-new-task-dialog input, .literature-new-task-dialog select { box-sizing: border-box; min-width: 0; width: 100%; padding: 10px 12px; font-size: 16px; }
-.literature-new-task-dialog .dialog-actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: flex-end; }
-.literature-new-task-dialog button { min-height: 42px; font-size: 15px; }
-.literature-connector pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; }
-@media (max-width: 900px) {
-  .literature-connector .literature-config-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .literature-connector .literature-history-row { grid-template-columns: minmax(70px, auto) minmax(0, 1fr) auto; }
-  .literature-connector .literature-history-message { display: block; grid-column: 1 / -1; }
+/* 文献工作区：用整体折叠留出空间，字号独立调节，不用缩放压小界面。
+ * body / dialog 前缀使文献阅读样式高于后加载的 workspace.css 小字默认值。 */
+body .literature-connector,
+body dialog.literature-help-dialog,
+body dialog.literature-new-task-dialog { font-size: var(--literature-reader-size, 20px); line-height: 1.65; }
+body .literature-connector { box-sizing: border-box; width: 100%; max-width: 1400px; margin: 12px auto 18px; padding: 22px 26px; }
+body .literature-connector :is(p, span, li, label, summary, small, pre, code, th, td, button, input, textarea, select, option, a, .quiet-button, .primary-button, .codex-status, .codex-error, .literature-stage, .literature-stage-meta, .literature-history-row),
+body dialog.literature-help-dialog :is(p, span, li, label, summary, small, pre, code, th, td, button, input, textarea, select, option, a, .quiet-button, .primary-button, .codex-status, .codex-error),
+body dialog.literature-new-task-dialog :is(p, span, li, label, summary, small, button, input, textarea, select, option, a, .quiet-button, .primary-button, .codex-status, .codex-error) { font-size: var(--literature-reader-size, 20px); line-height: 1.6; }
+body .literature-connector :is(h2, h3, h4),
+body dialog.literature-help-dialog :is(h2, h3, h4),
+body dialog.literature-help-dialog .literature-workflow-stage h3,
+body dialog.literature-new-task-dialog :is(h2, h3, h4) { font-size: calc(var(--literature-reader-size, 20px) + 4px); line-height: 1.5; }
+body .literature-connector .literature-overview { align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 22px; }
+body .literature-connector .literature-overview h3 { margin: 0; }
+body .literature-connector :is(.codex-status, .literature-stage-meta, .literature-stage-state) { color: #51634c; }
+body .literature-connector p { margin: 0 0 12px; overflow-wrap: anywhere; }
+body .literature-connector .literature-toolbar { flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+body .literature-connector .literature-toolbar > label { flex-wrap: wrap; gap: 10px; }
+body .literature-connector :is(button, .quiet-button, .primary-button, select),
+body dialog.literature-help-dialog :is(button, .quiet-button, .primary-button, select),
+body dialog.literature-new-task-dialog :is(button, .quiet-button, .primary-button, select) { box-sizing: border-box; min-height: 44px; max-width: 100%; padding: 10px 16px; line-height: 1.4; white-space: normal; }
+body .literature-connector .literature-toolbar > button { flex: 0 1 auto; }
+body .literature-connector :is(input:not([type="checkbox"]):not([type="radio"]), textarea),
+body dialog.literature-help-dialog :is(input:not([type="checkbox"]):not([type="radio"]), textarea),
+body dialog.literature-new-task-dialog :is(input:not([type="checkbox"]):not([type="radio"]), textarea) { box-sizing: border-box; min-height: 46px; padding: 10px 12px; }
+body .literature-connector :is(input[type="checkbox"], input[type="radio"]),
+body dialog.literature-help-dialog :is(input[type="checkbox"], input[type="radio"]),
+body dialog.literature-new-task-dialog :is(input[type="checkbox"], input[type="radio"]) { width: 22px; height: 22px; flex: 0 0 22px; }
+body .literature-connector .literature-config-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+body .literature-connector .literature-config-fields > label { gap: 8px; }
+body .literature-connector .literature-sources { gap: 14px 24px; }
+body .literature-connector .literature-sources label { min-height: 44px; gap: 10px; }
+body .literature-connector details > summary,
+body dialog.literature-help-dialog details > summary { cursor: pointer; min-height: 48px; padding: 12px 0; overflow-wrap: anywhere; }
+body .literature-connector details > summary:focus-visible,
+body dialog.literature-help-dialog details > summary:focus-visible { border-radius: 4px; outline-offset: 3px; }
+body .literature-connector .literature-task-selector { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin: 12px 0 22px; }
+body .literature-connector .literature-task-selector > label { display: grid; flex: 1 1 420px; gap: 9px; min-width: 0; max-width: 760px; }
+body .literature-connector .literature-task-selector select { width: 100%; min-width: 0; }
+body .literature-connector .literature-reader-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
+body .literature-connector .literature-reader-controls button { min-width: 48px; padding-inline: 12px; }
+body .literature-connector .literature-reader-controls output { min-width: 3.2em; text-align: center; font-size: var(--literature-reader-size, 20px); font-variant-numeric: tabular-nums; }
+body .literature-connector .literature-task-summary { display: grid; gap: 12px; padding: 18px; margin: 18px 0; border: 1px solid #cdd9d1; border-radius: 10px; background: #fff; }
+body .literature-connector .literature-task-summary p { margin: 0; }
+body .literature-connector .literature-panel-body { margin: 18px 0 0; padding: 0 18px; border: 1px solid #cdd9d1; border-radius: 10px; background: #fff; }
+body .literature-connector .literature-panel-body > summary { min-height: 52px; font-weight: 600; color: var(--text); }
+body .literature-connector .literature-panel-body[open] { padding-bottom: 18px; }
+body .literature-connector .literature-panel-body[open] > summary { margin-bottom: 16px; border-bottom: 1px solid var(--border, #dfe5e1); }
+body .literature-connector .literature-compact-warning { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 20px; margin: 12px 0; color: #73581e; }
+body .literature-connector .literature-warning-link { display: inline-block; min-height: 44px; padding: 7px 0; overflow-wrap: anywhere; color: #73581e; text-underline-offset: 4px; }
+body .literature-connector .literature-primary-downloads { display: flex; flex-wrap: wrap; gap: 12px; margin: 18px 0; }
+body .literature-connector .literature-primary-downloads a { display: inline-flex; align-items: center; justify-content: center; min-height: 48px; padding: 10px 18px; border: 1px solid #b6d0c0; border-radius: 8px; background: #eef7f1; color: var(--text); font-weight: 600; text-decoration: none; }
+body .literature-connector .literature-compact-notices { display: grid; gap: 12px; margin: 16px 0; }
+body .literature-connector :is(.literature-workspace-section, .literature-process-files) { margin: 18px 0; padding: 0 18px; border: 1px solid #d6dfd9; border-radius: 10px; background: #fff; }
+body .literature-connector :is(.literature-workspace-section, .literature-process-files) > summary { font-weight: 600; color: var(--text); }
+body .literature-connector :is(.literature-workspace-section, .literature-process-files)[open] > summary { margin-bottom: 18px; border-bottom: 1px solid var(--border, #dfe5e1); }
+body .literature-connector :is(.literature-workspace-section, .literature-process-files)[open] { padding-bottom: 18px; }
+body .literature-connector .literature-stages { gap: 10px; margin: 8px 0; }
+body .literature-connector .literature-stage { padding: 7px 12px; gap: 8px; }
+body .literature-connector .literature-stage-statistics { flex: 1 1 100%; width: 100%; }
+body .literature-connector .literature-statistics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 20px; padding: 16px; border: 1px solid var(--border, #dfe5e1); border-radius: 8px; background: #fff; font-size: var(--literature-reader-size, 20px); }
+body .literature-connector .literature-deliverables { display: grid; gap: 14px; margin: 18px 0; }
+body .literature-connector .literature-deliverable-group,
+body dialog.literature-help-dialog .literature-deliverable-group { display: block; min-width: 0; padding: 0 18px; border: 1px solid var(--border, #dfe5e1); border-radius: 9px; background: #fff; }
+body .literature-connector .literature-deliverable-export { border-color: #abc9b8; background: #eef7f1; }
+body .literature-connector .literature-deliverable-title { color: var(--text); font-weight: 600; }
+body .literature-connector .literature-deliverable-group[open] > summary { border-bottom: 1px solid var(--border, #dfe5e1); margin-bottom: 14px; }
+body .literature-connector .literature-deliverable-list { display: flex; flex-wrap: wrap; gap: 14px 20px; min-width: 0; padding-bottom: 18px; }
+body .literature-connector .literature-deliverable-list a,
+body .literature-connector .literature-deliverable-notice a { display: inline-block; max-width: 100%; min-height: 44px; padding: 7px 0; overflow-wrap: anywhere; }
+body .literature-connector .literature-deliverable-export .literature-deliverable-list a { padding: 10px 16px; border: 1px solid #b6d0c0; border-radius: 7px; background: #fff; font-weight: 500; }
+body .literature-connector .literature-deliverable-notice { padding: 16px 18px; border-left: 4px solid #c49a45; border-radius: 7px; background: #fff8e9; color: #73581e; }
+body .literature-connector .literature-deliverable-notice p { margin: 0 0 6px; }
+body .literature-connector .literature-history-row { grid-template-columns: 110px 180px minmax(0, 1fr) auto; gap: 14px; padding: 12px 0; }
+body .literature-connector .literature-history-message { white-space: normal; overflow-wrap: anywhere; }
+body .literature-connector pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+body dialog.literature-new-task-dialog { width: min(720px, calc(100vw - 40px)); box-sizing: border-box; max-height: calc(100dvh - 40px); overflow: auto; padding: 28px; }
+body dialog.literature-new-task-dialog h2 { margin-top: 0; }
+body dialog.literature-new-task-dialog form > label { display: grid; gap: 10px; margin: 20px 0; }
+body dialog.literature-new-task-dialog :is(input, select) { box-sizing: border-box; min-width: 0; width: 100%; }
+body dialog.literature-new-task-dialog .dialog-actions { display: flex; flex-wrap: wrap; gap: 14px; justify-content: flex-end; }
+body dialog.literature-help-dialog { width: min(1320px, calc(100vw - 40px)); padding: 28px; }
+body dialog.literature-help-dialog .literature-help-head { align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+body dialog.literature-help-dialog .literature-workflow p { font-size: var(--literature-reader-size, 20px); }
+body dialog.literature-help-dialog .literature-confirm { padding: 18px; margin: 16px 0; }
+body dialog.literature-help-dialog .literature-confirm-fields { gap: 20px; }
+body dialog.literature-help-dialog .literature-confirm-row { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding-bottom: 20px; border-bottom: 1px solid var(--border, #dfe5e1); }
+body dialog.literature-help-dialog .literature-confirm-row > label { gap: 8px; }
+body dialog.literature-help-dialog .literature-confirm-actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 18px; }
+body dialog.literature-help-dialog .literature-fields-preview-table { font-size: var(--literature-reader-size, 20px); }
+body dialog.literature-help-dialog .literature-fields-thread { max-height: 340px; }
+body dialog.literature-help-dialog .literature-fields-next { gap: 16px; padding: 16px 0; }
+/* 只在文献模块提升讨论区，其他模块沿用原字号。 */
+body.literature-reading-view #module-space :is(.msg, .msg-system, .msg-text),
+body.literature-reading-view #composer-input,
+body.literature-reading-view .composer select,
+body.literature-reading-view #btn-send { font-size: var(--literature-reader-size, 20px); line-height: 1.65; }
+body.literature-reading-view #module-space .msg-meta,
+body.literature-reading-view .composer :is(.composer-hint, .composer-mode > span) { font-size: max(16px, calc(var(--literature-reader-size, 20px) - 2px)); }
+body.literature-reading-view .composer :is(select, #btn-send) { min-height: 44px; height: auto; padding: 8px 14px; }
+body.literature-reading-view .composer :is(.composer-row, .composer-mode),
+body.literature-reading-view #module-space .msg-list { max-width: 1400px; }
+/* 文献方案与环节审核属于同一阅读区，不能回落到通用文档卡的小字号。 */
+body.literature-reading-view #module-space :is(.doc-card, .status-bar, .spec-card) { box-sizing: border-box; width: 100%; max-width: 1400px; margin: 18px auto 0; padding: 20px 22px; font-size: var(--literature-reader-size, 20px); line-height: 1.65; }
+body.literature-reading-view #module-space :is(.doc-card, .status-bar, .spec-card) :where(*) { font-size: inherit; }
+body.literature-reading-view #module-space :is(.doc-card-title, .spec-title),
+body.literature-reading-view #module-space .doc-card :is(h2, h3, h4),
+body.literature-reading-view #module-space .msg-text .md-h { font-size: calc(var(--literature-reader-size, 20px) + 4px); line-height: 1.5; }
+body.literature-reading-view #module-space :is(.doc-meta, .doc-advance-hint, .doc-file-size, .doc-file-total, .doc-run-meta) { font-size: max(16px, calc(var(--literature-reader-size, 20px) - 2px)); line-height: 1.6; }
+body.literature-reading-view #module-space :is(.doc-card, .status-bar, .spec-card) :is(button, select, input:not([type="checkbox"]):not([type="radio"])) { box-sizing: border-box; min-height: 44px; max-width: 100%; padding: 9px 14px; font-size: var(--literature-reader-size, 20px); line-height: 1.5; white-space: normal; }
+body.literature-reading-view #module-space .doc-card :is(textarea, pre, code, summary),
+body.literature-reading-view #module-space .msg-text :is(.md-code, .md-pre code) { font-size: var(--literature-reader-size, 20px); line-height: 1.65; }
+body.literature-reading-view #module-space .doc-card :is(textarea, .doc-content, .doc-code) { padding: 16px; }
+body.literature-reading-view #module-space .doc-content { max-height: min(60vh, 620px); }
+body.literature-reading-view #module-space .doc-editor { min-height: 220px; }
+body.literature-reading-view #module-space :is(.doc-card-head, .doc-template-row, .doc-actions, .doc-advance, .status-actions) { flex-wrap: wrap; gap: 14px; }
+body.literature-reading-view #module-space .doc-card-head { margin-bottom: 16px; }
+body.literature-reading-view #module-space .doc-template-row { margin-bottom: 18px; }
+body.literature-reading-view #module-space .status-hint { flex: 1 1 420px; }
+body.literature-reading-view #module-space .status-chip { padding: 6px 12px; }
+body.literature-reading-view #module-space .spec-row { gap: 16px; }
+body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
+@media (max-width: 1000px) {
+  body .literature-connector { padding: 20px; }
+  body .literature-connector .literature-history-row { grid-template-columns: minmax(90px, auto) minmax(0, 1fr) auto; }
+  body .literature-connector .literature-history-message { display: block; grid-column: 1 / -1; }
+  body dialog.literature-help-dialog .literature-confirm-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-@media (max-width: 560px) {
-  .literature-connector .literature-config-fields { grid-template-columns: minmax(0, 1fr); }
-  .literature-connector .literature-toolbar > label { flex: 1 1 100%; }
-  .literature-connector .literature-deliverable-export .literature-deliverable-list a { box-sizing: border-box; width: 100%; }
+@media (max-width: 680px) {
+  body .literature-connector { padding: 16px 14px; }
+  body .literature-connector .literature-config-fields,
+  body dialog.literature-help-dialog .literature-confirm-row,
+  body dialog.literature-help-dialog .literature-workflow-grid { grid-template-columns: minmax(0, 1fr); }
+  body .literature-connector .literature-task-selector > label,
+  body .literature-connector .literature-toolbar > label { flex: 1 1 100%; }
+  body .literature-connector .literature-reader-controls { justify-content: flex-start; margin-left: 0; }
+  body .literature-connector :is(.literature-panel-body, .literature-workspace-section, .literature-process-files, .literature-deliverable-group) { padding-inline: 12px; }
+  body .literature-connector .literature-deliverable-export .literature-deliverable-list a { box-sizing: border-box; width: 100%; }
+  body dialog.literature-help-dialog,
+  body dialog.literature-new-task-dialog { width: calc(100vw - 24px); padding: 18px; }
+  body.literature-reading-view .composer select { max-width: 100%; }
+  body.literature-reading-view #module-space :is(.doc-card, .status-bar, .spec-card) { padding: 16px 14px; }
+  body.literature-reading-view #module-space .status-actions { margin-left: 0; }
+  body.literature-reading-view #module-space .spec-row { flex-wrap: wrap; }
 }

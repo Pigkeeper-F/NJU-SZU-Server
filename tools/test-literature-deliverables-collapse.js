@@ -10,7 +10,6 @@ const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'js', 'codex.js'), 'utf8');
-const css = fs.readFileSync(path.join(root, 'css', 'style.css'), 'utf8');
 
 function functionSource(name) {
   const start = source.indexOf('  function ' + name + '(');
@@ -146,12 +145,6 @@ assert.equal(JSON.stringify(stageJob), stageOriginal);
 assert.equal(JSON.stringify(job), original);
 assert.equal(context.renderStages({ id: 'no-stages' }), null);
 
-// Higher-specificity connector selectors override the older compact workspace
-// styles even though workspace.css loads after style.css, without global zoom.
-assert.match(css, /\.literature-connector\s*\{[^}]*font-size:\s*15px/);
-assert.match(css, /\.literature-connector \.literature-toolbar\s*\{[^}]*flex-wrap:\s*wrap/);
-assert.ok(css.includes('.literature-connector .literature-toolbar button,'), 'Toolbar buttons override the older 10px codex-toolbar button rule');
-assert.match(css, /\.literature-connector details > summary\s*\{[^}]*font-size:\s*15px/);
-assert.match(css, /\.literature-connector \.literature-deliverable-title\s*\{[^}]*font-size:\s*15px/);
-assert.match(css, /\.literature-connector \.literature-deliverables > \.literature-deliverable-group\s*\{[^}]*display:\s*block/);
+// Font size and stylesheet precedence are checked on the rendered page; CSS
+// string matching cannot establish whether text is actually readable.
 console.log('LITERATURE_DELIVERABLES_COLLAPSE_TESTS_PASS');

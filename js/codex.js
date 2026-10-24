@@ -1414,6 +1414,117 @@
     if (t.literatureJobsError) box.append(node('p', '历史任务列表读取失败：' + t.literatureJobsError, 'codex-error'));
     return box;
   }
+  function literatureReaderSize() {
+    if (Number.isFinite(literatureReaderSize.value)) return literatureReaderSize.value;
+    try {
+      const value = Number(localStorage.getItem('research_literature_reader_size_v1'));
+      return value >= 18 && value <= 28 ? value : 20;
+    } catch (_) { return 20; }
+  }
+  function literatureReaderControls() {
+    const size = literatureReaderSize();
+    document.documentElement?.style?.setProperty('--literature-reader-size', size + 'px');
+    const controls = node('div', undefined, 'literature-reader-controls');
+    controls.setAttribute('aria-label', '文献区文字大小');
+    controls.append(node('span', '字号'));
+    const value = node('span', size + ' px'); value.setAttribute('aria-live', 'polite');
+    [-2, 2].forEach(delta => {
+      const button = node('button', delta < 0 ? 'A−' : 'A＋', 'quiet-button'); button.type = 'button';
+      button.setAttribute('aria-label', delta < 0 ? '缩小文献文字' : '放大文献文字');
+      button.disabled = delta < 0 ? size <= 18 : size >= 28;
+      button.onclick = () => {
+        const next = Math.max(18, Math.min(28, size + delta));
+        literatureReaderSize.value = next;
+        try { localStorage.setItem('research_literature_reader_size_v1', String(next)); } catch (_) {}
+        document.documentElement?.style?.setProperty('--literature-reader-size', next + 'px');
+        render();
+      };
+      if (delta < 0) controls.append(button, value); else controls.append(button);
+    });
+    return controls;
+  }
+  function compactLiteraturePanel(mod, t, box) {
+    if (!box.children || typeof box.replaceChildren !== 'function') return;
+    const children = Array.from(box.children), job = t.literatureJob;
+    const hasClass = (element, name) => String(element.className || '').split(/\s+/).includes(name);
+    const retained = [], operations = [], process = [], finalFiles = [], notices = [], attention = [];
+    children.forEach(child => {
+      if (hasClass(child, 'literature-overview') || hasClass(child, 'literature-task-selector')) retained.push(child);
+      else if (hasClass(child, 'literature-deliverables')) {
+        Array.from(child.children).forEach(section => {
+          if (hasClass(section, 'literature-deliverable-export')) finalFiles.push(section);
+          else if (hasClass(section, 'literature-deliverable-notice')) notices.push(section);
+          else process.push(section);
+        });
+      } else if (hasClass(child, 'literature-history') || (child.tagName === 'DETAILS' && !hasClass(child, 'literature-config') && !hasClass(child, 'literature-guidance'))) process.push(child);
+      else if (hasClass(child, 'literature-confirm') || hasClass(child, 'codex-error')) attention.push(child);
+      else operations.push(child);
+    });
+    const pieces = [];
+    if (job) {
+      const state = LITERATURE_STATUS_LABELS[job.status] || job.status || '正在找回';
+      pieces.push((job.until ? literatureStageLabel(job.until) + ' · ' : '') + state);
+      const counters = job.counters || {};
+      [['candidates', '候选'], ['fulltextFetched', '已获正文'], ['parameterRows', '参数记录']].forEach(([key, label]) => {
+        if (Number.isFinite(counters[key])) pieces.push(label + ' ' + counters[key]);
+      });
+    } else pieces.push('尚未检索 · 先讨论需求并核对设置');
+    const summary = node('p', pieces.join('　·　'), 'literature-task-summary');
+    summary.setAttribute('aria-live', 'polite');
+    let contextId = '';
+    try { if (typeof literatureWorkspaceManager === 'function') contextId = literatureWorkspaceManager(mod)?.active()?.id || ''; } catch (_) {}
+    const key = [mod.id, contextId, job?.id || 'draft'].join(':');
+    const states = compactLiteraturePanel.disclosureState || (compactLiteraturePanel.disclosureState = new Map());
+    function disclosure(name, className, suffix, initial) {
+      const element = node('details', undefined, className), stateKey = key + ':' + suffix;
+      element.open = states.has(stateKey) ? states.get(stateKey) : initial;
+      const heading = node('summary', name);
+      // Initial open also emits toggle; only an explicit click records a preference.
+      heading.onclick = event => { if (!event?.defaultPrevented) states.set(stateKey, !element.open); };
+      element.append(heading); return element;
+    }
+    const settings = disclosure('检索与执行设置（展开操作）', 'literature-workspace-section', 'operations', !job);
+    operations.forEach(child => settings.append(child));
+    const fileCount = Array.isArray(job?.files) ? job.files.filter(name => !String(name).startsWith('export/')).length : 0;
+    const files = disclosure('材料、过程文件与历史记录' + (fileCount ? ' · ' + fileCount + ' 个文件' : ''), 'literature-process-files', 'files', false);
+    process.forEach(child => files.append(child));
+    box.replaceChildren(...retained, summary);
+    // A running task always keeps its stop action visible, even with settings closed.
+    if (job?.status === 'running') {
+      const toolbar = operations.find(child => hasClass(child, 'literature-toolbar'));
+      const stop = toolbar && Array.from(toolbar.children).find(child => child.tagName === 'BUTTON' && child.textContent === '停止');
+      if (stop) box.append(stop);
+    }
+    attention.forEach(child => box.append(child));
+    const body = disclosure('任务详情与全部成果（点击展开 / 收起）', 'literature-panel-body', 'all', !job || ['running', 'needs_attention'].includes(job.status));
+    if (notices.length) {
+      const short = node('div', undefined, 'literature-compact-warning');
+      const missing = job?.counters?.materialsIncomplete;
+      short.append(node('span', Number.isFinite(missing) && missing > 0 ? '材料仍有缺口 ' + missing + ' 篇；结果需回原件核查。' : '结果需回原件核查。'));
+      notices.forEach(child => {
+        const source = child.querySelector?.('a');
+        if (source) {
+          const link = node('a', source.textContent, 'literature-warning-link'); link.href = source.href; short.append(link);
+        }
+      });
+      box.append(short);
+      const warnings = node('div', undefined, 'literature-compact-notices');
+      notices.forEach(child => warnings.append(child)); body.append(warnings);
+    }
+    if (finalFiles.length) {
+      const quick = node('div', undefined, 'literature-primary-downloads');
+      [['parameters', '参数明细表'], ['literature', '文献表']].forEach(([stem, label]) => {
+        const name = ['export/' + stem + '.xlsx', 'export/' + stem + '.csv'].find(candidate => job.files.includes(candidate));
+        if (!name) return;
+        const link = node('a', label + (name.endsWith('.xlsx') ? ' Excel' : ' CSV'), 'quiet-button');
+        link.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name); quick.append(link);
+      });
+      if (quick.children.length) box.append(quick);
+      const exports = node('div', undefined, 'literature-deliverables literature-main-results');
+      finalFiles.forEach(child => exports.append(child)); body.append(exports);
+    }
+    body.append(settings, files); box.append(body);
+  }
   function literaturePanel(mod, t, container = panel) {
     const box = node('div', undefined, 'literature-connector');
     let timeoutAttention = null;
@@ -1423,6 +1534,7 @@
     const help = node('button', '使用说明', 'quiet-button'); help.type = 'button';
     help.onclick = () => document.dispatchEvent(new CustomEvent('literature-help-open'));
     overview.append(introduction, help); box.append(overview);
+    if (typeof literatureReaderControls === 'function') overview.append(literatureReaderControls());
     if (typeof literatureTaskSelector === 'function') {
       const selector = literatureTaskSelector(mod, t);
       if (selector) box.append(selector);
@@ -1514,7 +1626,14 @@
         + '。已有候选保留，检索尚未全部完成；可打开原页面处理后点击“' + (job.deferredOnly === true ? '补检该来源' : '检查并继续') + '”补检。', 'codex-status'));
       const stages = literatureStageBar(job);
       if (stages) box.append(stages);
-      if (awaitingConfirm) box.append(node('p', '提取字段等待确认：点击“设置提取字段”，按讨论填入表格，核对后点击“核对表格并开始提取”。', 'codex-status'));
+      if (awaitingConfirm) {
+        const fieldsAttention = node('section', undefined, 'literature-confirm'); fieldsAttention.setAttribute('aria-live', 'polite');
+        fieldsAttention.append(node('h4', '当前需要处理：确认提取字段'));
+        fieldsAttention.append(node('p', '提取字段等待确认：按讨论填入表格，核对名称、含义和单位后，再点击“核对表格并开始提取”。已有候选与材料保留。', 'codex-status'));
+        const reviewFields = node('button', '核对提取字段', 'primary-button'); reviewFields.type = 'button';
+        reviewFields.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+        reviewFields.onclick = () => openLiteratureFields(mod); fieldsAttention.append(reviewFields); box.append(fieldsAttention);
+      }
     }
     if (job?.status !== 'running' && !job?.deletedAt && Array.isArray(job?.cnkiRetryItems) && job.cnkiRetryItems.length) {
       const retry = node('details', undefined, 'literature-deliverable-group');
@@ -1697,6 +1816,7 @@
     }
     box.append(literatureHistory(mod, t));
     if (t.literatureError) box.append(node('p', t.literatureError, 'codex-error'));
+    if (typeof compactLiteraturePanel === 'function') compactLiteraturePanel(mod, t, box);
     container.append(box);
     if (timeoutAttention && typeof timeoutAttention.scrollIntoView === 'function') {
       const event = Array.isArray(job.events) ? job.events[job.events.length - 1] : null;
@@ -2163,6 +2283,7 @@
     }
     const state = Store.getState();
     const mod = state.modules.find(m => m.id === state.activeModuleId);
+    document.body?.classList?.toggle('literature-reading-view', mod?.type === 'literature-mining');
     panel.hidden = !mod || !document.getElementById('records-view').hidden;
     if (panel.hidden) return;
     const t = task(mod.id);
