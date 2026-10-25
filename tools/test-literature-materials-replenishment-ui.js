@@ -89,13 +89,19 @@ async function main() {
   await s.continueLiterature(mod, { until: 'extract', deferAccess: true });
   assert.deepEqual(calls.findLast(call => call.url === '/api/literature/advance').body, { id: 'child', until: 'fulltext', deferAccess: true });
   current.literatureJob = { ...copy(child), status: 'needs_attention', resumeStage: 'fulltext', materialAccessPolicy: 'defer',
-    attention: { reason: 'deferred_materials' }, materialManualActions: [{ paperId: 'PMID-001', title: 'Blocked first article' }] };
+    attention: { reason: 'deferred_materials' }, materialManualActions: [{ paperId: 'PMID-001', title: 'Blocked first article', status: 'needs_attention', reason: 'login' }] };
   const beforeManual = calls.length;
   await s.continueLiterature(mod);
   await s.autoOpenLiteratureBrowser('m', current.literatureJob);
   assert.equal(calls.length, beforeManual, 'A final manual list must not automatically open pages or rerun');
   await s.openLiteratureMaterialActionPage(mod, 'not-in-list');
   assert.equal(calls.length, beforeManual, 'Only an existing manual item may open its saved official page');
+  current.literatureJob.materialManualActions.push({ paperId: 'PMID-SKIPPED', status: 'skipped', reason: 'not_found' });
+  await s.openLiteratureMaterialActionPage(mod, 'PMID-SKIPPED');
+  assert.equal(calls.length, beforeManual, 'A stale skipped entry cannot open an auth handling page');
+  current.literatureJob.materialManualActions.push({ paperId: 'PMID-TIMEOUT', status: 'needs_attention', reason: 'timeout' });
+  await s.openLiteratureMaterialActionPage(mod, 'PMID-TIMEOUT');
+  assert.equal(calls.length, beforeManual, 'A legacy timeout is not an auth action');
   await s.openLiteratureMaterialActionPage(mod, 'PMID-001');
   assert.deepEqual(calls.findLast(call => call.url === '/api/literature/material-action-page').body, { id: 'child', paperId: 'PMID-001' });
   assert.match(current.literatureMaterialNotice, /人工登录不限时/);

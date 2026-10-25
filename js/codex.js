@@ -693,7 +693,8 @@
   async function openLiteratureMaterialActionPage(mod, paperId) {
     const t = task(mod.id), job = t.literatureJob;
     if (!job?.materialReplenishment?.parentJobId || !Array.isArray(job.materialManualActions)
-      || !job.materialManualActions.some(item => item.paperId === paperId) || t.busy || t.literatureBusy || job.status === 'running' || root.LiteratureUI?.isBusy()) return;
+      || !job.materialManualActions.some(item => item.paperId === paperId && item.status !== 'skipped' && ['login', 'verification', 'access_required'].includes(item.reason))
+      || t.busy || t.literatureBusy || job.status === 'running' || root.LiteratureUI?.isBusy()) return;
     t.literatureBusy = true; t.literatureError = ''; render();
     try {
       await checkLiteratureRuntime(job.config?.sources || []);
@@ -938,7 +939,9 @@
     'export/literature.csv': '文献表 CSV', 'export/literature.xlsx': '文献表 Excel', 'export/parameters.csv': '参数明细表 CSV',
     'export/parameters.xlsx': '参数明细表 Excel', 'export/export_report.md': '导出报告',
     'fulltext/manual-actions.json': '人工待处理清单 JSON', 'fulltext/manual-actions.csv': '人工待处理清单 CSV',
-    'fulltext/manual-actions.md': '人工待处理清单说明' };
+    'fulltext/manual-actions.md': '人工待处理清单说明',
+    'fulltext/skipped-materials.json': '已跳过材料缺口 JSON', 'fulltext/skipped-materials.csv': '已跳过材料缺口 CSV',
+    'fulltext/skipped-materials.md': '已跳过材料缺口说明' };
   const LITERATURE_FILE_GROUPS = [['dedupe', '去重产物'], ['fulltext', '已保存材料与全文记录'], ['extraction', '提取产物'], ['validation', '校验产物'], ['export', '导出产物']];
   function literatureStageLabel(stage) { return LITERATURE_STAGE_LABELS[stage] || String(stage || ''); }
   function literatureFileLabel(name) {
@@ -1570,7 +1573,8 @@
           else if (hasClass(section, 'literature-deliverable-notice')) notices.push(section);
           else process.push(section);
         });
-      } else if (hasClass(child, 'literature-history') || (child.tagName === 'DETAILS' && !hasClass(child, 'literature-config') && !hasClass(child, 'literature-guidance'))) process.push(child);
+      } else if (hasClass(child, 'literature-material-skipped')) attention.push(child);
+      else if (hasClass(child, 'literature-history') || (child.tagName === 'DETAILS' && !hasClass(child, 'literature-config') && !hasClass(child, 'literature-guidance'))) process.push(child);
       else if (hasClass(child, 'literature-confirm') || hasClass(child, 'codex-error')) attention.push(child);
       else operations.push(child);
     });
@@ -1788,11 +1792,13 @@
         reviewFields.onclick = () => openLiteratureFields(mod); fieldsAttention.append(reviewFields); box.append(fieldsAttention);
       }
     }
-    if (replenishing && Array.isArray(job.materialManualActions) && job.materialManualActions.length) {
+    const manualActions = Array.isArray(job?.materialManualActions) ? job.materialManualActions.filter(item => item.status !== 'skipped'
+      && ['login', 'verification', 'access_required'].includes(item.reason)) : [];
+    if (replenishing && manualActions.length) {
       const manual = node('section', undefined, 'literature-confirm literature-material-manual');
-      manual.append(node('h4', '人工待处理文献 · ' + job.materialManualActions.length + ' 篇'));
+      manual.append(node('h4', '人工待处理文献 · ' + manualActions.length + ' 篇'));
       manual.append(node('p', '人工登录不限时，原窗口保留。可以逐篇处理登录、验证或权限；只有点击“我已处理，重新检查待处理文献”才会检查，不会自动重试或重新下载已存PDF。', 'codex-status'));
-      job.materialManualActions.forEach(item => {
+      manualActions.forEach(item => {
         const entry = node('div', undefined, 'literature-confirm');
         entry.append(node('h4', String(item.paperId || '文献ID待核对') + ' · ' + String(item.title || '题名待核对')));
         const missing = Array.isArray(item.supplements?.missing) ? item.supplements.missing : [];
@@ -1814,6 +1820,27 @@
         retry.onclick = () => continueLiterature(mod, { until: 'fulltext', deferAccess: true, retryDeferred: true }); manual.append(retry);
       }
       box.append(manual);
+    }
+    if (replenishing && Array.isArray(job.materialSkippedActions) && job.materialSkippedActions.length) {
+      const skipped = node('details', undefined, 'literature-deliverable-group literature-material-skipped');
+      skipped.append(node('summary', '已跳过材料缺口 · ' + job.materialSkippedActions.length + ' 篇'));
+      skipped.append(node('p', '无法获取的材料已记录原因并跳过，不自动重试。已有正文、PDF和原提取导出结果保留；登录、验证和权限问题另列人工待处理。', 'codex-status'));
+      job.materialSkippedActions.forEach(item => {
+        const entry = node('div', undefined, 'literature-confirm');
+        entry.append(node('h4', String(item.paperId || '文献ID待核对') + ' · ' + String(item.title || '题名待核对')));
+        const missing = Array.isArray(item.supplements?.missing) ? item.supplements.missing : [];
+        entry.append(node('p', (item.mainPdfMissing ? '缺正文PDF' : '正文PDF未列为缺失')
+          + (missing.length ? '；缺补充材料：' + missing.join('、') : '；补充材料核查：' + (item.supplements?.checkStatus || item.supplements?.status || '待核查')), 'codex-status'));
+        entry.append(node('p', '原因：' + [item.reason, item.message].filter(Boolean).join(' · '), 'codex-status')); skipped.append(entry);
+      });
+      const reports = node('div', undefined, 'literature-deliverable-list');
+      ['json', 'csv', 'md'].forEach(extension => {
+        const name = 'fulltext/skipped-materials.' + extension;
+        if (!job.files?.includes(name)) return;
+        const link = node('a', LITERATURE_FILE_LABELS[name]);
+        link.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name); reports.append(link);
+      });
+      skipped.append(reports); box.append(skipped);
     }
     if (!readOnlyResults && job?.status !== 'running' && !job?.deletedAt && Array.isArray(job?.cnkiRetryItems) && job.cnkiRetryItems.length) {
       const retry = node('details', undefined, 'literature-deliverable-group');

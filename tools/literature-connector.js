@@ -52,7 +52,7 @@ const DELIVERABLE_PATTERNS = [
   /^fulltext\/status\.json$/,
   /^fulltext\/review\.json$/,
   /^fulltext\/materials\.json$/,
-  /^fulltext\/manual-actions\.(?:json|csv|md)$/,
+  /^fulltext\/(?:manual-actions|skipped-materials)\.(?:json|csv|md)$/,
   /^fulltext\/materials\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[^\\]+$/,
   /^fulltext\/files\/[^/\\]+\.(?:pdf|txt)$/,
   /^extraction\/inputs\/[^/\\]+\.json$/,
@@ -613,6 +613,7 @@ class LiteratureConnector {
     const queue = checkpointDeferredSources(job.dir, job.config, job.deferredSources);
     const materialBasis = materialBasisFor(job.dir), materialsOnly = isMaterialRecord(job, job.dir);
     const materialManualActions = materialsOnly ? materialReplenishment.manualActions(job.dir) : [];
+    const materialSkippedActions = materialsOnly ? materialReplenishment.skippedActions(job.dir) : [];
     return { id: job.id, status: job.status, stage: job.stage, message: job.message,
       count: job.count, config: job.config, files: job.files, events: job.events, error: job.error,
       stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters, activeStage: job.activeStage || null,
@@ -623,6 +624,7 @@ class LiteratureConnector {
       replenishmentInvalid: materialsOnly && !materialBasis,
       materialAccessPolicy: materialsOnly ? (job.materialAccessPolicy === 'defer' ? 'defer' : 'pause') : null,
       materialManualActions, materialManualCount: materialManualActions.length,
+      materialSkippedActions, materialSkippedCount: materialSkippedActions.length,
       canReplenishMaterials: materialReplenishment.eligible(this.root, job.id, job),
       canReviewFulltext: !materialsOnly && fulltextReviewEligible(job, job.dir),
       cnkiRetryItems: materialsOnly ? [] : cnkiRetryItems(job, job.dir),
@@ -681,13 +683,13 @@ class LiteratureConnector {
     for (const item of status.items) if (item && Object.hasOwn(counts, item.status)) counts[item.status]++;
     counts.acquisition_skipped = status.items.filter(item => item?.acquisition_skip?.policy === 'skip_unavailable').length;
     if (Number.isInteger(status.counts?.material_incomplete)) counts.material_incomplete = status.counts.material_incomplete;
-    for (const key of ['complete_main', 'materials_complete', 'materials_partial', 'materials_unverified']) {
+    for (const key of ['complete_main', 'materials_complete', 'materials_partial', 'materials_unverified', 'material_skipped']) {
       if (Number.isInteger(status.counts?.[key])) counts[key] = status.counts[key];
     }
     const count = counts.fetched_pdf + counts.fetched_html;
     job.count = count; this.mergeCounters(job, 'fulltext', { count, counts });
     this.registerFiles(job, ['fulltext/status.json']); this.registerFulltextFiles(job);
-    this.registerFiles(job, ['fulltext/manual-actions.json', 'fulltext/manual-actions.csv', 'fulltext/manual-actions.md']);
+    this.registerFiles(job, ['manual-actions', 'skipped-materials'].flatMap(name => ['json', 'csv', 'md'].map(ext => 'fulltext/' + name + '.' + ext)));
   }
 
   mergeCounters(job, stage, event) {
@@ -704,7 +706,7 @@ class LiteratureConnector {
         partial: 'fulltextPartial', complete_main: 'fulltextComplete',
         materials_complete: 'materialsComplete', materials_partial: 'materialsPartial', materials_unverified: 'materialsUnverified',
         abstract_only: 'fulltextAbstract', unavailable: 'fulltextUnavailable', needs_attention: 'fulltextAttention', pending: 'fulltextPending',
-        acquisition_skipped: 'fulltextSkipped', material_incomplete: 'materialsIncomplete' })) {
+        acquisition_skipped: 'fulltextSkipped', material_incomplete: 'materialsIncomplete', material_skipped: 'materialsSkipped' })) {
         if (integer(counts[field]) !== null) counters[key] = counts[field];
       }
     }
@@ -1401,6 +1403,8 @@ class LiteratureConnector {
     restoreMaterialScope(saved, dir, interrupted);
     saved.materialManualActions = saved.materialReplenishment ? materialReplenishment.manualActions(dir) : [];
     saved.materialManualCount = saved.materialManualActions.length;
+    saved.materialSkippedActions = saved.materialReplenishment ? materialReplenishment.skippedActions(dir) : [];
+    saved.materialSkippedCount = saved.materialSkippedActions.length;
     saved.canReplenishMaterials = materialReplenishment.eligible(this.root, id, saved);
     saved.canReviewFulltext = !saved.materialReplenishment && fulltextReviewEligible(saved, dir);
     saved.cnkiRetryItems = saved.materialReplenishment ? [] : cnkiRetryItems(saved, dir);
@@ -1431,6 +1435,8 @@ class LiteratureConnector {
       restoreMaterialScope(saved, path.join(this.base, name));
       saved.materialManualActions = saved.materialReplenishment ? materialReplenishment.manualActions(path.join(this.base, name)) : [];
       saved.materialManualCount = saved.materialManualActions.length;
+      saved.materialSkippedActions = saved.materialReplenishment ? materialReplenishment.skippedActions(path.join(this.base, name)) : [];
+      saved.materialSkippedCount = saved.materialSkippedActions.length;
       saved.canReplenishMaterials = materialReplenishment.eligible(this.root, name, saved);
       saved.executionOrder = executionOrder(config, saved.deferredSources);
       saved.canReviewFulltext = !saved.materialReplenishment && fulltextReviewEligible(saved, path.join(this.base, name));

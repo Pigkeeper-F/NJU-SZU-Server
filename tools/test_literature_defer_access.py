@@ -22,6 +22,9 @@ class DeferredFetcher(replenish_tests.ReplenishFetcher):
         super().__init__(records, **kwargs)
         self.blocked = blocked or {}
         self.deferred, self.resumed, self.cleared = [], [], []
+        self.closed_deferred = []
+        self.before_close = None
+        self.complete_flags = []
 
     def fetch_pdf(self, url, out_path, opts):
         paper_id = opts["record"]["paper_id"]
@@ -46,6 +49,19 @@ class DeferredFetcher(replenish_tests.ReplenishFetcher):
 
     def clear_deferred(self, paper_id):
         self.cleared.append(paper_id)
+
+    def complete_paper(self, **kwargs):
+        self.complete_flags.append(kwargs)
+        if self.before_close:
+            self.before_close("active")
+        self.completed += 1
+        return {"closed": True}
+
+    def close_deferred(self, paper_id):
+        if self.before_close:
+            self.before_close(paper_id)
+        self.closed_deferred.append(paper_id)
+        return {"closed": True}
 
 
 class DeferAccessTests(unittest.TestCase):
@@ -125,7 +141,7 @@ class DeferAccessTests(unittest.TestCase):
             report_text = (job / lf.MANUAL_ACTION_FILES[0]).read_text(encoding="utf-8")
             report = json.loads(report_text)
             self.assertNotIn("secret", report_text)
-            self.assertEqual(len(report["items"]), 2)
+            self.assertEqual(len(report["items"]), 1)
             for action in report["items"]:
                 self.assertEqual(action["status"], "needs_attention")
                 self.assertEqual(action["waiting_policy"], "until_explicit_retry")
@@ -134,9 +150,121 @@ class DeferAccessTests(unittest.TestCase):
                 self.assertTrue(action["official_url"].startswith("https://publisher.invalid/article/"))
             self.assertEqual(report["items"][0]["supplements"]["missing"][0]["label"], "Additional dataset")
             csv_rows = list(csv.DictReader(io.StringIO((job / lf.MANUAL_ACTION_FILES[1]).read_text(encoding="utf-8-sig"))))
-            self.assertEqual(len(csv_rows), 2)
-            self.assertIn("PMID-002", (job / lf.MANUAL_ACTION_FILES[2]).read_text(encoding="utf-8"))
+            self.assertEqual(len(csv_rows), 1)
+            skipped = json.loads((job / lf.SKIPPED_MATERIAL_FILES[0]).read_text(encoding="utf-8"))
+            self.assertEqual([item["paper_id"] for item in skipped["items"]], ["PMID-002"])
+            self.assertEqual(skipped["items"][0]["status"], "skipped")
+            self.assertIn("PMID-002", (job / lf.SKIPPED_MATERIAL_FILES[2]).read_text(encoding="utf-8"))
             self.assertTrue(set(lf.MANUAL_ACTION_FILES).issubset(events[-1]["files"]))
+            self.assertTrue(set(lf.SKIPPED_MATERIAL_FILES).issubset(events[-1]["files"]))
+
+    def test_non_auth_failures_skip_close_after_durable_reports_and_never_auto_retry(self):
+        for reason in ("page_error", "load_timeout", "rate_limited", "results_unrecognized"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as root:
+                job, config, records, _, _ = self.fixture(root, count=2, html_count=0)
+                first = DeferredFetcher(records, {"PMID-001": (reason, "Remote page unavailable")})
+                def check_persisted(_):
+                    self.assertIn("material_skipped", read_status(job)["items"][0])
+                    report = json.loads((job / lf.SKIPPED_MATERIAL_FILES[0]).read_text(encoding="utf-8"))
+                    self.assertEqual(report["items"][0]["reason"], reason)
+                    self.assertEqual(json.loads((job / lf.MANUAL_ACTION_FILES[0]).read_text(encoding="utf-8"))["items"], [])
+                first.before_close = check_persisted
+                _, events = self.run_defer(job, config, first)
+                self.assertEqual(events[-1]["type"], "result")
+                self.assertEqual(events[-1]["counts"]["material_skipped"], 1)
+                self.assertEqual(first.completed, 2)
+                self.assertEqual(first.complete_flags, [{"skipped": True}, {}])
+                self.assertEqual(first.deferred, [])
+                second = DeferredFetcher(records)
+                self.run_defer(job, config, second)
+                self.assertEqual(second.calls, [])
+                retry = DeferredFetcher(records)
+                self.run_defer(job, config, retry, retry_deferred=True)
+                self.assertEqual((retry.calls, retry.resumed), ([], []))
+
+    def test_old_non_auth_manual_entries_migrate_without_requests_and_only_close_their_held_pages(self):
+        with tempfile.TemporaryDirectory() as root:
+            job, config, records, targets, store = self.fixture(root, count=3, html_count=1, pdf_count=1, checked="unknown")
+            items = read_status(job)["items"]
+            reasons = ["supplements_incomplete", "pdf_unavailable", "login"]
+            for item, target, reason in zip(items, targets, reasons):
+                marker = {"reason": reason, "message": "Materials unavailable", "deferred_at": "2026-10-25"}
+                item["material_deferred"] = marker
+                store.paper(target)["material_deferred"] = dict(marker)
+            lf._write_status(job, items); store.flush()
+            originals = {p: p.read_bytes() for p in (job / "fulltext/files").iterdir()}
+            fetcher = DeferredFetcher(records)
+            def check_persisted(paper_id):
+                self.assertNotEqual(paper_id, "active")
+                item = next(v for v in read_status(job)["items"] if v["paper_id"] == paper_id)
+                self.assertIn("material_skipped", item)
+                self.assertNotIn("material_deferred", item)
+                self.assertTrue(any(v["paper_id"] == paper_id for v in json.loads((job / lf.SKIPPED_MATERIAL_FILES[0]).read_text(encoding="utf-8"))["items"]))
+            fetcher.before_close = check_persisted
+            _, events = self.run_defer(job, config, fetcher)
+            self.assertEqual(fetcher.calls, [])
+            self.assertEqual(fetcher.completed, 0)
+            self.assertEqual(fetcher.closed_deferred, ["PMID-001", "PMID-002"])
+            self.assertEqual(fetcher.cleared, ["PMID-001", "PMID-002"])
+            self.assertEqual(events[-1]["reason"], "deferred_materials")
+            self.assertEqual(events[-1]["counts"]["material_skipped"], 2)
+            manual = json.loads((job / lf.MANUAL_ACTION_FILES[0]).read_text(encoding="utf-8"))["items"]
+            self.assertEqual([v["paper_id"] for v in manual], ["PMID-003"])
+            skipped = json.loads((job / lf.SKIPPED_MATERIAL_FILES[0]).read_text(encoding="utf-8"))["items"]
+            self.assertFalse(skipped[0]["main_pdf_missing"])
+            self.assertTrue(skipped[1]["main_pdf_missing"])
+            self.assertEqual(skipped[1]["supplements"]["check_status"], "unknown")
+            for path, content in originals.items():
+                self.assertEqual(path.read_bytes(), content)
+
+    def test_unsafe_held_window_is_not_cleared_when_safe_close_refuses(self):
+        with tempfile.TemporaryDirectory() as root:
+            job, config, records, _, _ = self.fixture(root, html_count=0)
+            items = read_status(job)["items"]
+            items[0]["material_deferred"] = {"reason": "page_error", "message": "Remote 404"}
+            lf._write_status(job, items)
+            fetcher = DeferredFetcher(records)
+            fetcher.close_deferred = lambda paper_id: {"closed": False}
+            _, events = self.run_defer(job, config, fetcher)
+            self.assertEqual(events[-1]["type"], "result")
+            self.assertEqual(fetcher.calls, [])
+            self.assertEqual(fetcher.cleared, [])
+            self.assertEqual(fetcher.completed, 0)
+            self.assertIn("material_skipped", read_status(job)["items"][0])
+
+    def test_migration_without_injected_fetcher_only_connects_to_close_exact_held_page(self):
+        with tempfile.TemporaryDirectory() as root:
+            job, config, records, _, _ = self.fixture(root, html_count=0)
+            items = read_status(job)["items"]
+            items[0]["material_deferred"] = {"reason": "page_error", "message": "Remote 404"}
+            lf._write_status(job, items)
+            fetcher = DeferredFetcher(records)
+            events = []
+            with patch.object(lf, "make_fetcher", return_value=fetcher) as factory, patch.object(lf, "emit", lambda kind, **values: events.append({"type": kind, **values})):
+                code = lf._run_fulltext(config, job, resume=True, replenish_materials=True, defer_access=True)
+            self.assertEqual(code, 0)
+            factory.assert_called_once_with(config, job)
+            self.assertEqual(fetcher.calls, [])
+            self.assertEqual(fetcher.closed_deferred, ["PMID-001"])
+            self.assertEqual(fetcher.cleared, ["PMID-001"])
+            self.assertEqual(fetcher.completed, 0)
+            self.assertEqual(events[-1]["type"], "result")
+
+    def test_missing_pdf_and_unknown_supplements_are_skipped_after_preserving_materials(self):
+        with tempfile.TemporaryDirectory() as root:
+            job, config, records, targets, _ = self.fixture(root, count=2, html_count=1, pdf_count=1, checked="unknown")
+            before = {p: p.read_bytes() for p in (job / "fulltext/files").iterdir()}
+            fetcher = DeferredFetcher(records, inspections={target["paper_id"]: {"status": "ok", "material_discovery": {"status": "unknown", "links": []}} for target in targets})
+            fetcher.fetch_pdf = lambda *args: {"status": "unavailable"}
+            _, events = self.run_defer(job, config, fetcher)
+            self.assertEqual(events[-1]["type"], "result")
+            self.assertEqual(fetcher.completed, 2)
+            self.assertFalse(fetcher.deferred)
+            self.assertEqual(json.loads((job / lf.MANUAL_ACTION_FILES[0]).read_text(encoding="utf-8"))["items"], [])
+            skipped = json.loads((job / lf.SKIPPED_MATERIAL_FILES[0]).read_text(encoding="utf-8"))["items"]
+            self.assertEqual({v["reason"] for v in skipped}, {"pdf_unavailable", "supplements_incomplete"})
+            for path, content in before.items():
+                self.assertEqual(path.read_bytes(), content)
 
     def test_pdf_saved_but_supplement_auth_is_queued_and_retry_does_not_redownload_pdf(self):
         with tempfile.TemporaryDirectory() as root:

@@ -1050,7 +1050,7 @@ def _carry_previous(target: dict, prev: dict | None, job_dir: Path) -> dict:
     item = _item_skeleton(target)
     if not prev:
         return item
-    for key in ("fulltext_url", "attempted_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "evidence_version", "html_evidence", "content_sha256", "reviewed_at", "pdf_evidence", "reused_from", "observed_content_sha256", "local_verification", "acquisition_skip", "pause_reason", "material_deferred"):
+    for key in ("fulltext_url", "attempted_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "evidence_version", "html_evidence", "content_sha256", "reviewed_at", "pdf_evidence", "reused_from", "observed_content_sha256", "local_verification", "acquisition_skip", "pause_reason", "material_deferred", "material_skipped"):
         if key in prev:
             item[key] = prev[key]
     if item["status"] == "fetched_html":
@@ -1328,6 +1328,8 @@ def _previous_remote_pause(item: dict, paper: dict) -> FulltextPause | None:
 
 
 MANUAL_ACTION_FILES = ["fulltext/manual-actions.json", "fulltext/manual-actions.csv", "fulltext/manual-actions.md"]
+SKIPPED_MATERIAL_FILES = ["fulltext/skipped-materials.json", "fulltext/skipped-materials.csv", "fulltext/skipped-materials.md"]
+MANUAL_ACCESS_REASONS = {"login", "verification", "access_required"}
 
 
 def _manual_entry_url(record):
@@ -1341,10 +1343,18 @@ def _manual_entry_url(record):
 
 
 def _defer_access_pause(pause):
-    if pause.reason not in {"login", "verification", "access_required", "rate_limited", "load_timeout", "page_error", "results_unrecognized"}:
-        return False
+    return pause.reason in MANUAL_ACCESS_REASONS and _safe_material_failure(pause)
+
+
+def _safe_material_failure(pause):
     # Ownership, identity and local original-file failures must stop the batch.
     return not re.search(r"身份|同篇|打开关系|所有权|来源.*(?:无法|不符|不一致)|SHA|缓存|本地|暂存|清理|文件.*冲突", str(pause.message), re.I)
+
+
+def _skip_material_pause(pause):
+    return pause.reason in {"rate_limited", "load_timeout", "page_error", "results_unrecognized",
+                            "pdf_unavailable", "supplements_incomplete", "materials_incomplete",
+                            "material_discovery", "material_download"} and _safe_material_failure(pause)
 
 
 def _manual_message(value, official_url):
@@ -1356,7 +1366,7 @@ def _write_manual_actions(job_dir, items, targets, materials):
     actions = []
     for item in items:
         deferred = item.get("material_deferred")
-        if not isinstance(deferred, dict):
+        if not isinstance(deferred, dict) or deferred.get("reason") not in MANUAL_ACCESS_REASONS:
             continue
         target = by_id[item["paper_id"]]
         paper = materials.paper(target)
@@ -1389,6 +1399,42 @@ def _write_manual_actions(job_dir, items, targets, materials):
             "- 说明：" + clean(action["message"]), "- 官方入口：" + action["official_url"], ""]
     atomic_write_bytes(Path(job_dir) / MANUAL_ACTION_FILES[1], b"\xef\xbb\xbf" + output.getvalue().encode("utf-8"))
     atomic_write_text(Path(job_dir) / MANUAL_ACTION_FILES[2], "\n".join(lines))
+    return actions
+
+
+def _write_skipped_materials(job_dir, items, targets, materials):
+    by_id = {target["paper_id"]: target for target in targets}
+    actions = []
+    for item in items:
+        marker = item.get("material_skipped")
+        if not isinstance(marker, dict):
+            continue
+        target = by_id[item["paper_id"]]
+        supplement = materials.completeness(target)
+        official = _manual_entry_url(target)
+        actions.append({"paper_id": item["paper_id"], "title": str(target.get("title") or "")[:500],
+            "status": "skipped", "reason": str(marker.get("reason") or "materials_incomplete"),
+            "message": _manual_message(marker.get("message"), official), "official_url": official,
+            "main_pdf_missing": materials.paper(target).get("main_pdf_status") != "downloaded",
+            "supplements": {"status": supplement["status"], "check_status": supplement["check_status"], "missing": supplement["missing"]},
+            "skipped_at": marker.get("skipped_at") or "", "retry_policy": "not_automatic"})
+    note = "无法自动取得的非登录材料已记录原因后跳过；已有原件保留，不自动重试，不要求人工处理。"
+    atomic_write_json(Path(job_dir) / SKIPPED_MATERIAL_FILES[0], {"version": 1, "generated_at": now_iso(), "items": actions, "note": note})
+    output = io.StringIO()
+    fields = ["paper_id", "title", "status", "reason", "message", "official_url", "main_pdf_missing", "supplement_status", "supplement_missing", "skipped_at", "retry_policy"]
+    writer = csv.DictWriter(output, fieldnames=fields); writer.writeheader()
+    lines = ["# 已跳过的材料", "", note, "", f"共 {len(actions)} 篇。", ""]
+    for action in actions:
+        writer.writerow({**{key: action[key] for key in fields if key in action},
+            "supplement_status": action["supplements"]["check_status"],
+            "supplement_missing": "; ".join(str(entry.get("label") or entry.get("material_id") or "") for entry in action["supplements"]["missing"])})
+        clean = lambda value: str(value).replace("\n", " ").replace("\r", " ")
+        lines += [f"## {action['paper_id']} · {clean(action['title'])}", "", f"- 状态：已跳过；原因：{clean(action['reason'])}",
+            "- 正文 PDF：" + ("尚缺" if action["main_pdf_missing"] else "已保存"),
+            "- 补充材料：" + clean(action["supplements"]["check_status"]) + "；未取得项 " + str(len(action["supplements"]["missing"])),
+            "- 说明：" + clean(action["message"]), "- 官方入口：" + action["official_url"], ""]
+    atomic_write_bytes(Path(job_dir) / SKIPPED_MATERIAL_FILES[1], b"\xef\xbb\xbf" + output.getvalue().encode("utf-8"))
+    atomic_write_text(Path(job_dir) / SKIPPED_MATERIAL_FILES[2], "\n".join(lines))
     return actions
 
 
@@ -1491,16 +1537,67 @@ def _run_fulltext(
         emit("stage", stage="fulltext", reason=reason, paper_id=item["paper_id"],
              message=f"{item['paper_id']} 留待人工处理，原窗口不限时保留；继续其余文献。")
 
-    if defer_access and not retry_deferred:
+    def close_skipped(paper_id, *, held=False):
+        nonlocal fetcher
+        if fetcher is None:
+            fetcher = make_fetcher(config, job_dir)
+        close = getattr(fetcher, "close_deferred" if held else "complete_paper", None)
+        result = close(paper_id) if held and callable(close) else (close(skipped=True) if callable(close) else {"closed": False})
+        if result is None or (isinstance(result, dict) and result.get("closed") is True):
+            clear = getattr(fetcher, "clear_deferred", None)
+            if callable(clear):
+                clear(paper_id)
+
+    def skip_material(item, target, reason, message, *, held=False):
+        saved = items[position[item["paper_id"]]]
+        marker = {"reason": reason, "message": _manual_message(message, _manual_entry_url(target)),
+                  "official_url": _manual_entry_url(target), "skipped_at": now_iso(), "policy": "skip_non_access"}
+        saved["material_skipped"] = marker
+        saved.pop("material_deferred", None)
+        saved.pop("pause_reason", None)
+        if saved.get("status") not in FETCHED_STATUSES | {"abstract_only"}:
+            saved.update(status="unavailable", reason=marker["message"], fulltext_url="")
+        paper = materials.paper(target)
+        paper["material_skipped"] = dict(marker)
+        paper.pop("material_deferred", None)
+        if paper.get("main_pdf_status") != "downloaded":
+            paper.update(main_pdf_status="missing", main_pdf_reason=marker["message"])
+        if paper.get("supplement_check", {}).get("status") == "needs_attention":
+            paper["supplement_check"] = {"status": "unknown", "reason": marker["message"]}
+        for material in paper.get("materials", []):
+            if material.get("download_status") == "needs_attention":
+                material.update(download_status="missing", download_reason=marker["message"])
+        materials.flush()
+        _write_status(job_dir, items, materials=materials)
+        _write_manual_actions(job_dir, items, targets, materials)
+        _write_skipped_materials(job_dir, items, targets, materials)
+        # Durability precedes cleanup. Never touch an unrelated current page
+        # while retiring a previously held problem window.
+        close_skipped(item["paper_id"], held=held)
+        emit("stage", stage="fulltext", reason=reason, paper_id=item["paper_id"],
+             message=f"{item['paper_id']} 已记录材料缺口并跳过；已有材料保留，继续其余文献。")
+
+    if defer_access:
         for item in items:
+            target = target_by_id[item["paper_id"]]
+            deferred = item.get("material_deferred")
+            if isinstance(deferred, dict) and deferred.get("reason") not in MANUAL_ACCESS_REASONS:
+                pause = FulltextPause(item["paper_id"], reason=str(deferred.get("reason") or "materials_incomplete"),
+                                      message=str(deferred.get("message") or "未取得所需材料。"))
+                if _skip_material_pause(pause):
+                    skip_material(item, target, pause.reason, pause.message, held=True)
+                    continue
+                emit("attention", stage="verification", reason=pause.reason, paper_id=item["paper_id"], message=pause.message)
+                return 0
             # Old parent skip markers authorize the first replenishment attempt;
             # only this child run's actual pause is moved to the manual queue.
-            if item.get("material_deferred") or item.get("acquisition_skip"):
+            if item.get("material_skipped") or item.get("material_deferred") or item.get("acquisition_skip") or retry_deferred:
                 continue
-            target = target_by_id[item["paper_id"]]
             pause = _previous_remote_pause(item, materials.paper(target))
             if pause is not None and _defer_access_pause(pause):
                 defer_manual(item, target, pause.reason, pause.message, pause.url)
+            elif pause is not None and _skip_material_pause(pause):
+                skip_material(item, target, pause.reason, pause.message)
 
     def skip_remote(item, target, pause):
         nonlocal fetcher
@@ -1541,6 +1638,8 @@ def _run_fulltext(
 
     def eligible(item: dict) -> bool:
         status = str(item.get("status") or "pending")
+        if item.get("material_skipped"):
+            return False
         if item.get("material_deferred"):
             return retry_deferred
         if item.get("acquisition_skip") and not explicit_retry and not replenish_materials and not item.get("local_verification"):
@@ -1558,6 +1657,8 @@ def _run_fulltext(
     if fetcher is None or callable(getattr(fetcher, "inspect_materials", None)):
         for item in items:
             if item["paper_id"] not in allowed or item.get("status") not in FETCHED_STATUSES:
+                continue
+            if item.get("material_skipped"):
                 continue
             if item.get("material_deferred") and not retry_deferred:
                 continue
@@ -1608,7 +1709,8 @@ def _run_fulltext(
             result["material_incomplete"] = sum(
                 materials.paper(target).get("main_pdf_status") != "downloaded" or not materials.paper_ready(target) for target in targets)
         if defer_access:
-            result["deferred_materials"] = sum(isinstance(item.get("material_deferred"), dict) for item in items)
+            result["deferred_materials"] = sum(isinstance(item.get("material_deferred"), dict) and item["material_deferred"].get("reason") in MANUAL_ACCESS_REASONS for item in items)
+            result["material_skipped"] = sum(isinstance(item.get("material_skipped"), dict) for item in items)
         return result
 
     if not eligible_items:
@@ -1621,10 +1723,11 @@ def _run_fulltext(
         fetched = counts["fetched_pdf"] + counts["fetched_html"]
         if defer_access:
             actions = _write_manual_actions(job_dir, items, targets, materials)
+            _write_skipped_materials(job_dir, items, targets, materials)
             if actions:
                 emit("attention", stage="fulltext", reason="deferred_materials", count=fetched,
                      counts={**counts, **incomplete_counts()}, message=f"可自动获取的材料已处理；{len(actions)} 篇待人工操作，原窗口不限时保留。完成后显式重试待处理项。",
-                     files=["fulltext/status.json", "fulltext/materials.json", *MANUAL_ACTION_FILES])
+                     files=["fulltext/status.json", "fulltext/materials.json", *MANUAL_ACTION_FILES, *SKIPPED_MATERIAL_FILES])
                 return 0
         emit(
             "result",
@@ -1642,7 +1745,7 @@ def _run_fulltext(
                 "skipped": skipped,
                 **incomplete_counts(),
             },
-            files=["fulltext/status.json", "fulltext/materials.json"],
+            files=["fulltext/status.json", "fulltext/materials.json", *([*MANUAL_ACTION_FILES, *SKIPPED_MATERIAL_FILES] if defer_access else [])],
         )
         return 0
 
@@ -1780,6 +1883,9 @@ def _run_fulltext(
             if defer_access and _defer_access_pause(pause):
                 defer_manual(item, target, pause.reason, pause.message, pause.url)
                 continue
+            if defer_access and _skip_material_pause(pause):
+                skip_material(item, target, pause.reason, pause.message)
+                continue
             if skip_unavailable and _remote_pause(pause.reason):
                 skip_remote(item, target, pause)
                 continue
@@ -1824,14 +1930,12 @@ def _run_fulltext(
             if missing_pdf or missing_supplements:
                 reason = "pdf_unavailable" if missing_pdf else "supplements_incomplete"
                 message = ("尚未取得正文PDF；已有材料保留。" if missing_pdf else "正文PDF已保存，补充材料尚未齐全或尚不能确认。")
-                defer_manual(updated, target, reason, message)
+                skip_material(updated, target, reason, message)
                 continue
             updated.pop("material_deferred", None)
             updated.pop("pause_reason", None)
             materials.paper(target).pop("material_deferred", None)
-            clear = getattr(fetcher, "clear_deferred", None)
-            if callable(clear):
-                clear(item["paper_id"])
+            materials.flush()
         _write_status(job_dir, items, materials=materials)
         catalog.register(target, updated)
         if updated.get("status") in FETCHED_STATUSES and (
@@ -1839,17 +1943,22 @@ def _run_fulltext(
                 (collector.inspected and callable(getattr(fetcher, "inspect_materials", None)))):
             complete = getattr(fetcher, "complete_paper", None)
             if callable(complete):
-                complete()  # Close only our page, after validated file and status are saved.
+                result = complete()  # Close only our page, after validated file and status are saved.
+                if defer_access and (result is None or (isinstance(result, dict) and result.get("closed") is True)):
+                    clear = getattr(fetcher, "clear_deferred", None)
+                    if callable(clear):
+                        clear(item["paper_id"])
 
     materials.flush()
     counts = _write_status(job_dir, items, materials=materials)
     fetched = counts["fetched_pdf"] + counts["fetched_html"]
     if defer_access:
         actions = _write_manual_actions(job_dir, items, targets, materials)
+        _write_skipped_materials(job_dir, items, targets, materials)
         if actions:
             emit("attention", stage="fulltext", reason="deferred_materials", count=fetched,
                  counts={**counts, **incomplete_counts()}, message=f"可自动获取的材料已处理；{len(actions)} 篇待人工操作，原窗口不限时保留。完成后显式重试待处理项。",
-                 files=["fulltext/status.json", "fulltext/materials.json", *MANUAL_ACTION_FILES])
+                 files=["fulltext/status.json", "fulltext/materials.json", *MANUAL_ACTION_FILES, *SKIPPED_MATERIAL_FILES])
             return 0
     emit(
         "result",
@@ -1876,7 +1985,7 @@ def _run_fulltext(
             "skipped": skipped,
             **incomplete_counts(),
         },
-        files=["fulltext/status.json", "fulltext/materials.json"],
+        files=["fulltext/status.json", "fulltext/materials.json", *([*MANUAL_ACTION_FILES, *SKIPPED_MATERIAL_FILES] if defer_access else [])],
     )
     return 0
 

@@ -146,9 +146,10 @@ function createSnapshot(root, id, snapshot) {
 // Manual reports are a read-only projection of this child's frozen papers.
 // URLs are displayed to the researcher; page opening uses a saved browser
 // binding and the paper ID, never a URL received from the HTTP request.
-function manualActions(dir) {
+const AUTH_REASONS = new Set(['login', 'verification', 'access_required']);
+function actionReport(dir, name, status, accepts) {
   try {
-    const report = document(dir, 'fulltext/manual-actions.json', false)?.json;
+    const report = document(dir, 'fulltext/' + name + '.json', false)?.json;
     if (report?.version !== 1 || !Array.isArray(report.items)) return [];
     const snapshot = inputSnapshot(dir), titles = new Map(snapshot.records.map(record => [record.candidate_id, record.title]));
     const allowed = new Set(snapshot.groupIds), seen = new Set();
@@ -159,9 +160,9 @@ function manualActions(dir) {
     };
     return report.items.flatMap(item => {
       const paperId = item?.paper_id;
-      if (!allowed.has(paperId) || seen.has(paperId) || item.status !== 'needs_attention') return [];
+      if (!allowed.has(paperId) || seen.has(paperId) || item.status !== status || !accepts(item.reason)) return [];
       seen.add(paperId);
-      return [{ paperId, title: string(item.title || titles.get(paperId), 1000), status: 'needs_attention',
+      return [{ paperId, title: string(item.title || titles.get(paperId), 1000), status,
         reason: string(item.reason, 100), message: string(item.message, 3000), officialUrl: officialUrl(item.official_url),
         mainPdfMissing: item.main_pdf_missing === true,
         supplements: { status: string(item.supplements?.status, 100), checkStatus: string(item.supplements?.check_status, 100),
@@ -170,4 +171,6 @@ function manualActions(dir) {
     });
   } catch (_) { return []; }
 }
-module.exports = { MARKER, sourceSnapshot, readBasis, eligible, createSnapshot, manualActions };
+function manualActions(dir) { return actionReport(dir, 'manual-actions', 'needs_attention', reason => AUTH_REASONS.has(reason)); }
+function skippedActions(dir) { return actionReport(dir, 'skipped-materials', 'skipped', reason => typeof reason === 'string' && !!reason && !AUTH_REASONS.has(reason)); }
+module.exports = { MARKER, sourceSnapshot, readBasis, eligible, createSnapshot, manualActions, skippedActions };

@@ -155,7 +155,12 @@ _SNAPSHOT_JS = r"""/* literature_fulltext_snapshot */ () => {
       || /您所访问的页面不存在|页面不存在或已被删除|requested page (?:does not exist|could not be found)/i.test(prefix.slice(0,2000)),
     login:Array.from(document.querySelectorAll('input[type="password"]')).some(visible)
       || /请先登录|请登录后|登录后方可|sign in to access|log in to access|please sign in|please log in/i.test(prefix.slice(0,2000)),
-    access_required:/您所在的机构未订购|没有访问权限|无访问权限|不在授权范围|机构没有订购|your institution does not have|institutional access is required|not entitled|subscription required|you do not have access|not authorized to access/i.test(prefix.slice(0,2500))
+    access_required:/您所在的机构未订购|没有访问权限|无访问权限|不在授权范围|机构没有订购|your institution does not have|institutional access is required|not entitled|subscription required|you do not have access|not authorized to access/i.test(prefix.slice(0,2500)),
+    download_pending:/文件正在生成|正在生成(?:文件|全文|PDF)|正在(?:下载|传输)|下载中|preparing your (?:file|download)|generating (?:your )?(?:file|pdf)|download in progress/i.test(prefix.slice(0,3000))
+      || Array.from(document.querySelectorAll('[role="progressbar"]')).filter(visible).some(e => {
+        const now=Number(e.getAttribute('aria-valuenow')), max=Number(e.getAttribute('aria-valuemax')||100);
+        return !e.hasAttribute('aria-valuenow') || (Number.isFinite(now) && now < max);
+      })
   };
 }""".replace("__MATERIALS_FUNCTION__", _MATERIALS_FUNCTION_JS)
 
@@ -656,39 +661,74 @@ class FulltextBrowserFetcher:
             except Exception:
                 pass
 
-    def complete_paper(self):
-        """Close only the task page after the caller saved a verified result.
-
-        Access problems always leave that page open for the researcher.  The
-        driver calls this only after both the artifact and status are saved.
-        """
-        if self._blocked or self._binding.get("material_flow"):
+    def _close_task_binding(self, binding):
+        """Close exact owned pages only; never navigate or create a page."""
+        auth = {"login", "verification", "access_required"}
+        if binding.get("attention_reason") in auth or binding.get("material_flow"):
             return {"closed": False}
+        flow = binding.get("cnki_flow") or {}
+        if isinstance(flow, dict) and flow.get("pending_popup"):
+            return {"closed": False}
+        wanted = binding.get("target_id")
+        if not wanted:
+            return {"closed": True}
         try:
-            page = self._find_bound_page()
-            if page is None:
-                return {"closed": False}
-            page.close(run_before_unload=False)
-            self._page = None
-            flow = self._binding.get("cnki_flow") or {}
+            ids = [wanted]
             cleanup_id = flow.get("cleanup_target_id") if isinstance(flow, dict) else None
-            if cleanup_id and cleanup_id != self._binding.get("target_id"):
-                cleanup = self._find_target_page(cleanup_id)
-                if cleanup is not None and not cleanup.is_closed():
-                    try:
-                        cleanup.close(run_before_unload=False)
-                    except Exception:
-                        self._progress("全文获取：文件已保存，任务的旧定位页未能关闭，请手动关闭该旧页。")
+            if cleanup_id and cleanup_id != wanted:
+                ids.append(cleanup_id)
+            pages = []
+            for target_id in ids:
+                page = self._find_target_page(target_id)
+                if page is not None and not page.is_closed():
+                    snapshot = page.evaluate(_SNAPSHOT_JS)
+                    if not isinstance(snapshot, dict) or any(snapshot.get(key) for key in
+                            ("login", "verification", "access_required", "download_pending")):
                         return {"closed": False}
+                    pages.append(page)
+            for page in pages:
+                page.close(run_before_unload=False)
+            return {"closed": True}
+        except Exception:
+            return {"closed": False}
+
+    def close_deferred(self, paper_id):
+        """Release a skipped paper's old page, preserving shared access pages."""
+        entries = self._binding.get("deferred_papers", {})
+        entry = entries.get(paper_id) if isinstance(entries, dict) else None
+        if not isinstance(entry, dict) or not isinstance(entry.get("binding"), dict):
+            return {"closed": True}
+        if entry.get("reason") in {"login", "verification", "access_required"} or entry.get("shared_from"):
+            return {"closed": False}
+        wanted = entry["binding"].get("target_id")
+        if any(key != paper_id and isinstance(other, dict) and other.get("binding", {}).get("target_id") == wanted
+               for key, other in entries.items()) or (wanted and self._binding.get("target_id") == wanted):
+            return {"closed": False}
+        return self._close_task_binding(entry["binding"])
+
+    def complete_paper(self, *, skipped=False):
+        """Caller has durably saved the file/status or recorded a non-auth skip."""
+        reason = (self._blocked or {}).get("reason") or self._binding.get("attention_reason")
+        if (reason and not skipped) or reason in {"login", "verification", "access_required", "material_cleanup"} or str(reason or "").startswith("local_"):
+            return {"closed": False}
+        wanted = self._binding.get("target_id")
+        if not wanted:
+            return {"closed": False}
+        held = [entry for entry in self._binding.get("deferred_papers", {}).values()
+                if isinstance(entry, dict) and wanted and entry.get("binding", {}).get("target_id") == wanted]
+        if len(held) > 1 or any(entry.get("shared_from") for entry in held):
+            return {"closed": False}
+        result = self._close_task_binding(self._binding)
+        if result.get("closed"):
+            self._page = None
+            self._blocked, self._blocked_url = None, ""
             self._binding.pop("target_id", None)
             self._binding.pop("pending_url_hash", None)
             self._binding.pop("attention_reason", None)
             self._binding.pop("cnki_flow", None)
             self._write_binding()
-            self._progress("全文获取：文件已完成并保存，已关闭本任务的文献页面。")
-            return {"closed": True}
-        except Exception:
-            return {"closed": False}
+            self._progress("全文获取：文件已保存或缺口已记录，已关闭本任务的文献页面。")
+        return result
 
     def _progress(self, message):
         if self.on_progress:
