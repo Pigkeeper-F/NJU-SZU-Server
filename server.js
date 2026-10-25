@@ -763,6 +763,8 @@ async function handleLiterature(req, res, url) {
       const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
       return sendJson(res, 200, scholar.advance(data.id, { until: data.until, confirmations: data.confirmations,
         ...(Object.hasOwn(data, 'skipUnavailable') ? { skipUnavailable: data.skipUnavailable } : {}),
+        ...(Object.hasOwn(data, 'deferAccess') ? { deferAccess: data.deferAccess } : {}),
+        ...(Object.hasOwn(data, 'retryDeferred') ? { retryDeferred: data.retryDeferred } : {}),
         ...(Object.hasOwn(data, 'deferSource') ? { deferSource: data.deferSource } : {}) }));
     }
     if (req.method === 'POST' && route === '/api/literature/continue-available') {
@@ -799,6 +801,13 @@ async function handleLiterature(req, res, url) {
       const data = JSON.parse(await readLiteratureBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Object.keys(data).some(key => key !== 'id')) throw new Error('只需提供当前检索任务标识');
       return sendJson(res, 200, await scholar.openLogin(data.id));
+    }
+    if (req.method === 'POST' && route === '/api/literature/material-action-page') {
+      const data = JSON.parse(await readLiteratureBody(req, 4 * 1024));
+      if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).length !== 2
+          || !Object.hasOwn(data, 'id') || !Object.hasOwn(data, 'paperId')
+          || Object.keys(data).some(key => !['id', 'paperId'].includes(key))) throw new Error('只需提供材料补齐任务标识与清单文献标识');
+      return sendJson(res, 200, await scholar.openMaterialAction(data.id, data.paperId));
     }
     if (req.method === 'POST' && ['/api/literature/delete', '/api/literature/restore'].includes(route)) {
       const data = JSON.parse(await readLiteratureBody(req, 4 * 1024));

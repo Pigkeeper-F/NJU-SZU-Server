@@ -24,7 +24,9 @@ browser and unrelated tabs remain owned by the researcher.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -1048,7 +1050,7 @@ def _carry_previous(target: dict, prev: dict | None, job_dir: Path) -> dict:
     item = _item_skeleton(target)
     if not prev:
         return item
-    for key in ("fulltext_url", "attempted_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "evidence_version", "html_evidence", "content_sha256", "reviewed_at", "pdf_evidence", "reused_from", "observed_content_sha256", "local_verification", "acquisition_skip", "pause_reason"):
+    for key in ("fulltext_url", "attempted_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "evidence_version", "html_evidence", "content_sha256", "reviewed_at", "pdf_evidence", "reused_from", "observed_content_sha256", "local_verification", "acquisition_skip", "pause_reason", "material_deferred"):
         if key in prev:
             item[key] = prev[key]
     if item["status"] == "fetched_html":
@@ -1325,6 +1327,68 @@ def _previous_remote_pause(item: dict, paper: dict) -> FulltextPause | None:
                          reason=reason, message=message)
 
 
+MANUAL_ACTION_FILES = ["fulltext/manual-actions.json", "fulltext/manual-actions.csv", "fulltext/manual-actions.md"]
+
+
+def _manual_entry_url(record):
+    """Report a canonical entry, never a login URL, token or session query."""
+    value = str(record.get("source_url") or "")
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password:
+        return parsed._replace(netloc=parsed.hostname, query="", fragment="").geturl()
+    doi = str(record.get("doi") or "")
+    return "https://doi.org/" + quote(doi, safe="/().-_") if re.fullmatch(r"10\.\d{4,9}/\S+", doi) else ""
+
+
+def _defer_access_pause(pause):
+    if pause.reason not in {"login", "verification", "access_required", "rate_limited", "load_timeout", "page_error", "results_unrecognized"}:
+        return False
+    # Ownership, identity and local original-file failures must stop the batch.
+    return not re.search(r"身份|同篇|打开关系|所有权|来源.*(?:无法|不符|不一致)|SHA|缓存|本地|暂存|清理|文件.*冲突", str(pause.message), re.I)
+
+
+def _manual_message(value, official_url):
+    return re.sub(r"https?://[^\s，；）)]+", official_url or "[官方入口]", str(value or ""))[:2000]
+
+
+def _write_manual_actions(job_dir, items, targets, materials):
+    by_id = {target["paper_id"]: target for target in targets}
+    actions = []
+    for item in items:
+        deferred = item.get("material_deferred")
+        if not isinstance(deferred, dict):
+            continue
+        target = by_id[item["paper_id"]]
+        paper = materials.paper(target)
+        supplement = materials.completeness(target)
+        official = _manual_entry_url(target)
+        actions.append({"paper_id": item["paper_id"], "title": str(target.get("title") or "")[:500],
+            "status": "needs_attention", "reason": str(deferred.get("reason") or "materials_incomplete"),
+            "message": _manual_message(deferred.get("message"), official), "official_url": official,
+            "main_pdf_missing": paper.get("main_pdf_status") != "downloaded",
+            "supplements": {"status": supplement["status"], "check_status": supplement["check_status"], "missing": supplement["missing"]},
+            "deferred_at": deferred.get("deferred_at") or "", "waiting_policy": "until_explicit_retry"})
+    document = {"version": 1, "generated_at": now_iso(), "items": actions,
+        "note": "待人工操作的原窗口不限时保留；完成登录、验证或权限处理后显式重试，不自动重试、不倒计时关闭。"}
+    atomic_write_json(Path(job_dir) / MANUAL_ACTION_FILES[0], document)
+    output = io.StringIO()
+    fields = ["paper_id", "title", "status", "reason", "message", "official_url", "main_pdf_missing", "supplement_status", "supplement_missing", "deferred_at", "waiting_policy"]
+    writer = csv.DictWriter(output, fieldnames=fields); writer.writeheader()
+    lines = ["# 待人工处理的材料", "", document["note"], "", f"共 {len(actions)} 篇；原件与已有正文保留，未进入提取。", ""]
+    for action in actions:
+        writer.writerow({**{key: action[key] for key in fields if key in action},
+            "supplement_status": action["supplements"]["check_status"],
+            "supplement_missing": "; ".join(str(entry.get("label") or entry.get("material_id") or "") for entry in action["supplements"]["missing"])})
+        clean = lambda value: str(value).replace("\n", " ").replace("\r", " ")
+        lines += [f"## {action['paper_id']} · {clean(action['title'])}", "", f"- 状态：待人工处理；原因：{clean(action['reason'])}",
+            "- 正文 PDF：" + ("尚缺" if action["main_pdf_missing"] else "已保存"),
+            "- 补充材料：" + clean(action["supplements"]["check_status"]) + "；未取得项 " + str(len(action["supplements"]["missing"])),
+            "- 说明：" + clean(action["message"]), "- 官方入口：" + action["official_url"], ""]
+    atomic_write_bytes(Path(job_dir) / MANUAL_ACTION_FILES[1], b"\xef\xbb\xbf" + output.getvalue().encode("utf-8"))
+    atomic_write_text(Path(job_dir) / MANUAL_ACTION_FILES[2], "\n".join(lines))
+    return actions
+
+
 def _run_fulltext(
     config: dict,
     job_dir: Path,
@@ -1336,6 +1400,8 @@ def _run_fulltext(
     restart_cnki: bool = False,
     skip_unavailable: bool = False,
     replenish_materials: bool = False,
+    defer_access: bool = False,
+    retry_deferred: bool = False,
     fetcher=None,
 ) -> int:
     """Execute the fulltext stage; returns the process exit code (0/1)."""
@@ -1397,7 +1463,41 @@ def _run_fulltext(
     else:
         allowed = set(position)
 
+    if retry_deferred:
+        allowed = {item["paper_id"] for item in items if isinstance(item.get("material_deferred"), dict)}
+
     explicit_retry = retry_unavailable and only_ids is not None and len(only_ids) == 1
+
+    def defer_manual(item, target, reason, message, url=""):
+        nonlocal fetcher
+        saved = items[position[item["paper_id"]]]
+        official = _manual_entry_url(target)
+        marker = {"reason": reason, "message": _manual_message(message, official), "official_url": official,
+                  "deferred_at": now_iso(), "policy": "until_explicit_retry"}
+        saved.update(material_deferred=marker, pause_reason=reason)
+        if saved.get("status") not in FETCHED_STATUSES:
+            saved.update(status="needs_attention", reason=marker["message"], fulltext_url="")
+        materials.paper(target)["material_deferred"] = dict(marker)
+        materials.flush(); _write_status(job_dir, items, materials=materials)
+        _write_manual_actions(job_dir, items, targets, materials)
+        if fetcher is None:
+            fetcher = make_fetcher(config, job_dir)
+        retain = getattr(fetcher, "defer_paper", None)
+        if callable(retain):
+            retain(reason=reason, url=url or str(target.get("source_url") or ""), paper_id=item["paper_id"])
+        emit("stage", stage="fulltext", reason=reason, paper_id=item["paper_id"],
+             message=f"{item['paper_id']} 留待人工处理，原窗口不限时保留；继续其余文献。")
+
+    if defer_access and not retry_deferred:
+        for item in items:
+            # Old parent skip markers authorize the first replenishment attempt;
+            # only this child run's actual pause is moved to the manual queue.
+            if item.get("material_deferred") or item.get("acquisition_skip"):
+                continue
+            target = target_by_id[item["paper_id"]]
+            pause = _previous_remote_pause(item, materials.paper(target))
+            if pause is not None and _defer_access_pause(pause):
+                defer_manual(item, target, pause.reason, pause.message, pause.url)
 
     def skip_remote(item, target, pause):
         nonlocal fetcher
@@ -1438,6 +1538,8 @@ def _run_fulltext(
 
     def eligible(item: dict) -> bool:
         status = str(item.get("status") or "pending")
+        if item.get("material_deferred"):
+            return retry_deferred
         if item.get("acquisition_skip") and not explicit_retry and not replenish_materials and not item.get("local_verification"):
             return False
         if status in RETRYABLE_ON_RESUME:
@@ -1453,6 +1555,8 @@ def _run_fulltext(
     if fetcher is None or callable(getattr(fetcher, "inspect_materials", None)):
         for item in items:
             if item["paper_id"] not in allowed or item.get("status") not in FETCHED_STATUSES:
+                continue
+            if item.get("material_deferred") and not retry_deferred:
                 continue
             if item.get("acquisition_skip") and not explicit_retry and not replenish_materials:
                 continue
@@ -1475,7 +1579,8 @@ def _run_fulltext(
             message=f"本次最多获取 {quota} 篇（其余保持待处理；可放宽 --limit / fulltext.maxPapers 后续跑）",
         )
         eligible_items = eligible_items[:quota]
-    eligible_items += backfill
+    included = {item["paper_id"] for item in eligible_items}
+    eligible_items += [item for item in backfill if item["paper_id"] not in included]
     if limit is not None:
         eligible_items = eligible_items[:limit]
 
@@ -1499,6 +1604,8 @@ def _run_fulltext(
             result["pdf_missing"] = sum(materials.paper(target).get("main_pdf_status") != "downloaded" for target in targets)
             result["material_incomplete"] = sum(
                 materials.paper(target).get("main_pdf_status") != "downloaded" or not materials.paper_ready(target) for target in targets)
+        if defer_access:
+            result["deferred_materials"] = sum(isinstance(item.get("material_deferred"), dict) for item in items)
         return result
 
     if not eligible_items:
@@ -1509,6 +1616,13 @@ def _run_fulltext(
         materials.flush()
         counts = _write_status(job_dir, items, materials=materials)
         fetched = counts["fetched_pdf"] + counts["fetched_html"]
+        if defer_access:
+            actions = _write_manual_actions(job_dir, items, targets, materials)
+            if actions:
+                emit("attention", stage="fulltext", reason="deferred_materials", count=fetched,
+                     counts={**counts, **incomplete_counts()}, message=f"可自动获取的材料已处理；{len(actions)} 篇待人工操作，原窗口不限时保留。完成后显式重试待处理项。",
+                     files=["fulltext/status.json", "fulltext/materials.json", *MANUAL_ACTION_FILES])
+                return 0
         emit(
             "result",
             stage="fulltext",
@@ -1547,6 +1661,8 @@ def _run_fulltext(
 
     for index, item in enumerate(eligible_items, start=1):
         target = target_by_id[item["paper_id"]]
+        if retry_deferred and callable(getattr(fetcher, "resume_deferred", None)):
+            fetcher.resume_deferred(item["paper_id"])
         if replenish_materials and item.get("status") in FETCHED_STATUSES:
             target["materials_url"] = _materials_page_url(target, item)
         if explicit_retry or replenish_materials:
@@ -1658,6 +1774,9 @@ def _run_fulltext(
                              main_pdf_reason=str(updated.get("reason") or "本次未取得正文PDF。"))
                 materials.flush()
         except FulltextPause as pause:
+            if defer_access and _defer_access_pause(pause):
+                defer_manual(item, target, pause.reason, pause.message, pause.url)
+                continue
             if skip_unavailable and _remote_pause(pause.reason):
                 skip_remote(item, target, pause)
                 continue
@@ -1696,6 +1815,20 @@ def _run_fulltext(
             updated["materials_completeness"] = {"status": "unverified", "check_status": "error",
                                                  "expected": 0, "downloaded": 0, "pending": 0, "missing": []}
         items[position[item["paper_id"]]] = updated
+        if defer_access:
+            missing_pdf = materials.paper(target).get("main_pdf_status") != "downloaded"
+            missing_supplements = materials.completeness(target)["status"] != "complete"
+            if missing_pdf or missing_supplements:
+                reason = "pdf_unavailable" if missing_pdf else "supplements_incomplete"
+                message = ("尚未取得正文PDF；已存网页正文保留。" if missing_pdf else "正文PDF已保存，补充材料尚未齐全或尚不能确认。")
+                defer_manual(updated, target, reason, message)
+                continue
+            updated.pop("material_deferred", None)
+            updated.pop("pause_reason", None)
+            materials.paper(target).pop("material_deferred", None)
+            clear = getattr(fetcher, "clear_deferred", None)
+            if callable(clear):
+                clear(item["paper_id"])
         _write_status(job_dir, items, materials=materials)
         catalog.register(target, updated)
         if updated.get("status") in FETCHED_STATUSES and (
@@ -1708,6 +1841,13 @@ def _run_fulltext(
     materials.flush()
     counts = _write_status(job_dir, items, materials=materials)
     fetched = counts["fetched_pdf"] + counts["fetched_html"]
+    if defer_access:
+        actions = _write_manual_actions(job_dir, items, targets, materials)
+        if actions:
+            emit("attention", stage="fulltext", reason="deferred_materials", count=fetched,
+                 counts={**counts, **incomplete_counts()}, message=f"可自动获取的材料已处理；{len(actions)} 篇待人工操作，原窗口不限时保留。完成后显式重试待处理项。",
+                 files=["fulltext/status.json", "fulltext/materials.json", *MANUAL_ACTION_FILES])
+            return 0
     emit(
         "result",
         stage="fulltext",
@@ -1781,8 +1921,11 @@ def _verify_material_replenishment(config, job_dir):
         materials.verify_saved(target)
 
 
-def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, skip_unavailable=False, replenish_materials=False, fetcher=None):
+def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, skip_unavailable=False, replenish_materials=False, defer_access=False, retry_deferred=False, fetcher=None):
     job_dir = Path(job_dir)
+    if (defer_access and not (resume and replenish_materials)) or (retry_deferred and not defer_access):
+        emit("error", stage="fulltext", message="暂缓人工访问仅适用于 --resume --replenish-materials；重试待处理项还须 --defer-access。")
+        return 1
     if replenish_materials:
         try:
             if not resume or only is not None or limit is not None or retry_unavailable or restart_cnki or skip_unavailable:
@@ -1825,7 +1968,8 @@ def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailab
     try:
         return _run_fulltext(config, job_dir, resume=resume, limit=limit, only=only,
                              retry_unavailable=retry_unavailable, restart_cnki=restart_cnki,
-                             skip_unavailable=skip_unavailable, replenish_materials=replenish_materials, fetcher=actual)
+                             skip_unavailable=skip_unavailable, replenish_materials=replenish_materials,
+                             defer_access=defer_access, retry_deferred=retry_deferred, fetcher=actual)
     finally:
         close = getattr(actual, "close", None)
         if callable(close):
@@ -1842,30 +1986,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--retry-unavailable", action="store_true", help="重试此前标为待补充（unavailable/abstract_only）的项")
     parser.add_argument("--skip-unavailable", action="store_true", help="远程登录、权限、验证或超时项登记待补充并继续；本地材料核验异常仍暂停")
     parser.add_argument("--replenish-materials", action="store_true", help="仅在关联子任务内重试缺失PDF和补充材料，保留已有原件，不继续提取")
+    parser.add_argument("--defer-access", action="store_true", help="材料补齐时保留人工处理页，继续其余文献；待处理项仅显式重试")
+    parser.add_argument("--retry-deferred", action="store_true", help="人工处理后仅重试已登记的待处理文献，须 --defer-access")
     parser.add_argument("--restart-cnki", action="store_true", help="显式重新定位已选知网单篇，从正常检索页开始一次")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review-only", action="store_true", help="仅离线复核缓存，不访问网站")
     mode.add_argument("--open-current", action="store_true", help="只显示任务已绑定的全文页面")
+    mode.add_argument("--open-deferred", metavar="PAPER_ID", help="只显示指定待处理文献已绑定的原页面，不导航或重试")
     args = parser.parse_args(argv)
 
     try:
         config = json.loads(args.config.read_text(encoding="utf-8"))
         if not isinstance(config, dict):
             raise ValueError("运行配置无效")
-        if args.restart_cnki and (args.review_only or args.open_current):
+        view_mode = args.review_only or args.open_current or args.open_deferred is not None
+        if args.restart_cnki and view_mode:
             raise ValueError("重新定位不能与离线复核或仅查看原页面同时使用")
-        if args.replenish_materials and (args.review_only or args.open_current):
+        if (args.replenish_materials or args.defer_access or args.retry_deferred) and view_mode:
             raise ValueError("材料补齐不能与离线复核或仅查看原页面同时使用")
         if args.review_only:
             review_saved_fulltext(args.output_dir)
             return 0
-        if args.open_current:
+        if args.open_current or args.open_deferred is not None:
+            if args.open_deferred is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", args.open_deferred):
+                raise ValueError("待处理文献标识无效")
             fetcher = make_fetcher(config, args.output_dir)
             try:
-                result = fetcher.open_current()
+                result = fetcher.open_current(paper_id=args.open_deferred) if args.open_deferred is not None else fetcher.open_current()
                 if not result.get("opened"):
                     raise ValueError(result.get("message") or "尚无该任务绑定的全文页面")
-                emit("result", stage="fulltext_browser", opened=True, message=str(result.get("message") or "已显示原任务全文页面"))
+                emit("result", stage="fulltext_browser", opened=True,
+                     **({"paper_id": args.open_deferred} if args.open_deferred is not None else {}),
+                     message=str(result.get("message") or "已显示原任务全文页面"))
                 return 0
             finally:
                 fetcher.close()
@@ -1879,6 +2031,8 @@ def main(argv: list[str] | None = None) -> int:
             restart_cnki=args.restart_cnki,
             skip_unavailable=args.skip_unavailable,
             replenish_materials=args.replenish_materials,
+            defer_access=args.defer_access,
+            retry_deferred=args.retry_deferred,
         )
     except Exception as error:
         emit("error", stage="fulltext", message=f"全文获取失败：{error}")

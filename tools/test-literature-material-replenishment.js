@@ -57,12 +57,76 @@ function routeHandler(root, connector) {
   const context = vm.createContext({ scholar: connector, literatureAuxiliary: new LiteratureAuxiliary(root, connector),
     readBody: async req => JSON.stringify(req.body), sendJson: (res, status, data) => Object.assign(res, { status, data }) });
   vm.runInContext(source.slice(a, b + 2) + '\nglobalThis.handle=handleLiterature;', context);
-  return async body => { const res = {}; await context.handle({ method: 'POST', body }, res, new URL('http://fixture/api/literature/replenish-materials')); return res; };
+  return async (body, route = '/api/literature/replenish-materials') => { const res = {}; await context.handle({ method: 'POST', body }, res, new URL('http://fixture' + route)); return res; };
+}
+
+async function deferCases(root) {
+  const dir = fixture(root), original = hashes(dir), calls = [];
+  let failRetry = false, openCalls = 0;
+  const connector = new LiteratureConnector(root, { prepare: async () => 'mock-python', prepareOffline: async () => 'mock-python',
+    openDeferred: async (job, python, paperId) => { openCalls++; assert.equal(job.browserOpening, true); assert.equal(python, 'mock-python'); return { opened: true, paper_id: paperId }; } });
+  connector.runStage = async (script, args, job, emit) => {
+    assert.equal(script, 'literature_fulltext.py'); calls.push([...args]);
+    assert.equal(json(path.join(job.dir, 'candidates.json')).records.length, 10);
+    assert.equal(job.until, 'fulltext');
+    if (!args.includes('--defer-access')) {
+      emit({ type: 'attention', stage: 'fulltext', reason: 'access_required', source: 'pubmed', message: 'fixture login required' }); return;
+    }
+    if (failRetry && args.includes('--retry-deferred')) throw new Error('fixture worker failure');
+    write(job.dir, 'fulltext/manual-actions.json', { version: 1, generated_at: new Date().toISOString(), items: [
+      { paper_id: 'PMID-004', title: 'Login paper', status: 'needs_attention', reason: 'access_required', message: 'Keep original login tab', official_url: 'https://publisher.example/article/4', main_pdf_missing: true, supplements: { status: 'unverified', missing: ['table.xlsx'] } },
+      { paper_id: 'PMID-005', title: 'Verify paper', status: 'needs_attention', reason: 'verification', official_url: 'javascript:alert(1)', main_pdf_missing: true, supplements: { status: 'partial', check_status: 'checked', missing: [{ label: 'appendix.pdf', material_id: 'appendix' }, { material_id: 'data-table' }] } },
+      { paper_id: 'OUTSIDE-999', title: 'Unrelated report entry', status: 'needs_attention', reason: 'login', official_url: 'https://unrelated.example/' }
+    ] });
+    write(job.dir, 'fulltext/manual-actions.csv', 'paper_id,reason\nPMID-004,access_required\n');
+    write(job.dir, 'fulltext/manual-actions.md', '# Manual fixture\n');
+    write(job.dir, 'fulltext-browser.json', { deferred_papers: {
+      'PMID-004': { paper_id: 'PMID-004', url: 'https://publisher.example/article/4', binding: { target_id: 'saved-tab-4' } }
+    } });
+    emit({ type: 'attention', stage: 'fulltext', reason: 'deferred_materials', message: 'Remaining papers attempted; researcher actions remain',
+      files: ['fulltext/manual-actions.json', 'fulltext/manual-actions.csv', 'fulltext/manual-actions.md'] });
+  };
+  const child = connector.replenishMaterials(ID); await settle(connector, child.id);
+  const route = routeHandler(root, connector), advance = body => route(body, '/api/literature/advance');
+  for (const body of [{ id: ID, deferAccess: true }, { id: child.id, deferAccess: false }, { id: child.id, retryDeferred: true },
+    { id: child.id, deferAccess: true, until: 'extract' }]) assert.equal((await advance(body)).status, 400);
+  assert.equal((await advance({ id: child.id, deferAccess: true })).status, 200);
+  const paused = await settle(connector, child.id);
+  assert.deepEqual(calls[1], ['--replenish-materials', '--defer-access', '--resume']);
+  assert.equal(paused.status, 'needs_attention'); assert.equal(paused.attention.reason, 'deferred_materials');
+  assert.equal(paused.materialAccessPolicy, 'defer'); assert.equal(paused.materialManualCount, 2);
+  assert.equal(paused.materialManualActions[0].paperId, 'PMID-004'); assert.equal(paused.materialManualActions[1].officialUrl, '');
+  assert.deepEqual(paused.materialManualActions[1].supplements.missing, ['appendix.pdf', 'data-table']);
+  assert.equal(paused.materialManualActions[1].supplements.checkStatus, 'checked');
+  for (const ext of ['json', 'csv', 'md']) assert.ok(connector.download(child.id, 'fulltext/manual-actions.' + ext));
+  const restarted = new LiteratureConnector(root);
+  assert.equal(restarted.snapshot(child.id).materialAccessPolicy, 'defer');
+  assert.equal(restarted.list(20).find(item => item.id === child.id).materialManualCount, 2);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 2, 'Researcher waiting has no automatic resume or retry');
+  const actionRoute = body => route(body, '/api/literature/material-action-page');
+  for (const body of [{ id: child.id, paperId: 'PMID-004', url: 'https://arbitrary.example' }, { id: child.id, paperId: 'OUTSIDE-999' },
+    { id: ID, paperId: 'PMID-004' }, { id: child.id, paperId: 'PMID-005' }]) assert.equal((await actionRoute(body)).status, 400);
+  assert.equal(openCalls, 0);
+  assert.equal((await actionRoute({ id: child.id, paperId: 'PMID-004' })).status, 200);
+  assert.equal(openCalls, 1); assert.equal(connector.jobs.get(child.id).browserOpening, false);
+  assert.equal(calls.length, 2, 'Opening a saved page does not download or retry');
+  assert.equal((await advance({ id: child.id })).status, 200); await settle(connector, child.id);
+  assert.deepEqual(calls[2], ['--replenish-materials', '--defer-access', '--resume'], 'ordinary resume does not retry deferred papers');
+  failRetry = true;
+  assert.equal((await advance({ id: child.id, retryDeferred: true })).status, 200);
+  assert.equal((await settle(connector, child.id)).status, 'failed');
+  assert.deepEqual(calls[3], ['--replenish-materials', '--defer-access', '--retry-deferred', '--resume']);
+  failRetry = false;
+  assert.equal((await advance({ id: child.id })).status, 200); await settle(connector, child.id);
+  assert.equal(calls[4].includes('--retry-deferred'), false, 'a failed explicit retry cannot leak into later ordinary resumes');
+  assert.deepEqual(hashes(dir), original, 'deferring, reading, opening and retrying never write the original parent');
 }
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'yanxu-replenishment-'));
   try {
+    await deferCases(path.join(root, 'defer-cases'));
     const dir = fixture(root), original = hashes(dir), workerCalls = [];
     let gateRelease;
     const gate = new Promise(resolve => { gateRelease = resolve; });

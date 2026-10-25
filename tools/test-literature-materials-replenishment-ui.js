@@ -8,7 +8,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'js/codex.js'), 'utf8');
 const copy = value => JSON.parse(JSON.stringify(value));
-const names = ['literatureResumeStage', 'replenishLiteratureMaterials', 'viewLiteratureMaterialsRelatedJob', 'continueLiterature', 'confirmLiteratureFields'];
+const names = ['literatureResumeStage', 'replenishLiteratureMaterials', 'viewLiteratureMaterialsRelatedJob', 'continueLiterature', 'confirmLiteratureFields', 'autoOpenLiteratureBrowser', 'openLiteratureMaterialActionPage'];
 function fn(name) {
   const prefix = source.includes('  async function ' + name + '(') ? '  async function ' : '  function ';
   const start = source.indexOf(prefix + name + '(');
@@ -44,6 +44,7 @@ const context = vm.createContext({ task: () => current, saved,
     if (url === '/api/literature/job?id=parent') return copy(original);
     if (url === '/api/literature/job?id=child') return copy(child);
     if (url === '/api/literature/advance') return { ...copy(child), status: 'completed' };
+    if (url === '/api/literature/material-action-page') return { opened: true };
     throw new Error('Unexpected mutation: ' + url);
   }
 });
@@ -84,6 +85,22 @@ async function main() {
   current.literatureJob.status = 'needs_attention'; current.literatureJob.resumeStage = 'fulltext'; current.literatureUntil = 'export';
   await s.continueLiterature(mod, { until: 'extract' });
   assert.deepEqual(calls.findLast(call => call.url === '/api/literature/advance').body, { id: 'child', until: 'fulltext' });
+  current.literatureJob = { ...copy(child), status: 'needs_attention', resumeStage: 'fulltext', attention: { reason: 'login', source: 'cnki' } };
+  await s.continueLiterature(mod, { until: 'extract', deferAccess: true });
+  assert.deepEqual(calls.findLast(call => call.url === '/api/literature/advance').body, { id: 'child', until: 'fulltext', deferAccess: true });
+  current.literatureJob = { ...copy(child), status: 'needs_attention', resumeStage: 'fulltext', materialAccessPolicy: 'defer',
+    attention: { reason: 'deferred_materials' }, materialManualActions: [{ paperId: 'PMID-001', title: 'Blocked first article' }] };
+  const beforeManual = calls.length;
+  await s.continueLiterature(mod);
+  await s.autoOpenLiteratureBrowser('m', current.literatureJob);
+  assert.equal(calls.length, beforeManual, 'A final manual list must not automatically open pages or rerun');
+  await s.openLiteratureMaterialActionPage(mod, 'not-in-list');
+  assert.equal(calls.length, beforeManual, 'Only an existing manual item may open its saved official page');
+  await s.openLiteratureMaterialActionPage(mod, 'PMID-001');
+  assert.deepEqual(calls.findLast(call => call.url === '/api/literature/material-action-page').body, { id: 'child', paperId: 'PMID-001' });
+  assert.match(current.literatureMaterialNotice, /人工登录不限时/);
+  await s.continueLiterature(mod, { until: 'extract', retryDeferred: true });
+  assert.deepEqual(calls.findLast(call => call.url === '/api/literature/advance').body, { id: 'child', until: 'fulltext', deferAccess: true, retryDeferred: true });
   assert.equal(JSON.stringify(original), originalBytes, 'Parent results and counts remain unchanged');
   assert.deepEqual(calls.filter(call => call.url?.includes('/job?')).map(call => call.method), ['GET', 'GET']);
   assert.ok(!calls.some(call => /search|browser|download|extract/.test(call.url || '')));

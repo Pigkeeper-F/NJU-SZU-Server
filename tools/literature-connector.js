@@ -52,6 +52,7 @@ const DELIVERABLE_PATTERNS = [
   /^fulltext\/status\.json$/,
   /^fulltext\/review\.json$/,
   /^fulltext\/materials\.json$/,
+  /^fulltext\/manual-actions\.(?:json|csv|md)$/,
   /^fulltext\/materials\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[^\\]+$/,
   /^fulltext\/files\/[^/\\]+\.(?:pdf|txt)$/,
   /^extraction\/inputs\/[^/\\]+\.json$/,
@@ -99,6 +100,7 @@ function loadJsonFile(file) {
 
 function sourceAttention(value) {
   if (!value || typeof value !== 'object') return null;
+  if (value.reason === 'deferred_materials') return { reason: 'deferred_materials' };
   if (!executableSources().some(source => source.key === value.source)) return null;
   if (!['login', 'verification', 'access_required', 'results_unrecognized'].includes(value.reason)) return null;
   return { source: value.source, reason: value.reason };
@@ -169,6 +171,7 @@ function restoreMaterialScope(job, dir, interrupted = false) {
   job.materialReplenishment = basis || job.materialReplenishment || { invalid: true };
   job.replenishmentInvalid = !basis;
   job.until = 'fulltext'; job.fulltextFailurePolicy = 'pause';
+  job.materialAccessPolicy = job.materialAccessPolicy === 'defer' ? 'defer' : 'pause';
   job.stages = { ...(job.stages || {}), discover: 'done', dedupe: 'done' };
   job.resumeStage = job.status === 'completed' && job.stages.fulltext === 'done' ? null : 'fulltext';
   if (interrupted) {
@@ -594,11 +597,22 @@ class LiteratureConnector {
       if (!result || result.opened !== true || result.source !== source) throw new Error('无法打开对应检索页面，请检查本机浏览器环境');
       return result;
     });
+    this.openDeferred = options.openDeferred || (async (job, python, paperId) => {
+      const spec = await stagePythonProcessSpec(this.root, python);
+      const raw = await runCommand(spec.executable, ['-u', path.join(this.root, 'tools', 'literature_fulltext.py'),
+        '--config', path.join(job.dir, 'run_config.json'), '--output-dir', job.dir, '--open-deferred', paperId],
+      { cwd: this.root, timeout: 15000, environment: spec.environment });
+      let result;
+      try { result = JSON.parse(raw); } catch (_) { throw new Error('原待处理页面未返回有效状态，请重试'); }
+      if (result?.opened !== true || result.paper_id !== paperId) throw new Error('原待处理页面未打开，请保留登录窗口后重试');
+      return result;
+    });
   }
 
   public(job) {
     const queue = checkpointDeferredSources(job.dir, job.config, job.deferredSources);
     const materialBasis = materialBasisFor(job.dir), materialsOnly = isMaterialRecord(job, job.dir);
+    const materialManualActions = materialsOnly ? materialReplenishment.manualActions(job.dir) : [];
     return { id: job.id, status: job.status, stage: job.stage, message: job.message,
       count: job.count, config: job.config, files: job.files, events: job.events, error: job.error,
       stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters, activeStage: job.activeStage || null,
@@ -607,6 +621,8 @@ class LiteratureConnector {
       executionOrder: executionOrder(job.config, queue), processingBasis: job.processingBasis || null, deletedAt: job.deletedAt || null,
       materialReplenishment: materialBasis || job.materialReplenishment || (materialsOnly ? { invalid: true } : null),
       replenishmentInvalid: materialsOnly && !materialBasis,
+      materialAccessPolicy: materialsOnly ? (job.materialAccessPolicy === 'defer' ? 'defer' : 'pause') : null,
+      materialManualActions, materialManualCount: materialManualActions.length,
       canReplenishMaterials: materialReplenishment.eligible(this.root, job.id, job),
       canReviewFulltext: !materialsOnly && fulltextReviewEligible(job, job.dir),
       cnkiRetryItems: materialsOnly ? [] : cnkiRetryItems(job, job.dir),
@@ -671,6 +687,7 @@ class LiteratureConnector {
     const count = counts.fetched_pdf + counts.fetched_html;
     job.count = count; this.mergeCounters(job, 'fulltext', { count, counts });
     this.registerFiles(job, ['fulltext/status.json']); this.registerFulltextFiles(job);
+    this.registerFiles(job, ['fulltext/manual-actions.json', 'fulltext/manual-actions.csv', 'fulltext/manual-actions.md']);
   }
 
   mergeCounters(job, stage, event) {
@@ -797,7 +814,11 @@ class LiteratureConnector {
     if (stage === 'extract' && this.extract) return this.extract(job, python, onEvent);
     if (stage === 'extract') return defaultExtractStage(this.root, job, python, onEvent);
     const extraArgs = [];
-    if (materialsOnly) extraArgs.push('--replenish-materials');
+    if (materialsOnly) {
+      extraArgs.push('--replenish-materials');
+      if (job.materialAccessPolicy === 'defer') extraArgs.push('--defer-access');
+      if (job.retryDeferred === true) extraArgs.push('--retry-deferred');
+    }
     if (stage === 'discover') {
       if (job.resumeCurrent) extraArgs.push('--scrape-current');
       if (job.resumeRun) extraArgs.push('--resume');
@@ -807,7 +828,10 @@ class LiteratureConnector {
     }
     if (stage === 'fulltext' && job.fulltextFailurePolicy === 'skip') extraArgs.push('--skip-unavailable');
     try { return await this.runStage(STAGE_SCRIPTS[stage], extraArgs, job, onEvent); }
-    finally { if (stage === 'discover') job.deferSource = null; }
+    finally {
+      if (stage === 'discover') job.deferSource = null;
+      if (stage === 'fulltext') job.retryDeferred = false;
+    }
   }
 
   async run(job, fromStage = 'discover', until = 'discover') {
@@ -988,7 +1012,7 @@ class LiteratureConnector {
       stages: Object.fromEntries(STAGES.map(stage => [stage, ['discover', 'dedupe'].includes(stage) ? 'done' : 'pending'])),
       resumeStage: 'fulltext', until: 'fulltext', counters: { candidates: snapshot.records.length, uniqueGroups: snapshot.groupIds.length },
       limits: resolveLimits(snapshot.config), activeStage: null, python: null, resumeRun: true, fulltextFailurePolicy: 'pause',
-      attention: null, deferredSources: [], deferSource: null, materialReplenishment: materialBasisFor(created.dir) };
+      attention: null, deferredSources: [], deferSource: null, materialAccessPolicy: 'pause', materialReplenishment: materialBasisFor(created.dir) };
     this.jobs.set(newId, job);
     this.registerFiles(job, [...snapshot.files.map(file => file.name), 'fulltext/status.json',
       ...(snapshot.manifestFile ? ['fulltext/materials.json'] : []), ...snapshot.copies.map(file => file.name), materialReplenishment.MARKER]);
@@ -1140,7 +1164,8 @@ class LiteratureConnector {
       attention: sourceAttention(saved.attention), browserOpening: false,
       deferredSources: checkpointDeferredSources(dir, config), deferSource: null, deletedAt: saved.deletedAt || null,
       processingBasis: processingBasisFor(dir, config),
-      materialReplenishment: saved.materialReplenishment || null, replenishmentInvalid: saved.replenishmentInvalid === true
+      materialReplenishment: saved.materialReplenishment || null, replenishmentInvalid: saved.replenishmentInvalid === true,
+      materialAccessPolicy: saved.materialAccessPolicy === 'defer' ? 'defer' : 'pause', retryDeferred: false
     };
     job.cnkiRetryPaperId = typeof saved.cnkiRetryPaperId === 'string' && PAPER_ID.test(saved.cnkiRetryPaperId) ? saved.cnkiRetryPaperId : null;
     const detected = detectStagedArtifacts(dir);
@@ -1177,6 +1202,22 @@ class LiteratureConnector {
     if (stored?.deletedAt) throw new Error('该任务已删除，请先恢复后再执行');
     const materialsOnly = isMaterialRecord(stored, path.join(this.base, id));
     if (materialsOnly && !materialBasisFor(path.join(this.base, id))) throw new Error('材料补齐冻结输入无法核对，不能继续');
+    const hasDeferAccess = Object.hasOwn(requested, 'deferAccess'), hasRetryDeferred = Object.hasOwn(requested, 'retryDeferred');
+    if (hasDeferAccess || hasRetryDeferred) {
+      if (!materialsOnly) throw new Error('暂留登录与人工补齐清单仅用于材料补齐记录');
+      if ((hasDeferAccess && requested.deferAccess !== true) || (hasRetryDeferred && requested.retryDeferred !== true)) {
+        throw new Error('材料暂留与显式重试必须为 true');
+      }
+      if (!stored || !['needs_attention', 'failed', 'cancelled'].includes(stored.status) || stored.resumeStage !== 'fulltext') {
+        throw new Error('只能在材料补齐暂停后继续，范围保持全文获取');
+      }
+      if (hasRetryDeferred && stored.materialAccessPolicy !== 'defer' && requested.deferAccess !== true) {
+        throw new Error('请先启用暂留人工问题策略后再显式重试清单');
+      }
+      if (hasRetryDeferred && !materialReplenishment.manualActions(path.join(this.base, id)).length) {
+        throw new Error('没有可重试的人工材料清单，请先继续处理其余文献');
+      }
+    }
     if (materialsOnly && ((requested.until && requested.until !== 'fulltext') || requested.confirmations != null
         || Object.hasOwn(requested, 'skipUnavailable') || requested.deferSource !== undefined)) {
       throw new Error('材料补齐只获取 PDF 和补充材料，不能检索、改字段、跳过验证或进入提取');
@@ -1236,6 +1277,8 @@ class LiteratureConnector {
     if (STAGES.indexOf(until) < STAGES.indexOf(stage)) throw new Error('请选择当前待运行阶段或之后的阶段');
     if (requested.confirmations != null) this.appendConfirmations(job, requested.confirmations);
     if (hasSkip) job.fulltextFailurePolicy = requested.skipUnavailable ? 'skip' : 'pause';
+    if (hasDeferAccess) job.materialAccessPolicy = 'defer';
+    job.retryDeferred = hasRetryDeferred;
     job.resumeRun = true;
     job.deferSource = hasDefer ? requested.deferSource : null;
     if (hasDefer) job.resumeCurrent = false;
@@ -1246,9 +1289,37 @@ class LiteratureConnector {
     job.until = until;
     this.update(job, stage, stage === 'fulltext' && job.fulltextFailurePolicy === 'skip'
       ? '继续获取全文：无法取得的正文或补充材料记录原因后跳过，保留已有成果。'
+      : materialsOnly && job.materialAccessPolicy === 'defer'
+        ? hasRetryDeferred ? '显式重试人工材料清单；仍需登录或权限的保留原页，继续其他文献。'
+          : '继续补齐材料：登录、验证和权限问题暂留原页并记入清单，继续其他文献；人工等待不限时。'
       : `继续${STAGE_LABELS[stage] || stage}`);
     void this.run(job, stage, until);
     return this.public(job);
+  }
+
+  async openMaterialAction(id, paperId) {
+    if (!ID.test(id || '') || !PAPER_ID.test(paperId || '')) throw new Error('无效文献任务或文献标识');
+    const dir = path.join(this.base, id), saved = this.jobs.get(id) || loadJsonFile(path.join(dir, 'job.json'));
+    if (!saved || saved.deletedAt) throw new Error(saved?.deletedAt ? '该任务已删除，请先恢复' : '文献任务不存在');
+    if (!isMaterialRecord(saved, dir) || !materialBasisFor(dir)) throw new Error('仅能打开有效材料补齐记录的人工问题页');
+    if (saved.status !== 'needs_attention' || saved.resumeStage !== 'fulltext') throw new Error('请等待本轮材料处理暂停后再打开人工问题页');
+    if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) throw new Error('任务浏览器仍在使用，请稍后再打开');
+    if (!materialReplenishment.manualActions(dir).some(item => item.paperId === paperId)) throw new Error('文献不在本任务人工材料清单中');
+    const browserFile = safeFile(dir, 'fulltext-browser.json');
+    const browser = browserFile && browserFile.size <= 20 * 1024 * 1024 ? loadJsonFile(browserFile.file) : null;
+    const deferred = browser?.deferred_papers?.[paperId];
+    if (deferred?.paper_id !== paperId || typeof deferred.binding?.target_id !== 'string' || !deferred.binding.target_id) {
+      throw new Error('该文献没有可恢复的原浏览器页面，请查看清单中的官方入口后再显式重试');
+    }
+    const job = this.jobs.get(id) || this.loadPersisted(id);
+    job.browserOpening = true;
+    try {
+      const python = await this.prepareOffline(job);
+      if (job.status !== 'needs_attention' || job.deletedAt) throw new Error('任务状态已变化，请刷新后再操作');
+      const result = await this.openDeferred(job, python, paperId);
+      if (result?.opened !== true || result.paper_id !== paperId) throw new Error('原待处理页面打开失败');
+      return { opened: true, paperId, label: '原人工处理页面' };
+    } finally { job.browserOpening = false; }
   }
 
   async openLogin(id) {
@@ -1328,6 +1399,8 @@ class LiteratureConnector {
     }
     restoreCnkiRetryScope(saved, interrupted);
     restoreMaterialScope(saved, dir, interrupted);
+    saved.materialManualActions = saved.materialReplenishment ? materialReplenishment.manualActions(dir) : [];
+    saved.materialManualCount = saved.materialManualActions.length;
     saved.canReplenishMaterials = materialReplenishment.eligible(this.root, id, saved);
     saved.canReviewFulltext = !saved.materialReplenishment && fulltextReviewEligible(saved, dir);
     saved.cnkiRetryItems = saved.materialReplenishment ? [] : cnkiRetryItems(saved, dir);
@@ -1356,6 +1429,8 @@ class LiteratureConnector {
       saved.deferredOnly = checkpointDeferredOnly(path.join(this.base, name), config);
       saved.processingBasis = processingBasisFor(path.join(this.base, name), config);
       restoreMaterialScope(saved, path.join(this.base, name));
+      saved.materialManualActions = saved.materialReplenishment ? materialReplenishment.manualActions(path.join(this.base, name)) : [];
+      saved.materialManualCount = saved.materialManualActions.length;
       saved.canReplenishMaterials = materialReplenishment.eligible(this.root, name, saved);
       saved.executionOrder = executionOrder(config, saved.deferredSources);
       saved.canReviewFulltext = !saved.materialReplenishment && fulltextReviewEligible(saved, path.join(this.base, name));

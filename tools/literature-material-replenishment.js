@@ -143,4 +143,31 @@ function createSnapshot(root, id, snapshot) {
     fs.rmSync(dir, { recursive: true, force: true }); throw error;
   }
 }
-module.exports = { MARKER, sourceSnapshot, readBasis, eligible, createSnapshot };
+// Manual reports are a read-only projection of this child's frozen papers.
+// URLs are displayed to the researcher; page opening uses a saved browser
+// binding and the paper ID, never a URL received from the HTTP request.
+function manualActions(dir) {
+  try {
+    const report = document(dir, 'fulltext/manual-actions.json', false)?.json;
+    if (report?.version !== 1 || !Array.isArray(report.items)) return [];
+    const snapshot = inputSnapshot(dir), titles = new Map(snapshot.records.map(record => [record.candidate_id, record.title]));
+    const allowed = new Set(snapshot.groupIds), seen = new Set();
+    const string = (value, limit) => typeof value === 'string' ? value.slice(0, limit) : '';
+    const officialUrl = value => {
+      try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url.href : ''; }
+      catch (_) { return ''; }
+    };
+    return report.items.flatMap(item => {
+      const paperId = item?.paper_id;
+      if (!allowed.has(paperId) || seen.has(paperId) || item.status !== 'needs_attention') return [];
+      seen.add(paperId);
+      return [{ paperId, title: string(item.title || titles.get(paperId), 1000), status: 'needs_attention',
+        reason: string(item.reason, 100), message: string(item.message, 3000), officialUrl: officialUrl(item.official_url),
+        mainPdfMissing: item.main_pdf_missing === true,
+        supplements: { status: string(item.supplements?.status, 100), checkStatus: string(item.supplements?.check_status, 100),
+          missing: (Array.isArray(item.supplements?.missing) ? item.supplements.missing : []).slice(0, 200)
+            .map(value => string(typeof value === 'string' ? value : value?.label || value?.name || value?.title || value?.path || value?.material_id, 500)).filter(Boolean) } }];
+    });
+  } catch (_) { return []; }
+}
+module.exports = { MARKER, sourceSnapshot, readBasis, eligible, createSnapshot, manualActions };

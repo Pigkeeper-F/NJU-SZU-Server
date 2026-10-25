@@ -249,7 +249,7 @@
   async function autoOpenLiteratureBrowser(id, job) {
     const source = job.attention?.source, reason = job.attention?.reason;
     const t = task(id);
-    if (job.status !== 'needs_attention' || job.stage === 'awaiting_confirmation' || job.deferredOnly === true
+    if (job.status !== 'needs_attention' || job.stage === 'awaiting_confirmation' || job.deferredOnly === true || job.attention?.reason === 'deferred_materials'
       || !LITERATURE_EXECUTABLE_SOURCES.includes(source) || !['login', 'verification', 'access_required'].includes(reason)) {
       t.literatureAutoOpenNotice = ''; return false;
     }
@@ -491,6 +491,12 @@
     const job = t.literatureJob;
     if (!job?.id) { t.literatureError = '没有可继续的检索任务'; render(); return; }
     if (saved[mod.id]?.literatureReadOnlyJobId === job.id) { t.literatureError = '当前只读查看原结果；请返回材料补齐任务继续。'; render(); return; }
+    if ((options.deferAccess === true || options.retryDeferred === true) && (!job.materialReplenishment?.parentJobId || job.resumeStage !== 'fulltext')) {
+      t.literatureError = '仅材料补齐任务可暂缓登录或重试人工待处理文献。'; render(); return;
+    }
+    if (job.attention?.reason === 'deferred_materials' && options.retryDeferred !== true) {
+      t.literatureError = '其他文献已处理；人工登录不限时，处理后请点击“我已处理，重新检查待处理文献”。'; render(); return;
+    }
     const deferSource = options.deferSource;
     const restoreFrozenOrder = deferSource !== undefined && t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig)
       && sameLiteratureDeferralConfig(job.config, t.literatureConfig);
@@ -516,7 +522,9 @@
     try {
       await checkLiteratureRuntime(job.config?.sources || []);
       const body = { id: job.id, until, ...(deferSource !== undefined ? { deferSource } : {}),
-        ...(options.skipUnavailable !== undefined ? { skipUnavailable: options.skipUnavailable } : {}) };
+        ...(options.skipUnavailable !== undefined ? { skipUnavailable: options.skipUnavailable } : {}),
+        ...(options.deferAccess === true || options.retryDeferred === true ? { deferAccess: true } : {}),
+        ...(options.retryDeferred === true ? { retryDeferred: true } : {}) };
       const next = await request('/api/literature/advance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (restoreFrozenOrder || restoreStopped) {
         t.literatureConfig = JSON.parse(JSON.stringify(job.config));
@@ -679,6 +687,19 @@
       t.literatureAutoOpenNotice = t.literatureJob.resumeStage === 'fulltext' ? '已请求显示原全文任务页；处理页面问题后，点击“继续获取全文”。'
         : t.literatureJob.deferredOnly === true ? '已请求打开原任务页面，确认可用后回到这里点击“补检该来源”。'
         : '已请求打开本任务的官方页面，请在平台专用检索浏览器处理后回到这里点击“检查并继续”。';
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  async function openLiteratureMaterialActionPage(mod, paperId) {
+    const t = task(mod.id), job = t.literatureJob;
+    if (!job?.materialReplenishment?.parentJobId || !Array.isArray(job.materialManualActions)
+      || !job.materialManualActions.some(item => item.paperId === paperId) || t.busy || t.literatureBusy || job.status === 'running' || root.LiteratureUI?.isBusy()) return;
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      await checkLiteratureRuntime(job.config?.sources || []);
+      await request('/api/literature/material-action-page', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: job.id, paperId }) });
+      t.literatureMaterialNotice = '已请求显示本篇原官方问题页。人工登录不限时，窗口保留；处理后回平台点击“我已处理，重新检查待处理文献”。';
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
@@ -915,7 +936,9 @@
     'fulltext/review.json': '全文缓存复核报告', 'fulltext/materials.json': '每篇材料清单 JSON',
     'extraction/check_report.json': '提取校验报告', 'validation/validation.json': '校验结果 JSON', 'validation/validation.md': '待审核清单',
     'export/literature.csv': '文献表 CSV', 'export/literature.xlsx': '文献表 Excel', 'export/parameters.csv': '参数明细表 CSV',
-    'export/parameters.xlsx': '参数明细表 Excel', 'export/export_report.md': '导出报告' };
+    'export/parameters.xlsx': '参数明细表 Excel', 'export/export_report.md': '导出报告',
+    'fulltext/manual-actions.json': '人工待处理清单 JSON', 'fulltext/manual-actions.csv': '人工待处理清单 CSV',
+    'fulltext/manual-actions.md': '人工待处理清单说明' };
   const LITERATURE_FILE_GROUPS = [['dedupe', '去重产物'], ['fulltext', '已保存材料与全文记录'], ['extraction', '提取产物'], ['validation', '校验产物'], ['export', '导出产物']];
   function literatureStageLabel(stage) { return LITERATURE_STAGE_LABELS[stage] || String(stage || ''); }
   function literatureFileLabel(name) {
@@ -1738,7 +1761,7 @@
     flowNotes.append(node('p', '讨论需求 → 确认设置 → 执行 → 核查结果', 'codex-status'));
     flowNotes.append(node('p', '候选检索支持 ' + Object.values(LITERATURE_SOURCE_LABELS).join(' / ') + '；开放 API 源免验证码。', 'codex-status'));
     flowNotes.append(node('p', '登录流程：需要登录、验证或机构权限时，平台会尝试自动打开本任务的官方页面。请在平台专用检索浏览器操作，它会保存该浏览器的登录状态；普通 Edge/Chrome 的登录不会自动共享。完成后回到本平台点击“检查并继续”，任务才会恢复。', 'codex-status'));
-    flowNotes.append(node('p', '后台对每次页面加载或候选获取设置1分钟时限，超时后暂停并保留已保存结果；正式检索每页单独计时，依赖准备另行提示。', 'codex-status'));
+    flowNotes.append(node('p', '后台对自动页面加载或候选获取设置1分钟时限，超时后保留已保存结果；这不限制人工登录的等待时间。正式检索每页单独计时，依赖准备另行提示。', 'codex-status'));
     if (job?.files?.includes('fulltext/status.json') || job?.resumeStage === 'fulltext') {
       flowNotes.append(node('p', job.fulltextFailurePolicy === 'skip'
         ? '全文获取逐篇处理：无法取得的正文或补充材料记录原因后跳过，继续下一篇；登录、验证或限流页面保留，同一受限站点本轮不反复请求。已有材料保留，不重复下载；本地文件校验问题仍需处理。'
@@ -1764,6 +1787,33 @@
         reviewFields.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
         reviewFields.onclick = () => openLiteratureFields(mod); fieldsAttention.append(reviewFields); box.append(fieldsAttention);
       }
+    }
+    if (replenishing && Array.isArray(job.materialManualActions) && job.materialManualActions.length) {
+      const manual = node('section', undefined, 'literature-confirm literature-material-manual');
+      manual.append(node('h4', '人工待处理文献 · ' + job.materialManualActions.length + ' 篇'));
+      manual.append(node('p', '人工登录不限时，原窗口保留。可以逐篇处理登录、验证或权限；只有点击“我已处理，重新检查待处理文献”才会检查，不会自动重试或重新下载已存PDF。', 'codex-status'));
+      job.materialManualActions.forEach(item => {
+        const entry = node('div', undefined, 'literature-confirm');
+        entry.append(node('h4', String(item.paperId || '文献ID待核对') + ' · ' + String(item.title || '题名待核对')));
+        const missing = Array.isArray(item.supplements?.missing) ? item.supplements.missing : [];
+        const checkStatus = item.supplements?.checkStatus || item.supplements?.status || 'unknown';
+        const checkLabels = { unknown: '尚未检查', checked: '已检查', none_declared: '未声明补充材料', unverified: '尚未核查', complete: '核查完成', partial: '待补充' };
+        entry.append(node('p', (item.mainPdfMissing ? '正文PDF待补' : '正文PDF未列为缺失') + '；'
+          + '补充材料状态：' + (checkLabels[checkStatus] || checkStatus)
+          + (missing.length ? '；待补：' + missing.join('、') : ''), 'codex-status'));
+        entry.append(node('p', '原因：' + [item.reason, item.message].filter(Boolean).join(' · '), 'codex-status'));
+        const open = node('button', '打开这篇官方问题页', 'quiet-button'); open.type = 'button';
+        open.disabled = !item.paperId || t.busy || t.literatureBusy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
+        open.setAttribute('aria-label', '打开官方问题页：' + String(item.paperId || '未知文献'));
+        open.onclick = () => openLiteratureMaterialActionPage(mod, item.paperId); entry.append(open); manual.append(entry);
+      });
+      if (t.literatureMaterialNotice) manual.append(node('p', t.literatureMaterialNotice, 'codex-status'));
+      if (job.status !== 'running') {
+        const retry = node('button', '我已处理，重新检查待处理文献', 'primary-button'); retry.type = 'button';
+        retry.disabled = t.busy || t.literatureBusy || !!root.LiteratureUI?.isBusy();
+        retry.onclick = () => continueLiterature(mod, { until: 'fulltext', deferAccess: true, retryDeferred: true }); manual.append(retry);
+      }
+      box.append(manual);
     }
     if (!readOnlyResults && job?.status !== 'running' && !job?.deletedAt && Array.isArray(job?.cnkiRetryItems) && job.cnkiRetryItems.length) {
       const retry = node('details', undefined, 'literature-deliverable-group');
@@ -1792,12 +1842,16 @@
         || (job.resumeStage === 'fulltext' && String(job.message || '').startsWith('全文页面加载超过1分钟')))) timeoutAttention = attention;
       const hasSourcePage = LITERATURE_EXECUTABLE_SOURCES.includes(job.attention?.source);
       const fulltextPaused = job.resumeStage === 'fulltext';
+      const deferredMaterials = replenishing && job.attention?.reason === 'deferred_materials';
       const materialsOnly = job.cnkiRetryItems?.some(item => item.id === job.cnkiRetryPaperId && item.materials_only);
       attention.append(node('h4', job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : '当前需要处理：' + (fulltextPaused ? '全文获取' : hasSourcePage ? LITERATURE_SOURCE_LABELS[job.attention.source] : job.resumeStage === 'extract' ? '全文核查与提取确认' : '检索暂停')));
       attention.append(node('p', literatureAttentionMessage(job), 'codex-status'));
+      if (replenishing) attention.append(node('p', deferredMaterials
+        ? '其他可处理文献已处理。人工登录不限时，窗口保留；请按上方清单逐篇处理，点击重试后才检查。'
+        : '人工登录不限时，窗口保留。1分钟仅是自动加载页面的时限；处理后点击重试才会检查。可先暂缓受限文献，继续处理其他篇。', 'codex-status'));
       if (t.literatureAutoOpenNotice && job.deferredOnly !== true) attention.append(node('p', t.literatureAutoOpenNotice, 'codex-status'));
       const actions = node('div', undefined, 'literature-confirm-actions');
-      if (hasSourcePage || fulltextPaused) {
+      if (!deferredMaterials && (hasSourcePage || fulltextPaused)) {
         const open = node('button', fulltextPaused ? '查看原全文任务页' : job.deferredOnly === true ? '查看原页面' : '打开登录/检索页面', 'quiet-button'); open.type = 'button';
         open.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
         open.onclick = () => openLiteratureBrowser(mod);
@@ -1807,8 +1861,13 @@
       resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
       resume.onclick = () => job.cnkiRetryPaperId && fulltextPaused ? retryLiteratureCnki(mod, job.cnkiRetryPaperId)
         : continueLiterature(mod, fulltextPaused ? { until: 'fulltext' } : {});
-      actions.append(resume);
-      if (fulltextPaused && !job.cnkiRetryPaperId) {
+      if (!deferredMaterials) actions.append(resume);
+      if (replenishing && fulltextPaused && !deferredMaterials) {
+        const deferAccess = node('button', '先留待处理，继续其他文献', 'primary-button'); deferAccess.type = 'button';
+        deferAccess.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
+        deferAccess.onclick = () => continueLiterature(mod, { until: 'fulltext', deferAccess: true }); actions.append(deferAccess);
+      }
+      if (fulltextPaused && !job.cnkiRetryPaperId && !replenishing) {
         const skip = node('button', '跳过无法获取的文献，继续', 'primary-button'); skip.type = 'button';
         skip.title = '本任务无法取得的正文或补充材料记入待补充清单，继续下一篇；保留已保存材料，只运行到全文获取。';
         skip.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;

@@ -225,14 +225,15 @@ async function routeAndUiTests() {
   }
 
   // Execute the real button block and its onclick, without constructing a page.
-  const buttonStart = source.indexOf('      if (fulltextPaused && !job.cnkiRetryPaperId) {');
+  const buttonStart = source.indexOf('      if (fulltextPaused && !job.cnkiRetryPaperId && !replenishing) {');
   const buttonEnd = source.indexOf('      if (fulltextPaused && job.cnkiRetryPaperId', buttonStart);
   assert.ok(buttonStart >= 0 && buttonEnd > buttonStart);
   const buttonCode = source.slice(buttonStart, buttonEnd);
   for (const scenario of [{ paused: true, scope: null, same: true, expected: 1 }, { paused: false, scope: null, same: true, expected: 0 },
-    { paused: true, scope: 'CNKI-001', same: true, expected: 0 }, { paused: true, scope: null, same: false, expected: 1 }]) {
+    { paused: true, scope: 'CNKI-001', same: true, expected: 0 }, { paused: true, scope: null, same: false, expected: 1 },
+    { paused: true, scope: null, same: true, materials: true, expected: 0 }]) {
     const buttons = [], continuations = [];
-    const buttonContext = vm.createContext({ fulltextPaused: scenario.paused, job: { cnkiRetryPaperId: scenario.scope },
+    const buttonContext = vm.createContext({ replenishing: scenario.materials === true, fulltextPaused: scenario.paused, job: { cnkiRetryPaperId: scenario.scope },
       t: { literatureBusy: false, busy: false }, sameConfig: scenario.same, root: { LiteratureUI: { isBusy: () => false } }, mod: { id: 'module-fixture' },
       node: (tag, label) => ({ tag, label }), actions: { append: value => buttons.push(value) },
       continueLiterature: (_mod, options) => continuations.push(copy(options)) });

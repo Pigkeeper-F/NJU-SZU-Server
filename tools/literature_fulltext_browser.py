@@ -446,7 +446,7 @@ class FulltextBrowserFetcher:
             self.close()
             return {"status": "error", "message": "本机全文浏览器未能连接，请检查浏览器环境。"}
 
-    def open_current(self):
+    def open_current(self, paper_id=None):
         """Show the exact retained task window without navigation or adoption.
 
         A pending CNKI popup may be the window needing the researcher's help,
@@ -456,7 +456,12 @@ class FulltextBrowserFetcher:
         """
         try:
             binding = self._binding
-            if not binding.get("target_id"):
+            if paper_id is not None:
+                deferred = binding.get("deferred_papers", {}).get(paper_id)
+                if not isinstance(deferred, dict) or not isinstance(deferred.get("binding"), dict):
+                    return {"opened": False, "message": "该文献没有已记录的待处理窗口；未打开其他页面。"}
+                binding = deferred["binding"]
+            elif not binding.get("target_id"):
                 deferred = binding.get("last_deferred_paper")
                 if isinstance(deferred, dict) and isinstance(deferred.get("binding"), dict):
                     binding = deferred["binding"]
@@ -528,11 +533,13 @@ class FulltextBrowserFetcher:
         except (TypeError, ValueError):
             cached = None
         if cached:
+            self._last_deferred_site = _site(str(url or ""))
             return dict(cached, deferred_site=True,
                         message="该站点本批次仍待登录、验证或权限处理，已跳过当前材料；原页面保留，未重复访问。")
+        self._last_deferred_site = ""
         return None
 
-    def defer_paper(self, *, reason="", url=""):
+    def defer_paper(self, *, reason="", url="", paper_id=None):
         """Retain this paper's exact windows and release the task for another.
 
         Skipping is a caller policy, never an access workaround. A login,
@@ -541,6 +548,24 @@ class FulltextBrowserFetcher:
         timeouts apply only to this paper. No page is closed or adopted here.
         """
         blocked = dict(self._blocked or {})
+        shared_site = getattr(self, "_last_deferred_site", "") if not blocked else ""
+        if shared_site and isinstance(paper_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", paper_id):
+            entries = self._binding.setdefault("deferred_papers", {})
+            source = next((entry for entry in entries.values()
+                           if isinstance(entry, dict) and entry.get("site") == shared_site
+                           and isinstance(entry.get("binding"), dict) and entry["binding"].get("target_id")), None)
+            if source:
+                entries[paper_id] = {**source, "paper_id": paper_id,
+                    "shared_from": source.get("shared_from") or source.get("paper_id"),
+                    "deferred_at": self._clock()}
+                for key in ("target_id", "pending_url_hash", "attention_reason", "cnki_flow", "material_flow"):
+                    self._binding.pop(key, None)
+                self._page = None
+                self._blocked = None
+                self._blocked_url = ""
+                self._last_deferred_site = ""
+                self._write_binding()
+                return {"deferred": True, "reason": str(reason), "shared_from": entries[paper_id]["shared_from"]}
         actual = (self._blocked_url or blocked.get("url") or "") if blocked else ""
         if not actual and self._page is not None:
             try:
@@ -576,6 +601,12 @@ class FulltextBrowserFetcher:
             "reason": why, "url": result["url"], "site": destination,
             "deferred_at": self._clock(), "binding": retained,
         }
+        if isinstance(paper_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", paper_id):
+            record = {**self._binding["last_deferred_paper"], "paper_id": paper_id}
+            deferred = self._binding.setdefault("deferred_papers", {})
+            if not isinstance(deferred, dict):
+                raise ValueError("待处理窗口记录无法核验")
+            deferred[paper_id] = record
         for key in retained:
             self._binding.pop(key, None)
         self._write_binding()
@@ -584,6 +615,37 @@ class FulltextBrowserFetcher:
         self._blocked_url = ""
         self._progress("全文获取：暂未取得的页面已保留，继续尝试可访问入口。")
         return {"deferred": True, "reason": why, "url": result["url"]}
+
+    def resume_deferred(self, paper_id):
+        """An explicit retry may rebind only this paper's retained task page."""
+        entry = self._binding.get("deferred_papers", {}).get(paper_id)
+        if not isinstance(entry, dict) or not isinstance(entry.get("binding"), dict):
+            return {"restored": False}
+        retained = entry["binding"]
+        shared = bool(entry.get("shared_from")) or any(
+            key != paper_id and isinstance(other, dict) and other.get("binding", {}).get("target_id") == retained.get("target_id")
+            for key, other in self._binding.get("deferred_papers", {}).items())
+        for key in ("target_id", "pending_url_hash", "attention_reason", "cnki_flow", "material_flow"):
+            self._binding.pop(key, None)
+        # Login cookies are shared by this task's browser. A page held for
+        # other papers remains untouched; retry this paper in a new task tab.
+        self._binding.update({key: value for key, value in ({} if shared else retained).items()
+                              if key in {"target_id", "pending_url_hash", "attention_reason", "cnki_flow", "material_flow"}})
+        self._page = None
+        self._blocked = None
+        self._blocked_url = ""
+        self._last_deferred_site = ""
+        self._deferred_sites.pop(str(entry.get("site") or ""), None)
+        self._write_binding()
+        return {"restored": bool(self._binding.get("target_id")), "shared": shared}
+
+    def clear_deferred(self, paper_id):
+        entries = self._binding.get("deferred_papers")
+        if isinstance(entries, dict) and paper_id in entries:
+            old = entries.pop(paper_id)
+            if self._binding.get("last_deferred_paper", {}).get("binding") == old.get("binding"):
+                self._binding.pop("last_deferred_paper", None)
+            self._write_binding()
 
     def close(self):
         cm, self._runtime_cm = self._runtime_cm, None
