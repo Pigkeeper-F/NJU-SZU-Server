@@ -23,7 +23,7 @@ function functionSource(name) {
   const end = source.indexOf('\n  }', start);
   return source.slice(start, end + 4);
 }
-const FUNCTIONS = ['checkLiteratureRuntime', 'autoOpenLiteratureBrowser', 'watchLiterature', 'startLiterature',
+const FUNCTIONS = ['checkLiteratureRuntime', 'autoOpenLiteratureBrowser', 'watchLiterature', 'startLiterature', 'literatureResumeStage',
   'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'confirmLiteratureFields', 'literatureFieldsAssistState', 'literatureAttentionMessage', 'literatureCompletedMessage', 'literatureProcessingBasisMessage'];
 function job(overrides = {}) {
   return { id: 'original-job', status: 'needs_attention', stage: 'verification', resumeStage: 'discover', until: 'discover',
@@ -126,10 +126,11 @@ async function main() {
     assert.ok(source.includes(text), 'Runtime/login instructions should be visible: ' + text);
   }
   assert.ok(source.includes("'查看原页面' : '打开登录/检索页面'"), 'Manual open remains available after an automatic attempt');
-  const old = harness(); old.setRuntimeError(new Error('404 route not found'));
+  const old = harness(); old.setRuntimeError(new Error('404 route not found')); old.current.literatureJob = null;
   await old.subject.startLiterature(mod);
   assert.equal(old.posts().length, 0, 'Old server must not receive a new search');
   assert.match(old.current.literatureError, /当前端口后台需要更新.*启动/);
+  old.setJob(job());
   await old.subject.continueLiterature(mod);
   assert.equal(old.posts().length, 0, 'Old server must not receive advance');
   await old.subject.openLiteratureBrowser(mod);
@@ -142,7 +143,7 @@ async function main() {
 
   for (const unavailable of [null, { ...RUNTIME, protocolVersion: 0 }, { ...RUNTIME, restartRequired: true },
     { ...RUNTIME, supportedSources: ['pubmed'] }, { ...RUNTIME, browserSession: 'ordinary-browser' }]) {
-    const rejected = harness(); rejected.setRuntime(unavailable);
+    const rejected = harness(); rejected.setRuntime(unavailable); rejected.current.literatureJob = null;
     await rejected.subject.startLiterature(mod);
     assert.equal(rejected.posts().length, 0, 'Unsupported or stale runtime must block execution');
     assert.match(rejected.current.literatureError, /当前端口后台需要更新/);
@@ -150,7 +151,7 @@ async function main() {
   const capabilities = harness(); capabilities.setRuntime({ ...RUNTIME, supportedSources: ['pubmed'] });
   await assert.rejects(() => capabilities.subject.checkLiteratureRuntime(['cnki']), /中国知网/);
 
-  const fresh = harness(); await fresh.subject.startLiterature(mod);
+  const fresh = harness(); fresh.current.literatureJob = null; await fresh.subject.startLiterature(mod);
   const search = fresh.calls.find(call => call.url === '/api/literature/search');
   assert.ok(search); assert.equal(fresh.calls[0].url, '/api/literature/runtime');
   assert.equal(search.body.config.stopMode, 'end'); assert.equal(search.body.config.perSourceLimit, null);

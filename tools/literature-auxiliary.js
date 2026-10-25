@@ -24,6 +24,7 @@ class LiteratureAuxiliary {
     try { saved = JSON.parse(fs.readFileSync(path.join(dir, 'job.json'), 'utf8')); }
     catch (_) { throw failure('检索任务不存在。', 404); }
     if (!saved || saved.id !== id || !fs.existsSync(path.join(dir, 'run_config.json'))) throw failure('检索任务记录不完整。', 404);
+    if (saved.materialReplenishment || saved.replenishmentInvalid || fs.existsSync(path.join(dir, 'materials-basis.json'))) throw failure('材料补齐记录仅用于获取 PDF 和补充材料，不能导入候选或生成新的调研结果。');
     const live = this.scholar.jobs.get(id);
     if (saved.deletedAt || live?.deletedAt) throw failure('检索任务已删除，请先恢复。');
     if (saved.status === 'running' || live?.status === 'running' || live?.child || live?.browserOpening) {

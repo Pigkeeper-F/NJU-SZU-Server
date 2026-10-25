@@ -817,6 +817,12 @@ class MaterialsStore:
             return False
         return True
 
+    def verify_saved(self, record):
+        """Verify recorded originals before an explicit material-only retry."""
+        for material in self._paper(record)["materials"]:
+            if material.get("download_status") == "downloaded" and _material_file(self.job_dir, material) is None:
+                raise MaterialsError("清单中已保存的材料原件缺失或路径无法核验，请先核查；未重新下载或覆盖。")
+
     def flush(self):
         if _reparse(self.job_dir) or _reparse(self.job_dir.parent) or _reparse(self.path.parent) or _reparse(self.path):
             raise MaterialsError("材料清单目录无法安全核验，未覆盖原清单。")

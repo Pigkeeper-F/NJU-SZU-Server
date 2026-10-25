@@ -841,11 +841,16 @@ class FulltextBrowserFetcher:
         if self._blocked:
             return dict(self._blocked, material_discovery=current)
 
+        main_pdf_links = []
+
         def accept(discovery):
             # The outer MaterialCollection.observe() processes this final
             # discovery exactly once. Intermediate pages must not trigger a
             # supplement download before the publisher page is inspected.
-            return {"status": "ok", "material_discovery": discovery}
+            result = {"status": "ok", "material_discovery": discovery}
+            if options.get("replenish_materials"):
+                result["main_pdf_links"] = main_pdf_links
+            return result
 
         candidates: list[str] = []
         raw_links = [article_url] + [str(item.get("url") or "") for item in (record.get("fulltext_links") or [])
@@ -874,6 +879,19 @@ class FulltextBrowserFetcher:
             if result.get("status") in {"attention", "captcha"}:
                 blocked = blocked or result
                 continue
+            proof = result.get("html_evidence") or {}
+            if options.get("replenish_materials") and _material_identity(proof, record):
+                # These links are observed in the same identified article
+                # page, not guessed PDF paths or persisted session tickets.
+                for link in proof.get("links") or []:
+                    if not isinstance(link, dict):
+                        continue
+                    target = literature_browser.safe_url(link.get("url"))
+                    label = str(link.get("text") or link.get("label") or "")
+                    if (target and (link.get("kind") == "pdf" or re.search(r"\.pdf(?:$|[?#])|/(?:e?pdf)(?:/|$)", target, re.I))
+                            and not re.search(r"supplement|supporting|additional|附件|补充", label, re.I)
+                            and all(item["url"] != target for item in main_pdf_links)):
+                        main_pdf_links.append({"url": target, "kind": "pdf", "label": label[:180]})
             discovery = result.get("material_discovery")
             if isinstance(discovery, dict):
                 if (discovery.get("reason") == "only_main_pdf_page_available"
@@ -886,7 +904,7 @@ class FulltextBrowserFetcher:
                     best, best_score, best_status = discovery, score, status
                 if status == "needs_attention":
                     blocked = blocked or result
-        if blocked is not None and best_status not in {"checked", "none_declared"}:
+        if blocked is not None and (options.get("replenish_materials") or best_status not in {"checked", "none_declared"}):
             return blocked
         return accept(best)
         return result

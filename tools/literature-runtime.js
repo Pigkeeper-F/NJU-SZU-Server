@@ -41,6 +41,7 @@ const BACKEND_FILES = [
   'tools/literature_materials.py',
   'tools/literature_material_collection.py',
   'tools/literature-materials.js',
+  'tools/literature-material-replenishment.js',
   'tools/literature_fulltext_reuse.py',
   'tools/literature_target_groups.py',
   'tools/literature_cnki_fulltext.py',

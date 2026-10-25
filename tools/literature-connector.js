@@ -14,6 +14,7 @@ const { normalizeConfig, discoverBudget, MAX_FIELD_DEFINITIONS } = require('./li
 const { executableSources } = require('./literature-sources');
 const { proxyFor } = require('./source-download');
 const { readMaterials, registeredMaterialFile, safeFile } = require('./literature-materials');
+const materialReplenishment = require('./literature-material-replenishment');
 
 function childEnv() {
   const proxy = proxyFor('https:');
@@ -46,6 +47,7 @@ const DELIVERABLE_PATTERNS = [
   /^run_config\.json$/,
   /^candidates\.(?:json|csv)$/,
   /^processing-basis\.json$/,
+  /^materials-basis\.json$/,
   /^dedupe\/dedupe\.(?:json|csv)$/,
   /^fulltext\/status\.json$/,
   /^fulltext\/review\.json$/,
@@ -151,6 +153,30 @@ function processingBasisFor(dir, config) {
   } catch (_) { return null; }
   return { parentJobId: basis.parentJobId, candidateCount: basis.candidateCount,
     deferredSources: [...basis.deferredSources], candidateSnapshotSha256: basis.candidateSnapshotSha256, createdAt: basis.createdAt };
+}
+
+function materialBasisFor(dir) {
+  try { return materialReplenishment.readBasis(dir); } catch (_) { return null; }
+}
+
+function isMaterialRecord(job, dir) {
+  return !!job?.materialReplenishment || job?.replenishmentInvalid === true || fs.existsSync(path.join(dir, materialReplenishment.MARKER));
+}
+
+function restoreMaterialScope(job, dir, interrupted = false) {
+  const basis = materialBasisFor(dir);
+  if (!basis && !isMaterialRecord(job, dir)) { job.materialReplenishment = null; return; }
+  job.materialReplenishment = basis || job.materialReplenishment || { invalid: true };
+  job.replenishmentInvalid = !basis;
+  job.until = 'fulltext'; job.fulltextFailurePolicy = 'pause';
+  job.stages = { ...(job.stages || {}), discover: 'done', dedupe: 'done' };
+  job.resumeStage = job.status === 'completed' && job.stages.fulltext === 'done' ? null : 'fulltext';
+  if (interrupted) {
+    job.status = 'failed'; job.stage = 'interrupted'; job.activeStage = null;
+    job.stages.fulltext = 'pending'; job.resumeStage = 'fulltext'; job.attention = null;
+    job.error = '本地服务重启，材料补齐已暂停；请显式继续，仅补正文 PDF 和补充材料。';
+    job.message = job.error;
+  }
 }
 
 function executionOrder(config, queue) {
@@ -426,7 +452,7 @@ function detectStagedArtifacts(jobDir) {
   const stages = {};
   const candidates = loadJsonFile(path.join(jobDir, 'candidates.json'));
   const config = loadJsonFile(path.join(jobDir, 'run_config.json'));
-  stages.discover = processingBasisFor(jobDir, config) || (candidates && candidates.discovery_complete !== false && !checkpointDeferredSources(jobDir, config).length
+  stages.discover = materialBasisFor(jobDir) || processingBasisFor(jobDir, config) || (candidates && candidates.discovery_complete !== false && !checkpointDeferredSources(jobDir, config).length
     && Array.isArray(candidates.batches) && candidates.batches.length) ? 'done' : 'pending';
 
   const dedupe = loadJsonFile(path.join(jobDir, 'dedupe', 'dedupe.json'));
@@ -572,13 +598,18 @@ class LiteratureConnector {
 
   public(job) {
     const queue = checkpointDeferredSources(job.dir, job.config, job.deferredSources);
+    const materialBasis = materialBasisFor(job.dir), materialsOnly = isMaterialRecord(job, job.dir);
     return { id: job.id, status: job.status, stage: job.stage, message: job.message,
       count: job.count, config: job.config, files: job.files, events: job.events, error: job.error,
       stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters, activeStage: job.activeStage || null,
       fulltextFailurePolicy: job.fulltextFailurePolicy === 'skip' ? 'skip' : 'pause',
       attention: sourceAttention(job.attention), deferredSources: queue, deferredOnly: checkpointDeferredOnly(job.dir, job.config),
       executionOrder: executionOrder(job.config, queue), processingBasis: job.processingBasis || null, deletedAt: job.deletedAt || null,
-      canReviewFulltext: fulltextReviewEligible(job, job.dir), cnkiRetryItems: cnkiRetryItems(job, job.dir),
+      materialReplenishment: materialBasis || job.materialReplenishment || (materialsOnly ? { invalid: true } : null),
+      replenishmentInvalid: materialsOnly && !materialBasis,
+      canReplenishMaterials: materialReplenishment.eligible(this.root, job.id, job),
+      canReviewFulltext: !materialsOnly && fulltextReviewEligible(job, job.dir),
+      cnkiRetryItems: materialsOnly ? [] : cnkiRetryItems(job, job.dir),
       cnkiRetryPaperId: typeof job.cnkiRetryPaperId === 'string' && PAPER_ID.test(job.cnkiRetryPaperId) ? job.cnkiRetryPaperId : null };
   }
 
@@ -757,6 +788,8 @@ class LiteratureConnector {
   async runSingleStage(job, python, stage, runId) {
     job.python = python;
     const onEvent = event => this.onStageEvent(job, runId, stage, event);
+    const materialsOnly = isMaterialRecord(job, job.dir);
+    if (materialsOnly && (stage !== 'fulltext' || !materialBasisFor(job.dir))) throw new Error('材料补齐记录只能运行原候选的全文材料获取');
     if (stage === 'discover' && this.search) {
       try { return await this.search(job, python, onEvent); }
       finally { job.deferSource = null; }
@@ -764,6 +797,7 @@ class LiteratureConnector {
     if (stage === 'extract' && this.extract) return this.extract(job, python, onEvent);
     if (stage === 'extract') return defaultExtractStage(this.root, job, python, onEvent);
     const extraArgs = [];
+    if (materialsOnly) extraArgs.push('--replenish-materials');
     if (stage === 'discover') {
       if (job.resumeCurrent) extraArgs.push('--scrape-current');
       if (job.resumeRun) extraArgs.push('--resume');
@@ -778,6 +812,11 @@ class LiteratureConnector {
 
   async run(job, fromStage = 'discover', until = 'discover') {
     if (job.deletedAt) throw new Error('该任务已删除，请先恢复后再执行');
+    if (isMaterialRecord(job, job.dir)) {
+      if (!materialBasisFor(job.dir)) throw new Error('材料补齐冻结输入无法核对，未开始运行');
+      fromStage = 'fulltext'; until = 'fulltext'; job.until = 'fulltext'; job.resumeRun = true;
+      job.fulltextFailurePolicy = 'pause';
+    }
     const runId = (Number.isInteger(job.runId) ? job.runId : 0) + 1;
     job.runId = runId;
     job.activeStage = fromStage;
@@ -823,7 +862,7 @@ class LiteratureConnector {
       const next = STAGES.find(stage => job.stages[stage] !== 'done') || null;
       job.status = 'completed';
       job.activeStage = null;
-      job.resumeStage = next;
+      job.resumeStage = job.materialReplenishment ? null : next;
       this.update(job, 'completed', job.message || '阶段完成');
     } catch (error) {
       if (job.runId !== runId) return;
@@ -914,8 +953,54 @@ class LiteratureConnector {
     return this.public(job);
   }
 
+  replenishMaterials(id) {
+    if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    const snapshot = materialReplenishment.sourceSnapshot(this.root, id, this.jobs.get(id));
+    // A repeated click returns its existing acquisition record without
+    // resuming it or launching another browser/worker.
+    for (const name of fs.readdirSync(this.base)) {
+      if (!ID.test(name)) continue;
+      const dir = path.join(this.base, name);
+      const rawBasis = loadJsonFile(path.join(dir, materialReplenishment.MARKER));
+      const saved = this.jobs.get(name) || loadJsonFile(path.join(dir, 'job.json'));
+      const linked = [rawBasis, saved?.materialReplenishment].some(basis => basis?.parentJobId === id
+        && (!basis.snapshotSha256 || basis.snapshotSha256 === snapshot.snapshotSha256));
+      if (!linked) continue;
+      const basis = materialReplenishment.readBasis(dir);
+      if (!basis || !saved || saved.id !== name) throw new Error('已有材料补齐记录不完整，请先核对');
+      if (saved.deletedAt) throw new Error('已有材料补齐记录已删除，请先恢复原补齐记录');
+      return this.snapshot(name);
+    }
+    if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) {
+      throw new Error('已有文献任务正在运行，请等待或停止后补齐材料');
+    }
+    // A disk-only running record has not been proved idle. Do not start a
+    // second acquisition browser merely because this process has no handle.
+    for (const name of fs.readdirSync(this.base)) {
+      if (ID.test(name) && loadJsonFile(path.join(this.base, name, 'job.json'))?.status === 'running') {
+        throw new Error('仍有未核对的运行任务，请先在历史任务中处理后再补齐材料');
+      }
+    }
+    const newId = randomUUID(), created = materialReplenishment.createSnapshot(this.root, newId, snapshot);
+    const job = { id: newId, dir: created.dir, config: snapshot.config, resumeCurrent: false, status: 'running', stage: 'queued',
+      message: `沿用原 ${snapshot.records.length} 条候选补齐正文 PDF 与补充材料；原提取和导出保留`,
+      count: snapshot.records.length, files: [], events: [], error: null, child: null,
+      stages: Object.fromEntries(STAGES.map(stage => [stage, ['discover', 'dedupe'].includes(stage) ? 'done' : 'pending'])),
+      resumeStage: 'fulltext', until: 'fulltext', counters: { candidates: snapshot.records.length, uniqueGroups: snapshot.groupIds.length },
+      limits: resolveLimits(snapshot.config), activeStage: null, python: null, resumeRun: true, fulltextFailurePolicy: 'pause',
+      attention: null, deferredSources: [], deferSource: null, materialReplenishment: materialBasisFor(created.dir) };
+    this.jobs.set(newId, job);
+    this.registerFiles(job, [...snapshot.files.map(file => file.name), 'fulltext/status.json',
+      ...(snapshot.manifestFile ? ['fulltext/materials.json'] : []), ...snapshot.copies.map(file => file.name), materialReplenishment.MARKER]);
+    this.syncFulltextSnapshot(job);
+    this.update(job, 'queued', job.message);
+    void this.run(job, 'fulltext', 'fulltext');
+    return this.public(job);
+  }
+
   reviewFulltext(id) {
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    if (isMaterialRecord(this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json')), path.join(this.base, id))) throw new Error('请在材料补齐记录中继续获取材料；复核不替代补齐');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) {
       throw new Error('已有文献任务正在运行，请先停止或等待结束后复核');
     }
@@ -974,6 +1059,7 @@ class LiteratureConnector {
 
   retryCnki(id, paperId, restart = false) {
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    if (isMaterialRecord(this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json')), path.join(this.base, id))) throw new Error('材料补齐记录请使用普通继续，不能改为单篇下载范围');
     if (typeof paperId !== 'string' || !PAPER_ID.test(paperId)) throw new Error('无效的单篇文献标识');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) {
       throw new Error('已有文献任务正在运行，请先停止或等待结束后重试单篇');
@@ -1053,7 +1139,8 @@ class LiteratureConnector {
       limits: resolveLimits(saved.config || diskConfig), activeStage: null, python: null, resumeRun: true,
       attention: sourceAttention(saved.attention), browserOpening: false,
       deferredSources: checkpointDeferredSources(dir, config), deferSource: null, deletedAt: saved.deletedAt || null,
-      processingBasis: processingBasisFor(dir, config)
+      processingBasis: processingBasisFor(dir, config),
+      materialReplenishment: saved.materialReplenishment || null, replenishmentInvalid: saved.replenishmentInvalid === true
     };
     job.cnkiRetryPaperId = typeof saved.cnkiRetryPaperId === 'string' && PAPER_ID.test(saved.cnkiRetryPaperId) ? saved.cnkiRetryPaperId : null;
     const detected = detectStagedArtifacts(dir);
@@ -1077,6 +1164,7 @@ class LiteratureConnector {
       if (!Object.prototype.hasOwnProperty.call(saved, 'resumeStage')) job.resumeStage = detected.resumeStage;
     }
     restoreCnkiRetryScope(job, saved.status === 'running');
+    restoreMaterialScope(job, dir, saved.status === 'running');
     this.jobs.set(id, job);
     return job;
   }
@@ -1087,6 +1175,12 @@ class LiteratureConnector {
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const stored = this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json'));
     if (stored?.deletedAt) throw new Error('该任务已删除，请先恢复后再执行');
+    const materialsOnly = isMaterialRecord(stored, path.join(this.base, id));
+    if (materialsOnly && !materialBasisFor(path.join(this.base, id))) throw new Error('材料补齐冻结输入无法核对，不能继续');
+    if (materialsOnly && ((requested.until && requested.until !== 'fulltext') || requested.confirmations != null
+        || Object.hasOwn(requested, 'skipUnavailable') || requested.deferSource !== undefined)) {
+      throw new Error('材料补齐只获取 PDF 和补充材料，不能检索、改字段、跳过验证或进入提取');
+    }
     if (hasCnkiRetryScope(stored)) throw new Error('请使用“继续这篇知网文献”处理原单篇，不能扩大到其他文献');
     const hasSkip = Object.hasOwn(requested, 'skipUnavailable');
     if (hasSkip) {
@@ -1099,6 +1193,7 @@ class LiteratureConnector {
       if (requested.until != null && requested.until !== '' && requested.until !== 'fulltext') throw new Error('跳过文献只继续全文获取，不进入提取');
     }
     let until = requested.until == null || requested.until === '' ? 'export' : String(requested.until);
+    if (materialsOnly) until = 'fulltext';
     if (hasSkip) until = 'fulltext';
     if (!STAGES.includes(until)) throw new Error('阶段边界必须是 discover–export 的有效阶段名');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening)) throw new Error('已有文献检索正在运行，请等待或停止后重试');
@@ -1126,8 +1221,9 @@ class LiteratureConnector {
       }
     }
     const job = this.jobs.get(id) || this.loadPersisted(id);
+    if (materialsOnly) restoreMaterialScope(job, job.dir);
     if ((requested.until == null || requested.until === '') && job.status === 'needs_attention' && job.resumeStage === 'discover') until = job.until || 'discover';
-    const resumeStoppedFulltext = job.status === 'cancelled' && hasSkip && requested.skipUnavailable === true && job.resumeStage === 'fulltext';
+    const resumeStoppedFulltext = job.status === 'cancelled' && (materialsOnly || (hasSkip && requested.skipUnavailable === true)) && job.resumeStage === 'fulltext';
     if (job.status === 'cancelled' && !resumeStoppedFulltext) throw new Error('任务已停止，不能继续；请发起新检索');
     if (resumeStoppedFulltext && (job.child || !Array.isArray(loadJsonFile(path.join(job.dir, 'fulltext', 'status.json'))?.items))) {
       throw new Error(job.child ? '原任务进程正在退出，请稍后再继续' : '原全文进度无法核对，请先核查历史任务');
@@ -1231,8 +1327,10 @@ class LiteratureConnector {
       }
     }
     restoreCnkiRetryScope(saved, interrupted);
-    saved.canReviewFulltext = fulltextReviewEligible(saved, dir);
-    saved.cnkiRetryItems = cnkiRetryItems(saved, dir);
+    restoreMaterialScope(saved, dir, interrupted);
+    saved.canReplenishMaterials = materialReplenishment.eligible(this.root, id, saved);
+    saved.canReviewFulltext = !saved.materialReplenishment && fulltextReviewEligible(saved, dir);
+    saved.cnkiRetryItems = saved.materialReplenishment ? [] : cnkiRetryItems(saved, dir);
     return saved;
   }
 
@@ -1251,14 +1349,17 @@ class LiteratureConnector {
       if (!saved || typeof saved !== 'object' || Array.isArray(saved)) continue;
       saved.deletedAt = saved.deletedAt || null;
       if (saved.deletedAt && options.includeDeleted !== true) continue;
-      if (!this.jobs.has(name) && saved.status === 'running' && hasCnkiRetryScope(saved)) saved = this.snapshot(name);
+      if (!this.jobs.has(name) && saved.status === 'running' && (hasCnkiRetryScope(saved)
+          || isMaterialRecord(saved, path.join(this.base, name)))) saved = this.snapshot(name);
       const config = saved.config || loadJsonFile(path.join(this.base, name, 'run_config.json'));
       saved.deferredSources = checkpointDeferredSources(path.join(this.base, name), config);
       saved.deferredOnly = checkpointDeferredOnly(path.join(this.base, name), config);
       saved.processingBasis = processingBasisFor(path.join(this.base, name), config);
+      restoreMaterialScope(saved, path.join(this.base, name));
+      saved.canReplenishMaterials = materialReplenishment.eligible(this.root, name, saved);
       saved.executionOrder = executionOrder(config, saved.deferredSources);
-      saved.canReviewFulltext = fulltextReviewEligible(saved, path.join(this.base, name));
-      saved.cnkiRetryItems = cnkiRetryItems(saved, path.join(this.base, name));
+      saved.canReviewFulltext = !saved.materialReplenishment && fulltextReviewEligible(saved, path.join(this.base, name));
+      saved.cnkiRetryItems = saved.materialReplenishment ? [] : cnkiRetryItems(saved, path.join(this.base, name));
       entries.push({ mtime: stat.mtimeMs, job: saved });
     }
     entries.sort((a, b) => b.mtime - a.mtime);

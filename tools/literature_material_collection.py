@@ -16,6 +16,7 @@ class MaterialCollection:
         self.observed = False
         self.checked = False
         self.inspected = False
+        self.main_pdf_links = []
 
     def _attention(self, descriptor, reason, message):
         if descriptor is not None:
@@ -121,6 +122,8 @@ class MaterialCollection:
         except MaterialsError as error:
             return self._attention(None, "local_material_verification", str(error))
         result = inspect(self.record, {**opts, "record": self.record, "on_material_discovery": self.observe})
+        if isinstance(result.get("main_pdf_links"), list):
+            self.main_pdf_links = [dict(link) for link in result["main_pdf_links"] if isinstance(link, dict)]
         if result.get("status") in {"attention", "captcha"}:
             return self._attention(None, result.get("reason") or "verification", str(result.get("message") or "材料检查需要人工处理。"))
         discovery = result.get("material_discovery")

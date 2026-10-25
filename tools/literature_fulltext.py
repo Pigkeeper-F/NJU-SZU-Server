@@ -40,7 +40,7 @@ from urllib.request import Request, urlopen
 
 from literature_fulltext_evidence import (COMPLETENESS_VERSION, EVIDENCE_VERSION, assess_html, assess_completeness, revalidate_saved_html, verified_saved_html)
 from literature_fulltext_browser import FulltextBrowserFetcher
-from literature_fulltext_reuse import ReuseCatalog, inspect_saved, pdf_proof, artifact_destination
+from literature_fulltext_reuse import ReuseCatalog, inspect_saved, pdf_proof, artifact_destination, contained_file
 from literature_materials import MaterialsStore, MaterialsError
 from literature_material_collection import MaterialCollection
 
@@ -844,6 +844,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
                 pdf_result = fetcher.fetch_pdf(pdf_url, pdf_path, opts)
             except Exception:
                 pdf_result = {"status": "error"}
+            if opts.get("replenish_materials"):
+                _raise_page_attention(pdf_result, paper_id, pdf_url)
             if pdf_result.get("status") in {"saved", "already_exists"} and _looks_like_valid_pdf(pdf_path):
                 return _checkpoint_main(
                     _settle_pdf(item, pdf_path, pdf_relative, pdf_url, pdf_path.stat().st_size, record), opts)
@@ -857,6 +859,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             pdf_result = fetcher.fetch_pdf(pmc_pdf, pdf_path, opts)
         except Exception:
             pdf_result = {"status": "error"}
+        if opts.get("replenish_materials"):
+            _raise_page_attention(pdf_result, paper_id, pmc_pdf)
         if pdf_result.get("status") in {"saved", "already_exists"} and _looks_like_valid_pdf(pdf_path):
             return _checkpoint_main(
                 _settle_pdf(item, pdf_path, pdf_relative, pmc_pdf, pdf_path.stat().st_size, record), opts)
@@ -866,12 +870,26 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     # 2) Canonical PMC JATS body (complete sections; no HTML scraping guesswork).
     # Only the real browser fetcher opts into the stdlib Europe PMC call; the
     # offline fixtures keep their injected fetcher and never touch the network.
-    pmc_xml = _pmc_xml_item(record, job_dir, opts) if isinstance(fetcher, FulltextBrowserFetcher) else None
+    pmc_xml = (_pmc_xml_item(record, job_dir, opts)
+               if isinstance(fetcher, FulltextBrowserFetcher) and not (html_main and opts.get("replenish_materials")) else None)
     if pmc_xml is not None and pmc_xml.get("status") in FETCHED_STATUSES:
         return pmc_xml
     xml_fallback = pmc_xml if pmc_xml is not None else None
 
     attempts = candidate_urls(record)
+    if html_main is not None and opts.get("replenish_materials"):
+        # The verified body is already on disk. Only seek its missing PDF;
+        # article-page inspection and supplement retrieval ran separately.
+        links = list(opts.get("main_pdf_links") or [])
+        links += (html_main.get("html_evidence") or {}).get("links") or []
+        attempts = [entry for entry in attempts if entry[0] == "pdf"]
+        for link in links:
+            if not isinstance(link, dict) or _supplement_link(link):
+                continue
+            linked = safe_url(link.get("url"))
+            if linked and (_url_looks_pdf(linked) or link.get("kind") == "pdf") and not _cnki_transfer_url(linked):
+                if all(other != linked for _, other in attempts):
+                    attempts.append(("pdf", linked))
     if pmc_pdf:
         attempts = [entry for entry in attempts if entry[1] != pmc_pdf]
     # Inspect the already observed landing page before leaving it for a PDF,
@@ -884,6 +902,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             and not (_pubmed_article_url(source) and attempts and _pmc_article_url(attempts[0][1]))):
         attempts = [("html", source), *[entry for entry in attempts if entry[1] != source]]
     if not attempts:
+        if html_main is not None:
+            return html_main
         if any(_cnki_transfer_url(link["url"]) for link in _collect_links(record)) or _cnki_transfer_url(_record_result_url(record)):
             raise FulltextPause(paper_id, reason="page_error", message=CNKI_ENTRY_MESSAGE)
         if str(record.get("snippet") or "").strip():
@@ -926,7 +946,7 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
         try:
             _raise_page_attention(result, paper_id, url)
         except FulltextPause as pause:
-            if (_pmc_article_url(url) and _pubmed_article_url(source)
+            if (not opts.get("replenish_materials") and _pmc_article_url(url) and _pubmed_article_url(source)
                     and pause.reason in {"access_required", "login", "page_error", "load_timeout"}
                     and any(candidate_url == source for _, candidate_url in attempts)):
                 release = getattr(fetcher, "defer_paper", None)
@@ -937,7 +957,7 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             # A PMC article page may 404 while its JATS XML/PDF entry is
             # already available. Do not abort the whole batch for this page;
             # record the failure and let XML/PDF fallbacks or the next paper run.
-            if _pmc_article_url(url) and pause.reason in {"page_error", "load_timeout", "results_unrecognized"}:
+            if not opts.get("replenish_materials") and _pmc_article_url(url) and pause.reason in {"page_error", "load_timeout", "results_unrecognized"}:
                 failures.append(f"PMC 文章页不可用：{pause.reason}")
                 continue
             raise
@@ -1315,6 +1335,7 @@ def _run_fulltext(
     retry_unavailable: bool = False,
     restart_cnki: bool = False,
     skip_unavailable: bool = False,
+    replenish_materials: bool = False,
     fetcher=None,
 ) -> int:
     """Execute the fulltext stage; returns the process exit code (0/1)."""
@@ -1417,12 +1438,12 @@ def _run_fulltext(
 
     def eligible(item: dict) -> bool:
         status = str(item.get("status") or "pending")
-        if item.get("acquisition_skip") and not explicit_retry and not item.get("local_verification"):
+        if item.get("acquisition_skip") and not explicit_retry and not replenish_materials and not item.get("local_verification"):
             return False
         if status in RETRYABLE_ON_RESUME:
             return True
         if status in GATED_ON_RESUME:
-            return retry_unavailable
+            return retry_unavailable or replenish_materials
         return False
 
     eligible_items = [item for item in items if item["paper_id"] in allowed and eligible(item)]
@@ -1433,15 +1454,16 @@ def _run_fulltext(
         for item in items:
             if item["paper_id"] not in allowed or item.get("status") not in FETCHED_STATUSES:
                 continue
-            if item.get("acquisition_skip") and not explicit_retry:
+            if item.get("acquisition_skip") and not explicit_retry and not replenish_materials:
                 continue
             paper = materials.paper(target_by_id[item["paper_id"]])
-            if not materials.paper_ready(target_by_id[item["paper_id"]]):
+            if (not materials.paper_ready(target_by_id[item["paper_id"]])
+                    or (replenish_materials and paper.get("main_pdf_status") != "downloaded")):
                 backfill.append(item)
 
     # Quota: min(--limit, fulltext.maxPapers - already fetched)
     quota: int | None = None
-    if options["max_papers"] > 0:
+    if options["max_papers"] > 0 and not replenish_materials:
         fetched_so_far = sum(1 for item in items if item.get("status") in FETCHED_STATUSES)
         quota = max(0, options["max_papers"] - fetched_so_far)
     if limit is not None:
@@ -1461,7 +1483,7 @@ def _run_fulltext(
         item for item in items
         if item["paper_id"] in allowed and str(item.get("status")) in GATED_ON_RESUME
     ]
-    if gated and not retry_unavailable:
+    if gated and not retry_unavailable and not replenish_materials:
         emit(
             "stage",
             stage="fulltext",
@@ -1471,8 +1493,13 @@ def _run_fulltext(
     skipped = len(items) - len(eligible_items)
 
     def incomplete_counts():
-        return {"acquisition_skipped": sum(bool(item.get("acquisition_skip")) for item in items),
-                "material_incomplete": sum(not materials.paper_ready(target) for target in targets)}
+        result = {"acquisition_skipped": sum(bool(item.get("acquisition_skip")) for item in items),
+                  "material_incomplete": sum(not materials.paper_ready(target) for target in targets)}
+        if replenish_materials:
+            result["pdf_missing"] = sum(materials.paper(target).get("main_pdf_status") != "downloaded" for target in targets)
+            result["material_incomplete"] = sum(
+                materials.paper(target).get("main_pdf_status") != "downloaded" or not materials.paper_ready(target) for target in targets)
+        return result
 
     if not eligible_items:
         for target in targets:
@@ -1507,7 +1534,7 @@ def _run_fulltext(
     browser_ready = False
     catalog = ReuseCatalog(job_dir, targets, load_targets)
     opts = {"fetcher": fetcher, "per_paper_timeout_sec": options["per_paper_timeout_sec"],
-            "cnki_restart": restart_cnki}
+            "cnki_restart": restart_cnki, "replenish_materials": replenish_materials}
 
     def ensure_browser():
         nonlocal browser_ready
@@ -1520,7 +1547,9 @@ def _run_fulltext(
 
     for index, item in enumerate(eligible_items, start=1):
         target = target_by_id[item["paper_id"]]
-        if explicit_retry:
+        if replenish_materials and item.get("status") in FETCHED_STATUSES:
+            target["materials_url"] = _materials_page_url(target, item)
+        if explicit_retry or replenish_materials:
             item.pop("acquisition_skip", None)
             item.pop("pause_reason", None)
             materials.paper(target).pop("acquisition_skip", None)
@@ -1580,6 +1609,9 @@ def _run_fulltext(
                 attention = collector.inspect_existing(paper_opts)
                 if not attention:
                     return
+                if replenish_materials:
+                    raise FulltextPause(item["paper_id"], reason=str(attention.get("reason") or "material_download"),
+                                        message=str(attention.get("message") or "材料补齐需要人工处理，原页面已保留。"))
                 # A supplement page that needs login/verification, 404s or
                 # times out must not discard a valid main text or block the
                 # remaining papers. Record it as unverified for a later retry.
@@ -1593,7 +1625,7 @@ def _run_fulltext(
                 updated = current
                 inspect_materials_safely()
             elif current.get("status") == "fetched_html" and (
-                    not callable(getattr(fetcher, "inspect_materials", None))
+                    (not replenish_materials and not callable(getattr(fetcher, "inspect_materials", None)))
                     or materials.paper(target).get("main_pdf_status") == "downloaded"):
                 updated = current
                 inspect_materials_safely()
@@ -1603,6 +1635,12 @@ def _run_fulltext(
                     ready = ensure_browser()
                     if ready.get("status") != "ok":
                         raise FulltextPause(item["paper_id"], reason="page_error", message=str(ready.get("message") or "PDF检查浏览器尚未就绪。"))
+                    if replenish_materials:
+                        attention = collector.inspect_existing(paper_opts)
+                        if attention:
+                            raise FulltextPause(item["paper_id"], reason=str(attention.get("reason") or "material_download"),
+                                                message=str(attention.get("message") or "材料补齐需要人工处理，原页面已保留。"))
+                        paper_opts["main_pdf_links"] = collector.main_pdf_links
                 updated = fetch_one(target, job_dir, paper_opts)
             target["materials_url"] = _materials_page_url(target, updated)
             checkpoint(updated)
@@ -1700,8 +1738,62 @@ def _run_fulltext(
     return 0
 
 
-def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, skip_unavailable=False, fetcher=None):
+def _verify_material_replenishment(config, job_dir):
+    """Bind an explicit material-only run to immutable copied task inputs."""
+    marker_path = contained_file(job_dir, "materials-basis.json")
+    if marker_path is None:
+        raise ValueError("材料补齐只适用于有原任务快照见证的独立子任务")
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    if (not isinstance(marker, dict) or marker.get("version") != 1 or marker.get("kind") != "material-replenishment"
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", str(marker.get("parentJobId") or ""), re.I)
+            or marker.get("parentJobId") == job_dir.name):
+        raise ValueError("材料补齐原任务快照见证无效")
+    files = {"configSnapshotSha256": "run_config.json", "candidateSnapshotSha256": "candidates.json",
+             "candidateCsvSnapshotSha256": "candidates.csv", "dedupeSnapshotSha256": "dedupe/dedupe.json",
+             "dedupeCsvSnapshotSha256": "dedupe/dedupe.csv"}
+    hashes = {}
+    for key, name in files.items():
+        path = contained_file(job_dir, name)
+        if path is None:
+            raise ValueError("材料补齐的冻结输入缺失或路径无法核验：" + name)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if marker.get(key) != digest:
+            raise ValueError("材料补齐的冻结输入已改变：" + name)
+        hashes[key] = digest
+    snapshot = hashlib.sha256(json.dumps(hashes, separators=(",", ":")).encode("utf-8")).hexdigest()
+    if marker.get("snapshotSha256") != snapshot:
+        raise ValueError("材料补齐的快照指纹不一致")
+    saved_config = json.loads((job_dir / "run_config.json").read_text(encoding="utf-8"))
+    candidates = json.loads((job_dir / "candidates.json").read_text(encoding="utf-8"))
+    if config != saved_config or type(marker.get("candidateCount")) is not int or marker["candidateCount"] != len(candidates.get("records") or []):
+        raise ValueError("材料补齐的配置或候选数量与原任务快照不一致")
+    if any((job_dir / name).exists() and any((job_dir / name).rglob("*")) for name in ("extraction", "validation", "export")):
+        raise ValueError("材料补齐子任务不能已有提取、校验或导出成果；请保留原结果")
+    targets = load_targets(job_dir, config)
+    previous = _load_previous_items(job_dir / "fulltext" / "status.json")
+    materials = MaterialsStore(job_dir, targets)
+    for target in targets:
+        saved = previous.get(target["paper_id"])
+        if saved and saved.get("status") in FETCHED_STATUSES:
+            checked = inspect_saved(job_dir, saved, target, for_reuse=False)
+            if checked.get("status") != "valid":
+                raise MaterialsError(checked.get("reason") or "已保存正文无法核验，未重新下载。")
+        materials.verify_saved(target)
+
+
+def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, skip_unavailable=False, replenish_materials=False, fetcher=None):
     job_dir = Path(job_dir)
+    if replenish_materials:
+        try:
+            if not resume or only is not None or limit is not None or retry_unavailable or restart_cnki or skip_unavailable:
+                raise ValueError("材料补齐须使用 --resume，不能与单篇、限量、跳过、普通重试或知网重新定位混用")
+            _verify_material_replenishment(config, job_dir)
+        except MaterialsError as error:
+            emit("attention", stage="verification", reason="local_material_verification", message=str(error))
+            return 0
+        except (OSError, ValueError, TypeError) as error:
+            emit("error", stage="fulltext", message=f"材料补齐失败：{error}")
+            return 1
     if restart_cnki:
         try:
             ids = _parse_only(only)
@@ -1733,7 +1825,7 @@ def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailab
     try:
         return _run_fulltext(config, job_dir, resume=resume, limit=limit, only=only,
                              retry_unavailable=retry_unavailable, restart_cnki=restart_cnki,
-                             skip_unavailable=skip_unavailable, fetcher=actual)
+                             skip_unavailable=skip_unavailable, replenish_materials=replenish_materials, fetcher=actual)
     finally:
         close = getattr(actual, "close", None)
         if callable(close):
@@ -1749,6 +1841,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", help="仅处理指定论文标识，逗号分隔（如 GSC-001,GSC-002）")
     parser.add_argument("--retry-unavailable", action="store_true", help="重试此前标为待补充（unavailable/abstract_only）的项")
     parser.add_argument("--skip-unavailable", action="store_true", help="远程登录、权限、验证或超时项登记待补充并继续；本地材料核验异常仍暂停")
+    parser.add_argument("--replenish-materials", action="store_true", help="仅在关联子任务内重试缺失PDF和补充材料，保留已有原件，不继续提取")
     parser.add_argument("--restart-cnki", action="store_true", help="显式重新定位已选知网单篇，从正常检索页开始一次")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review-only", action="store_true", help="仅离线复核缓存，不访问网站")
@@ -1761,6 +1854,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("运行配置无效")
         if args.restart_cnki and (args.review_only or args.open_current):
             raise ValueError("重新定位不能与离线复核或仅查看原页面同时使用")
+        if args.replenish_materials and (args.review_only or args.open_current):
+            raise ValueError("材料补齐不能与离线复核或仅查看原页面同时使用")
         if args.review_only:
             review_saved_fulltext(args.output_dir)
             return 0
@@ -1783,6 +1878,7 @@ def main(argv: list[str] | None = None) -> int:
             retry_unavailable=args.retry_unavailable,
             restart_cnki=args.restart_cnki,
             skip_unavailable=args.skip_unavailable,
+            replenish_materials=args.replenish_materials,
         )
     except Exception as error:
         emit("error", stage="fulltext", message=f"全文获取失败：{error}")

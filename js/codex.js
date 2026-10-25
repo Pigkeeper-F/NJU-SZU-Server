@@ -490,6 +490,7 @@
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
     const job = t.literatureJob;
     if (!job?.id) { t.literatureError = '没有可继续的检索任务'; render(); return; }
+    if (saved[mod.id]?.literatureReadOnlyJobId === job.id) { t.literatureError = '当前只读查看原结果；请返回材料补齐任务继续。'; render(); return; }
     const deferSource = options.deferSource;
     const restoreFrozenOrder = deferSource !== undefined && t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig)
       && sameLiteratureDeferralConfig(job.config, t.literatureConfig);
@@ -502,8 +503,12 @@
       || deferSource !== job.attention?.source || !LITERATURE_EXECUTABLE_SOURCES.includes(deferSource) || !job.config?.sources?.includes(deferSource))) {
       t.literatureError = '只能暂缓当前等待人工处理的检索来源；请刷新任务状态后重试。'; render(); return;
     }
-    const until = options.until || (deferSource !== undefined ? job.until || t.literatureUntil || 'discover' : t.literatureUntil || job.until || 'discover');
-    const effectiveResumeStage = job.resumeStage || (job.status === 'completed' && (job.files?.includes('candidates.json') || job.files?.includes('candidates.csv')) ? (job.files?.includes('dedupe/dedupe.json') ? 'fulltext' : 'dedupe') : null);
+    const until = job.materialReplenishment?.parentJobId ? 'fulltext'
+      : options.until || (deferSource !== undefined ? job.until || t.literatureUntil || 'discover' : t.literatureUntil || job.until || 'discover');
+    const effectiveResumeStage = literatureResumeStage(job);
+    if (job.materialReplenishment?.parentJobId && !effectiveResumeStage) {
+      t.literatureError = '本次材料补齐已完成；原提取和导出结果保留，可点击查看。'; render(); return;
+    }
     if (effectiveResumeStage && LITERATURE_STAGE_ORDER.indexOf(until) < LITERATURE_STAGE_ORDER.indexOf(effectiveResumeStage)) {
       t.literatureError = '请先在“本次做到哪一步”选择“' + literatureStageLabel(effectiveResumeStage) + '”或更后的阶段，再继续原任务'; render(); return;
     }
@@ -523,6 +528,67 @@
       }
       applyLiteratureJob(mod, next);
       await watchLiterature(mod.id, next.id || job.id);
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  function literatureResumeStage(job) {
+    if (!job) return null;
+    if (job.materialReplenishment?.parentJobId) return job.status === 'completed' ? null : 'fulltext';
+    const stages = job.stages || {};
+    if (job.status === 'completed' && ['discover', 'dedupe', 'fulltext', 'extract', 'validate', 'export'].every(stage => stages[stage] === 'done')) return null;
+    if (['discover', 'dedupe', 'fulltext', 'extract', 'validate', 'export'].includes(job.resumeStage)) return job.resumeStage;
+    if (job.resumeStage || job.status !== 'completed') return null;
+    // Infer only an old candidate-only snapshot. A finished downstream run
+    // cannot be silently turned back into full-text acquisition.
+    const files = Array.isArray(job.files) ? job.files : [];
+    if (['fulltext', 'extract', 'validate', 'export'].some(stage => stages[stage] === 'done')
+      || files.some(name => /^(?:fulltext|extraction|validation|export)\//.test(name))) return null;
+    if (!files.includes('candidates.json') && !files.includes('candidates.csv')) return null;
+    return files.includes('dedupe/dedupe.json') || stages.dedupe === 'done' ? 'fulltext' : 'dedupe';
+  }
+  async function replenishLiteratureMaterials(mod) {
+    const t = task(mod.id), original = t.literatureJob;
+    if (t.busy || t.literatureBusy || root.LiteratureUI?.isBusy() || !original?.id || original.canReplenishMaterials !== true) return;
+    const parentDraft = JSON.parse(JSON.stringify({ id: original.id, config: t.literatureConfig, until: t.literatureUntil,
+      configOpen: t.literatureConfigOpen, source: saved[mod.id]?.literatureSource }));
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      await checkLiteratureRuntime(original.config?.sources || []);
+      const next = await request('/api/literature/replenish-materials', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: original.id }) });
+      if (!next?.id || next.id === original.id || next.materialReplenishment?.parentJobId !== original.id || next.until !== 'fulltext') {
+        throw new Error('未收到可核对的独立材料补齐任务；原候选、提取和导出结果保留，请刷新历史查看。');
+      }
+      t.literatureConfig = JSON.parse(JSON.stringify(next.config || original.config)); t.literatureUntil = 'fulltext';
+      saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureUntil: 'fulltext',
+        literatureMaterialsParentId: original.id, literatureMaterialsChildId: next.id, literatureMaterialsParentDraft: parentDraft,
+        literatureReadOnlyJobId: null, literatureSource: literatureSource(mod) };
+      applyLiteratureJob(mod, next);
+      if (typeof literatureWorkspaceManager === 'function') literatureWorkspaceManager(mod)?.saveActive();
+      await watchLiterature(mod.id, next.id);
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  async function viewLiteratureMaterialsRelatedJob(mod, targetId) {
+    const t = task(mod.id), job = t.literatureJob;
+    const parentId = job?.materialReplenishment?.parentJobId || saved[mod.id]?.literatureMaterialsParentId;
+    const childId = saved[mod.id]?.literatureMaterialsChildId;
+    if (!targetId || ![parentId, childId].includes(targetId) || t.busy || t.literatureBusy || job?.status === 'running' || root.LiteratureUI?.isBusy()) return;
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      const next = await request('/api/literature/job?id=' + encodeURIComponent(targetId));
+      if (next?.id !== targetId || next.deletedAt) throw new Error('关联任务不可读取，请从历史记录核对；原材料和结果保留。');
+      const draft = next.id === parentId && saved[mod.id]?.literatureMaterialsParentDraft?.id === parentId ? saved[mod.id].literatureMaterialsParentDraft : null;
+      t.literatureConfig = JSON.parse(JSON.stringify(draft ? draft.config : next.config || {}));
+      t.literatureUntil = draft?.until || (next.materialReplenishment?.parentJobId ? 'fulltext' : next.until || 'discover');
+      if (draft) t.literatureConfigOpen = draft.configOpen;
+      saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureUntil: t.literatureUntil,
+        literatureMaterialsParentId: parentId, literatureMaterialsChildId: childId || job?.id,
+        literatureReadOnlyJobId: next.id === parentId ? next.id : null,
+        literatureDelivered: [next.id, next.status, next.stage || '', next.events?.length || 0].join(':'),
+        literatureSource: draft ? draft.source : literatureSource(mod), literatureConfigOpen: t.literatureConfigOpen };
+      applyLiteratureJob(mod, next);
+      if (typeof literatureWorkspaceManager === 'function') literatureWorkspaceManager(mod)?.saveActive();
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
@@ -621,6 +687,9 @@
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy || t.literatureFieldsAssistBusy) return;
     const job = t.literatureJob;
     if (!job?.id) { t.literatureError = '没有可确认的检索任务'; render(); return; }
+    if (job.materialReplenishment?.parentJobId || saved[mod.id]?.literatureReadOnlyJobId === job.id) {
+      t.literatureError = '当前仅补齐材料或只读查看原结果，不执行参数提取。'; render(); return;
+    }
     if (literatureFieldsAssistState(mod, job).pending) return;
     if (job.status !== 'needs_attention' || job.stage !== 'awaiting_confirmation') {
       t.literatureFieldsError = '当前可先保存字段草稿；运行到提取阶段后再确认。'; renderLiteratureFieldsDialog(); return;
@@ -1575,13 +1644,40 @@
       if (selector) box.append(selector);
     }
     const row = node('div', undefined, 'codex-toolbar literature-toolbar');
+    const readOnlyResults = !!t.literatureJob?.id && saved[mod.id]?.literatureReadOnlyJobId === t.literatureJob.id;
     const prepare = node('button', t.literatureBusy ? '处理中…' : '从对话整理规则', 'quiet-button');
-    prepare.type = 'button'; prepare.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy(); prepare.onclick = () => prepareLiterature(mod); row.append(prepare);
+    prepare.type = 'button'; prepare.disabled = readOnlyResults || t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy(); prepare.onclick = () => prepareLiterature(mod); row.append(prepare);
     if (!t.literatureConfig) {
       const manual = node('button', '手动填写', 'quiet-button'); manual.type = 'button'; manual.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
       manual.onclick = () => manualLiterature(mod); row.append(manual);
     }
     const job = t.literatureJob;
+    const replenishing = !!job?.materialReplenishment?.parentJobId;
+    const relatedChildId = job?.id && saved[mod.id]?.literatureMaterialsParentId === job.id ? saved[mod.id]?.literatureMaterialsChildId : null;
+    if (job?.canReplenishMaterials === true || replenishing || relatedChildId) {
+      const materialsAction = node('section', undefined, 'literature-confirm literature-replenishment');
+      const candidateCount = replenishing ? job.materialReplenishment.candidateCount : job.counters?.candidates ?? job.count;
+      materialsAction.append(node('p', '沿用原' + (Number.isSafeInteger(candidateCount) ? candidateCount : '待核对的')
+        + '篇候选；仅补材料；原提取和导出结果保留。', 'codex-status'));
+      const actions = node('div', undefined, 'literature-confirm-actions');
+      if (job.canReplenishMaterials === true && !readOnlyResults) {
+        const replenish = node('button', '补齐PDF和补充材料', 'primary-button'); replenish.type = 'button';
+        replenish.disabled = t.busy || t.literatureBusy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
+        replenish.title = '按原任务冻结候选建立独立材料补齐任务；不重新检索、不重做提取或导出。';
+        replenish.onclick = () => replenishLiteratureMaterials(mod); actions.append(replenish);
+      }
+      if (replenishing) {
+        const original = node('button', '查看原提取和导出结果', 'quiet-button'); original.type = 'button';
+        original.disabled = t.busy || t.literatureBusy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
+        original.onclick = () => viewLiteratureMaterialsRelatedJob(mod, job.materialReplenishment.parentJobId); actions.append(original);
+      } else if (relatedChildId) {
+        materialsAction.append(node('p', '当前只读查看原提取和导出结果。', 'codex-status'));
+        const child = node('button', '查看材料补齐任务', 'quiet-button'); child.type = 'button';
+        child.disabled = t.busy || t.literatureBusy || !!root.LiteratureUI?.isBusy();
+        child.onclick = () => viewLiteratureMaterialsRelatedJob(mod, relatedChildId); actions.append(child);
+      }
+      materialsAction.append(actions); box.append(materialsAction);
+    }
     const awaitingConfirm = !!job && job.status === 'needs_attention' && job.stage === 'awaiting_confirmation';
     const awaitingAccess = !!job && job.status === 'needs_attention' && !awaitingConfirm;
     const sameConfig = !t.literatureConfig || !job?.config || sameLiteratureConfig(job.config, t.literatureConfig);
@@ -1600,16 +1696,16 @@
       };
       row.append(stop);
     }
-    const effectiveResumeStage = job?.resumeStage || (job?.status === 'completed' && (job?.files?.includes('candidates.json') || job?.files?.includes('candidates.csv')) ? (job?.files?.includes('dedupe/dedupe.json') ? 'fulltext' : 'dedupe') : null);
+    const effectiveResumeStage = literatureResumeStage(job);
     const canAdvance = !!job && !!effectiveResumeStage && ['completed', 'failed', 'needs_attention'].includes(job.status)
       && job.status !== 'needs_attention';
-    if (canAdvance && !job.cnkiRetryPaperId) {
+    if (canAdvance && !readOnlyResults && !job.cnkiRetryPaperId) {
       const label = job.status === 'completed' ? '继续下一阶段' : job.status === 'failed' ? (job.stage === 'interrupted' ? '继续中断的任务' : '重试当前阶段') : '继续';
       const advance = node('button', label, job.status === 'completed' ? 'primary-button' : 'quiet-button'); advance.type = 'button'; advance.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
       advance.title = '继续原任务，运行到上方所选阶段；请先选择下一阶段或更后的目标。';
       advance.onclick = () => continueLiterature(mod); row.append(advance);
     }
-    if (job?.status === 'cancelled' && job.resumeStage === 'fulltext' && !job.cnkiRetryPaperId) {
+    if (job?.status === 'cancelled' && job.resumeStage === 'fulltext' && !readOnlyResults && !job.cnkiRetryPaperId) {
       const stopped = node('button', '按原任务继续（跳过失败项）', 'primary-button'); stopped.type = 'button';
       stopped.title = '恢复原任务冻结设置与已有候选，保留已存材料，跳过无法取得的正文或补材；只运行到全文获取。';
       stopped.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
@@ -1620,20 +1716,20 @@
       const materials = node('button', '每篇材料清单', 'quiet-button'); materials.type = 'button';
       materials.title = '只读查看正文PDF、网页正文和补充材料的保存与读取状态，不运行任务。';
       materials.onclick = () => openLiteratureMaterials(mod); row.append(materials);
-      if (job.canReviewFulltext === true) {
+      if (job.canReviewFulltext === true && !readOnlyResults && !replenishing) {
         const review = node('button', '复核已保存全文', 'quiet-button'); review.type = 'button';
         review.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
         review.title = '仅离线复核缓存，保留原文件和备份；不打开网页、不重新检索或下载。';
         review.onclick = () => reviewLiteratureFulltext(mod); row.append(review);
       }
-      const editFields = node('button', '设置提取字段', 'quiet-button'); editFields.type = 'button';
+      const editFields = node('button', '设置提取字段', 'quiet-button'); editFields.type = 'button'; editFields.hidden = readOnlyResults || replenishing;
       editFields.disabled = t.literatureBusy || t.busy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
       editFields.onclick = () => openLiteratureFields(mod); row.append(editFields);
     }
     const untilWrap = node('label', '本次做到哪一步');
     const until = node('select'); until.setAttribute('aria-label', '本次运行到');
-    LITERATURE_UNTIL_OPTIONS.forEach(([value, title]) => { const option = node('option', title); option.value = value; until.append(option); });
-    until.value = t.literatureUntil || 'discover'; until.disabled = t.literatureBusy || t.busy;
+    (replenishing ? [['fulltext', '仅补齐全文与补充材料']] : LITERATURE_UNTIL_OPTIONS).forEach(([value, title]) => { const option = node('option', title); option.value = value; until.append(option); });
+    until.value = replenishing ? 'fulltext' : t.literatureUntil || 'discover'; until.disabled = replenishing || readOnlyResults || t.literatureBusy || t.busy;
     until.onchange = () => { t.literatureUntil = until.value; saved[mod.id] = { ...saved[mod.id], literatureUntil: t.literatureUntil }; persist(); };
     untilWrap.append(until); row.append(untilWrap);
     box.append(row);
@@ -1669,7 +1765,7 @@
         reviewFields.onclick = () => openLiteratureFields(mod); fieldsAttention.append(reviewFields); box.append(fieldsAttention);
       }
     }
-    if (job?.status !== 'running' && !job?.deletedAt && Array.isArray(job?.cnkiRetryItems) && job.cnkiRetryItems.length) {
+    if (!readOnlyResults && job?.status !== 'running' && !job?.deletedAt && Array.isArray(job?.cnkiRetryItems) && job.cnkiRetryItems.length) {
       const retry = node('details', undefined, 'literature-deliverable-group');
       retry.append(node('summary', '逐篇重试知网全文 · ' + job.cnkiRetryItems.length + ' 篇'));
       retry.append(node('p', '选择一篇，按完整题名进入知网正常检索与详情页，再获取全文。每次只处理这一篇；不会重新检索候选、批量重试其他文献或进入数据提取。', 'codex-status'));

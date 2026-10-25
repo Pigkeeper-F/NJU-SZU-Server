@@ -135,7 +135,7 @@ const context = vm.createContext({
 });
 const configCode = codex.slice(codex.indexOf('  const LITERATURE_CONFIG_KEYS'), codex.indexOf('  async function prepareLiterature'));
 const labelsCode = codex.slice(codex.indexOf('  const LITERATURE_STAGE_ORDER'), codex.indexOf('  function literatureFileLabel'));
-vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureProcessingBasisMessage', 'literatureDeliverableSummary', 'literatureStatusText', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
+vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'literatureResumeStage', 'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureProcessingBasisMessage', 'literatureDeliverableSummary', 'literatureStatusText', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
   + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, continueAvailableLiterature, openLiteratureBrowser, literatureAttentionMessage, literatureProcessingBasisMessage, literatureStatusText, literatureStageLabel, literatureStageBar, literaturePanel };', context);
 const subject = context.subject;
 

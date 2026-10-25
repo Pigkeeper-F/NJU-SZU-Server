@@ -66,7 +66,7 @@ function createHarness(storage) {
   const start = source.indexOf('  const tasks = {};');
   const end = source.indexOf('  const literatureFieldDraftKey');
   assert.ok(start >= 0 && end > start, 'Missing production task storage initialization');
-  vm.runInContext(source.slice(start, end) + '\n' + ['task', 'persist', 'literatureDeliverableSummary', 'literatureStatusText', 'literaturePanel'].map(functionSource).join('\n')
+  vm.runInContext(source.slice(start, end) + '\n' + ['task', 'persist', 'literatureResumeStage', 'literatureDeliverableSummary', 'literatureStatusText', 'literaturePanel'].map(functionSource).join('\n')
     + '\nglobalThis.subject = {task, literaturePanel, getSaved: () => saved};', context);
   const subject = context.subject;
   return {

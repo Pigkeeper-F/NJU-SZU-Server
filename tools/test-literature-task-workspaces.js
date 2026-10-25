@@ -37,7 +37,10 @@ store.markRun(mod.id, { artifacts: [{ name: 'candidates.csv', size: 30 }] });
 store.setModuleStatus(mod.id, 'doing');
 // Match the normalized shape used after an ordinary page reload.
 store.restoreState(store.getState());
-let client = { literatureJobId: 'sample-a', sessionId: 'session-a', literatureConfig: { topic: '肉鸡小样', query: 'broiler', searchMode: 'test', fieldDefinitions: [{ key: 'temperature', unit: '°C' }] },
+let client = { literatureJobId: 'sample-a', sessionId: 'session-a',
+  literatureMaterialsParentId: 'sample-a', literatureMaterialsChildId: 'materials-child',
+  literatureMaterialsParentDraft: { id: 'sample-a', config: { query: 'unconfirmed parent draft' }, until: 'export' },
+  literatureConfig: { topic: '肉鸡小样', query: 'broiler', searchMode: 'test', fieldDefinitions: [{ key: 'temperature', unit: '°C' }] },
   literatureUntil: 'fulltext', literatureDelivered: 'old-stamp' };
 let rules = { draft: '小样规则', confirmed: '小样规则', versions: [{ text: '小样规则' }] };
 let legacy = { binding: { id: 'legacy-a', sessionId: 'session-a' }, state: { run: { id: 'legacy-a', status: 'waiting' } } };
@@ -84,6 +87,8 @@ assert.equal(b.ok, true);
 assert.equal(b.context.mode, 'formal');
 assert.equal(client.sessionId, undefined); assert.equal(client.literatureJobId, undefined);
 assert.equal(client.confirmations, undefined); assert.equal(client.materials, undefined);
+assert.equal(client.literatureMaterialsParentDraft, undefined, 'Reused new-task seeds must not inherit material task links or parent drafts');
+assert.equal(client.literatureMaterialsChildId, undefined);
 assert.equal(client.literatureConfig.fieldDefinitions[0].unit, '°C');
 let currentModule = store.getState().modules.find(item => item.id === mod.id);
 assert.equal(currentModule.messages.length, 0); assert.equal(currentModule.run, null);
@@ -107,6 +112,7 @@ assert.equal(manager.active().id, c.context.id, 'Reload retains selected subtask
 assert.equal(manager.switch(a.id).ok, true);
 assert.equal(JSON.stringify(store.getState().modules.find(item => item.id === mod.id)), aModule);
 assert.equal(JSON.stringify(client), aClient); assert.equal(JSON.stringify(legacy), aLegacy);
+assert.equal(client.literatureMaterialsParentDraft.config.query, 'unconfirmed parent draft', 'Switching and reloading retain the original parent configuration draft');
 assert.equal(JSON.stringify(chat), aChat); assert.equal(JSON.stringify(rules), aRules);
 assert.equal(JSON.stringify(store.getDocHistory(mod.id)), aHistory);
 assert.equal(manager.switch(b.context.id).ok, true);
