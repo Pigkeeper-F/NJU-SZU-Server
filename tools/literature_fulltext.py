@@ -1362,9 +1362,12 @@ def _write_manual_actions(job_dir, items, targets, materials):
         paper = materials.paper(target)
         supplement = materials.completeness(target)
         official = _manual_entry_url(target)
+        message = deferred.get("message")
+        if deferred.get("reason") == "pdf_unavailable":
+            message = "尚未取得正文PDF；已有材料保留。"
         actions.append({"paper_id": item["paper_id"], "title": str(target.get("title") or "")[:500],
             "status": "needs_attention", "reason": str(deferred.get("reason") or "materials_incomplete"),
-            "message": _manual_message(deferred.get("message"), official), "official_url": official,
+            "message": _manual_message(message, official), "official_url": official,
             "main_pdf_missing": paper.get("main_pdf_status") != "downloaded",
             "supplements": {"status": supplement["status"], "check_status": supplement["check_status"], "missing": supplement["missing"]},
             "deferred_at": deferred.get("deferred_at") or "", "waiting_policy": "until_explicit_retry"})
@@ -1820,7 +1823,7 @@ def _run_fulltext(
             missing_supplements = materials.completeness(target)["status"] != "complete"
             if missing_pdf or missing_supplements:
                 reason = "pdf_unavailable" if missing_pdf else "supplements_incomplete"
-                message = ("尚未取得正文PDF；已存网页正文保留。" if missing_pdf else "正文PDF已保存，补充材料尚未齐全或尚不能确认。")
+                message = ("尚未取得正文PDF；已有材料保留。" if missing_pdf else "正文PDF已保存，补充材料尚未齐全或尚不能确认。")
                 defer_manual(updated, target, reason, message)
                 continue
             updated.pop("material_deferred", None)
