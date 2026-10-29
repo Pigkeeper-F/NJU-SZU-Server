@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const $ = id => document.getElementById(id);
-  let currentView = 'workspace';
+  let currentView = new URLSearchParams(location.search).get('view') === 'records' ? 'records' : 'workspace';
   const node = (tag, className, text) => {
     const el = document.createElement(tag);
     el.className = className || '';
@@ -19,9 +19,15 @@
     setTimeout(() => { el.hidden = true; }, 4000);
   }
   function switchView(view) {
+    if (!['workspace', 'records'].includes(view)) return false;
     currentView = view;
+    const url = new URL(location.href);
+    if (view === 'records') url.searchParams.set('view', 'records'); else url.searchParams.delete('view');
+    try { history.replaceState(null, '', url); } catch (_) { /* file:// may disallow history updates. */ }
     render();
+    return true;
   }
+  window.WorkspaceUI = Object.assign(window.WorkspaceUI || {}, { switchView });
   function welcome() {
     const panel = node('div', 'welcome');
     panel.append(node('div', 'eyebrow', '研序 · 研究工作台'), node('h2', '', '开始你的研究'), node('p', '', '从下载数据开始，逐步完成清洗、计算与分析。每个模块都有独立的对话与工作记录。'));
@@ -150,14 +156,15 @@
       el.classList.toggle('is-active', el.dataset.view === currentView);
       if (el.dataset.view === currentView) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     });
-    document.querySelector('.module-tabs-bar').hidden = currentView !== 'workspace';
-    document.querySelector('.module-tabs-bar').classList.toggle('is-empty', !state.modules.length);
+    document.querySelector('.module-tabs-bar').hidden = false;
+    document.querySelector('.module-tabs-bar').classList.toggle('is-empty', !state.modules.length && !$('module-tabs').dataset.fixedWorkbench);
     $('module-space').hidden = currentView !== 'workspace';
     $('composer').hidden = currentView !== 'workspace';
     $('records-view').hidden = currentView !== 'records';
     document.querySelectorAll('.module-tab, .sidebar-tab').forEach(el => { el.tabIndex = 0; });
     if (currentView === 'records') renderRecords(state);
     decorateSpace();
+    document.querySelector('.section-heading').classList.toggle('records-heading', currentView === 'records');
   }
   document.querySelectorAll('[data-new-module]').forEach(button => button.addEventListener('click', () => {
     const modules = Store.getState().modules;
@@ -217,7 +224,7 @@
   $('btn-send').addEventListener('click', saveNote, true);
   $('composer-input').addEventListener('keydown', saveNote, true);
   $('module-tabs').addEventListener('keydown', event => {
-    if (event.target.classList.contains('module-tab') && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); Store.selectModule(event.target.dataset.id); }
+    if (event.target.classList.contains('module-tab') && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); event.target.click(); }
   });
   $('module-tabs').addEventListener('click', event => {
     if (matchMedia('(max-width: 640px)').matches && event.target.closest('.module-tab') && !event.target.closest('button')) Store.setSidebar({ collapsed: true });

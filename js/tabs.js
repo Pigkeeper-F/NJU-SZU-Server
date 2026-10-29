@@ -171,12 +171,55 @@
 
   // ------------------------------------------------------------ 渲染
 
+  // Fixed navigation is presentation-only: instantiate a module on first click,
+  // without running it or changing the Store's scientific/dependency gates.
+  function renderWorkbench(state) {
+    var modules = state.modules || [];
+    var calculation = modules.filter(function (mod) { return mod.type === 'calculation'; })[0];
+    tabsEl.innerHTML = '';
+    FIXED_MODULES.filter(function (item) { return !item.conditional; }).forEach(function (item) {
+      var mod = modules.filter(function (entry) { return entry.type === item.id && !entry.step; })[0]
+        || modules.filter(function (entry) { return entry.type === item.id; })[0];
+      var tab;
+      if (mod) tab = createTab(mod, state.activeModuleId, modules);
+      else {
+        tab = doc.createElement('button'); tab.type = 'button'; tab.className = 'module-tab module-tab-placeholder';
+        tab.setAttribute('data-add-type', item.id); tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', 'false');
+        var title = doc.createElement('span'); title.className = 'module-tab-title'; title.textContent = item.name; tab.appendChild(title);
+        var blocked = ['plotting', 'result-audit', 'manual-review'].indexOf(item.id) >= 0 && (!calculation || !calculation.mode);
+        tab.disabled = blocked; tab.setAttribute('aria-disabled', String(blocked));
+        tab.title = blocked ? '先进入模型调整与计算，选择计算方式' : '进入' + item.name + '；不会自动执行';
+        var hint = doc.createElement('span'); hint.className = 'module-dep'; hint.textContent = blocked ? '先选择计算方式' : '点击进入'; tab.appendChild(hint);
+      }
+      tab.setAttribute('data-module-type', item.id);
+      tabsEl.appendChild(tab);
+      if (item.id === 'calculation') {
+        var children = modules.filter(function (entry) { return ['parameter-update', 'activity-data-update'].indexOf(entry.type) >= 0; });
+        if (children.length) {
+          var group = doc.createElement('details'); group.className = 'workbench-submodules';
+          group.open = children.some(function (entry) { return entry.id === state.activeModuleId; });
+          var summary = doc.createElement('summary'); summary.textContent = '计算子环节'; group.appendChild(summary);
+          children.forEach(function (entry) { group.appendChild(createTab(entry, state.activeModuleId, modules)); }); tabsEl.appendChild(group);
+        }
+      }
+    });
+    if (addBtn) addBtn.hidden = true;
+    if (addMenuEl) addMenuEl.hidden = true;
+    if (chainEl) chainEl.textContent = '';
+  }
+
   function render() {
     if (!tabsEl) return;
     var S = getStore();
     if (!S) return; // 数据层缺失：静默（T5/app.js 负责给出明确报错）
 
     var state = S.getState() || {};
+    var legacyFlow = /(?:^|[?&])flow=1(?:&|$)/.test(String(root.location && root.location.search || ''));
+    if (tabsEl.getAttribute && tabsEl.getAttribute('data-fixed-workbench') === 'true') {
+      tabsEl.classList.toggle('workbench-module-tabs', !legacyFlow);
+      if (!legacyFlow) { renderWorkbench(state); return; }
+      if (addBtn) addBtn.hidden = false;
+    }
     var modules = state.modules || [];
     var activeId = state.activeModuleId;
     var moduleTypes = modules.map(function (item) { return item.type; });
@@ -337,10 +380,12 @@
   function onTabsClick(e) {
     if (!tabsEl) return;
     var S = getStore();
+    if (!S) return;
     var addPath = closestWithin(e.target, '[data-add-type]', tabsEl);
     if (addPath) {
       var definition = FIXED_MODULES.filter(function (item) { return item.id === addPath.getAttribute('data-add-type'); })[0];
       if (definition) S.addModule(definition.name);
+      if (root.WorkspaceUI && root.WorkspaceUI.switchView) root.WorkspaceUI.switchView('workspace');
       return;
     }
     if (!S) return;
@@ -369,6 +414,7 @@
     }
 
     S.selectModule(id);
+    if (root.WorkspaceUI && root.WorkspaceUI.switchView) root.WorkspaceUI.switchView('workspace');
   }
 
   function onTabsDblClick(e) {

@@ -21,17 +21,22 @@
                 title="折叠 / 展开侧栏" aria-label="折叠或展开侧栏">&#9776;</button>
       </div>
       <!-- 选项卡列表容器：由 sidebar.js 渲染 .sidebar-tab / .sidebar-tab-active -->
-      <nav class="workspace-nav" aria-label="主导航">
-        <button class="nav-item is-active" data-view="workspace" type="button"><span class="nav-icon">▦</span>研究空间</button>
-        <button class="nav-item" data-view="records" type="button"><span class="nav-icon">▤</span>工作记录<span id="records-count" class="nav-count">0</span></button>
-      </nav>
-      <div class="nav-label project-label">研究流程 <span id="module-count">0 个模块</span></div>
+      <nav class="workspace-nav sidebar-navigation" aria-label="主导航">
+        <details id="sidebar-task-section" class="sidebar-section">
+          <summary><span class="nav-icon" aria-hidden="true">▤</span><span>任务</span><span class="sidebar-section-chevron" aria-hidden="true"></span></summary>
+          <div class="task-bar"><label for="task-select">当前任务</label><select id="task-select" aria-label="切换任务"></select><button id="task-new" class="quiet-button" type="button">＋ 新建任务</button><button id="backup-project" class="quiet-button" type="button" title="导出浏览器工作记录备份，不含 API Key">备份</button><button id="import-project" class="quiet-button" type="button" title="从 JSON 备份恢复浏览器工作记录">恢复</button></div>
+        </details>
+        <details id="sidebar-workspace-section" class="sidebar-section" open>
+          <summary class="nav-item is-active" data-view="workspace"><span class="nav-icon" aria-hidden="true">▦</span><span>研究空间（工作台）</span><span class="sidebar-section-chevron" aria-hidden="true"></span></summary>
       <div class="module-tabs-bar">
-        <div id="module-tabs" class="module-tabs" role="tablist" aria-label="研究模块" aria-orientation="vertical"></div>
+        <div id="module-tabs" class="module-tabs workbench-module-tabs" data-fixed-workbench="true" role="tablist" aria-label="研究模块" aria-orientation="vertical"></div>
         <div id="module-chain" class="module-chain" hidden></div>
-        <button id="btn-add-module" class="module-tab-add" type="button" title="添加环节" aria-label="添加环节">＋ 添加环节</button>
+        <button id="btn-add-module" class="module-tab-add" type="button" title="添加环节" aria-label="添加环节" hidden>＋ 添加环节</button>
         <span id="fixed-module-menu" class="fixed-module-next" hidden></span>
       </div>
+        </details>
+      </nav>
+      <span id="module-count" hidden>0 个模块</span><span id="records-count" hidden>0</span>
       <div id="sidebar-tabs" class="sidebar-tabs" hidden></div>
       <div class="sidebar-footer"><div class="sidebar-tools"><div class="api-menu"><button id="add-api-button" class="quiet-button" type="button" aria-label="添加 API" title="添加 API" aria-haspopup="menu" aria-expanded="false"><span aria-hidden="true">＋</span><span class="api-button-label">添加 API</span></button><div id="api-provider-menu" class="api-provider-menu" role="menu" hidden><button type="button" role="menuitem" data-api-provider="deepseek">DeepSeek</button><button type="button" role="menuitem" data-api-provider="openai">OpenAI</button></div></div><button id="edit-dependencies-button" class="quiet-button" type="button" title="用系统文本编辑器打开项目依赖清单" aria-label="编辑依赖"><span aria-hidden="true">✎</span><span class="dependency-button-label">编辑依赖</span></button></div></div>
       <div class="sidebar-bottom"><span class="profile-avatar">研</span><div>个人工作空间<small id="auth-user">已登录</small></div><button id="btn-logout" class="icon-btn" type="button" title="退出登录" aria-label="退出登录">⎋</button></div>
@@ -42,9 +47,7 @@
     <!-- ================================ 主区 ================================ -->
     <main id="main" class="main">
       <div class="workspace-body"><section class="work-area" aria-label="模块工作区">
-      <div class="task-bar"><label for="task-select">当前任务</label><select id="task-select" aria-label="切换任务"></select><button id="task-new" class="quiet-button" type="button">＋ 新建任务</button><button id="backup-project" class="quiet-button" type="button" title="导出浏览器工作记录备份，不含 API Key">备份</button><button id="import-project" class="quiet-button" type="button" title="从 JSON 备份恢复浏览器工作记录">恢复</button></div>
-      <div id="task-summary" class="task-rules-bar"><span>执行规则</span><span id="task-summary-status">尚未确认</span><button id="task-rules-open" class="quiet-button" type="button">查看 / 编辑规则</button></div>
-      <div class="section-heading"><h2 id="section-name">模块工作区</h2><span id="active-module-meta"></span></div>
+      <div class="section-heading"><div class="section-heading-main"><h2 id="section-name">模块工作区</h2><div id="task-summary" class="task-rules-bar"><span>执行规则</span><span id="task-summary-status">尚未确认</span><button id="task-rules-open" class="quiet-button" type="button">查看 / 编辑规则</button></div></div><span id="active-module-meta"></span></div>
       <!-- 顶部模块选项卡条：T3: js/tabs.js 渲染 #module-tabs 内容 -->
 
       <!-- 模块独立空间：T4: js/chat.js 渲染 .msg-list / .empty-state -->
@@ -60,13 +63,13 @@
         </div>
         <div class="composer-hint">Enter 发送 · Shift+Enter 换行 · 每个模块记忆独立</div>
       </div>
-      <section id="records-view" class="records-view" hidden><div class="records-search-row"><input id="records-search" class="records-search" type="search" placeholder="搜索记录…" autocomplete="off"></div><div id="records-list"></div></section>
+      <section id="records-view" class="records-view" hidden><div class="records-search-row"><input id="records-search" class="records-search" type="search" placeholder="搜索记录…" autocomplete="off"><button class="quiet-button" data-view="workspace" type="button">返回工作台</button></div><div id="records-list"></div></section>
       </section></div>
     </main>
   </div>
 
   <dialog id="api-dialog"><form id="api-form"><div class="dialog-top"><span id="api-dialog-eyebrow" class="eyebrow">API KEY</span><button class="icon-btn" id="api-close-dialog" type="button" aria-label="关闭">×</button></div><h2 id="api-dialog-title">添加 API</h2><p id="api-dialog-description">密钥会保存在当前浏览器，并通过本地服务代理请求模型。</p><label for="api-key-input" id="api-key-label">API Key</label><div class="api-key-row"><input id="api-key-input" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 API Key"><button id="api-paste-key" class="quiet-button" type="button">粘贴</button><button id="api-copy-key" class="quiet-button" type="button">复制</button></div><label for="api-model-input">模型</label><input id="api-model-input" autocomplete="off" placeholder="例如：deepseek-flash"><div class="dialog-actions"><button id="api-remove-key" class="quiet-button" type="button">移除已存密钥</button><button id="api-cancel-dialog" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">保存</button></div></form></dialog>
-  <dialog id="task-dialog"><form id="task-form"><div class="dialog-top"><span class="eyebrow">NEW TASK</span><button class="icon-btn" id="task-dialog-close" type="button" aria-label="关闭">×</button></div><h2>新建任务</h2><p>新任务有独立的模块对话与文件会话；当前练习保留，可随时切回。</p><label for="task-name">任务名称</label><input id="task-name" maxlength="80" required placeholder="例如：1992 年模型计算"><label for="task-start">从哪一步开始</label><select id="task-start"><option value="research">文献调研（完整九步研究流程）</option><option value="download">下载数据</option><option value="clean">数据清洗（已有原始文件）</option><option value="literature">文献挖掘</option><option value="calculation">模型调整与计算（已有代码和输入数据）</option></select><div class="dialog-actions"><button id="task-dialog-cancel" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">创建任务</button></div></form></dialog>
+  <dialog id="task-dialog"><form id="task-form"><div class="dialog-top"><span class="eyebrow">NEW TASK</span><button class="icon-btn" id="task-dialog-close" type="button" aria-label="关闭">×</button></div><h2>新建任务</h2><p>新任务有独立的模块对话与文件会话；当前练习保留，可随时切回。</p><label for="task-name">任务名称</label><input id="task-name" maxlength="80" required placeholder="例如：1992 年模型计算"><label for="task-start">从哪一步开始</label><select id="task-start"><option value="download">下载数据</option><option value="clean">数据清洗（已有原始文件）</option><option value="literature">文献挖掘</option><option value="calculation">模型调整与计算（已有代码和输入数据）</option></select><div class="dialog-actions"><button id="task-dialog-cancel" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">创建任务</button></div></form></dialog>
   <dialog id="rules-dialog"><div class="dialog-top"><span class="eyebrow">TASK RULES</span><button class="icon-btn" id="rules-dialog-close" type="button" aria-label="关闭">×</button></div><h2>执行规则</h2><p>这里只放你决定要执行的规则。可以自己填写，或让 AI 从对话中提取候选规则；AI 草稿须经你核对并确认。</p><div id="task-summary-confirmed" class="task-summary-confirmed" hidden></div><label for="task-summary-draft">规则草稿</label><textarea id="task-summary-draft" rows="12" placeholder="处理范围、输入文件、具体清洗/转换规则、异常处理、验收标准、输出文件……只写已经确定的内容。"></textarea><div class="task-rules-footer"><div id="task-rules-execution-status" role="status"></div><div class="task-summary-actions"><select id="task-summary-history" aria-label="查看规则历史版本"><option value="">历史版本</option></select><button id="task-rules-discuss" class="quiet-button" type="button">继续讨论完善规则</button><button id="task-summary-ai" class="quiet-button" type="button">AI 提取候选规则</button><button id="task-summary-save" class="primary-button" type="button">确认规则</button><button id="task-rules-execute" class="primary-button" type="button">按规则执行清洗</button></div><div id="task-summary-message" role="status"></div></div></dialog>
 
   <div id="toast" class="toast" role="status" hidden></div>

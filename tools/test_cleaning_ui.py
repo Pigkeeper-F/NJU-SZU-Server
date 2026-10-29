@@ -39,13 +39,16 @@ def main():
 
             def api(route):
                 parsed = urlparse(route.request.url)
-                body = route.request.post_data_json if route.request.post_data else None
+                body = route.request.post_data_json if route.request.post_data and "application/json" in route.request.headers.get("content-type", "") else None
                 calls.append((parsed.path, body))
                 if parsed.path == "/api/codex/status":
                     data = {"loggedIn": True, "model": "fixture-model", "models": [{"model": "fixture-model"}]}
                 elif parsed.path == "/api/codex/session":
                     data = {"id": SESSION, "files": []}
                 elif parsed.path == "/api/codex/files":
+                    data = {"files": FILES}
+                elif parsed.path == "/api/codex/upload":
+                    FILES.append({"group": "input", "name": "ddccbbaa-added.csv", "size": 20})
                     data = {"files": FILES}
                 elif parsed.path == "/api/codex/cleaning/profile":
                     data = {"row_count": 2, "blocked": False, "tables": [{"id": "T1", "columns": ["code", "value"], "row_count": 2, "fields": [], "issues": []}],
@@ -80,7 +83,20 @@ def main():
             page.evaluate("CodexUI.refresh(Store.getState().activeModuleId)")
             summary = page.locator("summary").filter(has_text="数据检查与处理范围")
             expect(summary).to_contain_text("2 个文件")
+            expect(page.locator(".codex-upload-status")).to_have_text("已上传 2 个 · 本次已选 2 个")
+            mode = page.get_by_label("Codex 工作模式", exact=True).bounding_box()
+            choose = page.get_by_role("button", name="选择文件", exact=True).bounding_box()
+            assert abs((mode["y"] + mode["height"] / 2) - (choose["y"] + choose["height"] / 2)) < 2
+            title = page.locator("#section-name").bounding_box()
+            rules = page.locator("#task-summary").bounding_box()
+            assert abs((title["y"] + title["height"] / 2) - (rules["y"] + rules["height"] / 2)) < 2
+            page.get_by_label("上传清洗原始文件", exact=True).set_input_files({"name": "added.csv", "mimeType": "text/csv", "buffer": b"code,value\n006,1\n"})
+            expect(page.locator(".codex-upload-status")).to_have_text("已上传 3 个 · 本次已选 3 个")
             summary.click()
+            page.get_by_label("added.csv", exact=True).uncheck()
+            expect(page.locator(".codex-upload-status")).to_have_text("已上传 3 个 · 本次已选 2 个")
+            page.get_by_role("button", name="刷新文件", exact=True).click()
+            expect(page.locator(".codex-upload-status")).to_have_text("已上传 3 个 · 本次已选 2 个")
             page.get_by_role("button", name="检查所选数据", exact=True).click()
             expect(page.locator(".codex-panel")).to_contain_text("结构检查完成")
             page.get_by_label(FILES[1]["name"] + " 选择工作表", exact=True).select_option(["Data"])
@@ -100,11 +116,17 @@ def main():
             expect(bundle).to_have_attribute("href", __import__("re").compile("inputs=1"))
             replay.click()
             page.wait_for_function("document.querySelector('.codex-panel').textContent.includes('固定核验')")
+            page.wait_for_function("!CodexUI.busy(Store.getState().activeModuleId)")
             assert len([c for c in calls if c[0] == "/api/codex/run"]) == 1
             assert len([c for c in calls if c[0] == "/api/codex/cleaning/replay"]) == 1
+            previews = ROOT / ".workbench/test-fixtures/cleaning-layout"
+            previews.mkdir(parents=True, exist_ok=True)
+            page.locator("summary").filter(has_text="清洗结果").first.click()
+            summary.click()
+            page.screenshot(path=str(previews / "desktop.png"))
             assert not errors, errors
             browser.close()
-        print("CLEANING_UI_PASS: file/sheet selection, fixed profile, rule confirmation, frozen-plan submission, persistent polling, replay and opt-in inputs")
+        print("CLEANING_UI_PASS: compact toolbar, inline rules, upload/selection counts, fixed profile, confirmation, execution, replay and opt-in inputs")
     finally:
         server.shutdown()
         server.server_close()

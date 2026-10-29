@@ -126,7 +126,7 @@
         // 直接告诉使用者去新建一个空任务。
         if (modules.length) {
           if (root.alert) {
-            root.alert('当前任务已有流程链（' + modules.length + ' 个模块）。九步研究流程要放在一个空任务里：点顶部「+ 新建任务」，再点这个按钮。');
+            root.alert('当前任务已有流程链（' + modules.length + ' 个模块）。九步研究流程要放在一个空任务里；可在侧栏「任务」切换到空任务，不会覆盖现有模块。');
           }
           return;
         }
@@ -955,9 +955,8 @@
     //      只有地址栏带 ?debug=1 时才显示这个链接，不打扰正常使用。
     if (String(root.location && root.location.search || '').indexOf('debug=1') >= 0) ensureDebugLink();
 
-    // 5) 侧栏「按业务流程初始化 9 个模块」按钮：九步研究流程的入口。
-    //    历史上这个入口被移除过、只留在"空模块空间"里，找入口很费劲（2026-10-21 放回侧栏）。
-    ensureFlowButton();
+    // 5) 九步流程仅保留 ?flow=1 的兼容入口，默认不占侧栏空间。
+    if (String(root.location && root.location.search || '').indexOf('flow=1') >= 0) ensureFlowButton();
 
     // 本工作台使用独立研究任务（js/tasks.js）；旧版项目列表不在此界面展示。
 

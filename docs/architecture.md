@@ -28,6 +28,7 @@ flowchart LR
 | --- | --- | --- |
 | 页面与状态 | [index.html](../index.html)、[js/store.js](../js/store.js)、[js/app.js](../js/app.js) | 页面装配、状态读写与渲染；`Store`为共享状态接口 |
 | 任务与流程 | [js/tasks.js](../js/tasks.js)、[js/tabs.js](../js/tabs.js) | 任务隔离、模块关系、候选规则、人工确认与规则版本 |
+| 侧栏导航与保留视图 | [index.html](../index.html)、[js/workspace.js](../js/workspace.js)、`js/tabs.js`、`js/sidebar.js` | 任务操作在侧栏折叠区；工作台显示七个固定模块入口，按需创建、不自动执行。工作记录通过`?view=records`或`WorkspaceUI.switchView('records')`进入；旧九步导航仅`?flow=1`显示，数据保留 |
 | 对话与操作 | [js/chat.js](../js/chat.js)、[js/codex.js](../js/codex.js)、[js/literature.js](../js/literature.js) | 模块对话、文件/模型设置、执行面板、进度与交接 |
 | 服务总入口 | [server.js](../server.js) | 静态文件、接口校验、模型代理、`workflowPrompt()`、专用执行器路由；目前仍集中在一个文件 |
 | 本机Codex | [tools/codex-bridge.js](../tools/codex-bridge.js)、[tools/codex-runtime.js](../tools/codex-runtime.js) | 发现运行时、登录与模型目录、JSON-RPC任务、文件及执行状态 |

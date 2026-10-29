@@ -1924,7 +1924,7 @@
     const chosen = cleanInputSelection(mod.id);
     section.append(node('summary', '数据检查与处理范围 · ' + chosen.length + ' 个文件'));
     section.ontoggle = () => { if (section.isConnected) t.cleanSettingsOpen = section.open; };
-    const change = entries => { saved[mod.id] = { ...saved[mod.id], cleanInputs: entries }; persist(); t.cleanProfile = null; render(); };
+    const change = entries => { t.cleanSettingsOpen = section.open; saved[mod.id] = { ...saved[mod.id], cleanInputs: entries }; persist(); t.cleanProfile = null; render(); };
     t.files.filter(f => f.group === 'input' && /\.(csv|tsv|xlsx|xls)$/i.test(f.name)).forEach(file => {
       const row = node('div', undefined, 'codex-toolbar'), label = node('label');
       const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = chosen.some(e => e.name === file.name); checkbox.disabled = t.busy;
@@ -2080,11 +2080,18 @@
     files.ontoggle = () => { if (!files.isConnected) return; t.filesOpen = files.open; toggle.setAttribute('aria-expanded', String(files.open)); };
     const fileRow = node('div', undefined, 'codex-toolbar');
     if (mod.type !== 'result-audit' && mod.type !== 'download-data') {
-      const input = node('input'); input.type = 'file'; input.multiple = true;
+      const input = node('input'); input.type = 'file'; input.multiple = true; input.hidden = true;
       input.accept = mod.type === 'calculation' ? '.py,.r,.R,.jl,.m,.ipynb,.csv,.tsv,.xlsx,.xls,.json,.txt' : '.csv,.tsv,.xlsx,.xls,.json,.txt';
       input.disabled = t.busy;
       input.setAttribute('aria-label', mod.type === 'calculation' ? '上传计算代码和输入数据' : mod.type === 'plotting' ? '上传绘图数据' : '上传清洗原始文件');
-      input.onchange = () => upload(mod.id, Array.from(input.files)); fileRow.append(input);
+      input.onchange = () => upload(mod.id, Array.from(input.files || []));
+      const choose = node('button', '选择文件', 'quiet-button'); choose.type = 'button'; choose.disabled = t.busy; choose.onclick = () => input.click();
+      const uploaded = t.files.filter(file => file.group === 'input');
+      const selectedCount = mod.type === 'clean-data' ? cleanInputSelection(mod.id).length : uploaded.length;
+      const uploadStatus = node('span', uploaded.length ? '已上传 ' + uploaded.length + ' 个' + (mod.type === 'clean-data' ? ' · 本次已选 ' + selectedCount + ' 个' : '文件') : '尚未上传文件', 'codex-upload-status codex-status');
+      uploadStatus.title = uploaded.map(file => file.name.replace(/^[a-f0-9]{8}-/, '')).join('\n');
+      uploadStatus.setAttribute('role', 'status'); uploadStatus.setAttribute('aria-live', 'polite');
+      fileRow.append(choose, input, uploadStatus);
     }
     const refreshButton = node('button', '刷新文件', 'quiet-button'); refreshButton.type = 'button'; refreshButton.disabled = t.busy; refreshButton.onclick = () => refresh(mod.id); fileRow.append(refreshButton);
     if (mod.type === 'download-data') {
@@ -2112,7 +2119,8 @@
       stop.onclick = async () => { try { await request('/api/codex/cancel?id=' + t.job.id + '&session=' + encodeURIComponent(saved[mod.id]?.sessionId || ''), { method: 'POST' }); } catch (error) { t.error = error.message; render(); } };
       row.append(stop);
     }
-    panel.append(fileRow);
+    if (mod.type === 'clean-data') { row.classList.add('codex-clean-toolbar'); row.append(...fileRow.childNodes); }
+    else panel.append(fileRow);
     if (mod.type === 'download-data') sourceDownloadPanel(mod, t);
     if (mod.type === 'plotting') plotPanel(mod,t);
     if (mod.type === 'clean-data') cleaningPanel(mod,t);
@@ -2132,7 +2140,7 @@
       link.href = '/api/codex/download?session=' + saved[mod.id]?.sessionId + '&group=' + file.group + '&name=' + encodeURIComponent(file.name); list.append(link);
     });
     }
-    files.append(list); fileRow.append(files);
+    files.append(list); (mod.type === 'clean-data' ? row : fileRow).append(files);
     if (t.busy && !t.sourceJob) panel.append(node('p', t.job ? 'Codex 正在处理…' : '上传或启动中…', 'codex-status'));
     if (t.job?.events.length) { const log = node('details'); log.open = t.logOpen; log.ontoggle = () => { t.logOpen = log.open; }; log.append(node('summary', '执行进度')); log.append(node('pre', t.job.events.join('\n'))); panel.append(log); }
     if (t.error) panel.append(node('p', t.error, 'codex-error'));
