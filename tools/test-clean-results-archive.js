@@ -50,7 +50,7 @@ async function main() {
     const packed = Buffer.concat(res.parts);
     assert.equal(Number(res.headers['Content-Length']), packed.length);
     const zip = path.join(dir, 'verified.zip'); fs.writeFileSync(zip, packed);
-    const python = path.resolve(__dirname, '../.venv/Scripts/python.exe');
+    const python = process.env.WORKBENCH_PYTHON || path.resolve(__dirname, '../.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
     const inspect = 'import zipfile,json,sys,hashlib\nwith zipfile.ZipFile(sys.argv[1]) as z:\n assert z.testzip() is None\n print(json.dumps({n:hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist()}))';
     const entries = JSON.parse(execFileSync(python, ['-c', inspect, zip], { encoding: 'utf8', windowsHide: true }));
     assert.deepEqual(Object.keys(entries).sort(), ['empty.csv', '中文目录/绘图代码.py', '贸易结果.csv'].sort());

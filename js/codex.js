@@ -91,14 +91,14 @@
     const t = mod ? task(mod.id) : preferences;
     backendPicker.value = t.backend || 'codex'; backendPicker.disabled = !!t.busy;
     modelPicker.replaceChildren();
-    const initial = node('option', '账号默认 · ' + (account?.model || '登录后显示')); initial.value = ''; modelPicker.append(initial);
+    const initial = node('option', '工作台默认 · ' + (account?.model || '登录后显示')); initial.value = ''; modelPicker.append(initial);
     (account?.models || []).forEach(item => { const option = node('option', item.displayName || item.model); option.value = item.model; modelPicker.append(option); });
     if (t.model && !(account?.models || []).some(item => item.model === t.model)) { const option = node('option', t.model + '（当前不可用，请重新选择）'); option.value = t.model; option.disabled = true; modelPicker.append(option); }
     modelPicker.value = t.model || ''; modelPicker.disabled = !!t.busy || checking || !account?.loggedIn;
     loginButton.textContent = account?.loggedIn ? '本机 Codex 已连接' : '登录本机 Codex'; loginButton.disabled = loginBusy || !!t.busy;
     refreshButton.disabled = checking;
     const connectionError = account?.error?.includes('workspace routing discovery timed out') ? 'Codex 工作区连接超时，请检查本机网络后重试。' : account?.error;
-    connectionStatus.textContent = checking ? '检查连接中…' : loginNotice || connectionError || (account?.loggedIn ? '本机 Codex 已登录 · ' + (account.models || []).length + ' 个模型' : '未连接，请先安装 Codex CLI 并点击登录');
+    connectionStatus.textContent = checking ? '检查连接中…' : loginNotice || connectionError || (account?.loggedIn ? '本机 Codex 已登录 · ' + (account.models || []).length + ' 个模型 · 推理 ' + (account.effort || 'high') : '未连接，请先安装 Codex CLI 并点击登录');
     document.querySelectorAll('[data-api-settings]').forEach(item => { item.hidden = backendPicker.value !== 'api'; });
   }
   function saveConnection() {
@@ -150,12 +150,16 @@
     const t = task(id); t.busy = true;
     try {
       while (true) {
-        const job = await request('/api/codex/job?id=' + jobId);
+        const job = await request('/api/codex/job?id=' + jobId + '&session=' + encodeURIComponent(saved[id]?.sessionId || ''));
         t.job = job; t.files = job.files; render();
         if (job.status !== 'running') {
+          if (job.stage && Store.getState().modules.find(mod => mod.id === id)?.type === 'clean-data') {
+            t.cleanResultsRunId = job.id;
+            t.cleanResultsKey = null;
+          }
           if (saved[id]?.delivered !== job.id) {
             if (job.text) Store.appendMessage(id, job.text, 'assistant');
-            if (job.status !== 'completed') Store.appendMessage(id, 'Codex：' + (job.error || (job.status === 'cancelled' ? '任务已停止，部分输出请检查后使用。' : '任务失败')), 'system');
+            if (job.status !== 'completed') Store.appendMessage(id, 'Codex：' + (job.error || (job.status === 'needs_attention' ? '有待确认事项，请补充规则后再执行。' : job.status === 'cancelled' ? '任务已停止，部分输出请检查后使用。' : '任务未完成')), 'system');
             const state = Store.getState();
             const source = state.modules.find(item => item.id === id);
             const audit = source?.type === 'calculation' && state.modules.find(item => item.type === 'result-audit');
@@ -1497,8 +1501,11 @@
     if (t.busy) throw new Error('文件上传或 Codex 任务正在进行');
     const executeRequested = t.executeOnce || t.execute;
     const plotPlan = module.type === 'plotting' && executeRequested ? t.preparedPlotPlan : undefined;
+    const cleanPlan = module.type === 'clean-data' && executeRequested ? t.preparedCleanPlan : undefined;
     if (module.type === 'plotting' && executeRequested && !plotPlan) throw new Error('请在绘图方案中审核后点击生成');
+    if (module.type === 'clean-data' && executeRequested && !cleanPlan) throw new Error('请先确认清洗规则并选择本次输入');
     t.preparedPlotPlan = null;
+    t.preparedCleanPlan = null;
     t.executeOnce = false;
     t.plotGenerating = !!plotPlan;
     t.busy = true; t.error = ''; t.job = null; render();
@@ -1514,8 +1521,9 @@
         if (sources.length) messages = [{role:'user', text:'三条并列准备路径中已有的已确认来源说明（仅作为来源上下文；不代表输入文件已导入或允许直接执行，计算仍依据本模块确认的方案）：\n' + sources.map(up => up.name + (up.version ? ' · 规则 v' + up.version : '') + '\n' + up.text.slice(0, 4000)).join('\n\n')}, ...messages];
       }
       if (module.type === 'clean-data' && batch) messages = [{ role: 'user', text: '当前下载交接批次（来源信息，不替代本模块的清洗规则）：\n仅处理以下当前输入文件，其他 input 文件为历史保留，不自动合并：\n' + batch.names.join('\n') + '\n获取依据：' + batch.label + '\n' + batch.text.slice(0, 1500) }, ...messages];
-      const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, step: module.step || null, mode: module.mode }, messages, execute: executeRequested, model: t.model || null, ...(plotPlan ? {plotPlan} : {}) }) });
+      const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, step: module.step || null, mode: module.mode }, messages, execute: executeRequested, model: t.model || null, ...(plotPlan ? {plotPlan} : {}), ...(cleanPlan ? {cleanPlan} : {}), ...(module.type === 'clean-data' ? { cleanInputs: cleanInputSelection(module.id) } : {}) }) });
       if (plotPlan) { t.plotSelectedRunId = job.id; saved[module.id].plotSelectedRunId = job.id; Store.setModuleStatus(module.id,'doing'); }
+      if (cleanPlan) Store.setModuleStatus(module.id,'doing');
       saved[module.id].jobId = job.id; persist();
       await watch(module.id, job.id);
     } finally { t.busy = false; t.plotGenerating = false; render(); }
@@ -1528,6 +1536,11 @@
     t.files = (await request('/api/codex/files?session=' + sid)).files;
     const mod = Store.getState().modules.find(item => item.id === id);
     if (!t.files.some(file => file.group === 'input')) { render(); return false; }
+    if (mod?.type === 'clean-data') {
+      const basis = root.TaskManager?.rulesForModule(id), inputs = cleanInputSelection(id);
+      if (!basis?.text || !inputs.length) throw new Error('请确认清洗规则，并在“数据检查与处理范围”中选择文件');
+      t.preparedCleanPlan = { text: basis.text, version: basis.version, confirmed: true, inputs };
+    }
     if (mod?.type === 'plotting') {
       const basis = root.TaskManager?.rulesForModule(id);
       const inputNames = plotInputNames(id);
@@ -1541,11 +1554,11 @@
     render();
     return true;
   }
-  function cancelPreparedExecution(id) { task(id).executeOnce = false; task(id).preparedPlotPlan = null; render(); }
+  function cancelPreparedExecution(id) { task(id).executeOnce = false; task(id).preparedPlotPlan = null; task(id).preparedCleanPlan = null; render(); }
   function prepareRuleDiscussion(id) {
     const t = task(id);
     if (t.busy || root.ModuleSpace?.isBusy()) throw new Error('当前文件或 AI 任务尚未完成');
-    t.execute = false; t.executeOnce = false; t.preparedPlotPlan = null;
+    t.execute = false; t.executeOnce = false; t.preparedPlotPlan = null; t.preparedCleanPlan = null;
     render();
   }
   function plotInputNames(id) {
@@ -1899,6 +1912,57 @@
     link.append(node('span', file.name.split('/').pop() + ' · ' + Math.ceil(file.size / 1024) + 'KB' + (Number.isInteger(file.rowCount) ? ' · ' + file.rowCount.toLocaleString() + ' 行' : ''), 'clean-result-meta'));
     return link;
   }
+  function cleanInputSelection(id) {
+    const all = task(id).files.filter(f => f.group === 'input' && /\.(csv|tsv|xlsx|xls)$/i.test(f.name));
+    const previous = saved[id]?.cleanInputs;
+    if (Array.isArray(previous)) return previous.filter(e => all.some(f => f.name === e.name));
+    const batch = saved[id]?.inputBatch;
+    return all.filter(f => !batch || batch.names.includes(f.name)).map(f => ({ name: f.name, encoding: 'utf-8-sig', sheets: null }));
+  }
+  function cleaningPanel(mod, t) {
+    const section = node('details', undefined, 'clean-result-aux'); section.open = !!t.cleanSettingsOpen;
+    const chosen = cleanInputSelection(mod.id);
+    section.append(node('summary', '数据检查与处理范围 · ' + chosen.length + ' 个文件'));
+    section.ontoggle = () => { if (section.isConnected) t.cleanSettingsOpen = section.open; };
+    const change = entries => { saved[mod.id] = { ...saved[mod.id], cleanInputs: entries }; persist(); t.cleanProfile = null; render(); };
+    t.files.filter(f => f.group === 'input' && /\.(csv|tsv|xlsx|xls)$/i.test(f.name)).forEach(file => {
+      const row = node('div', undefined, 'codex-toolbar'), label = node('label');
+      const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = chosen.some(e => e.name === file.name); checkbox.disabled = t.busy;
+      checkbox.onchange = () => change(checkbox.checked ? [...chosen, {name:file.name, encoding:'utf-8-sig', sheets:null}] : chosen.filter(e => e.name !== file.name));
+      label.append(checkbox, node('span', file.name.replace(/^[a-f0-9]{8}-/, ''))); row.append(label);
+      const entry = chosen.find(e => e.name === file.name);
+      if (entry && /\.(csv|tsv)$/i.test(file.name)) {
+        const encoding = node('select'); encoding.setAttribute('aria-label', file.name + ' 文本编码');
+        [['utf-8-sig','UTF-8'],['utf-16','UTF-16'],['gb18030','GB18030']].forEach(([value,label]) => { const option = node('option',label); option.value=value; encoding.append(option); });
+        encoding.value = entry.encoding; encoding.disabled = t.busy;
+        encoding.onchange = () => change(chosen.map(e => e.name === file.name ? {...e,encoding:encoding.value} : e)); row.append(encoding);
+      }
+      const sheets = t.cleanSheetCatalog?.[file.name];
+      if (entry && sheets) {
+        const select = node('select'); select.multiple = true; select.size = Math.min(4, sheets.length + 1); select.disabled = t.busy;
+        select.setAttribute('aria-label', file.name + ' 选择工作表');
+        ['*', ...sheets].forEach(name => { const option=node('option', name==='*'?'全部工作表':name); option.value=name; option.selected=entry.sheets ? entry.sheets.includes(name) : name==='*'; select.append(option); });
+        select.onchange = () => { const values=Array.from(select.selectedOptions).map(o=>o.value); change(chosen.map(e=>e.name===file.name?{...e,sheets:values.includes('*')?null:values}:e)); }; row.append(select);
+      }
+      section.append(row);
+    });
+    const inspect = node('button', '检查所选数据', 'quiet-button'); inspect.type='button'; inspect.disabled=t.busy || !chosen.length;
+    inspect.onclick = async () => {
+      t.busy=true; t.error=''; render();
+      try {
+        t.cleanProfile = await request('/api/codex/cleaning/profile', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:await session(mod.id),inputs:cleanInputSelection(mod.id)})});
+        t.cleanSheetCatalog = Object.fromEntries(t.cleanProfile.inputs.filter(e=>e.available_sheets).map(e=>[e.name,e.available_sheets]));
+      } catch(error) { t.error=error.message; } finally { t.busy=false; t.cleanSettingsOpen=true; render(); }
+    };
+    section.append(inspect, node('p','固定程序完整检查所选表；Excel公式只读保存值，表头或缓存有歧义时列出问题。','clean-result-meta'));
+    if(t.cleanProfile) {
+      const profile=t.cleanProfile; section.append(node('p',profile.tables.length+' 张表、'+profile.row_count+' 条记录 · '+(profile.blocked?'有问题需先处理':'结构检查完成，处理规则仍需确认'),'codex-status'));
+      const summary=node('details'); summary.append(node('summary','查看字段、空值、重复和数值检查'));
+      summary.append(node('pre',JSON.stringify(profile.tables,null,2))); section.append(summary);
+    }
+    if(t.job?.stage) section.append(node('p','清洗阶段：'+({preparing:'准备',profiling:'数据检查',generating:'生成脚本',executing:'执行冻结脚本',verifying:'独立核验',completed:'完成'}[t.job.stage]||t.job.stage),'codex-status'));
+    panel.append(section);
+  }
   function renderCleanResults(mod, t, list) {
     list.classList.add('clean-results');
     const key = JSON.stringify(t.files.map(file => [file.group, file.name, file.size]));
@@ -1924,6 +1988,18 @@
       bundle.title = '包含本次结果、代码和说明，不混入其他运行或原始输入';
       if (t.busy) { bundle.removeAttribute('href'); bundle.setAttribute('aria-disabled', 'true'); bundle.title = '任务完成后可打包下载'; }
       heading.append(select, bundle); list.append(heading);
+      if (view.cleaning) {
+        const include = node('input'); include.type='checkbox'; include.checked=!!t.cleanBundleInputs; include.disabled=t.busy;
+        const label=node('label','复现包包含原始输入 '); label.append(include);
+        const reproduce=node('a','下载复现包','quiet-button');
+        const update=()=>{ reproduce.href='/api/codex/cleaning/archive?session='+encodeURIComponent(saved[mod.id].sessionId)+'&id='+encodeURIComponent(view.runId)+(t.cleanBundleInputs?'&inputs=1':''); };
+        include.onchange=()=>{t.cleanBundleInputs=include.checked;update();}; update();
+        const replay=node('button','按原脚本另建版本重跑','quiet-button'); replay.type='button'; replay.disabled=t.busy || !view.cleaning.scriptSha256;
+        replay.onclick=async()=>{t.busy=true;t.error='';render();try{const job=await request('/api/codex/cleaning/replay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:await session(mod.id),id:view.runId,confirm:true})});saved[mod.id].jobId=job.id;persist();Store.setModuleStatus(mod.id,'doing');await watch(mod.id,job.id);}catch(error){t.error=error.message;}finally{t.busy=false;render();}};
+        if(t.busy || !view.cleaning.scriptSha256) reproduce.removeAttribute('href');
+        heading.append(label,reproduce,replay);
+        list.append(node('p','运行状态：'+view.cleaning.status+'；规则 v'+view.cleaning.rules.version+'；固定核验：'+(view.cleaning.verification?.status||'尚未完成')+'；研究者验收未判定。','codex-status'));
+      }
       [['main', '主要结果', '本次尚未生成主要结果数据。'], ['reports', '检查报告', '本次尚未生成检查报告。'], ['issues', '待处理问题', '所列问题清单中没有记录；是否通过验收仍以检查报告和人工核查为准。']].forEach(([group, title, empty]) => {
         const section = node('section', undefined, 'clean-result-section'); section.append(node('h4', title));
         if (view.groups[group].length) view.groups[group].forEach(file => section.append(cleanResultLink(mod.id, file)));
@@ -2033,12 +2109,13 @@
     }
     if (t.busy && t.job?.id) {
       const stop = node('button', '停止任务', 'quiet-button'); stop.type = 'button';
-      stop.onclick = async () => { try { await request('/api/codex/cancel?id=' + t.job.id, { method: 'POST' }); } catch (error) { t.error = error.message; render(); } };
+      stop.onclick = async () => { try { await request('/api/codex/cancel?id=' + t.job.id + '&session=' + encodeURIComponent(saved[mod.id]?.sessionId || ''), { method: 'POST' }); } catch (error) { t.error = error.message; render(); } };
       row.append(stop);
     }
     panel.append(fileRow);
     if (mod.type === 'download-data') sourceDownloadPanel(mod, t);
     if (mod.type === 'plotting') plotPanel(mod,t);
+    if (mod.type === 'clean-data') cleaningPanel(mod,t);
     if (mod.type === 'result-audit') panel.append(node('p', '先讨论并在上方确认核查原则，或直接上传已有标准；再核查结果、讨论定位。每个标准文件上限 20MB。', 'codex-status'));
     if (mod.type === 'clean-data' && saved[mod.id]?.inputBatch) panel.append(node('p', '当前交接输入 ' + saved[mod.id].inputBatch.names.length + ' 个；历史原始文件保留，不自动合并到本次清洗。', 'codex-status'));
     const list = node('div', undefined, 'codex-files');

@@ -113,7 +113,7 @@ function unitCases(root) {
 async function httpCases(root) {
   sourceFixture(root);
   for (const name of ['server.js', 'tools/literature-runtime.js', 'tools/source-download.js', 'tools/scholar-flow.js', 'tools/plotting.js',
-    'tools/clean-results-view.js', 'tools/clean-results-archive.js', 'tools/faostat-download.js', 'tools/source-transfer.js',
+    'tools/clean-results-view.js', 'tools/clean-results-archive.js', 'tools/cleaning.js', 'tools/cleaning-runtime.js', 'tools/cleaning_core.py', 'requirements-cleaning.txt', 'tools/faostat-download.js', 'tools/source-transfer.js',
     'tools/literature-fields-assist.js', 'tools/literature-auxiliary.js', 'tools/literature-config.js']) {
     write(path.join(root, name), fs.readFileSync(path.join(ROOT, name)));
   }

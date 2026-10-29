@@ -1,5 +1,11 @@
-# 研序 Python 依赖总清单（规划阶段；尚未自动安装）
-# 后续统一安装到项目根目录的 .venv/，不要使用已有的 .env 配置文件作为虚拟环境。
+# 研序 Python 依赖总清单；模块按需安装自己的子清单。
+# 统一使用项目根目录的 .venv/；.env 是服务配置文件，不是虚拟环境。
+
+# 通用清洗模块（Excel读取；CSV/TSV仅需标准库）
+-r requirements-cleaning.txt
+
+# 通用表格处理，与 requirements-plotting.txt 使用相同版本范围
+pandas>=2.0,<4
 
 # 文献检索、全文处理与 Excel 合并：源自 SOC 流水线
 openpyxl>=3.1.0
@@ -12,6 +18,4 @@ opencv-python>=4.8.0
 numpy>=1.24.0
 Pillow>=10.0.0
 
-# SOC 附带的绘图脚本使用；后续确定是否纳入统一安装
-# pandas
-# matplotlib
+# 绘图额外依赖见 requirements-plotting.txt（包含 matplotlib）。

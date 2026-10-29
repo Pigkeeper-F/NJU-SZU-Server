@@ -11,11 +11,15 @@ function isFile(file) {
 
 // Prefer the desktop runtime that supplies the current account's model catalog.
 // Keep explicit overrides and the npm/PATH fallback for standalone installs.
-function resolveCodexBin({ env = process.env, platform = process.platform, arch = process.arch, home = os.homedir() } = {}) {
+function resolveCodexBin({ env = process.env, platform = process.platform, arch = process.arch, home = os.homedir(), fileExists = isFile } = {}) {
   if (typeof env.CODEX_BIN === 'string' && env.CODEX_BIN.trim()) return env.CODEX_BIN.trim();
   if (platform === 'darwin') {
-    const desktop = '/Applications/ChatGPT.app/Contents/Resources/codex';
-    if (isFile(desktop)) return desktop;
+    for (const desktop of [
+      '/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex',
+      '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex',
+      '/Applications/Codex.app/Contents/Resources/codex',
+      '/Applications/ChatGPT.app/Contents/Resources/codex'
+    ]) if (fileExists(desktop)) return desktop;
   }
   if (platform === 'win32') {
     const local = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');

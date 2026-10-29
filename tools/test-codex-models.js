@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { resolveCodexBin } = require('./codex-runtime');
 const { CodexBridge } = require('./codex-bridge');
+const { randomUUID } = require('node:crypto');
 
 const parent = path.resolve(__dirname, '..', '.workbench');
 fs.mkdirSync(parent, { recursive: true });
@@ -30,6 +31,9 @@ async function main() {
     assert.equal(resolveCodexBin(options), latest, 'ignore incomplete desktop installs');
     assert.equal(resolveCodexBin({ ...options, env: { ...env, CODEX_BIN: 'custom-codex.exe' } }), 'custom-codex.exe');
     assert.equal(resolveCodexBin({ ...options, platform: 'linux' }), 'codex');
+    const desktopMac = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex';
+    assert.equal(resolveCodexBin({ env: {}, platform: 'darwin', fileExists: file => file === desktopMac }), desktopMac);
+    assert.equal(resolveCodexBin({ env: {}, platform: 'darwin', fileExists: () => false }), 'codex');
 
     const bridge = new CodexBridge(directory);
     bridge.connect = async () => {};
@@ -39,15 +43,32 @@ async function main() {
       if (method === 'account/read') return { account: { type: 'chatgpt' } };
       return !params.cursor
         ? { data: [{ model: 'gpt-5.5' }, { model: 'gpt-6.1-sol', isDefault: true, defaultReasoningEffort: 'low' }], nextCursor: 'page2' }
-        : { data: [{ model: 'gpt-6.1-sol', isDefault: true, defaultReasoningEffort: 'low' }, { model: 'gpt-6-astra' }, { model: 'internal-review', hidden: true }], nextCursor: null };
+        : { data: [{ model: 'gpt-6.1-sol', isDefault: true, defaultReasoningEffort: 'low' }, { model: 'gpt-6-astra' }, { model: 'gpt-6-sol', supportedReasoningEfforts: [{reasoningEffort:'high'}] }, { model: 'internal-review', hidden: true }], nextCursor: null };
     };
     const status = await bridge.status();
-    assert.equal(status.model, 'gpt-6.1-sol');
-    assert.deepEqual(status.models.map(model => model.model), ['gpt-5.5', 'gpt-6.1-sol', 'gpt-6-astra']);
+    assert.equal(status.model, 'gpt-6-sol');
+    assert.equal(status.effort, 'high');
+    assert.deepEqual(status.models.map(model => model.model), ['gpt-5.5', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol']);
     assert.equal(status.models[1].defaultReasoningEffort, 'low');
     assert.equal(requests.filter(request => request.method === 'model/list').length, 2);
     assert.equal(requests.at(-1).params.cursor, 'page2');
     assert.equal(requests.at(-1).params.includeHidden, false);
+    const catalogRpc = bridge.rpc;
+    bridge.rpc = async (method, params) => {
+      if (method === 'thread/start' || method === 'turn/start') {
+        requests.push({method,params});
+        return method === 'thread/start' ? {thread:{id:randomUUID()}} : {turn:{id:randomUUID()}};
+      }
+      return catalogRpc(method,params);
+    };
+    const session = bridge.createSession();
+    const job = await bridge.run(session.id,[{role:'user',content:'fixture'}],'',false,null,'discussion');
+    for(let i=0;i<100&&!bridge.jobs.get(job.id).turnId;i++) await new Promise(resolve=>setTimeout(resolve,5));
+    assert.equal(bridge.snapshot(job.id).model,'gpt-6-sol');
+    assert.equal(bridge.snapshot(job.id).effort,'high');
+    assert.equal(requests.find(r=>r.method==='thread/start').params.config.model_reasoning_effort,'high');
+    assert.equal(requests.find(r=>r.method==='turn/start').params.effort,'high');
+    bridge.finish(bridge.jobs.get(job.id),'completed');
 
     let accountReads = 0;
     let localChecks = 0;

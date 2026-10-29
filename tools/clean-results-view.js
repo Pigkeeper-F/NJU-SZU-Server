@@ -38,6 +38,9 @@ function csvInfo(file, size) {
 
 function presentation(name) {
   const base = path.basename(name).replace(/^[a-f0-9]{8}-/, '');
+  if (/^(verification|input-profile)\.json$/.test(base)) return { category: 'reports', label: base === 'verification.json' ? '固定程序核验' : '原始数据检查' };
+  if (/^(cleaning-plan|cleaning-result)\.json$/.test(base)) return { category: 'auxiliary', label: base === 'cleaning-plan.json' ? '冻结清洗计划' : '逐行来源与处理去向' };
+  if (base === 'needs-attention.json') return { category: 'issues', label: '执行中待确认口径' };
   if (/\.(?:py|r|jl|m|ipynb|js|sh|bat|ps1)$/i.test(base)) return { category: 'auxiliary', label: '处理代码' };
   if (/field[_ -]?dictionary|字段|字典/i.test(base)) return { category: 'auxiliary', label: '字段说明' };
   if (/entity[_ -]?screening/i.test(base)) return { category: 'auxiliary', label: '国家与地区初筛明细' };
@@ -78,6 +81,11 @@ function cleanResultsView(bridge, sessionId, runId) {
   const ordered = [...runs.values()].sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
   if (runId && !runs.has(runId)) throw new Error('未找到这次清洗结果，请刷新文件后重试');
   const selected = runId ? runs.get(runId) : ordered[0];
+  let cleaning = null;
+  if (selected) {
+    const stateFile = path.join(bridge.session(sessionId), '.cleaning', selected.id, 'state.json');
+    if (fs.existsSync(stateFile) && !fs.lstatSync(stateFile).isSymbolicLink()) cleaning = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  }
   const groups = { main: [], reports: [], issues: [], auxiliary: [] };
   for (const file of selected?.files || []) {
     const { category, label } = presentation(file.name);
@@ -89,7 +97,7 @@ function cleanResultsView(bridge, sessionId, runId) {
   }
   for (const group of Object.values(groups)) group.sort((a, b) => a.name.localeCompare(b.name));
   return {
-    sessionId, runId: selected?.id || null,
+    sessionId, runId: selected?.id || null, cleaning,
     runs: ordered.map(run => ({ id: run.id, updatedAt: new Date(run.updatedAt).toISOString(), fileCount: run.files.length })),
     groups, inputs, otherFiles
   };

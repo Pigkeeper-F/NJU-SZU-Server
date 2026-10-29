@@ -1,5 +1,9 @@
 # 研序 · 研究工作台
 
+维护入口：[工程架构速查](docs/architecture.md)——职责、执行能力、代码入口、数据保存位置与常见问题定位；架构相关改动同步更新。
+
+数据清洗已接入固定CSV/TSV/Excel检查、确认规则后的冻结脚本执行、独立核验和原脚本复现，操作与限制见[清洗模块说明](docs/cleaning.md)。
+
 本仓库合并了本地研序交接版与 GitHub `origin/main` 的工作流改动。主界面按资料准备和模型工作组织：下载数据、数据清洗、文献挖掘是三条并列准备路径，按任务需要汇入“模型调整与计算”；后续为绘图、结果核查与定位、人工审核。三个准备环节可独立开展，不要求依次完成；参数与活动数据更新是计算的可选子环节。SOC 流水线位于 `SOC-database-pipeline-clean/`，复用其 Google Scholar 候选发现能力；网页通用文献流程另支持开放全文获取、带出处提取与清洗交接，尚未接入 SOC 专用数据库的自动合并。
 
 新建任务同时可选择[九步研究流程](docs/quickstart-research-flow.md)：从文献调研、科学问题凝练开始，逐步审核和解锁后续环节。它与上述数据准备路径并存，旧任务沿用原结构。2026-10-23 已同步双方融合后的主分支，并补齐导入、调研和旧任务兼容检查，见[融合验证记录](docs/merge-20261023.md)。
@@ -98,7 +102,19 @@ Windows 默认优先发现已安装的桌面 Codex 运行时，再回落 npm 原
 
 预览区按版本展示实际生成的 PNG/JPEG/WebP；可下载图片、SVG/PDF、绘图代码、绘图数据与运行说明。填写某版修改意见后先讨论，再修订和审核方案生成新版本，旧文件保留；失败、停止和重启中断的版本也显示真实状态，不计为完成。首次使用或升级后须运行工作台启动器以加载新版后端。
 
-本机 Codex 需要安装 CLI；在左下角“设置 → 模型”选择本机 Codex 并点击登录按钮，完成官方浏览器登录即可。已有本机登录时直接复用。macOS 也可复用桌面应用内置 CLI；`CODEX_BIN` 可指定路径。模型与后端按当前模块保存；生成环节文档、代码和 AI 定位也使用所选后端。无需填写 API Key。API 对话仍可在页面配置密钥，或使用 `.env`。除 Scholar 最小检索环境外，Python 等计算依赖尚未自动安装；`requirements.txt` 是统一依赖清单，可用左侧「编辑依赖」打开。虚拟环境目录为 `.venv/`，`.env` 用于服务配置。
+本机 Codex 需要安装 CLI；在左下角“设置 → 模型”选择本机 Codex 并点击登录按钮，完成官方浏览器登录即可。已有本机登录时直接复用。macOS 也可复用桌面应用内置 CLI；`CODEX_BIN` 可指定路径。模型与后端按当前模块保存；生成环节文档、代码和 AI 定位也使用所选后端。无需填写 API Key。API 对话仍可在页面配置密钥，或使用 `.env`。
+
+Python 依赖统一维护在 [`requirements.txt`](requirements.txt)，可用左侧「编辑依赖」打开；通用表格处理包括 `pandas>=2.0,<4`。文献检索、绘图、清洗 Excel 的按需安装清单分别为 `requirements-literature.txt`、`requirements-plotting.txt`、`requirements-cleaning.txt`；模块安装不等于安装总清单中的全部依赖。统一使用 Python 原生 venv 创建的项目 `.venv/`，不使用 conda；`.env` 仅用于服务配置。现有环境单独补装 pandas：
+
+```bash
+# macOS/Linux：从项目根目录运行，安装到已有 .venv，不修改系统Python。
+.venv/bin/python -m pip install 'pandas>=2.0,<4'
+```
+
+```powershell
+# Windows PowerShell：从项目根目录运行，使用同一个项目虚拟环境。
+.venv/Scripts/python.exe -m pip install 'pandas>=2.0,<4'
+```
 
 ```bash
 npm run check
