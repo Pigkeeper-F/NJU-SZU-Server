@@ -88,7 +88,7 @@ function unitCases(root) {
   assert.ok(!JSON.stringify(runtime.snapshot()).includes(root), 'Runtime response must not reveal the absolute workspace path');
 
   for (const moduleName of ['literature_fulltext_reuse.py', 'literature_target_groups.py',
-    'literature-research.js', 'literature-auxiliary.js', 'research-question.js', 'literature_search_open.py', 'literature_import.py', 'writing_build.py']) {
+    'literature-research.js', 'literature-auxiliary.js', 'research-question.js', 'literature_search_open.py', 'literature_expand.py', 'literature_import.py', 'writing_build.py']) {
     const prior = backendFingerprint(root);
     const loaded = createLiteratureRuntime({ root, port: 8123 });
     assert.equal(loaded.snapshot().restartRequired, false);

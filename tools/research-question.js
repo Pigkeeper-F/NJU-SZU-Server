@@ -35,6 +35,7 @@ function loadResearchOutputs(jobDir) {
     gaps: (gaps && Array.isArray(gaps.gaps)) ? gaps.gaps : [],
     consensus: (synthesis && Array.isArray(synthesis.consensus)) ? synthesis.consensus : [],
     disagreements: (synthesis && Array.isArray(synthesis.disagreements)) ? synthesis.disagreements : [],
+    risks: (synthesis && Array.isArray(synthesis.risks)) ? synthesis.risks : [],
     topic: (notes && notes.meta && notes.meta.topic) || ''
   };
 }
@@ -294,15 +295,31 @@ function notesBrief(notes) {
     year: note.year || '',
     evidence: String(note.evidence || ''),
     question: String(note.question || ''),
+    population: String(note.population || ''),
+    outcome: String(note.outcome || ''),
+    unit: String(note.unit || ''),
+    conditions: String(note.conditions || ''),
+    effect: String(note.effect || ''),
     conclusion: String(note.conclusion || ''),
     limitation: String(note.limitation || '')
   }));
 }
 
-function candidatesPrompt(idea, gaps, notes) {
+function risksBrief(risks) {
+  return asList(risks, 12).map((item) => ({
+    kind: String(item.kind || ''),
+    statement: String(item.statement || ''),
+    refs: asList(item.refs, 6).map(String),
+    why_it_matters: String(item.why_it_matters || '')
+  })).filter((item) => item.statement);
+}
+
+function candidatesPrompt(idea, gaps, notes, risks) {
   return [
-    '你是科研选题助手。下面是研究想法、文献调研得出的研究空白清单（每条含支撑依据）、以及已读文献的要点。',
+    '你是科研选题助手。下面是研究想法、文献调研得出的研究空白清单（每条含支撑依据）、已读文献的要点，',
+    '以及「合并/比较前必须核对」的可比性风险清单。',
     '请提出 **3–5 个候选科学问题**——不是把所有空白都变成问题，而是挑出「值得做、且做得动」的那几个。',
+    '优先考虑两类问题：① 直接填补空白；② 先解决口径/单位/条件不可比的方法学问题，使后续合并或比较成为可能。',
     '',
     '输出 JSON 数组，每个元素：',
     '{',
@@ -311,6 +328,7 @@ function candidatesPrompt(idea, gaps, notes) {
     '  "variables": ["关键变量"],',
     '  "boundary": "研究边界条件（对象范围、时空尺度、适用条件）",',
     '  "gapRefs": ["对应空白的原文"],',
+    '  "riskRefs": ["对应可比性风险的原文（没有就空数组）"],',
     '  "basis": [{"id": "文献 id", "what": "该文献里支持这个问题的具体结论"}],',
     '  "feasibility": "可行性初判：需要什么数据与方法、可能卡在哪、能否被证伪"',
     '}',
@@ -319,13 +337,18 @@ function candidatesPrompt(idea, gaps, notes) {
     '1. gapRefs 必须是输入里空白的原文；basis.id 必须是输入里出现过的文献 id。不得虚构。',
     '2. 每个问题至少对应一条空白、至少一条文献依据；写不出依据的条目不要写。',
     '3. 变量与边界要具体到能操作，不要写「效果」「影响」这类无法测量的词。',
-    '4. 若输入材料不足以支撑任何问题，返回空数组——这是允许的答案。',
-    '5. 只输出 JSON 数组。',
+    '4. 若研究问题针对可比性风险，必须在 boundary 或 hypothesis 中写明要统一的口径、单位或条件；',
+    '   riskRefs 只能引用下方风险清单里出现过的条目原文。',
+    '5. 若输入材料不足以支撑任何问题，返回空数组——这是允许的答案。',
+    '6. 只输出 JSON 数组。',
     '',
     '【研究想法】' + String(idea || ''),
     '',
     '【研究空白】',
     JSON.stringify(gapsBrief(gaps), null, 1),
+    '',
+    '【可比性风险】',
+    JSON.stringify(risksBrief(risks), null, 1),
     '',
     '【文献要点】',
     JSON.stringify(notesBrief(notes), null, 1)
@@ -343,6 +366,7 @@ function normalizeCandidate(raw, index) {
     variables: asList(raw.variables, 8).map(String),
     boundary: String(raw.boundary || '').trim(),
     gapRefs: asList(raw.gapRefs, 6).map(String),
+    riskRefs: asList(raw.riskRefs, 6).map(String),
     basis: asList(raw.basis, 6).map((item) => ({
       id: String((item && item.id) || ''),
       what: String((item && item.what) || '')
@@ -351,10 +375,10 @@ function normalizeCandidate(raw, index) {
   };
 }
 
-async function buildCandidates({ idea, gaps, notes, callModel, modelCfg } = {}) {
+async function buildCandidates({ idea, gaps, notes, risks, callModel, modelCfg } = {}) {
   if (typeof callModel !== 'function') throw new Error('缺少模型调用入口');
   if (!asList(gaps, 1).length) throw new Error('没有研究空白可用——先完成文献调研环节（环节①）。');
-  const reply = await callModel(modelCfg, [{ role: 'user', content: candidatesPrompt(idea, gaps, notes) }], 180000);
+  const reply = await callModel(modelCfg, [{ role: 'user', content: candidatesPrompt(idea, gaps, notes, risks) }], 180000);
   const parsed = parseJsonLoose(reply);
   const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.candidates) ? parsed.candidates : []);
   const candidates = [];
@@ -375,7 +399,7 @@ async function buildCandidates({ idea, gaps, notes, callModel, modelCfg } = {}) 
 // 环节② · 问题说明书
 // ---------------------------------------------------------------------------
 
-function specificationPrompt(idea, candidate, gaps, notes) {
+function specificationPrompt(idea, candidate, gaps, notes, risks) {
   return [
     '你是科研选题助手。请把选定的候选科学问题展开成一份「科学问题说明书」，',
     '它要作为后续环节（数据获取与清洗、方法选择与运行、图表绘制、文章撰写）的输入契约。',
@@ -393,7 +417,8 @@ function specificationPrompt(idea, candidate, gaps, notes) {
     '1. 只依据给定材料；材料里没有的写「待明确」，不要编造数据、方法或文献。',
     '2. 每条论断标明依据（文献 id 或空白编号），让下游能回溯。',
     '3. 「可检验形式」要写清什么结果算支持、什么结果算否定。',
-    '4. 不要写「结果显著」这类空话；写不出来的部分直接标「待明确」。',
+    '4. 「边界条件」要逐条处理下方可比性风险：统一哪个口径/单位/条件，无法统一的要写明。',
+    '5. 不要写「结果显著」这类空话；写不出来的部分直接标「待明确」。',
     '',
     '【研究想法】' + String(idea || ''),
     '',
@@ -403,15 +428,18 @@ function specificationPrompt(idea, candidate, gaps, notes) {
     '【研究空白】',
     JSON.stringify(gapsBrief(gaps), null, 1),
     '',
+    '【可比性风险】',
+    JSON.stringify(risksBrief(risks), null, 1),
+    '',
     '【文献要点】',
     JSON.stringify(notesBrief(notes), null, 1)
   ].join('\n');
 }
 
-async function buildSpecification({ idea, candidate, gaps, notes, callModel, modelCfg } = {}) {
+async function buildSpecification({ idea, candidate, gaps, notes, risks, callModel, modelCfg } = {}) {
   if (typeof callModel !== 'function') throw new Error('缺少模型调用入口');
   if (!candidate || !candidate.statement) throw new Error('缺少选定的候选问题');
-  const reply = await callModel(modelCfg, [{ role: 'user', content: specificationPrompt(idea, candidate, gaps, notes) }], 180000);
+  const reply = await callModel(modelCfg, [{ role: 'user', content: specificationPrompt(idea, candidate, gaps, notes, risks) }], 180000);
   const text = String(reply || '').trim();
   if (!text) throw new Error('模型没有返回问题说明书');
   return {

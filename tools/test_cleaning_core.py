@@ -28,7 +28,10 @@ class CleaningCoreTests(unittest.TestCase):
         self.bundle.mkdir()
 
     def fixture(self, text="code,value\n004,-11.000000\n005,0.000000\n", name="data.csv"):
-        (self.inputs / name).write_text(text, encoding="utf-8-sig")
+        # newline=""：测试文本里的 \n 在 Windows 上也按原样落盘，否则
+        # 引号内多行字段会变成 \r\n，与跨平台预期不一致。
+        with (self.inputs / name).open("w", encoding="utf-8-sig", newline="") as stream:
+            stream.write(text)
         return [{"name": name}]
 
     def freeze(self, selection, code=IDENTITY, checks=None):

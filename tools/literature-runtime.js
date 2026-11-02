@@ -55,6 +55,7 @@ const BACKEND_FILES = [
   'tools/literature_scholar_batches.py',
   'tools/literature_scholar_discovery.py',
   'tools/literature_search_open.py',
+  'tools/literature_expand.py',
   'tools/literature_import.py',
   'tools/literature_dedupe.py',
   'tools/literature_sources.py',

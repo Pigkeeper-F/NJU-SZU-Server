@@ -548,6 +548,10 @@ def write_results(
     }
     if source_status:
         report["source_status"] = source_status
+    # 【以文献找文献 · 2026-10-23】种子扩展的顶层描述必须跨检索批次保留；
+    # 扩展记录本身已按 batch_index=-1 留在 records 里，这里只补回元信息。
+    if isinstance(existing.get("expansions"), list) and existing["expansions"]:
+        report["expansions"] = existing["expansions"]
     if search.get("pending_source"):
         report["pending_source"] = search["pending_source"]
     if "deferred_sources" in search:

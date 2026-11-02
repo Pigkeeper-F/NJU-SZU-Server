@@ -91,11 +91,16 @@ node tools/debug-report.js --json
 
 - 九步主流程（step/type 合流、逐步解锁、契约先行）——契约 §22
 - 上游产物汇聚（exec 的 `upstream` / `upstreamJobs` / `params`）——契约 §22.6
-- 环节①文献调研：冷启动 → 检索 → 人工初筛 → 逐篇要点/共识分歧/研究空白——契约 §23
+- 环节①文献调研：冷启动 → 检索 → 人工初筛 → 逐篇要点/共识分歧/研究空白——契约 §23；
+  2026-10-23 增补逐篇「对象/结局/单位/条件/效应」、可比性风险与条件—指标矩阵（`matrix.csv/md`），
+  并把风险传入②候选问题凝练（`riskRefs`）
 - **多源检索（2026-10-22，10-23 补强）**：Scholar + 知网/万方/WoS/Scopus + PubMed / PMC /
   OpenAlex / Europe PMC / Semantic Scholar 可在同一批合并；支持按源检索式（`sourceQueries`）、
   跨源 DOI/标题去重、逐源命中/失败展示；正式检索支持按来源翻页（50/100 条或到末页），
   Scholar 验证码打断时开放源结果先落盘（批次 `status: "partial"`）
+- **以文献找文献（2026-10-23）**：DOI/PMID/PMCID/OpenAlex ID/S2 paperId/论文链接/标题为种子，
+  扩展参考文献 / 被引 / 相似文献；OpenAlex 优先、S2 兜底；并入同一候选池（`batch_index=-1`，
+  同种子整批替换），扩展条目带 `seed_relation` 可回溯——契约 §26.8
 - 环节②科学问题凝练：候选问题 → 人选 → 问题说明书——契约 §24
 - 环节⑥文章撰写：目标期刊手填、LaTeX 生成器、AAAI/NeurIPS/ICML 规范——契约 §22.7 / §23.5
 - 调试台：服务端缓冲 + 调试页 + 命令行报告 + 文档——契约 §25

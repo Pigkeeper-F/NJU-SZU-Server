@@ -1313,15 +1313,21 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 **流程**：读 `candidates.json` → 读 `fulltext/files/*.txt` 并按 candidate_id / 标题匹配回候选 →
 分批调模型抽要点 → 调模型做横向归纳 → 产物落盘。
 
-**出参**：`{ ok, meta, files[], notes[], synthesis{consensus,disagreements,gaps}, gaps[], error }`。
+**出参**：`{ ok, meta, files[], notes[], synthesis{consensus,disagreements,gaps,risks}, gaps[], risks[], matrix[], error }`。
 
 **产物**（写在作业目录 `research/` 下，已加入 `DELIVERABLE_PATTERNS`，可从作业面板下载）：
 
 | 文件 | 内容 |
 |---|---|
-| `research/notes.json` / `notes.csv` | 逐篇要点：研究问题 / 数据来源 / 方法 / 结论 / 局限 + 题录 + `evidence`（全文 / 仅题录） |
-| `research/synthesis.json` / `synthesis.md` | 共识、分歧（每条带出处 id） |
+| `research/notes.json` / `notes.csv` | 逐篇要点：研究问题 / 数据来源 / 方法 / **研究对象 / 结局指标 / 单位 / 条件 / 原文效应** / 结论 / 局限 + 题录 + `evidence`（全文 / 仅题录） |
+| `research/synthesis.json` / `synthesis.md` | 共识、分歧、**风险与待查项**（每条带出处 id） |
 | `research/gaps.json` / `gaps.md` | 研究空白清单：空白描述 + 支撑依据（哪篇的什么结论）+ 可检验方向 |
+| `research/matrix.csv` / `matrix.md` | **条件—指标矩阵**：逐篇摊开对象 / 结局指标 / 单位 / 条件 / 原文效应，标明不同行不可直接合并 |
+
+**风险口径（2026-10-23）**：`risks[]` 的 `kind` 限定为
+`指标口径 / 单位不一致 / 条件不可比 / 样本代表性 / 外推过度 / 报告缺失 / 其他`；
+它不是研究空白，而是「看起来能比较、其实口径/单位/条件对不上」的问题，
+每条必须有至少一个 `refs`。没有可支撑的风险时返回空数组，不硬凑。
 
 **诚实性约束**：只有题录（无全文）的文献，`evidence` 标「仅题录」，提示词明令不得推断方法细节与结论；
 模型没给出的字段一律落「文中未说明」；模型输出不合法时不崩，如实记 `error` 并仍留下过程产物。
@@ -1383,9 +1389,10 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 | `candidates` | `{ idea, upstreamJobIds[], settings? }` | `{ ok, candidates[] }` |
 | `specify` | `{ idea, choice, upstreamJobIds[], settings? }` | `{ ok, markdown, candidate }` |
 
-- **上游产物由服务端自己读**：`upstreamJobIds` → `.workbench/literature/<id>/research/{gaps,notes}.json`，
+- **上游产物由服务端自己读**：`upstreamJobIds` → `.workbench/literature/<id>/research/{gaps,notes,synthesis}.json`，
   前端不（也不该）把文件内容原样回传。
-- 候选问题字段：`statement / hypothesis / variables[] / boundary / gapRefs[] / basis[{id,what}] / feasibility`。
+- 候选问题字段：`statement / hypothesis / variables[] / boundary / gapRefs[] / riskRefs[] / basis[{id,what}] / feasibility`。
+  `riskRefs` 对应 `synthesis.risks` 的原文；用于把「口径/单位/条件不可比」转成方法学问题。
 - **硬要求（代码兜底，不只靠提示词）**：候选必须至少有一条 `gapRefs` 和一条 `basis`，否则丢弃；
   模型的输出不可全信。材料不足时**允许返回空数组**——那是正确答案，不硬凑。
 - 说明书用 Markdown 固定小节：研究问题 / 可检验形式 / 研究对象与关键变量 / 边界条件 /
@@ -1402,6 +1409,8 @@ test-literature-guidance、test-literature-extract、`python -m unittest discove
 - 环节①面板：`想法` + `生成检索式`（→ 候选检索式，点一条填入）＋ `检索式` + `检索` →
   **检索后不直接抽取**，先列候选让人勾选（默认全勾）→ `确认初筛并生成要点`。
   刷新后按 `params.researchJobId` 自动恢复候选清单。
+- 检索后还提供「以文献找文献」：填 DOI/PMID/论文链接（或标题）→ 选参考文献/被引/相似 →
+  并入同一候选池，再统一初筛；扩展条目带「以文献扩展」标记。
 - 环节②面板：`想法` + `生成候选问题` → 候选卡片（陈述 / 假设 / 变量 / 边界 / 对应空白 / 文献依据 / 可行性）+ `采用这条`
   → 说明书写入**环节文档**（走人工审核门），它就是下游③数据获取、④方法选择的输入契约。
 
@@ -1568,6 +1577,7 @@ README 的「调试」段给了一条命令的用法。
 python tools/test_literature_search.py        # 含混合来源/DOI 去重/部分落盘
 python tools/test_literature_search_open.py   # 开放源请求构造、翻页与调度器接入
 python tools/test_literature_fulltext_browser.py  # 全文快照、PMC 等待/重试
+python tools/test_literature_expand.py        # 种子扩展：关系去重/并入替换/S2 兜底
 node tools/test-literature-sources.js         # 注册表 + normalizeConfig（含 sourceQueries）
 node tools/test-research-question.js          # 选题拆解（含 perSource）
 node tools/test-literature-ui-stage2.js       # 多源面板静态检查
@@ -1595,6 +1605,11 @@ node tools/check-contract.js                  # ALL_CHECKS_PASS
   不能被提取阶段当作完整正文。
 - PDF 完整性按**文件**判定：`pdf_magic` + `%%EOF` + 传输完成 + ≥50KB；
   `completeness.text_extractable` 单独记录文本能否抽取（扫描版仍算完整 PDF，提取需 OCR）。
+- **CDP 原生下载兜底**：研究者浏览器通过 CDP 附着时，Chrome 可能直接保存文件而不发
+  Playwright `Download` 事件。任务页（及其已核对弹窗）设置 page-scoped
+  `Page.setDownloadBehavior` 到 `fulltext/.downloads/cdp/`；点击后除事件/PDF 响应外，
+  还接受该目录中**已完成且通过文件校验**的 PDF（跳过 `.crdownload/.part/.tmp`）。
+  这只是“文件已下载但没收到事件”的兜底，不绕过登录、订阅、验证码或下载配额。
 - 旧任务/复用条目若没有 `completeness`，加载时按已保存文件补算。
 
 **补充材料完整性**
@@ -1615,6 +1630,67 @@ node tools/check-contract.js                  # ALL_CHECKS_PASS
   `fetched_pdf` / `fetched_html` 写 `fulltext_url`。
 - 没有 PMC/开放全文入口的论文按“待补充”保留，不绕过订阅或登录；PDF 端点被
   Cloudflare/订阅拦截时不伪造 PDF，保存完整 JATS 正文并标 `kind="xml"`。
+
+### 26.8 以文献找文献：种子文献扩展（2026-10-23）
+
+**用途**：关键词检索擅长按主题捞，但不擅长从一个已知关键点把整个小领域捞全。
+给定一篇种子文献，按三种关系扩展候选：
+
+| 关系 | 含义 | OpenAlex | Semantic Scholar |
+|---|---|---|---|
+| `reference` | 参考文献（上游脉络） | `referenced_works` → `filter=openalex_id:...` | `/references` |
+| `citing` | 被引文献（后续发展） | `filter=cites:W...`（按出版日期倒序） | `/citations` |
+| `similar` | 相似文献（同一问题的其它做法） | `related_works` | `/recommendations` |
+
+**种子标识**：DOI（可带 `https://doi.org/`）、PMID（可带 `pubmed.ncbi.nlm.nih.gov` URL）、
+PMCID、OpenAlex Work ID、Semantic Scholar paperId（40 位十六进制），以及包含这些标识的论文 URL。
+纯标题/作者文本先在 OpenAlex 检索：只有标题完全吻合才自动定位，否则返回 `needs_selection`
+与候选项，由人点选——不替人猜。
+
+**端点** `POST /api/literature/expand`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `jobId` | string | 是 | 要并入的检索作业 id |
+| `seed` | string | 是 | 种子文献标识或标题（≤500 字符） |
+| `relations` | string[] | 否 | `reference` / `citing` / `similar`，缺省三种全要 |
+| `limit` | number | 否 | 每种关系上限 1–200，缺省 50 |
+
+出参：`{ ok, status, seed, relations, added, total, replaced, provider_counts[], warnings[], preview[], files[] }`。
+`status` 可为 `ok` / `no_results` / `needs_selection`。
+
+**并入语义**
+
+- 扩展条目与检索条目**同构**（同样的题录字段），直接进 `candidates.json` 的 `records`，
+  下游去重 → 全文 → 提取 → 校验 → 导出零改动。
+- 扩展批次 `batch_index = -1`，候选 id 前缀 `SEED-<种子哈希>-REF/CIT/SIM###`，
+  不与检索批次（1/2/…）或清单导入（0）撞号。
+- 每条记录带 `expanded=true`、`seed_key`、`seed_id`、`seed_title`、
+  `seed_relation`、`seed_relations[]`（同一文献可同时是参考文献与相似文献）。
+- **同一篇种子重跑 = 整批替换**（按 `seed_key`），不会越扩越多；不同种子各自保留。
+- 顶层 `expansions[]` 记录每次扩展的种子、关系、来源计数与警告。
+- 完整结果同时写 `research/seed_expansion.json`（已加入 `DELIVERABLE_PATTERNS`）。
+
+**兜底与诚实性**
+
+- OpenAlex 优先；该关系**完全取不到**（限流/空结果/缺 ID）时才走 Semantic Scholar，
+  不把两个来源硬凑成数量；`provider_counts[]` 记录每个关系/来源的 `count` 与 `added`。
+- OpenAlex 免费池按出口 IP 共享每日预算，429 时记 warning 并继续，不中断整批。
+- 扩展不到时返回 `no_results` 并说明「可能是开放元数据缺失，不代表该文献没有引用关系」，
+  不宣称已穷尽。
+
+**前端**
+
+- 环节①面板的「以文献找文献」行：种子输入 + 参考文献/被引/相似复选 + 每类 20/50/100 条 +
+  「扩展候选池」；`needs_selection` 时列出候选标题，点「用这篇」再扩展。
+- 候选初筛列表对扩展条目显示「以文献扩展 · 参考文献/被引/相似」标记。
+- 扩展后清空旧候选与勾选，重新拉取候选池（新条目默认参与初筛）。
+
+**验收**
+
+```bash
+python tools/test_literature_expand.py   # 标识分类/关系去重/并入替换/S2 兜底/needs_selection
+```
 
 ## 2026-10-19 本地整合：六阶段与已审核方案流程
 

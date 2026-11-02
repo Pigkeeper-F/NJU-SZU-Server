@@ -35,6 +35,9 @@ class LiteratureAuxiliary {
     if (importing && (state.processingBasis || fs.existsSync(path.join(dir, 'processing-basis.json')))) {
       throw failure('已有候选的后续处理快照已冻结；请回原检索任务补检或导入，再建立新的后续处理。');
     }
+    if (importing && fs.existsSync(path.join(dir, 'confirmations.json'))) {
+      throw failure('该任务已有提取字段确认，请另建同库任务导入，保留原结果。');
+    }
     const confirmedImport = importing && state.config?.researchPlan && fs.existsSync(path.join(dir, 'research-basis.json'));
     if (!confirmedImport && !fs.existsSync(path.join(dir, 'candidates.json'))) throw failure('当前任务没有候选清单。');
     if (importing) {

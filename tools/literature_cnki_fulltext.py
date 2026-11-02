@@ -596,6 +596,8 @@ def run_cnki(fetcher, record, opts):
             return
         attached.add(id(target))
         attached_targets[id(target)] = literature_browser._target_id(fetcher._context, target)
+        # CDP-attached Chrome may save the file without emitting Download.
+        fetcher._enable_cdp_downloads(target)
         def on_download(download):
             nonlocal metadata_download_seen
             if metadata_only:
@@ -945,6 +947,10 @@ def run_cnki(fetcher, record, opts):
             except Exception:
                 return pause("page_error", "知网页面响应未通过PDF内容校验，已暂停；请在原页面核对。")
             return finish_artifact(blob)
+        if step == "download_clicked":
+            blob = fetcher._take_cdp_download(fetcher._cdp_download_before)
+            if blob is not None:
+                return finish_artifact(blob)
         return None
 
     def find_target(context, target_id, *, strict=False):
@@ -1082,6 +1088,7 @@ def run_cnki(fetcher, record, opts):
         step = flow["step"] if resuming else "lookup"
         action = "title" if step == "detail_pending" else "download" if step == "download_clicked" else None
         attach(page)
+        fetcher._cdp_download_before = fetcher._cdp_download_snapshot()
         fetcher._context.on("response", context_response)
         listeners.append((fetcher._context, "response", context_response))
         start = fetcher._clock()
@@ -1341,6 +1348,7 @@ def run_cnki(fetcher, record, opts):
                             step = "download_clicked"
                             action = "download"
                             fetcher._progress("全文获取：已点击当前知网详情页的下载控件，等待文件生成或真实下载；不会重复点击。")
+                            fetcher._cdp_download_before = fetcher._cdp_download_snapshot()
                             element.click(timeout=15_000, no_wait_after=True)
                         finally:
                             try:

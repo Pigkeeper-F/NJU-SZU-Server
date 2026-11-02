@@ -119,8 +119,10 @@ const DELIVERABLE_PATTERNS = [
   /^extraction\/[^/\\]+\.json$/,
   /^validation\/validation\.(?:json|md)$/,
   // 【文献调研 · 2026-10-20】环节①的调研产物：逐篇要点、共识分歧、研究空白、人工初筛记录。
-  /^research\/(?:notes|synthesis|gaps)\.(?:json|csv|md)$/,
+  /^research\/(?:notes|synthesis|gaps|matrix)\.(?:json|csv|md)$/,
   /^research\/screening(?:_result)?\.json$/,
+  // 【以文献找文献 · 2026-10-23】种子扩展的完整结果（含来源、关系与警告）。
+  /^research\/seed_expansion\.json$/,
   /^export\/[^/\\]+\.(?:csv|xlsx|md)$/
 ];
 

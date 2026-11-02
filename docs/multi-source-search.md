@@ -191,8 +191,64 @@ python tools/literature_search_open.py --source pubmed --query "soil carbon" --l
 | `server.js` `POST /api/literature/import` | 端点：`{jobId, source, content, format?}` → 写入作业候选池 |
 | `js/chat.js` | ①调研面板底部的「导入清单」入口（选来源 + 选文件） |
 | `tools/test_literature_import.py` | 离线回归：38 项断言（解析/识别/并入/整批替换/坏输入） |
+| `tools/literature_expand.py` | 以文献找文献：种子定位 + 参考文献/被引/相似 + 并入候选池 |
+| `tools/test_literature_expand.py` | 离线回归：关系去重/并入替换/S2 兜底/needs_selection |
 
 ### 8.5 知网能导入多少？
 
 知网免费账号通常**单次导出有条数上限**（常见 20–50 条，视版本），建议分批导出、分次导入——
 同一份清单重复导入会整批替换，但**不同清单会累加**，所以分批要换文件名/内容。
+
+---
+
+## 九、以文献找文献：种子文献扩展（已实现，2026-10-23）
+
+关键词检索擅长「按主题捞」，但不擅长「从一篇已知关键论文把整个小领域捞全」。
+综述、方法学奠基作、导师指定的那篇论文，往往是最好的检索起点：
+
+| 关系 | 含义 | 用途 |
+|---|---|---|
+| **参考文献** | 种子论文引用了谁 | 追溯上游脉络、理论来源 |
+| **被引** | 谁引用了种子论文 | 追后续发展、最新应用 |
+| **相似** | 同一问题的其它做法 | 找平行研究、方法对照 |
+
+### 9.1 操作步骤
+
+1. 先跑过一次检索（任意来源，哪怕只有 1 条），让作业存在。
+2. 在①调研面板底部「**以文献找文献**」行填入：
+   DOI（如 `10.1016/j.cej.2025.164701`）、PMID、PMCID、OpenAlex Work ID、论文链接，
+   或直接填**论文标题**。
+3. 勾选要的关系（默认三种全选），选每类条数（20/50/100），点「**扩展候选池**」。
+4. 扩展结果并入同一候选池，与检索来的条目一起进入人工初筛；扩展条目在初筛列表里带
+   「以文献扩展 · 参考文献/被引/相似」标记。
+
+标题匹配到多篇时，界面会列出候选，点「用这篇」确认后再扩展——**不替人猜**。
+
+### 9.2 语义
+
+- 扩展条目与检索条目**同构**，下游去重 → 全文 → 提取 → 校验 → 导出零改动。
+- 扩展批次 `batch_index = -1`，候选 id 形如 `SEED-<种子哈希>-REF001`，与检索批次、清单导入都不撞号。
+- 每条带 `expanded / seed_key / seed_id / seed_title / seed_relation / seed_relations[]`，可回溯来源。
+- **同一篇种子重跑 = 整批替换**，不同种子各自保留；不会越扩越多。
+- 完整结果另存 `research/seed_expansion.json`。
+
+### 9.3 来源与兜底
+
+- 优先 OpenAlex（`referenced_works` / `cites:` / `related_works`）；
+  该关系完全取不到时兜底 Semantic Scholar（`/references`、`/citations`、`/recommendations`）。
+- OpenAlex 免费池按出口 IP 共享每日预算，429 时记 warning 并继续；不中断整批。
+- 扩展不到时如实返回 `no_results`，并说明**可能是开放元数据缺失，不代表该文献没有引用关系**。
+- 不绕过订阅：只有来源给出的开放获取链接才写进 `fulltext_links`。
+
+### 9.4 相关代码与验收
+
+| 文件 | 作用 |
+|---|---|
+| `tools/literature_expand.py` | 种子定位、三种关系抓取、跨来源去重、并入候选池 |
+| `server.js` `POST /api/literature/expand` | 端点：`{jobId, seed, relations[], limit}` |
+| `js/chat.js` | ①调研面板的「以文献找文献」行与「用这篇」确认 |
+| `tools/test_literature_expand.py` | 离线回归：标识分类/关系去重/整批替换/S2 兜底/needs_selection |
+
+```bash
+python tools/test_literature_expand.py   # LITERATURE_EXPAND_TESTS_PASS
+```

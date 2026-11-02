@@ -23,3 +23,18 @@
 - 已加载本机 18125 平台，并沿原 3814 条任务续跑；输入、冻结研究依据和配置的 SHA256 校验一致。真实任务已越过第一篇旧停点，连续推进后续文献。
 
 首批真实 PDF 获取仍在观察中；上述验证不代表 3814 条处理完毕、来源检全或真实 PDF 已全部取得。原检索覆盖缺口保留，提取与分析未启动。
+
+## CDP 原生下载兜底（2026-11-02）
+
+研究者浏览器通过 CDP 附着，Chrome 可能把文件直接保存到浏览器下载目录，而不会向 Playwright 发出 `Download` 对象。此前知网“详情页有 Full access、点击 Download PDF 失败”的现象，可能是自动化只等待 `download` 事件，未识别 Chrome 已保存的实际文件。
+
+现在对每个任务页（及其已核对下载弹窗）设置 **page-scoped** `Page.setDownloadBehavior`，把原生下载定向到 `fulltext/.downloads/cdp/`；点击后除原有 `download`/PDF 响应外，还检查该目录：
+
+- 跳过 `.crdownload`/`.part`/`.tmp`；
+- 只接受大小在 `MIN_PDF_BYTES`–`MAX_PDF_BYTES`、`%PDF` 魔数正确且实际读取成功的文件；
+- 通过后走与事件下载相同的 `finish_artifact` 保存和登记流程；
+- 已有文件不会重复消费；下载目录按任务隔离。
+
+该兜底只解决“文件其实已下载但未收到 Playwright 事件”，不绕过登录、订阅、验证码或下载配额。若 Chrome 返回错误页/CAJ，仍按原规则暂停并保留页面。
+
+离线回归：`python tools/test_literature_cdp_download.py`（8 项）验证目录隔离、未完成文件忽略、HTML 拒绝、PDF 接受与已消费文件不复用；现有 `test_literature_cnki_fulltext.py`（83 项）和 `test_literature_fulltext_browser.py`（27 项）通过。

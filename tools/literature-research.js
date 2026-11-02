@@ -26,7 +26,15 @@ const NOTES_BATCH = 3;        // 每次请求处理的篇数
 const TEXT_CHARS = 4000;      // 每篇送进模型的正文字符上限
 const SYNTHESIS_CHARS = 12000; // 送进综合调用的要点字符上限
 
-const NOTE_FIELDS = ['question', 'data', 'method', 'conclusion', 'limitation'];
+// 【风险与可比性 · 2026-10-23】除了「研究了什么/结论是什么」，还抽「在什么对象、
+// 什么条件下、测了哪个指标、单位是什么、效应多大」——不同文献的分歧往往不是结论
+// 相反，而是指标口径/单位/条件不可比。这些字段直接支撑条件—指标矩阵。
+const NOTE_FIELDS = [
+  'question', 'data', 'method', 'population', 'outcome', 'unit', 'conditions', 'effect',
+  'conclusion', 'limitation'
+];
+
+const RISK_KINDS = ['指标口径', '单位不一致', '条件不可比', '样本代表性', '外推过度', '报告缺失', '其他'];
 
 function loadJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { return null; }
@@ -232,13 +240,20 @@ function notesPrompt(bundles) {
     '你是科研文献调研助手。下面给出若干篇文献的题录与正文片段（evidence 标"仅题录"的没有正文）。',
     '请为每篇抽取结构化要点，严格输出一个 JSON 数组，每篇一个对象，字段：',
     '{"id": "原文 id", "question": "研究问题", "data": "数据来源", "method": "方法",',
+    ' "population": "研究对象/系统（物种、地区、样本）",',
+    ' "outcome": "关键结局指标（如产奶量/日增重/饲料转化率）",',
+    ' "unit": "该指标在原文使用的单位/量纲",',
+    ' "conditions": "实验或观测条件（时间尺度、处理强度、环境）",',
+    ' "effect": "原文报告的效应方向与大小（不换算、不合并）",',
     ' "conclusion": "结论", "limitation": "局限", "evidence": "全文|仅题录"}',
     '要求：',
     '1. 只依据给出的材料，不要补充材料里没有的信息；材料里没有的字段写"文中未说明"。',
     '2. evidence 为"仅题录"的文献，只能写题录能支持的内容（标题、作者、期刊、摘要片段），',
     '   不得推断方法细节、实验结果或结论——这是硬要求。',
     '3. id 必须与输入完全一致，顺序一致，不得增删条目。',
-    '4. 只输出 JSON 数组，不要任何解释文字或代码围栏。',
+    '4. population/outcome/unit/conditions/effect 只照抄或紧贴原文归纳：原文没写单位就写',
+    '   "文中未说明"，不要把不同指标合并成一个，不要做单位换算，不要替作者外推。',
+    '5. 只输出 JSON 数组，不要任何解释文字或代码围栏。',
     '',
     JSON.stringify(payload, null, 1)
   ].join('\n');
@@ -252,6 +267,11 @@ function synthesisPrompt(notes) {
     year: note.year,
     evidence: note.evidence,
     question: note.question,
+    population: note.population,
+    outcome: note.outcome,
+    unit: note.unit,
+    conditions: note.conditions,
+    effect: note.effect,
     conclusion: note.conclusion,
     limitation: note.limitation
   }));
@@ -263,14 +283,22 @@ function synthesisPrompt(notes) {
     '  "disagreements": [{"statement": "存在的分歧/争议", "refs": ["id", ...]}],',
     '  "gaps": [{"gap": "研究空白的具体描述",',
     '             "basis": [{"id": "...", "what": "该文献里指向这个空白的具体结论"}],',
-    '             "direction": "可检验的研究方向"}]',
+    '             "direction": "可检验的研究方向"}],',
+    '  "risks": [{"kind": "指标口径|单位不一致|条件不可比|样本代表性|外推过度|报告缺失|其他",',
+    '             "statement": "合并/比较/外推前必须核对的问题",',
+    '             "refs": ["id", ...],',
+    '             "why_it_matters": "如果不核对，会怎样影响结论或合并结果"}]',
     '}',
     '要求：',
     '1. refs 与 basis.id 只能是输入中出现过的 id，且每条至少一个；写不出依据的条目不要写。',
     '2. gaps 必须能从上面的要点推出（basis 至少一条），不得凭空想象研究空白；',
     '   若确实推不出，把 gaps 设为空数组——空数组是允许的答案。',
     '3. 共识与分歧要如实反映文献间的差异，不要把个别论文的主张当成领域共识。',
-    '4. 只输出 JSON 对象，不要解释文字。',
+    '4. risks 不是研究空白：它专指"看起来能比较、其实口径/单位/条件对不上"的问题。',
+    '   优先检查：不同指标被当成同一结局、百分比变化被当成绝对产量变化、',
+    '   实验条件或时间尺度不可比、样本代表性不足、原文没有报告关键数值。',
+    '   没有可支撑的风险就返回空数组，不要为凑数编造。',
+    '5. 只输出 JSON 对象，不要解释文字。',
     '',
     JSON.stringify(brief, null, 1)
   ].join('\n');
@@ -329,7 +357,7 @@ function renderGapsMd(gaps, notes) {
 }
 
 function renderSynthesisMd(synthesis) {
-  const lines = ['# 综述要点（共识 / 分歧）', ''];
+  const lines = ['# 综述要点（共识 / 分歧 / 风险）', ''];
   lines.push('## 共识');
   if (synthesis.consensus.length) {
     for (const item of synthesis.consensus) {
@@ -348,8 +376,52 @@ function renderSynthesisMd(synthesis) {
     lines.push('- （未归纳出明显分歧）');
   }
   lines.push('');
-  lines.push('> 完整的研究空白清单见 `gaps.md`；逐篇要点见 `notes.csv`。');
+  lines.push('## 风险与待查项（合并 / 比较前必须核对）');
+  const risks = Array.isArray(synthesis.risks) ? synthesis.risks : [];
+  if (risks.length) {
+    for (const item of risks) {
+      lines.push(`- 【${item.kind || '其他'}】${item.statement}　（出处：${item.refs.join('、') || '—'}）`);
+      if (item.why_it_matters) lines.push(`  - 影响：${item.why_it_matters}`);
+    }
+  } else {
+    lines.push('- （未识别出需要单独提示的可比性风险；不代表一定不存在，逐篇条件见 `matrix.md`）');
+  }
+  lines.push('');
+  lines.push('> 完整的研究空白清单见 `gaps.md`；条件—指标矩阵见 `matrix.md`；逐篇要点见 `notes.csv`。');
   return lines.join('\n');
+}
+
+function mdCell(value) {
+  return normalizeText(value).replace(/\|/g, '\\|') || '文中未说明';
+}
+
+/** 条件—指标矩阵：逐篇摊开对象/结局/单位/条件/效应，避免把不可比的结果压成一个结论。 */
+function buildMatrix(notes) {
+  return notes.map((note) => ({
+    id: note.id,
+    title: note.title,
+    year: note.year,
+    population: note.population,
+    outcome: note.outcome,
+    unit: note.unit,
+    conditions: note.conditions,
+    effect: note.effect,
+    evidence: note.evidence
+  }));
+}
+
+function renderMatrixMd(rows) {
+  const lines = ['# 条件—指标矩阵', '',
+    '逐篇保留研究对象、结局指标、单位、条件与原文效应；不同行不可直接合并，除非口径一致。', '',
+    '| id | 文献 | 年份 | 研究对象/系统 | 结局指标 | 单位 | 条件 | 原文效应 | 证据 |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |'];
+  for (const row of rows) {
+    lines.push('| ' + [
+      row.id, mdCell(row.title), row.year || '', mdCell(row.population), mdCell(row.outcome),
+      mdCell(row.unit), mdCell(row.conditions), mdCell(row.effect), mdCell(row.evidence)
+    ].join(' | ') + ' |');
+  }
+  return lines.join('\n') + '\n';
 }
 
 /**
@@ -412,7 +484,7 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
     briefText = JSON.stringify(briefNotes);
   }
 
-  let synthesis = { consensus: [], disagreements: [], gaps: [] };
+  let synthesis = { consensus: [], disagreements: [], gaps: [], risks: [] };
   let synthesisError = null;
   try {
     const text = await callModel(modelCfg, [{ role: 'user', content: synthesisPrompt(briefNotes) }], 180000);
@@ -433,7 +505,16 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
               .filter((b) => b.id),
             direction: String((item && item.direction) || '')
           }))
-          .filter((item) => item.gap && item.basis.length)
+          .filter((item) => item.gap && item.basis.length),
+        risks: (Array.isArray(parsed.risks) ? parsed.risks : [])
+          .map((item) => ({
+            kind: RISK_KINDS.includes(String((item && item.kind) || '').trim())
+              ? String(item.kind).trim() : '其他',
+            statement: String((item && item.statement) || '').trim(),
+            refs: collectRefs(item && item.refs),
+            why_it_matters: String((item && item.why_it_matters) || '').trim()
+          }))
+          .filter((item) => item.statement && item.refs.length)
       };
     } else {
       synthesisError = '综合归纳返回的不是可解析的 JSON';
@@ -455,9 +536,12 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
     only_title: bundles.filter((b) => !b.hasFulltext).length,
     synthesis_truncated: truncated,
     synthesis_input_notes: briefNotes.length,
+    risk_count: synthesis.risks.length,
+    matrix_rows: notes.length,
     failures
   };
 
+  const matrix = buildMatrix(notes);
   const outDir = path.join(jobDir, 'research');
   const files = [];
   const notesFile = path.join(outDir, 'notes.json');
@@ -467,7 +551,7 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
   const csvFile = path.join(outDir, 'notes.csv');
   writeText(csvFile, toCsv(notes, [
     'id', 'title', 'authors', 'year', 'venue', 'doi', 'source', 'evidence',
-    'question', 'data', 'method', 'conclusion', 'limitation'
+    ...NOTE_FIELDS
   ]));
   files.push('research/notes.csv');
 
@@ -487,6 +571,16 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
   writeText(gapsMd, renderGapsMd(synthesis.gaps, notes));
   files.push('research/gaps.md');
 
+  const matrixCsv = path.join(outDir, 'matrix.csv');
+  writeText(matrixCsv, toCsv(matrix, [
+    'id', 'title', 'year', 'population', 'outcome', 'unit', 'conditions', 'effect', 'evidence'
+  ]));
+  files.push('research/matrix.csv');
+
+  const matrixMd = path.join(outDir, 'matrix.md');
+  writeText(matrixMd, renderMatrixMd(matrix));
+  files.push('research/matrix.md');
+
   // 人工初筛的留档：谁被留下、谁被排除、为什么排除（可回看、可追溯）。
   if (screening) {
     const screeningFile = path.join(outDir, 'screening_result.json');
@@ -501,7 +595,8 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
     files.push('research/screening_result.json');
   }
 
-  if (onEvent) onEvent({ type: 'research:done', files, notes: notes.length, gaps: synthesis.gaps.length });
+  if (onEvent) onEvent({ type: 'research:done', files, notes: notes.length,
+    gaps: synthesis.gaps.length, risks: synthesis.risks.length });
 
   return {
     ok: !synthesisError,
@@ -509,9 +604,14 @@ async function runResearchStage({ job, modelCfg, callModel, onEvent } = {}) {
     notes,
     synthesis,
     gaps: synthesis.gaps,
+    risks: synthesis.risks,
+    matrix,
     files,
     error: synthesisError
   };
 }
 
-module.exports = { runResearchStage, parseJsonLoose, notesPrompt, synthesisPrompt, buildBundles, loadScreening, applyScreening };
+module.exports = {
+  runResearchStage, parseJsonLoose, notesPrompt, synthesisPrompt, buildBundles,
+  loadScreening, applyScreening, buildMatrix, renderMatrixMd, RISK_KINDS
+};

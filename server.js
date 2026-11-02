@@ -637,6 +637,7 @@ async function handleResearch(req, res, url) {
     const rq = require('./tools/research-question');
     let gaps = [];
     let notes = [];
+    let risks = [];
     let topic = '';
     const jobIds = Array.isArray(data.upstreamJobIds) ? data.upstreamJobIds : [];
     for (const jobId of jobIds) {
@@ -644,19 +645,21 @@ async function handleResearch(req, res, url) {
       const out = rq.loadResearchOutputs(upstream.dir);
       gaps = gaps.concat(out.gaps);
       notes = notes.concat(out.notes);
+      risks = risks.concat(out.risks || []);
       topic = topic || out.topic;
     }
     if (Array.isArray(data.gaps)) gaps = gaps.concat(data.gaps);
     if (Array.isArray(data.notes)) notes = notes.concat(data.notes);
+    if (Array.isArray(data.risks)) risks = risks.concat(data.risks);
     const idea = String(data.idea || topic || '').trim();
     try {
       if (data.action === 'specify') {
         const spec = await rq.buildSpecification({
-          idea, candidate: data.choice, gaps, notes, modelCfg: cfg, callModel: callModelWithRetry
+          idea, candidate: data.choice, gaps, notes, risks, modelCfg: cfg, callModel: callModelWithRetry
         });
         return sendJson(res, 200, { ok: true, ...spec });
       }
-      const result = await rq.buildCandidates({ idea, gaps, notes, modelCfg: cfg, callModel: callModelWithRetry });
+      const result = await rq.buildCandidates({ idea, gaps, notes, risks, modelCfg: cfg, callModel: callModelWithRetry });
       return sendJson(res, 200, { ok: true, ...result, config: configInfo(cfg, configSource(data.settings, normalizeCredential(data.credential))) });
     } catch (error) {
       const message = (error && error.message) || '问题凝练失败';
@@ -667,6 +670,28 @@ async function handleResearch(req, res, url) {
   res.end(JSON.stringify({ error: '未知的接口' }));
   } catch (error) { return sendJson(res, error.status || 400, { error: error.message }); }
   finally { release?.(); }
+}
+
+/** 调 Python 工具并把最后一行 JSON 解析回来（种子扩展等一次性任务）。 */
+function runPythonJson(args, { timeoutMs = 180000 } = {}) {
+  return new Promise((resolve) => {
+    const python = [process.env.WORKBENCH_PYTHON, path.join(ROOT, '.venv', 'Scripts', 'python.exe'),
+      path.join(ROOT, '.venv', 'bin', 'python')].find(file => file && fs.existsSync(file)) || 'python';
+    const child = spawn(python, args, { cwd: ROOT, windowsHide: true });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => { try { child.kill(); } catch (error) { /* 已退出 */ } }, timeoutMs);
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.stderr.on('data', (chunk) => { err += chunk; });
+    child.on('error', (error) => { clearTimeout(timer); resolve({ code: 1, out: '', err: String(error && error.message) }); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      let parsed = null;
+      const lines = String(out || '').trim().split(String.fromCharCode(10)).map((line) => line.trim()).filter(Boolean);
+      try { parsed = JSON.parse(lines.length ? lines[lines.length - 1] : '{}'); } catch (error) { parsed = null; }
+      resolve({ code, out, err, parsed });
+    });
+  });
 }
 
 async function handleLiterature(req, res, url) {
@@ -790,7 +815,8 @@ async function handleLiterature(req, res, url) {
         scholar.persist(job);
         return sendJson(res, 200, {
           ok: result.ok, meta: result.meta, files: result.files,
-          notes: result.notes, synthesis: result.synthesis, gaps: result.gaps, error: result.error
+          notes: result.notes, synthesis: result.synthesis, gaps: result.gaps,
+          risks: result.risks, matrix: result.matrix, error: result.error
         });
       } catch (error) {
         console.error('[server] literature research failed:', error);
@@ -915,6 +941,65 @@ async function handleLiterature(req, res, url) {
       } finally {
         try { fs.unlinkSync(tempPath); } catch (error) { /* 临时文件清理失败不影响结果 */ }
       }
+    }
+
+    // 【以文献找文献 · 2026-10-23】POST /api/literature/expand
+    // 从一篇种子文献向外扩：参考文献（上游脉络）/ 被引（后续发展）/ 相似（同一问题的其它做法）。
+    // 扩展条目与检索条目同构，直接并入候选池；同一篇种子重跑 = 整批替换，不会越扩越多。
+    if (req.method === 'POST' && route === '/api/literature/expand') {
+      const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
+      const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
+      const seed = typeof data.seed === 'string' ? data.seed.trim().slice(0, 500) : '';
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
+        return sendJson(res, 400, { error: '检索任务标识无效。' });
+      }
+      if (!seed) return sendJson(res, 400, { error: '请先填写种子文献（DOI / PMID / 论文链接）' });
+      const allowed = ['reference', 'citing', 'similar'];
+      const relations = (Array.isArray(data.relations) ? data.relations : allowed)
+        .map((item) => String(item || '').trim()).filter((item) => allowed.includes(item));
+      if (!relations.length) return sendJson(res, 400, { error: '至少选择一种扩展关系' });
+      const limit = Number.isInteger(data.limit) ? Math.max(1, Math.min(data.limit, 200)) : 50;
+      release = literatureAuxiliary.acquire();
+      const job = literatureAuxiliary.job(jobId);
+      const outcome = await runPythonJson([
+        path.join(ROOT, 'tools', 'literature_expand.py'),
+        '--output-dir', job.dir,
+        '--seed', seed,
+        '--relations', relations.join(','),
+        '--limit', String(limit)
+      ], { timeoutMs: 240000 });
+      const parsed = outcome.parsed;
+      if (outcome.code !== 0 || !parsed || parsed.status === 'error') {
+        const message = (parsed && parsed.message) || String(outcome.out || outcome.err || '').trim().slice(0, 300) || '扩展失败';
+        return sendJson(res, researchErrorStatus(message), { error: message });
+      }
+      if (parsed.status === 'needs_selection') {
+        return sendJson(res, 200, {
+          ok: false, status: 'needs_selection',
+          message: '标题匹配到多篇文献，请点一条确认，或直接填 DOI/PMID。',
+          candidates: (parsed.candidates || []).slice(0, 8)
+        });
+      }
+      if (parsed.status === 'ok' && parsed.appended) {
+        job.count = parsed.total;
+        job.counters = { ...job.counters, candidates: parsed.total };
+        scholar.registerFiles(job, parsed.files || []);
+        scholar.persist(job);
+      }
+      return sendJson(res, 200, {
+        ok: parsed.status === 'ok',
+        status: parsed.status,
+        seed: parsed.seed || null,
+        relations: parsed.relations || relations,
+        added: parsed.added || 0,
+        total: parsed.total || job.count || 0,
+        replaced: parsed.replaced || 0,
+        relation_counts: parsed.relation_counts || {},
+        provider_counts: parsed.provider_counts || [],
+        warnings: parsed.warnings || [],
+        preview: (parsed.preview || parsed.records || []).slice(0, 40),
+        files: parsed.files || []
+      });
     }
 
     // 【stage2】POST /advance：从 resumeStage 续跑（缺省 until=export），支持字段确认关口（§21.2.2）。
@@ -1063,7 +1148,11 @@ async function handleLiterature(req, res, url) {
           year: record.year || '',
           venue: String(record.venue || ''),
           doi: String(record.doi || ''),
-          snippet: String(record.snippet || '').slice(0, 400)
+          snippet: String(record.snippet || '').slice(0, 400),
+          expanded: record.expanded === true,
+          seed_relation: String(record.seed_relation || ''),
+          seed_relations: Array.isArray(record.seed_relations) ? record.seed_relations : [],
+          seed_title: String(record.seed_title || '')
         }))
       });
     }

@@ -58,13 +58,18 @@ const RECORDS = [
   console.log('\nS1/S2/S3 正常路径：抽取要点 → 归纳 → 落盘');
   const job = makeJob(RECORDS);
   const notesReply = JSON.stringify([
-    { id: 'GSC-001', question: '长期施肥对稻田 SOC 的影响', data: '长期试验的 meta 分析', method: 'meta 分析', conclusion: '长期施肥提高 SOC', limitation: '未覆盖北方土壤', evidence: '全文' },
-    { id: 'GSC-002', question: '粪肥输入与碳组分', data: '长期定位试验', method: '长期定位试验', conclusion: '粪肥提高活性碳', limitation: '样本点少', evidence: '全文' }
+    { id: 'GSC-001', question: '长期施肥对稻田 SOC 的影响', data: '长期试验的 meta 分析', method: 'meta 分析',
+      population: '中国南方稻田', outcome: '土壤有机碳', unit: 'g/kg', conditions: '长期定位试验，≥10 年',
+      effect: 'SOC 提高 12%', conclusion: '长期施肥提高 SOC', limitation: '未覆盖北方土壤', evidence: '全文' },
+    { id: 'GSC-002', question: '粪肥输入与碳组分', data: '长期定位试验', method: '长期定位试验',
+      population: '红壤旱地', outcome: '活性有机碳', unit: 'mg/kg', conditions: '粪肥年施用量 30 t/ha',
+      effect: '活性碳提高 20%', conclusion: '粪肥提高活性碳', limitation: '样本点少', evidence: '全文' }
   ]);
   const synthesisReply = JSON.stringify({
     consensus: [{ statement: '长期施肥普遍提高土壤有机碳', refs: ['GSC-001', 'GSC-002'] }],
     disagreements: [{ statement: '不同土壤类型响应幅度差异大', refs: ['GSC-001'] }],
-    gaps: [{ gap: '长期施肥在北方旱地土壤的证据不足', basis: [{ id: 'GSC-001', what: 'meta 分析只覆盖水稻土' }], direction: '在北方旱地开展长期定位试验' }]
+    gaps: [{ gap: '长期施肥在北方旱地土壤的证据不足', basis: [{ id: 'GSC-001', what: 'meta 分析只覆盖水稻土' }], direction: '在北方旱地开展长期定位试验' }],
+    risks: [{ kind: '单位不一致', statement: 'SOC 用 g/kg、活性碳用 mg/kg，不能直接合并', refs: ['GSC-001', 'GSC-002'], why_it_matters: '直接平均会夸大或缩小效应' }]
   });
   const calls = [];
   const mockModel = async (cfg, messages, timeout) => {
@@ -78,14 +83,21 @@ const RECORDS = [
   ok(result.synthesis.consensus.length === 1, '归纳出 1 条共识');
   ok(result.synthesis.disagreements.length === 1, '归纳出 1 条分歧');
   ok(result.gaps.length === 1 && result.gaps[0].basis.length === 1, '研究空白带依据');
-  ok(result.files.length === 6, '产出 6 个文件');
+  ok(result.risks.length === 1 && result.risks[0].kind === '单位不一致', '归纳出 1 条可比性风险');
+  ok(result.matrix.length === 2 && result.matrix[0].outcome === '土壤有机碳', '条件—指标矩阵带结局指标');
+  ok(result.files.length === 8, '产出 8 个文件（含矩阵）');
   for (const rel of result.files) {
     ok(fs.existsSync(path.join(job.dir, rel)), '文件已落盘：' + rel);
   }
   const csv = fs.readFileSync(path.join(job.dir, 'research', 'notes.csv'), 'utf8');
   ok(csv.split('\r\n')[0].includes('question') && csv.includes('长期施肥对稻田 SOC 的影响'), 'CSV 表头与内容正确');
+  ok(csv.split('\r\n')[0].includes('outcome') && csv.includes('g/kg'), 'notes.csv 含结局指标与单位');
   const gapsMd = fs.readFileSync(path.join(job.dir, 'research', 'gaps.md'), 'utf8');
   ok(gapsMd.includes('北方旱地') && gapsMd.includes('meta 分析只覆盖水稻土'), 'gaps.md 含空白与依据出处');
+  const synthesisMd = fs.readFileSync(path.join(job.dir, 'research', 'synthesis.md'), 'utf8');
+  ok(synthesisMd.includes('风险与待查项') && synthesisMd.includes('单位不一致'), 'synthesis.md 含风险段');
+  const matrixMd = fs.readFileSync(path.join(job.dir, 'research', 'matrix.md'), 'utf8');
+  ok(matrixMd.includes('条件—指标矩阵') && matrixMd.includes('土壤有机碳') && matrixMd.includes('g/kg'), 'matrix.md 含逐篇条件与单位');
   ok(calls.length === 2, '模型被调用 2 次（要点 + 综合）');
   ok(calls[0].includes('仅题录') && calls[0].includes('不得推断方法细节'), '要点提示词含"仅题录不得推断"的硬要求');
 

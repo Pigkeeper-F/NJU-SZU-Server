@@ -574,6 +574,11 @@ async function multiSourceTests() {
     'searchMode', 'stopMode', 'perSourceLimit', '到可访问末页', '/api/literature/cancel']) {
     assert.ok(chat.includes(token), '多源检索面板应包含: ' + token);
   }
+  // 9c) 以文献找文献：入口、关系、状态签名与候选标记都必须在位
+  for (const token of ['/api/literature/expand', '以文献找文献', 'expandSeed', 'expandRelations',
+    'expandMessage', 'seed_relation', '以文献扩展']) {
+    assert.ok(chat.includes(token), '种子扩展面板应包含: ' + token);
+  }
   assert.ok(!chat.includes("sources: ['google-scholar'], limit: 10"), '调研面板不得把来源写死为 Scholar');
   console.log('LITERATURE_UI_STAGE2_TESTS_PASS');
 }

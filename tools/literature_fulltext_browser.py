@@ -624,6 +624,11 @@ class FulltextBrowserFetcher:
         self._deferred_sites = {}
         self._material_discoveries = {}
         self._material_results = {}
+        # A CDP-attached researcher browser does not always emit Playwright
+        # Download objects (native Chrome saves the file itself). Keep a
+        # page-scoped download directory as a second, still file-validated path.
+        self._cdp_download_sessions = {}
+        self._cdp_download_before = set()
 
     def _read_binding(self):
         try:
@@ -1273,6 +1278,75 @@ class FulltextBrowserFetcher:
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+    def _cdp_download_directory(self) -> Path:
+        directory = self.job_dir / "fulltext" / ".downloads" / "cdp"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _enable_cdp_downloads(self, page) -> bool:
+        """Route native Chrome downloads for this page into the task directory.
+
+        The researcher browser is attached over CDP; downloads started by the
+        site may bypass Playwright's Download event. Page-scoped CDP behavior
+        keeps the change local to this task page and never touches other tabs.
+        """
+        key = id(page)
+        if key in self._cdp_download_sessions:
+            return True
+        try:
+            session = self._context.new_cdp_session(page)
+            session.send("Page.setDownloadBehavior", {
+                "behavior": "allow", "downloadPath": str(self._cdp_download_directory())})
+            self._cdp_download_sessions[key] = session
+            return True
+        except Exception as error:
+            self._pdf_diagnostic("cdp_download_behavior_unavailable", error_class=type(error).__name__)
+            return False
+
+    def _cdp_download_snapshot(self) -> set[str]:
+        try:
+            return {item.name for item in self._cdp_download_directory().iterdir() if item.is_file()}
+        except OSError:
+            return set()
+
+    def _take_cdp_download(self, before: set[str] | None = None, out_path=None):
+        """Return a completed, validated native download newer than ``before``.
+
+        Chrome leaves ``.crdownload`` while writing; only a stable, non-partial
+        file that passes the same PDF checks is accepted.
+        """
+        try:
+            directory = self._cdp_download_directory()
+            seen = before if isinstance(before, set) else self._cdp_download_before
+            candidates = []
+            for item in directory.iterdir():
+                if not item.is_file() or item.name in seen:
+                    continue
+                if item.suffix.lower() in {".crdownload", ".part", ".tmp"}:
+                    continue
+                try:
+                    size = item.stat().st_size
+                except OSError:
+                    continue
+                if size < MIN_PDF_BYTES or size > MAX_PDF_BYTES:
+                    continue
+                candidates.append((item.stat().st_mtime_ns, item, size))
+            for _, item, size in sorted(candidates):
+                try:
+                    blob = item.read_bytes()
+                except OSError:
+                    continue
+                if not blob.startswith(b"%PDF") or len(blob) < MIN_PDF_BYTES:
+                    self._pdf_diagnostic("cdp_download_invalid_body", bytes=len(blob))
+                    continue
+                if out_path is not None:
+                    _save_pdf(out_path, blob)
+                self._pdf_diagnostic("cdp_download_accepted", bytes=len(blob), source="page_download_directory")
+                return blob
+        except Exception as error:
+            self._pdf_diagnostic("cdp_download_read_failed", error_class=type(error).__name__)
+        return None
 
     def _discovery(self, record, snapshot, url):
         result = {"status": "unknown", "reason": "article_materials_not_observed",
@@ -2364,6 +2438,7 @@ class FulltextBrowserFetcher:
                 if id(owner) in attached:
                     return
                 attached.add(id(owner))
+                self._enable_cdp_downloads(owner)
                 def got_download(download):
                     if clicked:
                         downloads.append(download)
@@ -2452,6 +2527,7 @@ class FulltextBrowserFetcher:
                 if not clicked:
                     self._pace(safe)
                     self._request_url = safe
+                    self._cdp_download_before = self._cdp_download_snapshot()
                     # Durable before the first click: a restart inspects the
                     # exact retained page instead of clicking a second time.
                     self._binding.update(pending_url_hash=_url_hash(safe), attention_reason="page_not_ready", pdf_click_pending=True)
@@ -2568,6 +2644,12 @@ class FulltextBrowserFetcher:
                     self._clear_pending()
                     return {"status": "saved" if out_path else "pdf_page", "url": safe,
                             "bytes": blob, "size": len(blob), "acquisition_method": "observed_pdf_click"}
+                if self._binding.get("pdf_click_pending"):
+                    blob = self._take_cdp_download(self._cdp_download_before, out_path)
+                    if blob is not None:
+                        self._clear_pending()
+                        return {"status": "saved" if out_path else "pdf_page", "url": safe,
+                                "bytes": blob, "size": len(blob), "acquisition_method": "cdp_page_download"}
                 while responses:
                     response = responses.pop(0)
                     status = int(getattr(response, "status", 0) or 0)

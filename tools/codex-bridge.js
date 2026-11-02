@@ -278,7 +278,26 @@ class CodexBridge {
     }
     if (method === 'turn/completed') this.finish(job, p.turn.status === 'completed' ? 'completed' : p.turn.status === 'interrupted' ? 'cancelled' : 'failed', p.turn.error?.message);
   }
-  async run(sessionId, messages, instructions, execute, requestedModel, moduleType, moduleMode, plotPlan, prepared = null, cleanPlan, options) {
+  async run(sessionId, messages, instructions, execute, requestedModel, moduleType, moduleMode, plotPlan, arg9 = null, arg10, arg11) {
+    // Two historical call shapes coexist: prepared cleaning context as the
+    // ninth argument, and cleanPlan/options as the ninth/tenth. Normalize by
+    // shape so neither the frozen-cleaning path nor the literature prepare
+    // marker is silently ignored.
+    let prepared = null, cleanPlan = null, options = null;
+    if (arg9 && typeof arg9 === 'object' && !Array.isArray(arg9) && arg9.kind === 'literature-prepare') {
+      options = arg9;
+    } else if (arg9 && typeof arg9 === 'object' && !Array.isArray(arg9) && (arg9.id || arg9.inputs)) {
+      prepared = arg9;
+      if (arg10 && typeof arg10 === 'object' && arg10.kind === 'literature-prepare') options = arg10;
+      else cleanPlan = arg10;
+      if (arg11 && typeof arg11 === 'object' && arg11.kind === 'literature-prepare') options = arg11;
+    } else if (arg9 == null && arg10 && typeof arg10 === 'object' && !Array.isArray(arg10)) {
+      if (arg10.kind === 'literature-prepare') options = arg10;
+      else { cleanPlan = arg10; options = arg11; }
+    } else {
+      cleanPlan = arg9;
+      options = arg10 || arg11;
+    }
     if (options != null && (typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => key !== 'kind')
         || options.kind !== 'literature-prepare' || moduleType !== 'literature-mining' || execute !== false || plotPlan != null || cleanPlan != null)) throw new Error('文献规则整理结果标记仅适用于只读文字整理');
     const dir = this.session(sessionId);

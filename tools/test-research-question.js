@@ -29,7 +29,15 @@ const GAPS = [{
 
 const NOTES = [{
   id: 'GSC-001', title: 'Long-term fertilization and SOC', authors: 'A Author', year: 2015,
-  evidence: '仅题录', question: '长期施肥对 SOC 的影响', conclusion: '长期施肥提高 SOC', limitation: '未覆盖北方土壤'
+  evidence: '仅题录', question: '长期施肥对 SOC 的影响', conclusion: '长期施肥提高 SOC', limitation: '未覆盖北方土壤',
+  population: '南方稻田', outcome: '土壤有机碳', unit: 'g/kg', conditions: '≥10 年定位试验', effect: '提高 12%'
+}];
+
+const RISKS = [{
+  kind: '单位不一致',
+  statement: 'SOC 用 g/kg、活性碳用 mg/kg，不能直接合并',
+  refs: ['GSC-001'],
+  why_it_matters: '直接平均会夸大或缩小效应'
 }];
 
 (async () => {
@@ -96,20 +104,23 @@ const NOTES = [{
       variables: ['SOC 含量', '施肥年限', '土壤类型'],
       boundary: '北方半湿润区旱地，施肥年限≥20 年',
       gapRefs: ['长期施肥在北方旱地土壤的证据不足'],
+      riskRefs: ['SOC 用 g/kg、活性碳用 mg/kg，不能直接合并'],
       basis: [{ id: 'GSC-001', what: 'meta 分析只覆盖水稻土' }],
       feasibility: '需公开的长期定位试验数据集；可证伪'
     },
     { statement: '缺依据的候选', hypothesis: '', variables: [], boundary: '', gapRefs: [], basis: [], feasibility: '' }
   ]);
   const result = await rq.buildCandidates({
-    idea: '长期施肥与土壤碳', gaps: GAPS, notes: NOTES, modelCfg: {},
+    idea: '长期施肥与土壤碳', gaps: GAPS, notes: NOTES, risks: RISKS, modelCfg: {},
     callModel: async (cfg, messages) => { candidatesPromptSeen = messages[0].content; return candReply; }
   });
   ok(result.candidates.length === 1, '没有依据的候选被过滤掉');
   ok(result.candidates[0].id === 'Q1' && result.candidates[0].statement.includes('北方旱地'), '候选带序号与问题陈述');
   ok(result.candidates[0].basis.length === 1 && result.candidates[0].basis[0].id === 'GSC-001', '候选带文献依据');
+  ok(result.candidates[0].riskRefs.length === 1, '候选保留对应的可比性风险');
   ok(candidatesPromptSeen.includes('不得虚构') && candidatesPromptSeen.includes('gapRefs'), '提示词含"不得虚构"的硬要求');
   ok(candidatesPromptSeen.includes('长期施肥在北方旱地土壤的证据不足'), '提示词带上了真实空白原文');
+  ok(candidatesPromptSeen.includes('可比性风险') && candidatesPromptSeen.includes('单位不一致') && candidatesPromptSeen.includes('riskRefs'), '提示词带上了可比性风险与 riskRefs');
 
   console.log('\nS3 材料不足：返回空数组是允许的答案');
   const empty = await rq.buildCandidates({
@@ -125,12 +136,13 @@ const NOTES = [{
   const spec = await rq.buildSpecification({
     idea: '长期施肥与土壤碳',
     candidate: { id: 'Q1', statement: '长期施肥在北方旱地是否同样提高 SOC？', variables: ['SOC 含量'] },
-    gaps: GAPS, notes: NOTES, modelCfg: {},
+    gaps: GAPS, notes: NOTES, risks: RISKS, modelCfg: {},
     callModel: async (cfg, messages) => { specPromptSeen = messages[0].content; return '## 研究问题\n\n……\n## 可检验形式\n\n……'; }
   });
   ok(spec.markdown.includes('## 研究问题'), '说明书原样返回');
   ok(specPromptSeen.includes('## 与文献空白的对应') && specPromptSeen.includes('什么结果算支持'), '提示词要求固定小节与可检验形式');
   ok(specPromptSeen.includes('GSC-001'), '提示词带上了文献依据');
+  ok(specPromptSeen.includes('可比性风险') && specPromptSeen.includes('单位不一致'), '说明书提示词带上了可比性风险');
 
   console.log('\nS5 人工初筛：只对保留的候选抽要点');
   const records = [

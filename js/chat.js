@@ -593,6 +593,9 @@
     }
     return key;
   }
+  function seedRelationLabel(key) {
+    return { reference: '参考文献', citing: '被引文献', similar: '相似文献' }[String(key || '')] || String(key || '');
+  }
 
   function buildResearchPanel(mod) {
     if (!mod || mod.type !== 'literature-research') return null;
@@ -602,6 +605,8 @@
       candidates: null, keep: null, screeningBusy: false, jobId: '',
       phase: '', startedAt: 0, abort: null, model: '',
       importBusy: false, importMessage: '',
+      expandSeed: '', expandRelations: ['reference', 'citing', 'similar'], expandLimit: 50,
+      expandBusy: false, expandMessage: '', expandCandidates: null,
       sources: ['google-scholar'], perSource: {}, sourceResults: null,
       searchMode: 'test', stopMode: 'count', perSourceLimit: 10
     });
@@ -857,6 +862,11 @@
           row.appendChild(el('span', 'research-screen-title', item.title || '(无标题)'));
           var meta = [item.authors, item.year, item.venue].filter(Boolean).join(' · ');
           if (meta) row.appendChild(el('span', 'research-screen-meta', meta));
+          if (item.expanded) {
+            var relLabels = (item.seed_relations && item.seed_relations.length ? item.seed_relations : [item.seed_relation])
+              .filter(Boolean).map(seedRelationLabel).join(' / ');
+            row.appendChild(el('span', 'research-seed-badge', '以文献扩展' + (relLabels ? ' · ' + relLabels : '')));
+          }
           list.appendChild(row);
         })(state.candidates[ci]);
       }
@@ -903,13 +913,86 @@
     if (state.importMessage) importRow.appendChild(el('span', 'research-status', state.importMessage));
     box.appendChild(importRow);
 
+    // 【以文献找文献 · 2026-10-23】从种子文献向外扩：参考文献 / 被引 / 相似。
+    // 适合「已有一篇关键论文，想把整个小领域捞全」；扩展结果并入同一候选池。
+    var expandRow = el('div', 'research-import research-expand');
+    expandRow.appendChild(el('span', 'research-import-label', '以文献找文献：'));
+    var expandInput = el('input', 'research-input research-expand-input');
+    expandInput.type = 'text';
+    expandInput.placeholder = 'DOI / PMID / 论文链接，或论文标题';
+    expandInput.value = state.expandSeed || '';
+    expandInput.addEventListener('input', function () { state.expandSeed = expandInput.value; });
+    expandRow.appendChild(expandInput);
+    [['reference', '参考文献'], ['citing', '被引'], ['similar', '相似']].forEach(function (pair) {
+      var wrap = el('label', 'research-source');
+      var cb = el('input', 'research-check');
+      cb.type = 'checkbox';
+      cb.checked = (state.expandRelations || []).indexOf(pair[0]) >= 0;
+      cb.addEventListener('change', function () {
+        var next = (state.expandRelations || []).slice();
+        var at = next.indexOf(pair[0]);
+        if (cb.checked && at < 0) next.push(pair[0]);
+        if (!cb.checked && at >= 0) next.splice(at, 1);
+        state.expandRelations = next;
+      });
+      wrap.appendChild(cb);
+      wrap.appendChild(el('span', 'research-source-label', pair[1]));
+      expandRow.appendChild(wrap);
+    });
+    var expandLimit = el('select', 'research-import-select');
+    [[20, '每类 20 条'], [50, '每类 50 条'], [100, '每类 100 条']].forEach(function (pair) {
+      var opt = el('option', null, pair[1]);
+      opt.value = String(pair[0]);
+      expandLimit.appendChild(opt);
+    });
+    expandLimit.value = String(state.expandLimit || 50);
+    expandLimit.addEventListener('change', function () { state.expandLimit = Number(expandLimit.value) || 50; });
+    expandRow.appendChild(expandLimit);
+    var expandBtn = el('button', 'quiet-button', state.expandBusy ? '扩展中…' : '扩展候选池');
+    expandBtn.type = 'button';
+    expandBtn.disabled = state.expandBusy === true || !state.jobId;
+    expandBtn.addEventListener('click', function () {
+      state.expandSeed = expandInput.value.trim();
+      expandLiterature(mod);
+      render();
+    });
+    expandRow.appendChild(expandBtn);
+    if (state.expandMessage) expandRow.appendChild(el('span', 'research-status', state.expandMessage));
+    box.appendChild(expandRow);
+    if (state.expandCandidates && state.expandCandidates.length) {
+      var seedPick = el('div', 'research-plans');
+      seedPick.appendChild(el('div', 'research-plan-title', '标题匹配到这些文献，点一条确认种子：'));
+      for (var sci = 0; sci < state.expandCandidates.length; sci++) {
+        (function (item) {
+          var row = el('div', 'research-plan');
+          var metaText = [item.authors, item.year, item.venue].filter(Boolean).join(' · ');
+          row.appendChild(el('span', 'research-plan-query', item.title || '(无标题)'));
+          if (metaText) row.appendChild(el('span', 'research-plan-why', metaText));
+          var use = el('button', 'quiet-button', '用这篇');
+          use.type = 'button';
+          use.addEventListener('click', function () {
+            var value = item.doi || item.openalex_id || item.url || '';
+            if (!value) return;
+            state.expandSeed = value;
+            state.expandCandidates = null;
+            expandLiterature(mod, value);
+            render();
+          });
+          row.appendChild(use);
+          seedPick.appendChild(row);
+        })(state.expandCandidates[sci]);
+      }
+      box.appendChild(seedPick);
+    }
+
     if (state.result) {
       var sum = el('div', 'research-summary');
       var meta2 = state.result.meta || {};
       sum.appendChild(el('div', 'research-summary-line',
         '文献 ' + (meta2.candidate_count || 0) + ' 篇（有全文 ' + (meta2.with_fulltext || 0) + ' 篇）'
         + '｜要点 ' + ((state.result.notes || []).length) + ' 条'
-        + '｜空白 ' + ((state.result.gaps || []).length) + ' 条'));
+        + '｜空白 ' + ((state.result.gaps || []).length) + ' 条'
+        + '｜风险 ' + (((state.result.risks || []).length)) + ' 条'));
       // 产物可直接下载（服务端只放行已登记的 research/* 文件）
       var files = state.result.files || [];
       if (files.length && state.jobId) {
@@ -923,6 +1006,18 @@
           })(files[fi]);
         }
         sum.appendChild(links);
+      }
+      var risks = state.result.risks || [];
+      if (risks.length) {
+        var riskBox = el('div', 'research-risks');
+        riskBox.appendChild(el('div', 'research-screening-title', '合并 / 比较前要核对的风险（' + risks.length + ' 条）'));
+        for (var ri = 0; ri < Math.min(risks.length, 6); ri++) {
+          var risk = risks[ri] || {};
+          riskBox.appendChild(el('div', 'research-risk-line',
+            '【' + (risk.kind || '其他') + '】' + (risk.statement || '')
+            + (risk.why_it_matters ? ' — ' + risk.why_it_matters : '')));
+        }
+        sum.appendChild(riskBox);
       }
       box.appendChild(sum);
     }
@@ -1214,6 +1309,90 @@
       render();
     };
     reader.readAsText(file, 'utf-8');
+  }
+
+  /**
+   * 以文献找文献：种子文献 → 参考文献 / 被引 / 相似文献，并入当前候选池。
+   * 同一种子重复扩展会整批替换，不会越扩越多；候选池刷新后重新进入初筛。
+   */
+  function expandLiterature(mod, overrideSeed) {
+    var state = uiOf(mod.id).research;
+    if (!state || state.expandBusy) return;
+    var jobId = state.jobId || ((mod.params && mod.params.researchJobId) || '');
+    if (!jobId) {
+      state.expandMessage = '还没有检索作业——先跑一次检索，再以文献扩展';
+      render();
+      return;
+    }
+    var seed = String(overrideSeed || state.expandSeed || '').trim();
+    if (!seed) {
+      state.expandMessage = '请先填种子文献（DOI / PMID / 论文链接，或论文标题）';
+      render();
+      return;
+    }
+    var relations = (state.expandRelations || []).slice();
+    if (!relations.length) {
+      state.expandMessage = '至少选择一种扩展关系（参考文献 / 被引 / 相似）';
+      render();
+      return;
+    }
+    state.expandBusy = true;
+    state.expandCandidates = null;
+    state.expandMessage = '正在定位种子并扩展（可能需要几十秒）…';
+    render();
+    researchPost('/api/literature/expand', {
+      jobId: jobId, seed: seed, relations: relations, limit: Number(state.expandLimit || 50)
+    }).then(function (result) {
+      state.expandBusy = false;
+      if (result && result.status === 'needs_selection') {
+        state.expandCandidates = result.candidates || [];
+        state.expandMessage = result.message || '标题匹配到多篇文献，请确认一篇';
+        render();
+        return;
+      }
+      if (result && result.status === 'no_results') {
+        var why = (result.warnings || []).join('；');
+        state.expandMessage = '没有可并入的扩展结果' + (why ? '（' + why + '）' : '');
+        render();
+        return;
+      }
+      if (!result || !result.ok) {
+        state.expandMessage = '扩展失败：' + ((result && result.error) || '未知错误');
+        render();
+        return;
+      }
+      var perRelation = (result.relation_counts && typeof result.relation_counts === 'object')
+        ? result.relation_counts : {};
+      if (!Object.keys(perRelation).length) {
+        for (var i = 0; i < (result.preview || []).length; i++) {
+          var key = (result.preview[i] && result.preview[i].seed_relation) || '';
+          if (key) perRelation[key] = (perRelation[key] || 0) + 1;
+        }
+      }
+      var parts = [];
+      for (var relation in perRelation) {
+        if (Object.prototype.hasOwnProperty.call(perRelation, relation)) {
+          parts.push(seedRelationLabel(relation) + ' ' + perRelation[relation] + ' 条');
+        }
+      }
+      state.expandMessage = '已扩展 ' + (result.added || 0) + ' 条'
+        + (parts.length ? '（' + parts.join('、') + '）' : '')
+        + '，候选池共 ' + (result.total || 0) + ' 条';
+      if (result.warnings && result.warnings.length) {
+        state.expandMessage += '；提示：' + result.warnings.join('；');
+      }
+      // 候选池已变：清空旧清单让面板重新拉取，旧勾选也重置（新条目默认参与初筛）。
+      state.candidates = null;
+      state.keep = null;
+      if (state.result && state.result.meta && result.total) {
+        state.result.meta.candidate_count = result.total;
+      }
+      render();
+    }).catch(function (error) {
+      state.expandBusy = false;
+      state.expandMessage = '扩展失败：' + ((error && error.message) || '未知错误');
+      render();
+    });
   }
 
   /**
@@ -1627,7 +1806,18 @@
         + '|' + (rs.phase || '') + '|' + (rs.topic || '') + '|' + (rs.query || '')
         + '|' + (rs.plan ? (rs.plan.queries || []).length : 0)
         + '|' + (rs.result ? 1 : 0) + '|' + ((rs.candidates || []).length) + '|' + ((rs.keep || []).length)
+        + '|' + (rs.result ? ((rs.result.notes || []).length + ':' + (rs.result.gaps || []).length + ':' + (rs.result.risks || []).length) : '')
         + '|' + (rs.message || '') + '|' + (rs.planMessage || '') + '|' + (rs.model || '')
+        // 【以文献找文献 · 2026-10-23】扩展种子、关系、状态与候选标记也进签名，
+        // 否则点「扩展候选池」后会被增量快速路径吞掉（同 2026-10-22 的坑）。
+        + '|' + (rs.expandBusy ? 1 : 0) + '|' + (rs.expandSeed || '')
+        + '|' + ((rs.expandRelations || []).join(',')) + '|' + String(rs.expandLimit || 50)
+        + '|' + (rs.expandMessage || '') + '|' + ((rs.expandCandidates || []).length)
+        + '|' + (rs.candidates || []).filter(function (c) {
+          return c && c.expanded;
+        }).map(function (c) {
+          return (c.id || '') + ':' + ((c.seed_relations || [c.seed_relation]).filter(Boolean).join('+'));
+        }).join(',')
         // 【多源检索 · 2026-10-22】来源多选 / 逐源检索式 / 逐源命中也必须进签名，
         // 否则勾选来源或检索完成时会被增量快速路径吞掉（本文件已知坑，踩过两次）。
         + '|' + ((rs.sources || []).join(',')) + '|' + perSourceSig + '|' + sourceResultSig
