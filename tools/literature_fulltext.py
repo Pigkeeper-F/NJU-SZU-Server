@@ -1550,6 +1550,58 @@ def _download_gate(job_dir, config, paper_ids=None):
     return result
 
 
+def _finish_previous_cnki_paper(fetcher, job_dir, target, targets, items):
+    """End a saved previous paper before a serial worker opens another one.
+
+    Browser file-received evidence alone cannot authorize discarding a live
+    window: match it to this job's target and recheck its durable PDF first.
+    Same-paper resume and unfinished downloads keep their original binding.
+    """
+    binding = getattr(fetcher, "_binding", None)
+    flow = binding.get("cnki_flow") if isinstance(binding, dict) else None
+    if not isinstance(flow, dict) or flow.get("file_verified") is not True:
+        return None
+    from literature_cnki_fulltext import _hash, _norm
+
+    def matches(record):
+        return (record.get("source_key") == "cnki"
+                and flow.get("paper_hash") == _hash("\n".join(str(record.get(key) or "") for key in
+                    ("source_key", "source_candidate_id", "paper_id", "id")))
+                and flow.get("title_hash") == _hash(_norm(record.get("title"))))
+
+    if matches(target):
+        return None
+    blocked = getattr(fetcher, "_blocked", None)
+    reason = ((blocked or {}).get("reason") if isinstance(blocked, dict) else None) or binding.get("attention_reason")
+    if reason in {"verification", "login", "access_required", "rate_limited", "access_blocked"}:
+        return {"status": "attention", "reason": reason, "paper_id": target.get("paper_id"),
+                "message": "知网原任务仍有登录、验证或访问限制，已保留原窗口；处理后再继续下一篇。"}
+    owners = [record for record in targets if matches(record)]
+    if len(owners) != 1:
+        return {"status": "attention", "reason": "local_fulltext_verification", "paper_id": target.get("paper_id"),
+                "message": "上一篇知网窗口无法对应本任务的唯一文献；原窗口与断点保留，未开始下一篇。"}
+    owner = owners[0]
+    saved = [item for item in items if item.get("paper_id") == owner.get("paper_id")]
+    valid = len(saved) == 1 and saved[0].get("status") == "fetched_pdf"
+    if valid:
+        try:
+            valid = inspect_saved(job_dir, saved[0], owner, for_reuse=False).get("status") == "valid"
+        except (OSError, ValueError, TypeError):
+            valid = False
+    if not valid:
+        return {"status": "attention", "reason": "local_fulltext_verification", "paper_id": owner.get("paper_id"),
+                "message": "上一篇知网PDF尚无可核验的本地成功记录；原窗口与断点保留，未开始下一篇。"}
+    complete = getattr(fetcher, "complete_paper", None)
+    try:
+        result = complete() if callable(complete) else None
+    except Exception:
+        result = None
+    if not isinstance(result, dict) or result.get("closed") is not True:
+        return {"status": "attention", "reason": "material_cleanup", "paper_id": owner.get("paper_id"),
+                "message": "上一篇知网PDF已保存，但任务窗口尚未清理完成；已暂停，未把旧窗口用于下一篇。"}
+    return None
+
+
 def _run_fulltext(
     config: dict,
     job_dir: Path,
@@ -1938,6 +1990,12 @@ def _run_fulltext(
 
     for index, item in enumerate(eligible_items, start=1):
         target = target_by_id[item["paper_id"]]
+        pending_cleanup = _finish_previous_cnki_paper(fetcher, job_dir, target, targets, items)
+        if pending_cleanup:
+            persist_status()
+            emit("attention", stage="fulltext", reason=pending_cleanup["reason"],
+                 paper_id=pending_cleanup.get("paper_id"), message=pending_cleanup["message"])
+            return 0
         if retry_skipped and isinstance(item.get("material_skipped"), dict):
             try:
                 _record_material_retry(job_dir, target, item["material_skipped"])

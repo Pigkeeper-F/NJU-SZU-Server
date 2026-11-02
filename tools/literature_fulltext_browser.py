@@ -900,13 +900,35 @@ class FulltextBrowserFetcher:
         if binding.get("attention_reason") in auth | {"page_not_ready"} or binding.get("material_flow") or binding.get("pdf_click_pending"):
             return {"closed": False}
         flow = binding.get("cnki_flow") or {}
+        verified_cnki_file = isinstance(flow, dict) and flow.get("file_verified") is True
+        finished_child_id = None
         if isinstance(flow, dict) and flow.get("pending_popup"):
             witness = flow["pending_popup"]
             adopted = isinstance(witness, dict) and witness.get("adopted") is True and witness.get("target_id") == binding.get("target_id")
             received_side = (isinstance(witness, dict) and flow.get("file_verified") is True
                 and witness.get("opener_verified") is True and witness.get("owner_target_id") == binding.get("target_id")
                 and witness.get("target_id") == flow.get("cleanup_target_id"))
-            if not (adopted or received_side):
+            # A download may finish before its blank attachment tab is adopted.
+            # The caller has already saved the verified file and success status;
+            # close that exact witnessed child with the article, rather than
+            # carrying a completed paper's popup into the next paper.
+            finished_side = (verified_cnki_file and isinstance(witness, dict)
+                and witness.get("opener_verified") is True and witness.get("action") == "download"
+                and witness.get("owner_target_id") == binding.get("target_id")
+                and flow.get("target_id") == binding.get("target_id")
+                and isinstance(witness.get("target_id"), str) and 0 < len(witness["target_id"]) <= 200
+                and witness["target_id"] != binding.get("target_id"))
+            if finished_side:
+                try:
+                    child = self._find_target_page(witness["target_id"])
+                    owner = self._find_target_page(witness["owner_target_id"])
+                    if child is not None and not child.is_closed():
+                        if owner is None or owner.is_closed() or child.opener() is not owner:
+                            return {"closed": False}
+                    finished_child_id = witness["target_id"]
+                except Exception:
+                    return {"closed": False}
+            if not (adopted or received_side or finished_side):
                 return {"closed": False}
         wanted = binding.get("target_id")
         if not wanted:
@@ -924,13 +946,20 @@ class FulltextBrowserFetcher:
             if not isinstance(cleanup_ids, list) or len(cleanup_ids) > 3 or any(not isinstance(value, str) or not value or len(value) > 200 for value in cleanup_ids):
                 return {"closed": False}
             ids = list(dict.fromkeys(ids + cleanup_ids))
+            if finished_child_id and finished_child_id not in ids:
+                ids.append(finished_child_id)
             pages = []
             for target_id in ids:
                 page = self._find_target_page(target_id)
                 if page is not None and not page.is_closed():
                     snapshot = page.evaluate(_SNAPSHOT_JS)
-                    if not isinstance(snapshot, dict) or _page_loading(snapshot) or any(snapshot.get(key) for key in
-                            ("login", "verification", "access_required", "download_pending")):
+                    if not isinstance(snapshot, dict) or any(snapshot.get(key) for key in
+                            ("login", "verification", "access_required", "rate_limited", "access_blocked")):
+                        return {"closed": False}
+                    # Once the actual PDF is saved, an attachment tab may stay
+                    # blank or the old page may still say "generating" forever.
+                    # Those stale loading hints do not keep a finished paper open.
+                    if not verified_cnki_file and (_page_loading(snapshot) or snapshot.get("download_pending")):
                         return {"closed": False}
                     pages.append(page)
             for page in pages:
@@ -959,7 +988,12 @@ class FulltextBrowserFetcher:
     def complete_paper(self, *, skipped=False):
         """Caller has durably saved the file/status or recorded a non-auth skip."""
         reason = (self._blocked or {}).get("reason") or self._binding.get("attention_reason")
-        if (reason and not skipped) or reason in {"login", "verification", "access_required", "material_cleanup", "page_not_ready"} or str(reason or "").startswith("local_"):
+        flow = self._binding.get("cnki_flow") or {}
+        # A non-auth side-page error after a successful file must not poison
+        # the next paper. Authentication and unfinished transfers still retain
+        # their original page and checkpoint.
+        finished_cnki = isinstance(flow, dict) and flow.get("file_verified") is True and reason in {None, "page_error"}
+        if (reason and not skipped and not finished_cnki) or reason in {"login", "verification", "access_required", "rate_limited", "access_blocked", "material_cleanup", "page_not_ready"} or str(reason or "").startswith("local_"):
             return {"closed": False}
         wanted = self._binding.get("target_id")
         if not wanted:
