@@ -53,7 +53,7 @@ const context = vm.createContext({
     throw new Error('Unexpected request: ' + url);
   }
 });
-const FUNCTIONS = ['detachLiteratureJob', 'changeLiteratureHistory', 'loadLiteratureJobs', 'attachLiteratureJob', 'literatureHistory', 'watchLiterature', 'applyLiteratureJob'];
+const FUNCTIONS = ['detachLiteratureJob', 'changeLiteratureHistory', 'loadLiteratureJobs', 'attachLiteratureJob', 'literatureDeliverableSummary', 'literatureStatusText', 'literatureHistory', 'watchLiterature', 'applyLiteratureJob'];
 vm.runInContext(FUNCTIONS.map(functionSource).join('\n') + '\nglobalThis.subject = { ' + FUNCTIONS.join(', ') + ' };', context);
 const subject = context.subject, current = tasks['module-a'];
 

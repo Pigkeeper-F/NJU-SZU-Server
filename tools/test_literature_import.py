@@ -7,7 +7,7 @@
   S2 BibTeX 解析
   S3 CSV 解析（中英文表头）
   S4 格式自动识别
-  S5 并入候选池：batch_index=0、前缀、整批替换（重复导入不翻倍）、与检索记录共存
+  S5 并入候选池：batch_index=0、前缀、同库累计（重复导入不翻倍）、与检索记录共存
   S6 坏输入：空清单 / 无题录 → 明确报错而不是写空
 
 跑法：python tools/test_literature_import.py
@@ -163,7 +163,7 @@ try:
 
     # 重复导入同一份 → 整批替换，不翻倍
     again = _import.append_imported(job, items, "cnki", "q")
-    ok(again["total"] == 3, "重复导入后总数不变（整批替换）：" + str(again["total"]))
+    ok(again["total"] == 3, "重复导入后总数不变（幂等累计）：" + str(again["total"]))
     data2 = json.loads((job / "candidates.json").read_text(encoding="utf-8"))
     ok(len([r for r in data2["records"] if r.get("imported")]) == 2, "导入条目没有翻倍")
     ok(len([b for b in data2["batches"] if b.get("batch_index") == 0]) == 1, "导入批次只有一条")
@@ -190,14 +190,14 @@ try:
     replacement = _import.parse_csv(CSV, "wanfang")[:1]
     replaced_result = _import.append_imported(job, replacement, "wanfang", "updated wf query")
     replaced = json.loads((job / "candidates.json").read_text(encoding="utf-8"))
-    ok(replaced_result["total"] == 5, "万方重导仅替换原万方两条，不丢其他来源")
+    ok(replaced_result["total"] == 7, "万方追加新批次，保留原万方两条与其他来源")
     ok([r for r in replaced["records"] if r.get("source_key") != "wanfang"] == other_records,
        "同来源重导后其他来源和检索候选逐项保持")
     ok([b for b in replaced["batches"] if b.get("source_key") != "wanfang"] == other_batches,
        "同来源重导后其他来源和检索批次逐项保持")
-    ok(len([b for b in replaced["batches"] if b.get("source_key") == "wanfang"]) == 1,
-       "同来源重导不累加重复导入批次")
-    ok(len({r["candidate_id"] for r in replaced["records"]}) == 5,
+    ok(len([b for b in replaced["batches"] if b.get("source_key") == "wanfang"]) == 2,
+       "同来源不同批次分别留存")
+    ok(len({r["candidate_id"] for r in replaced["records"]}) == 7,
        "同来源重导后候选 ID 仍唯一")
     with (job / "candidates.csv").open(encoding="utf-8-sig", newline="") as source_csv:
         csv_rows = list(csv.DictReader(source_csv))

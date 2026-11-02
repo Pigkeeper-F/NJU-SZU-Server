@@ -83,7 +83,7 @@ assert.ok(css.includes('.literature-stage.is-running') && css.includes('.literat
 assert.ok(css.includes('文献挖掘 · 第二阶段'), '样式应以独立分区追加');
 
 // 8) 第一阶段关键文案/行为零回归（多源检索后来源文案按新行为断言）
-for (const text of ['从对话整理规则', '确认配置并检索', '手动填写', '打开登录/检索页面', '检查并继续',
+for (const text of ['从对话更新规则并核查', '确认配置并检索', '手动填写', '打开登录/检索页面', '检查并继续',
   '检索来源（按研究需要勾选；开放 API 源免验证）', '请先从对话整理运行配置并核对', '对话或已批准文档有更新，请重新整理规则后再检索',
   '候选检索已保存 ', '这不是已纳入文献，也未提取全文。可在文献检索区下载清单。']) {
   assert.ok(codex.includes(text), '第一阶段文案不得回归: ' + text);
@@ -119,27 +119,70 @@ class Element {
 }
 function elements(parent) { return [parent, ...parent.children.flatMap(elements)]; }
 const calls = [];
+const prepareEvents = [];
+let prepareResult = { ok: true, id: 'inert-preparation' };
 let responseJob = { id: 'existing-job' };
 const current = { literatureBusy: false, busy: false };
 const container = new Element('section');
 const context = vm.createContext({
-  task: () => current, root: { LiteratureUI: { isBusy: () => false } }, saved: {}, panel: container, account: { model: 'fixture-model' },
+  task: () => current, root: { LiteratureUI: { isBusy: () => false }, LiteratureRuleReview: {
+    matches: (review, config, until, source) => !!review?.ready && JSON.stringify(review.config) === JSON.stringify(config) && review.until === until && review.source === source
+  } }, saved: {}, panel: container, account: { model: 'fixture-model' },
   node: (tag, text, className) => new Element(tag, text, className), render() {}, persist() {},
   request: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return responseJob; },
   watchLiterature: async (id, jobId) => calls.push({ watch: jobId }), applyLiteratureJob() {},
   checkLiteratureRuntime: async () => ({ protocolVersion: 1, restartRequired: false }),
+  session: async () => 'fixture-session', literatureWorkspaceManager: () => null,
+  openLiteratureRuleReview: async (mod, options) => prepareEvents.push({ review: mod.id, options }),
+  Store: { getState: () => ({ activeModuleId: 'module-1', modules: [{ id: 'module-1', messages: [] }] }) },
   literatureSource: () => 'current-source', literatureStageLabel: stage => stage,
   literatureHistory: () => new Element('details'), literatureStageBar: () => null, literatureDeliverables: () => null,
-  prepareLiterature() {}, manualLiterature() {}, startLiterature() {}, literatureConfirmForm: () => new Element('form'),
+  async prepareLiterature(mod) { prepareEvents.push({ prepare: mod.id }); return prepareResult; },
+  manualLiterature() {}, startLiterature() {}, literatureConfirmForm: () => new Element('form'),
   CustomEvent: class {}, document: { dispatchEvent() {} }
 });
 const configCode = codex.slice(codex.indexOf('  const LITERATURE_CONFIG_KEYS'), codex.indexOf('  async function prepareLiterature'));
 const labelsCode = codex.slice(codex.indexOf('  const LITERATURE_STAGE_ORDER'), codex.indexOf('  function literatureFileLabel'));
-vm.runInContext(configCode + labelsCode + '\n' + ['startLiterature', 'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureProcessingBasisMessage', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
-  + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, startLiterature, continueLiterature, continueAvailableLiterature, openLiteratureBrowser, literatureAttentionMessage, literatureProcessingBasisMessage, literatureStageLabel, literatureStageBar, literaturePanel };', context);
+vm.runInContext(configCode + labelsCode + '\n' + ['effectiveLiteratureReviewConfig', 'prepareLiteratureAndReview', 'startLiterature', 'literatureResumeStage', 'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'literatureAttentionMessage', 'literatureProcessingBasisMessage', 'literatureDeliverableSummary', 'literatureStatusText', 'literatureStageBar', 'literaturePanel'].map(functionSource).join('\n')
+  + '\nglobalThis.subject = { parseLiteratureConfig, newLiteratureSearchConfig, sameLiteratureConfig, effectiveLiteratureReviewConfig, startLiterature, continueLiterature, continueAvailableLiterature, openLiteratureBrowser, literatureAttentionMessage, literatureProcessingBasisMessage, literatureStatusText, literatureStageLabel, literatureStageBar, literaturePanel };', context);
 const subject = context.subject;
+function confirmNewConfiguration() {
+  // A copied historical draft is normalized before human item review; launching
+  // after review must preserve that confirmed snapshot rather than changing it.
+  current.literatureConfig = subject.newLiteratureSearchConfig(current.literatureConfig);
+  current.literatureRuleReview = { id: 'fixture-review', revision: 1, ready: true, source: 'current-source', until: current.literatureUntil || 'discover',
+    config: JSON.parse(JSON.stringify(subject.effectiveLiteratureReviewConfig(current))), progress: { confirmed: 14, total: 14 } };
+  context.saved['module-1'].literatureReviewAppliedRevision = 1;
+}
 
 async function multiSourceTests() {
+  // The ordinary draft uses the same production combined action as history
+  // continuation. Exercise its actual rendered button, not an open-call alias.
+  context.saved['module-1'] = { literatureSource: 'current-source' };
+  current.literatureReviewNeedsSync = true;
+  for (const result of [{ ok: false }, undefined, { ok: true, id: 'inert-preparation' }]) {
+    prepareResult = result; prepareEvents.length = 0; calls.length = 0;
+    container.children.length = 0;
+    subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+    const ordinaryButton = elements(container).find(item => item.tag === 'button' && item.textContent === '从对话更新规则并核查');
+    assert.ok(ordinaryButton && !ordinaryButton.disabled, 'An ordinary draft exposes the promised combined action');
+    await ordinaryButton.onclick();
+    assert.equal(prepareEvents[0].prepare, 'module-1');
+    assert.equal(prepareEvents.filter(item => item.review).length, result?.ok ? 1 : 0, 'Only successful preparation may open item review');
+    if (result?.ok) assert.equal(prepareEvents[1].options.draft, true, 'Review opens the current draft, not an old frozen job');
+    assert.equal(calls.length, 0, 'Preparing and opening review must not call search or advance');
+  }
+  delete current.literatureReviewNeedsSync;
+  const exportedMaterials = { status: 'completed', count: 259, message: '已导出 10 篇文献、259 个参数行',
+    files: ['fulltext/status.json', 'export/literature.xlsx', 'export/parameters.xlsx'],
+    counters: { candidates: 10, uniqueGroups: 10, parameterRows: 259, fulltextFetched: 3, fulltextPdf: 0, fulltextHtml: 3, materialsIncomplete: 10 } };
+  const originalMaterials = JSON.stringify(exportedMaterials);
+  const materialStatus = subject.literatureStatusText(exportedMaterials);
+  for (const expected of ['10 条文献记录', '259 行', '已获取正文 3 篇', 'PDF 0 篇', '网页正文 3 篇', '材料仍有缺口 10 篇']) assert.ok(materialStatus.includes(expected), expected);
+  assert.ok(!materialStatus.includes('259 条文献') && !materialStatus.includes('259 条待复核'), 'Parameter count is neither document count nor review count');
+  assert.equal(JSON.stringify(exportedMaterials), originalMaterials, 'Display clarification preserves the saved task');
+  const unknownFormats = subject.literatureStatusText({ ...exportedMaterials, counters: { candidates: 10, fulltextFetched: 3 } });
+  assert.ok(!unknownFormats.includes('PDF 0') && !unknownFormats.includes('网页正文 0'), 'Unknown formats are not reported as zero');
   assert.equal(subject.literatureStageLabel('discover'), '检索候选', 'Discover stage should use its Chinese label');
   const pausedStageJob = { status: 'needs_attention', resumeStage: 'discover', until: 'discover', stages: { discover: 'running' } };
   const pausedStageBytes = JSON.stringify(pausedStageJob);
@@ -204,6 +247,7 @@ async function multiSourceTests() {
   context.saved['module-1'] = { literatureSource: 'current-source' };
   current.literatureConfig = config; current.literatureUntil = 'discover';
   responseJob = { id: 'existing-job', config: { ...config, extraction: { model: 'fixture-model', maxCharsPerPaper: 120000 } } };
+  confirmNewConfiguration();
   await subject.startLiterature({ id: 'module-1' });
   assert.equal(current.literatureConfig.extraction.maxCharsPerPaper, 120000, '新任务应保存服务端规范化后的冻结配置，避免默认字段误报配置已改');
   assert.notEqual(current.literatureConfig, responseJob.config, '编辑草稿不得改变已冻结任务对象');
@@ -275,6 +319,28 @@ async function multiSourceTests() {
   cnkiField.value = ''; cnkiField.oninput();
   assert.equal(current.literatureConfig.sourceQueries.cnki, undefined, '空来源检索式回到默认query');
 
+  // A prepared confirmed plan is not a failed login; the same task starts only after a click.
+  current.literatureUntil = 'discover';
+  current.literatureJob = { id: 'prepared-job', config: current.literatureConfig, status: 'needs_attention', stage: 'prepared', resumeStage: 'discover', until: 'discover',
+    attention: null, message: '已载入已确认方案；请打开来源登录后开始检索。' };
+  const preparedBefore = JSON.stringify(current.literatureJob);
+  calls.length = 0; container.children.length = 0;
+  subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  const preparedNodes = elements(container);
+  assert.ok(preparedNodes.some(item => item.tag === 'h4' && item.textContent === '任务已准备，尚未开始'));
+  assert.ok(preparedNodes.some(item => item.textContent.includes('遇到登录或验证时再按提示处理')));
+  assert.ok(!preparedNodes.some(item => item.textContent.includes('当前需要处理：检索暂停')));
+  assert.equal(vm.runInContext("literatureJobStatusLabel({stage:'prepared',status:'needs_attention'})", context), '待开始检索');
+  assert.equal(vm.runInContext("literatureJobStatusLabel({stage:'login',status:'needs_attention'})", context), '需要人工');
+  assert.equal(vm.runInContext("literatureJobStatusLabel({stage:'prepared',status:'cancelled'})", context), '已停止');
+  assert.equal(JSON.stringify(current.literatureJob), preparedBefore, 'Display compatibility never rewrites the existing prepared task');
+  assert.equal(calls.length, 0, 'Rendering must not start any work');
+  const preparedStart = preparedNodes.find(item => item.tag === 'button' && item.textContent === '开始检索');
+  assert.ok(preparedStart && !preparedStart.disabled);
+  await preparedStart.onclick();
+  assert.deepEqual(calls[0], { url: '/api/literature/advance', body: { id: 'prepared-job', until: 'discover' } }, 'Only the explicit click starts the existing task to the chosen boundary');
+  assert.ok(!calls.some(call => call.url === '/api/literature/search' || call.url === '/api/literature/browser'));
+
   // 旧任务按原冻结数量恢复；显示设置时不补模式，也不改变原来的小批大小。
   const legacy = { ...config, limit: 2, batch: { size: 2, maxBatches: 3 }, limits: { discover: 180, fulltext: 3600 } };
   delete legacy.searchMode; delete legacy.perSourceLimit; delete legacy.stopMode;
@@ -317,6 +383,12 @@ async function multiSourceTests() {
   assert.equal(current.literatureConfig.limits.discover, undefined, '来源变更后重算自动预算');
   calls.length = 0; responseJob = { id: 'new-formal', config: JSON.parse(JSON.stringify(current.literatureConfig)) };
   await subject.startLiterature({ id: 'module-1' });
+  assert.equal(calls.length, 0, '小样已有记录时必须先新建独立文献任务，不能直接覆盖为正式检索');
+  assert.match(current.literatureError, /新建文献任务/);
+  // A new workspace has its copied rules, but no original job binding.
+  current.literatureJob = null; delete context.saved['module-1'].literatureJobId;
+  confirmNewConfiguration();
+  await subject.startLiterature({ id: 'module-1' });
   assert.equal(calls[0].body.config.searchMode, 'formal'); assert.equal(calls[0].body.config.perSourceLimit, null);
   assert.equal(calls[0].body.config.stopMode, 'end');
   assert.equal(calls[0].body.config.limit, 10, '正式请求使用独立数量字段，页大小仍为10');
@@ -334,6 +406,8 @@ async function multiSourceTests() {
   calls.length = 0; await subject.continueLiterature({ id: 'module-1' });
   assert.deepEqual(calls[0], { url: '/api/literature/advance', body: { id: 'legacy-formal', until: 'discover' } }, '旧正式任务继续用原id与配置');
   calls.length = 0; responseJob = { id: 'new-end' };
+  current.literatureJob = null; delete context.saved['module-1'].literatureJobId;
+  confirmNewConfiguration();
   await subject.startLiterature({ id: 'module-1' });
   assert.equal(calls[0].body.config.stopMode, 'end'); assert.equal(calls[0].body.config.perSourceLimit, null);
   assert.equal(calls[0].body.config.limits.discover, undefined); assert.equal(calls[0].body.config.limits.fulltext, 3600);
@@ -472,7 +546,9 @@ async function multiSourceTests() {
   const fulltextNodes = elements(container);
   assert.ok(fulltextNodes.some(item => item.textContent === '当前需要处理：全文获取'));
   assert.ok(fulltextNodes.some(item => item.tag === 'button' && item.textContent === '查看原全文任务页'));
-  assert.ok(fulltextNodes.some(item => item.textContent.includes('同篇文献复用任务页') && item.textContent.includes('已保存后关闭') && item.textContent.includes('不自动重复请求')));
+  assert.ok(fulltextNodes.some(item => item.textContent.includes('同篇文献复用任务页') && item.textContent.includes('文件保存完成后及时关闭')
+    && item.textContent.includes('持续加载、生成或传输时继续等待') && item.textContent.includes('已有材料不重复下载')),
+  'Explain page reuse, completion before closing, active transfer waits, and existing-file reuse');
   assert.ok(!fulltextNodes.some(item => item.tag === 'button' && item.textContent === '暂缓此来源，继续其他来源'));
   calls.length = 0; responseJob = { id: fulltextJob.id };
   await fulltextNodes.find(item => item.tag === 'button' && item.textContent === '继续获取全文').onclick();
@@ -484,6 +560,15 @@ async function multiSourceTests() {
   assert.equal(scrolls.length, 3, 'A fulltext navigation timeout also reveals the attention card');
   container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
   assert.equal(scrolls.length, 3, 'Polling the same fulltext timeout does not steal scroll again');
+  current.literatureJob = null; delete context.saved['module-1'].literatureJobId;
+  current.literaturePreparePending = { id: 'returned-reply', status: 'invalid_result', error: 'fixture format rejected' };
+  container.children.length = 0; subject.literaturePanel({ id: 'module-1', messages: [] }, current, container);
+  const rejectedNodes = elements(container);
+  assert.ok(rejectedNodes.some(item => item.tag === 'button' && item.textContent === '重新读取这次整理结果'));
+  assert.ok(rejectedNodes.some(item => item.textContent.includes('下方显示原草稿')));
+  assert.equal(rejectedNodes.find(item => item.tag === 'button' && ['确认配置并检索', '按已确认配置检索', '按修改后的配置开始'].includes(item.textContent)).disabled, true);
+  calls.length = 0; await subject.startLiterature({ id: 'module-1' }); assert.equal(calls.length, 0); assert.match(current.literatureError, /整理尚未应用/);
+  delete current.literaturePreparePending;
   // 9b) 多源检索面板：状态必须进 docSigOf（否则增量快速路径会吞掉勾选/逐源命中）
   for (const token of ['rs.sources', 'perSourceSig', 'sourceResultSig', '/api/literature/sources',
     'searchMode', 'stopMode', 'perSourceLimit', '到可访问末页', '/api/literature/cancel']) {

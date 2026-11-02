@@ -16,6 +16,22 @@ class MaterialCollection:
         self.observed = False
         self.checked = False
         self.inspected = False
+        self.main_pdf_links = []
+        self.main_pdf_preflight_only = False
+
+    def _apply_absence_rule(self, discovery=None):
+        apply = getattr(self.store, "apply_fulltext_absence_rule", None)
+        if not callable(apply):
+            return False
+        pending = getattr(self.fetcher, "pending_material_state", None)
+        if callable(pending) and pending(self.record):
+            return False
+        blocked = getattr(self.fetcher, "_blocked", None) or {}
+        applied = apply(self.record, observed=discovery,
+            access_attention=blocked.get("reason") in {"login", "verification", "access_required", "rate_limited"})
+        if applied:
+            self.observed = self.checked = True
+        return applied
 
     def _attention(self, descriptor, reason, message):
         if descriptor is not None:
@@ -64,6 +80,8 @@ class MaterialCollection:
             recovery = self._ack_saved_material()
             if recovery:
                 return recovery
+            if self._apply_absence_rule(discovery):
+                return None
             if discovery.get("status") == "needs_attention":
                 return self._attention(None, "material_discovery", str(discovery.get("reason") or "补充材料需要人工核查。"))
             for descriptor in self.store.pending_supplements(self.record):
@@ -108,6 +126,9 @@ class MaterialCollection:
     def inspect_existing(self, opts):
         """Inspect an already saved paper's article page without re-downloading it."""
         self.inspected = True
+        self.main_pdf_preflight_only = False
+        if self._apply_absence_rule():
+            return None
         inspect = getattr(self.fetcher, "inspect_materials", None)
         if not callable(inspect):
             return self.observe({"status": "unknown", "reason": "已有正文已保留；补充材料尚未在原文章页核查。", "links": []})
@@ -121,9 +142,24 @@ class MaterialCollection:
         except MaterialsError as error:
             return self._attention(None, "local_material_verification", str(error))
         result = inspect(self.record, {**opts, "record": self.record, "on_material_discovery": self.observe})
+        if isinstance(result.get("main_pdf_links"), list):
+            self.main_pdf_links = [dict(link) for link in result["main_pdf_links"] if isinstance(link, dict)]
         if result.get("status") in {"attention", "captcha"}:
             return self._attention(None, result.get("reason") or "verification", str(result.get("message") or "材料检查需要人工处理。"))
         discovery = result.get("material_discovery")
+        if opts.get("main_pdf_first") and result.get("main_pdf_ready") is True and self.main_pdf_links:
+            # Keep this identified article's actual PDF control available for
+            # the missing main file. Supplement fetching happens only after
+            # the caller checkpoints that PDF, then explicitly inspects again.
+            # This marker never overrides a browser attention result above.
+            try:
+                if isinstance(discovery, dict):
+                    self.store.record_discovery(self.record, discovery)
+                    self.store.flush()
+            except MaterialsError as error:
+                return self._attention(None, "local_material_verification", str(error))
+            self.main_pdf_preflight_only = True
+            return None
         if isinstance(discovery, dict):
             return self.observe(discovery)
         if not self.observed:

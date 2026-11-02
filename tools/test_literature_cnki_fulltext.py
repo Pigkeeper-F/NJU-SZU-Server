@@ -13,6 +13,8 @@ import literature_fulltext_browser as browser
 
 TITLE = "PGE2在热应激肉鸡肠道免疫功能中的调控机制"
 SCIENTIFIC_TITLE = "L-瓜氨酸对热应激和免疫应激肉鸡体温调节和一氧化氮代谢影响的研究"
+VERSION_TITLE = "蛋氨酸对热应激文昌鸡生产性能、血清生化指标及抗氧化性能的影响"
+VERSION_AUTHORS = "赵杉;魏立民;刘杰;丁向彬;欧阳坤"
 PDF = b"%PDF-1.7\n" + b"x" * (60 * 1024)
 RECORD = {"source_key": "cnki", "source_candidate_id": "CNKI-1", "paper_id": "P-1", "title": TITLE,
           "links": [{"url": "https://bar.cnki.net/bar/download/order?token=never-replay"}]}
@@ -41,6 +43,18 @@ def ui(*, title=TITLE, query=TITLE, count=1, controls=None, generating=False):
 
 def control(text="PDF下载", index=0):
     return {"text": text, "index": index, "visible": True, "enabled": True}
+
+
+def version_rows():
+    value = ui(title=VERSION_TITLE, query=VERSION_TITLE, count=2)
+    for row, year in zip(value["rows"], ("2026", "2025")):
+        row.update(authors=VERSION_AUTHORS, authors_complete=True, year=year)
+    return value
+
+
+def version_record():
+    return {**RECORD, "title": VERSION_TITLE, "year": 2026, "authors": VERSION_AUTHORS,
+            "document_type": "unknown"}
 
 
 class Download:
@@ -245,7 +259,7 @@ class Page:
         return copy.deepcopy(self.snap)
 
     def wait_for_timeout(self, milliseconds):
-        assert milliseconds == 200
+        assert 0 < milliseconds <= 200
         self.context.clock.sleep(milliseconds / 1000)
         # A Playwright wait pumps the context event loop, including events on
         # a still-pending popup while its opener remains the bound page.
@@ -313,6 +327,240 @@ class FlowTests(unittest.TestCase):
         return browser.FulltextBrowserFetcher({}, self.path, runtime_factory=self.context.runtime,
             clock=self.clock.time, sleep=self.clock.sleep, on_progress=self.messages.append)
 
+    def metadata_lookup(self, *, snapshot=None, on_read=None, on_title=None, paced=True):
+        """An interactive result page, with no real browser or source access."""
+        def setup(page):
+            original_goto, original_evaluate = page.goto, page.evaluate
+            def goto(url, **options):
+                response = original_goto(url, **options)
+                page.snap.update(ready_state="interactive", loading_pending=False, download_pending=False)
+                page.snap.update(snapshot or {})
+                return response
+            def evaluate(script):
+                if on_read and mod._lookup_page(page.url):
+                    on_read(page, script)
+                return original_evaluate(script)
+            page.goto, page.evaluate = goto, evaluate
+            def clicked(p):
+                p.clicked_at = self.clock.now
+                if on_title:
+                    on_title(p)
+                else:
+                    p.detail(p)
+            page.on_title = clicked
+        self.context.next_setup = setup
+        fetcher = self.fetcher()
+        if not paced:
+            # Isolate the stability timer; site pacing has separate regression
+            # coverage and remains enabled in the ordinary success test.
+            fetcher._pace = lambda url: None
+        return fetcher
+
+    def test_metadata_interactive_unique_lookup_stabilizes_and_enters_detail_once(self):
+        started = self.clock.now
+        fetcher = self.metadata_lookup()
+        result = mod.run_cnki(fetcher, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIs(result["metadata_only"], True)
+        page = fetcher._page
+        self.assertEqual((page.title_clicks, page.download_clicks, len(page.gotos)), (1, 0, 1))
+        self.assertGreaterEqual(page.clicked_at - started, browser.CNKI_SITE_INTERVAL_SECONDS)
+        self.assertLess(self.clock.now - started, 30)
+        self.assertEqual(fetcher._binding["cnki_flow"]["step"], "detail")
+        self.assertFalse(self.context.pages[0].gotos)
+
+    def test_metadata_lookup_stability_ignores_unrelated_controls_and_hidden_anchor_text(self):
+        reads = []
+        def changing(page, script):
+            if "literature_cnki_fulltext_ui" in script:
+                reads.append(self.clock.now)
+                page.ui["controls"] = [control("导航更新 " + str(len(reads)))]
+                page.ui["rows"][0]["anchors"] = [
+                    {"index": 0, "visible": True, "text": TITLE},
+                    {"index": 1, "visible": False, "text": "隐藏更新 " + str(len(reads))},
+                ]
+        started = self.clock.now
+        fetcher = self.metadata_lookup(on_read=changing, paced=False)
+        result = mod.run_cnki(fetcher, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["status"], "ok", result)
+        self.assertGreater(len(reads), 5)
+        self.assertGreaterEqual(fetcher._page.clicked_at - started, browser.PAGE_STABLE_SECONDS)
+        self.assertLess(fetcher._page.clicked_at - started, 5)
+        self.assertEqual((fetcher._page.title_clicks, fetcher._page.download_clicks), (1, 0))
+
+    def test_metadata_lookup_explicit_loading_never_clicks_and_reports_structural_timeout(self):
+        for flag in ("loading_pending", "download_pending"):
+            with self.subTest(flag=flag):
+                self.path = Path(self.tmp.name) / flag
+                fetcher = self.metadata_lookup(snapshot={flag: True})
+                result = mod.run_cnki(fetcher, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+                self.assertEqual(result["reason"], "page_not_ready")
+                self.assertEqual((fetcher._page.title_clicks, fetcher._page.download_clicks), (0, 0))
+                diagnostic = fetcher._binding["cnki_flow"]["page_diagnostic"]
+                self.assertIs(diagnostic[flag], True)
+                self.assertEqual(diagnostic["lookup_diagnosis"], "ready")
+                self.assertEqual(diagnostic["exact_result_count"], 1)
+                self.assertEqual(diagnostic["observed_step"], "lookup")
+
+    def test_metadata_loading_disappearing_restarts_the_continuous_stability_window(self):
+        started = self.clock.now
+        def loading_changes(page, script):
+            if "literature_fulltext_snapshot" in script:
+                page.snap["loading_pending"] = 2 <= self.clock.now - started < 4
+        fetcher = self.metadata_lookup(on_read=loading_changes, paced=False)
+        result = mod.run_cnki(fetcher, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["status"], "ok", result)
+        self.assertGreaterEqual(fetcher._page.clicked_at - started, 4 + browser.PAGE_STABLE_SECONDS)
+        self.assertEqual(fetcher._page.title_clicks, 1)
+
+    def test_metadata_pacing_rechecks_loading_download_and_purchase_before_click(self):
+        for changed in ("loading_pending", "download_pending", "ready_state", "purchase_required"):
+            with self.subTest(changed=changed):
+                self.path = Path(self.tmp.name) / ("pace-" + changed)
+                fetcher = self.metadata_lookup()
+                original_pace = fetcher._pace
+                calls = []
+                def pace(url):
+                    calls.append(url)
+                    original_pace(url)
+                    if len(calls) == 2:
+                        if changed == "purchase_required":
+                            fetcher._page.ui[changed] = True
+                        else:
+                            fetcher._page.snap[changed] = "loading" if changed == "ready_state" else True
+                fetcher._pace = pace
+                result = mod.run_cnki(fetcher, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+                self.assertGreaterEqual(len(calls), 2, "must reach the injected pre-click pacing change")
+                self.assertEqual(result["reason"], "access_required" if changed == "purchase_required" else "page_not_ready")
+                self.assertEqual((fetcher._page.title_clicks, fetcher._page.download_clicks), (0, 0))
+                if changed != "purchase_required":
+                    diagnostic = fetcher._binding["cnki_flow"]["page_diagnostic"]
+                    self.assertEqual(diagnostic[changed], "loading" if changed == "ready_state" else True)
+
+    def test_metadata_interactive_ambiguous_result_never_clicks_and_captcha_takes_priority(self):
+        self.context.initial_ui = ui(count=2)
+        fetcher = self.metadata_lookup()
+        result = mod.run_cnki(fetcher, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(fetcher._page.title_clicks, 0)
+        self.assertEqual(result.get("lookup_diagnostic") or fetcher._binding["cnki_flow"].get("page_diagnostic", {}).get("lookup_diagnosis"), "ambiguous")
+        self.path = Path(self.tmp.name) / "captcha-before-ambiguous"
+        blocked = self.metadata_lookup(snapshot={"verification": True, "loading_pending": True})
+        started = self.clock.now
+        result = mod.run_cnki(blocked, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["reason"], "verification")
+        self.assertEqual((blocked._page.title_clicks, blocked._page.download_clicks), (0, 0))
+        self.assertLess(self.clock.now - started, 1)
+
+    def test_metadata_lookup_timeout_diagnostic_contains_no_source_text_query_or_token(self):
+        self.context.initial_ui = ui(query="secret-query", count=0)
+        fetcher = self.metadata_lookup(snapshot={"text": "secret-page-body"})
+        result = mod.run_cnki(fetcher, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["reason"], "page_not_ready")
+        diagnostic = fetcher._binding["cnki_flow"]["page_diagnostic"]
+        self.assertIs(diagnostic["snapshot_observed"], True)
+        self.assertEqual(diagnostic["ready_state"], "interactive")
+        self.assertFalse(diagnostic["query_matches"])
+        self.assertEqual(diagnostic["exact_result_count"], 0)
+        serialized = json.dumps(diagnostic, ensure_ascii=False)
+        for secret in ("secret-query", "secret-page-body", TITLE, "never-replay", "https://", "?kw="):
+            self.assertNotIn(secret, serialized)
+        saved = json.loads(fetcher.binding_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["cnki_flow"]["page_diagnostic"], diagnostic)
+
+    def test_metadata_timeout_before_first_snapshot_is_safe_and_never_navigates(self):
+        fetcher = self.metadata_lookup()
+        fetcher._pace = lambda url: self.clock.sleep(31)
+        result = mod.run_cnki(fetcher, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["reason"], "page_not_ready")
+        self.assertIs(fetcher._binding["cnki_flow"]["page_diagnostic"]["snapshot_observed"], False)
+        self.assertFalse(fetcher._page.gotos)
+        self.assertEqual(fetcher._page.title_clicks, 0)
+
+    def test_metadata_timeout_after_title_click_preserves_step_and_resume_never_reclicks(self):
+        def slow_detail(page):
+            page.detail(page)
+            self.clock.sleep(31)
+        first = self.metadata_lookup(on_title=slow_detail)
+        result = mod.run_cnki(first, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["reason"], "page_not_ready")
+        page = first._page
+        self.assertEqual(first._binding["cnki_flow"]["step"], "detail_pending")
+        self.assertEqual(first._binding["cnki_flow"]["page_diagnostic"]["observed_step"], "lookup")
+        self.assertEqual((page.title_clicks, page.download_clicks), (1, 0))
+        first.close()
+        second = self.fetcher()
+        result = mod.run_cnki(second, RECORD, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIs(second._page, page)
+        self.assertEqual((page.title_clicks, page.download_clicks, len(page.gotos)), (1, 0, 1))
+
+    def test_same_title_versions_select_only_exact_visible_authors_and_year(self):
+        self.context.initial_ui = version_rows()
+        record = version_record()
+        def detail(page):
+            page.detail(page)
+            page.snap["citation_title"] = VERSION_TITLE
+            page.ui["titles"] = [VERSION_TITLE]
+        fetcher = self.metadata_lookup(on_title=detail)
+        result = mod.run_cnki(fetcher, record, {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["status"], "ok", result)
+        proof = fetcher._binding["cnki_flow"]["lookup_selection"]
+        self.assertEqual((proof["method"], proof["year"], proof["row_index"], proof["anchor_index"]),
+                         ("exact_title_authors_year", "2026", 0, 0))
+        self.assertEqual(proof["authors_hash"], mod._hash("\n".join(mod._authors_key(VERSION_AUTHORS))))
+        self.assertNotIn(VERSION_AUTHORS, json.dumps(proof, ensure_ascii=False))
+        self.assertEqual((fetcher._page.title_clicks, fetcher._page.download_clicks), (1, 0))
+
+    def test_same_title_competitor_unknown_or_two_matching_versions_remain_ambiguous(self):
+        cases = ({"year": ""}, {"authors": ""}, {"authors_complete": False},
+                 {"authors": "赵杉;魏立民;等"}, {"year": "2026"})
+        for index, change in enumerate(cases):
+            with self.subTest(change=change):
+                self.path = Path(self.tmp.name) / str(index)
+                self.context.initial_ui = version_rows()
+                self.context.initial_ui["rows"][1].update(change)
+                fetcher = self.fetcher()
+                result = mod.run_cnki(fetcher, version_record(), {"metadata_only": True, "metadata_timeout_sec": 30})
+                self.assertEqual(result["lookup_diagnostic"], "ambiguous")
+                self.assertEqual((fetcher._page.title_clicks, fetcher._page.download_clicks), (0, 0))
+
+    def test_version_bibliography_changed_during_pacing_cannot_click_same_row_index(self):
+        for changed in ("year", "authors", "competitor"):
+            with self.subTest(changed=changed):
+                self.path = Path(self.tmp.name) / changed
+                self.context.initial_ui = version_rows()
+                fetcher = self.fetcher()
+                original_pace, calls = fetcher._pace, []
+                def pace(url):
+                    calls.append(url)
+                    original_pace(url)
+                    if len(calls) == 2:
+                        if changed == "competitor":
+                            # Even if the other row disappears, the selected
+                            # version's evidence must not silently change.
+                            fetcher._page.ui["rows"] = [fetcher._page.ui["rows"][0]]
+                            fetcher._page.ui["rows"][0]["year"] = "2025"
+                        else:
+                            fetcher._page.ui["rows"][0][changed] = "2025" if changed == "year" else "其他作者"
+                fetcher._pace = pace
+                result = mod.run_cnki(fetcher, version_record(), {"metadata_only": True, "metadata_timeout_sec": 30})
+                self.assertGreaterEqual(len(calls), 2)
+                self.assertEqual(result["reason"], "page_error")
+                self.assertEqual(fetcher._page.title_clicks, 0)
+
+    def test_same_title_versions_do_not_override_query_or_verification_guard(self):
+        self.context.initial_ui = version_rows()
+        self.context.initial_ui["queries"] = ["蛋氨酸"]
+        first = self.fetcher()
+        result = mod.run_cnki(first, version_record(), {"metadata_only": True, "metadata_timeout_sec": 30})
+        self.assertEqual(result["lookup_diagnostic"], "ambiguous")
+        self.assertEqual(first._page.title_clicks, 0)
+        self.path = Path(self.tmp.name) / "version-captcha"
+        self.context.initial_ui = version_rows()
+        blocked = self.metadata_lookup(snapshot={"verification": True})
+        self.assertEqual(mod.run_cnki(blocked, version_record(), {"metadata_only": True, "metadata_timeout_sec": 30})["reason"], "verification")
+        self.assertEqual(blocked._page.title_clicks, 0)
+
     def test_fixed_entry_clicks_real_title_then_pdf_once_and_never_replays_transfer(self):
         fetcher = self.fetcher()
         result = mod.run_cnki(fetcher, RECORD, {})
@@ -332,6 +580,25 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(binding["cnki_flow"]["step"], "download_clicked")
         self.assertEqual(binding["cnki_flow"]["target_id"], page.target)
         self.assertNotIn("token", json.dumps(binding))
+
+    def test_reused_fetcher_rebinds_new_paper_before_popup_witness(self):
+        first = self.fetcher()
+        self.assertEqual(mod.run_cnki(first, RECORD, {})["status"], "pdf_page")
+        old_target = first._binding["target_id"]
+        next_record = {**RECORD, "id": "next-paper"}
+        self.context.initial_ui = ui(title=next_record["title"])
+        def next_detail(page):
+            page.detail(page)
+            page.snap["citation_title"] = next_record["title"]
+            page.ui["titles"] = [next_record["title"]]
+        self.context.next_setup = next_detail
+        result = mod.run_cnki(first, next_record, {})
+        self.assertEqual(result["status"], "pdf_page", result)
+        self.assertEqual(first._binding["target_id"], first._page.target)
+        self.assertEqual(first._binding["target_id"], old_target)
+        expected_hash = mod._hash("\n".join(str(next_record.get(key) or "") for key in ("source_key", "source_candidate_id", "paper_id", "id")))
+        self.assertEqual(first._binding["cnki_flow"]["paper_hash"], expected_hash)
+        self.assertEqual(first._page.download_clicks, 2)
 
     def test_lookup_waits_for_dynamic_rows_without_resubmission(self):
         self.context.next_setup = lambda p: setattr(p, "lookup_delay", self.clock.now + 3)
@@ -419,7 +686,7 @@ class FlowTests(unittest.TestCase):
         result = mod.run_cnki(fetcher, RECORD, {})
         self.assertEqual(result["status"], "pdf_page")
         self.assertEqual(self.context.creates, 2)
-        self.assertTrue(self.context.pages[1].closed)
+        self.assertFalse(self.context.pages[1].closed, "original waits for durable file/status")
         self.assertFalse(self.context.pages[0].closed)
         self.assertFalse(self.context.pages[2].closed)
         self.assertEqual(fetcher._binding["target_id"], self.context.pages[2].target)
@@ -573,7 +840,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "pdf_page")
         self.assertEqual(result["bytes"], PDF)
         self.assertEqual(fetcher._page.target, "owned-2")
-        self.assertTrue(self.context.pages[1].closed)
+        self.assertFalse(self.context.pages[1].closed, "original waits for durable file/status")
         self.assertFalse(fetcher._page.closed, "driver closes only after saved status")
         witness = fetcher._binding["cnki_flow"]["pending_popup"]
         self.assertTrue(witness["opener_verified"])
@@ -594,7 +861,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "pdf_page")
         self.assertEqual(fetcher._page.url, "about:blank")
         self.assertEqual(fetcher._binding["target_id"], "owned-2")
-        self.assertTrue(self.context.pages[1].closed)
+        self.assertFalse(self.context.pages[1].closed, "original waits for durable file/status")
 
     def test_blob_address_alone_never_counts_as_pdf(self):
         def setup(page):
@@ -826,7 +1093,7 @@ class FlowTests(unittest.TestCase):
         self.assertIn("两次确认上限", result["message"])
         self.assertEqual([p.download_clicks for p in self.context.pages[1:]], [1, 1, 0])
         self.assertEqual(fetcher._binding["cnki_flow"]["download_click_count"], 2)
-        self.assertEqual(sum(not p.closed for p in self.context.pages[1:]), 1)
+        self.assertEqual(sum(not p.closed for p in self.context.pages[1:]), 3)
 
     def test_new_detail_with_purchase_dialog_never_gets_additional_click(self):
         def setup(page):
@@ -1061,8 +1328,8 @@ class FlowTests(unittest.TestCase):
         summary = result["origin_summary"]
         self.assertEqual((summary["protocol"], summary["hostname"], summary["category"]), ("http", "kns.cnki.net", "http_cnki"))
         self.assertEqual(fetcher._binding["cnki_flow"]["origin_summary"], summary)
-        self.assertGreaterEqual(self.clock.now - opened_at[0], 60)
-        self.assertLess(self.clock.now - opened_at[0], 61)
+        self.assertGreaterEqual(self.clock.now - opened_at[0], 120)
+        self.assertLess(self.clock.now - opened_at[0], 121)
         self.assertEqual(sum("下载窗口正在跳转" in value for value in self.messages), 1)
         for secret in ("secret-user", "secret-password", "8129", "private-path", "secret-token", "secret-fragment"):
             self.assertNotIn(secret, json.dumps(result, ensure_ascii=False))
@@ -1333,18 +1600,51 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(other.download_clicks, 0)
         self.assertFalse(other.gotos)
 
-    def test_true_loading_stall_still_pauses_after_one_minute_with_specific_diagnostic(self):
+    def test_true_loading_stall_is_pending_and_retains_page(self):
         self.context.initial_ui = ui(count=0)
         fetcher = self.fetcher()
         result = mod.run_cnki(fetcher, RECORD, {})
         self.assertEqual(result["lookup_diagnostic"], "rows_loading")
-        self.assertEqual(result["reason"], "load_timeout")
-        self.assertGreaterEqual(self.clock.now, 1060)
+        self.assertEqual(result["reason"], "page_not_ready")
+        self.assertGreaterEqual(self.clock.now, 1120)
+        self.assertFalse(fetcher._page.closed)
         self.assertEqual(fetcher._page.search_submits, 0)
         self.assertEqual(fetcher._page.title_clicks, 0)
 
 
 class OriginSummaryTests(unittest.TestCase):
+    def test_bibliographic_disambiguation_requires_ordered_complete_authors_and_year(self):
+        value, record = version_rows(), version_record()
+        self.assertEqual(mod._exact_result(value, VERSION_TITLE, record), [(0, 0)])
+        for changes in ({"authors": "魏立民;赵杉;刘杰;丁向彬;欧阳坤"}, {"authors": "赵杉"},
+                        {"authors": ""}, {"year": ""}, {"year": 2024},
+                        {"authors": "赵杉 et al."}, {"authors": "赵杉…"}):
+            with self.subTest(changes=changes):
+                self.assertEqual(len(mod._exact_result(value, VERSION_TITLE, {**record, **changes})), 2)
+        for document_type in ("journal", "conference", "thesis", "unknown"):
+            self.assertEqual(mod._exact_result(value, VERSION_TITLE, {**record, "document_type": document_type}), [(0, 0)])
+        self.assertEqual(mod._exact_result(value, VERSION_TITLE, {**record, "year": 2025}), [(1, 0)])
+        value["rows"][0]["anchors"].append({"index": 1, "visible": True, "text": VERSION_TITLE})
+        self.assertEqual(len(mod._exact_result(value, VERSION_TITLE, record)), 3)
+
+    def test_result_dom_extracts_only_explicit_visible_author_and_publication_date_cells(self):
+        from test_literature_extra_sources import dom_snapshot
+        nodes = {"query": {"value": VERSION_TITLE}, "row": {"map": {
+            "a": ["title"], "td.author": ["authors"], "td.date": ["date"]}},
+            "title": {"text": VERSION_TITLE}, "authors": {"text": VERSION_AUTHORS},
+            "date": {"text": "2026-10-29 14:03"}}
+        mapping = {"#txt_SearchText": ["query"], mod.ROWS[0]: ["row"]}
+        value = dom_snapshot("cnki", nodes=nodes, mapping=mapping, script=mod._CNKI_UI_JS)
+        self.assertEqual(mod._row_bibliography(value, 0), (mod._authors_key(VERSION_AUTHORS), "2026"))
+        for change in ({"text": "会议2026收录2025"}, {"text": "2025-10-24", "hidden": True}):
+            nodes["date"] = change
+            value = dom_snapshot("cnki", nodes=nodes, mapping=mapping, head="2026-10-29", script=mod._CNKI_UI_JS)
+            self.assertIsNone(mod._row_bibliography(value, 0))
+        nodes["date"] = {"text": "2026-10-29"}
+        nodes["authors"] = {"text": "赵杉;魏立民;等"}
+        value = dom_snapshot("cnki", nodes=nodes, mapping=mapping, script=mod._CNKI_UI_JS)
+        self.assertIsNone(mod._row_bibliography(value, 0))
+
     def test_literal_query_wrapper_preserves_entire_scientific_prefix(self):
         for value in (SCIENTIFIC_TITLE, '"' + SCIENTIFIC_TITLE + '"'):
             self.assertTrue(mod._query_matches(ui(title=SCIENTIFIC_TITLE, query=value), SCIENTIFIC_TITLE))

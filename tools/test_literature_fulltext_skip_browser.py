@@ -102,21 +102,35 @@ class SkipBrowserTests(unittest.TestCase):
         self.assertNotIn("/login", binding_text)
 
     def test_bad_page_and_timeout_do_not_disable_the_site(self):
-        for reason in ("page_error", "load_timeout"):
+        for reason in ("page_error", "page_not_ready"):
             with self.subTest(reason=reason):
                 self.path = Path(self.temp.name) / reason
                 self.clock = Clock()
                 context = Context()
-                step = {"snapshot": snapshot(page_error=True)} if reason == "page_error" else {"error": TimeoutError("timeout")}
+                step = ({"snapshot": snapshot(page_error=True)} if reason == "page_error" else
+                        {"error": TimeoutError("timeout"), "snapshot": snapshot(ready_state="loading", loading_pending=True)})
                 context.next_steps = [step]
                 fetcher = self.fetcher(context)
-                self.assertEqual(fetcher.fetch_page("https://publisher.test/bad", {})["reason"], reason)
+                result = fetcher.fetch_page("https://publisher.test/bad", {})
+                self.assertEqual((result["status"], result["reason"]), ("attention", reason))
+                original = fetcher._page
+                self.assertFalse(original.closed)
+                if reason == "page_not_ready":
+                    self.assertGreaterEqual(self.clock.time() - 1000, mod.PAGE_IDLE_SECONDS)
+                    self.assertFalse(fetcher.complete_paper(skipped=True)["closed"])
                 fetcher.defer_paper(reason=reason)
                 self.assertFalse(fetcher._deferred_sites)
+                self.assertFalse(original.closed)
+                sleeps_before_next = len(self.clock.sleeps)
                 context.next_steps = [{}]
                 self.assertEqual(fetcher.fetch_page("https://publisher.test/good", {})["status"], "ok")
                 self.assertEqual(context.creates, 2)
-                self.assertEqual(self.clock.sleeps, [8])
+                self.assertIsNot(fetcher._page, original)
+                self.assertEqual(len(original.gotos), 1)
+                self.assertFalse(original.closed)
+                # A real readiness wait already consumes the site interval;
+                # an immediate page error still requires the normal delay.
+                self.assertEqual(self.clock.sleeps[sleeps_before_next:], [8] if reason == "page_error" else [])
 
     def test_cnki_and_material_entries_do_not_revisit_cached_restriction(self):
         context = Context()

@@ -7,6 +7,7 @@ states. Observed download URLs live only in the current store's memory.
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr
 import csv
 from datetime import datetime, timezone
 import hashlib
@@ -19,12 +20,13 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import tempfile
+import time
 import unicodedata
 from urllib.parse import unquote, urlsplit
 import xml.etree.ElementTree as ET
 import zipfile
 
-from literature_fulltext_reuse import contained_file, identity, match_identity, inspect_saved, UUID, _reparse
+from literature_fulltext_reuse import contained_file, identity, match_identity, inspect_saved, pdf_proof, UUID, _reparse
 
 
 VERSION = 1
@@ -40,6 +42,12 @@ ROLES = {"main_pdf", "main_html", "supplement"}
 DOWNLOAD_STATES = {"pending", "downloaded", "missing", "needs_attention"}
 CHECK_STATES = {"uninspected", "checked", "none_declared", "none_found", "unknown", "needs_attention"}
 READ_STATES = {"not_checked", "readable", "partial", "unreadable", "unsupported"}
+_SUPPLEMENT_REFERENCE = re.compile(
+    r"\bsupplement(?:ary|al)?[\s-]+(?:materials?|data(?:sets?)?|information|files?|appendi(?:x|ces)|tables?|figures?)\b"
+    r"|\bsupporting[\s-]+(?:information|materials?|data|files?)\b"
+    r"|\b(?:online|electronic)[\s-]+appendi(?:x|ces)\b"
+    r"|\b(?:table|figure|fig\.?)[\s-]*S[\s.-]*\d+\b|(?:表|图)[\s-]*S[\s.-]*\d+"
+    r"|(?:补充|附加)(?:材料|信息|数据|文件|表|图)|附件|附录文件", re.I)
 
 
 class MaterialsError(ValueError):
@@ -116,7 +124,14 @@ def _atomic_bytes(path, blob):
             stream.write(blob)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        for attempt in range(7):
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError as error:
+                if getattr(error, "winerror", None) not in {5, 32} or attempt == 6:
+                    raise
+                time.sleep(0.05 * (attempt + 1))  # At most 1.05 seconds; permanent errors still raise.
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -522,7 +537,7 @@ class MaterialsStore:
         """
         paper = self._paper(record)
         supplements = [material for material in paper.get("materials", [])
-                       if material.get("role") == "supplement"]
+                       if material.get("role") == "supplement" and not material.get("excluded_from_supplement_counts")]
         # When at least one real file URL was observed, fragment/landing links
         # are navigation duplicates, not additional attachments.
         file_like = [material for material in supplements
@@ -655,6 +670,78 @@ class MaterialsStore:
             self.flush()
         return material
 
+    def apply_fulltext_absence_rule(self, record, *, observed=None, access_attention=False):
+        """Explicit per-task rule: readable verified body, no attachment mention.
+
+        This records a researcher decision, never an author's declaration.
+        Historical entries/files remain intact; only explicitly listed entries
+        may be excluded from this run's expected supplement counts.
+        """
+        policy = self.document.get("supplement_policy")
+        if not isinstance(policy, dict) or policy.get("absence_rule") != "no_mention_in_verified_fulltext" or access_attention:
+            return False
+        observed = observed if isinstance(observed, dict) else {}
+        if observed.get("links") or observed.get("supplements") or observed.get("status") == "needs_attention":
+            return False
+        paper = self._paper(record)
+        status = _read_json(self.job_dir, "fulltext/status.json") or {}
+        matches = [item for item in status.get("items", []) if isinstance(item, dict) and item.get("paper_id") == paper["paper_id"]]
+        if len(matches) != 1:
+            return False
+        item = matches[0]
+        if (item.get("status") != "fetched_pdf" or item.get("local_verification")
+                or (item.get("completeness") or {}).get("status") != "complete"
+                or (item.get("material_deferred") or {}).get("reason") in {"login", "verification", "access_required"}):
+            return False
+        mains = [material for material in paper["materials"] if material.get("role") == "main_pdf" and material.get("download_status") == "downloaded"]
+        if len(mains) != 1:
+            return False
+        main = mains[0]
+        blob = _material_file(self.job_dir, main)
+        if blob is None or main.get("path") != item.get("path") or len(blob) < 50 * 1024:
+            return False
+        proof = pdf_proof(blob, record)
+        if not (proof.get("pdf_magic") and proof.get("eof_marker") and proof.get("parser_status") == "valid"):
+            return False
+        try:
+            from pypdf import PdfReader
+            with redirect_stderr(io.StringIO()):
+                reader = PdfReader(io.BytesIO(blob), strict=False)
+                if reader.is_encrypted or not 1 <= len(reader.pages) <= 1000:
+                    return False
+                pages = [(page.extract_text() or "").strip() for page in reader.pages]
+            if any(not text for text in pages):
+                return False  # A scanned/blank page cannot prove absence.
+            text = unicodedata.normalize("NFKC", "\n".join(pages))
+            text = re.sub(r"(?<=[A-Za-z])[-\u00ad\u2010\u2011][ \t]*\r?\n[ \t]*(?=[A-Za-z])", "", text)
+            if not 800 <= len(text) <= 1000000 or _SUPPLEMENT_REFERENCE.search(text):
+                return False
+        except Exception:
+            return False
+        exclusions = policy.get("historical_exclusions") or {}
+        exclusion = exclusions.get(paper["paper_id"], {}) if isinstance(exclusions, dict) else {}
+        allowed_ids = set(exclusion.get("material_ids") or []) if isinstance(exclusion, dict) else set()
+        historical = [material for material in paper["materials"]
+                      if material.get("role") == "supplement" and not material.get("excluded_from_supplement_counts")]
+        # A real saved attachment, active observed link, or unreviewed legacy
+        # entry always wins over this negative body check.
+        if any(material.get("material_id") not in allowed_ids or material.get("download_status") == "downloaded"
+               or material.get("path") or material.get("exclusion_reobserved_at")
+               or _file_like_url(str((self.descriptors.get((paper["paper_id"], material.get("material_id"))) or {}).get("url") or ""))
+               for material in historical):
+            return False
+        reason = "完整且可读的正文未提补充材料；按研究者本轮规则记为无补材，非作者明确声明。"
+        for material in historical:
+            material.update(excluded_from_supplement_counts=True,
+                exclusion_reason=_reason(exclusion.get("reason") or "依本轮研究者规则从应下载补材中排除；历史入口性质未全部核实，原记录保留。"),
+                exclusion_policy=policy["absence_rule"], exclusion_main_pdf_sha256=main["sha256"], excluded_at=_now())
+        paper["supplement_check"] = {"status": "none_found", "reason": reason,
+            "evidence": {"source": "verified_main_pdf_no_supplement_mention", "sha256": main["sha256"],
+                         "pages": len(pages), "text_chars": len(text), "mentions": 0,
+                         "policy": policy["absence_rule"], "checked_at": _now()}}
+        self.flush()
+        return True
+
     def record_discovery(self, record, discovery):
         paper = self._paper(record)
         discovery = discovery if isinstance(discovery, dict) else {"status": "unknown", "reason": "补充材料发现结果无法核查。"}
@@ -666,13 +753,24 @@ class MaterialsStore:
         observed = []
         for descriptor in entries:
             if isinstance(descriptor, dict):
-                _, _, normalized = self._upsert(record, {**descriptor, "role": "supplement"})
+                _, material, normalized = self._upsert(record, {**descriptor, "role": "supplement"})
+                if material.get("excluded_from_supplement_counts"):
+                    # A newly observed actual entry reactivates this record;
+                    # the earlier exclusion explanation remains in its audit.
+                    material.update(excluded_from_supplement_counts=False, exclusion_reobserved_at=_now())
                 observed.append(normalized)
-        if observed and state == "none_declared":
+        active_supplements = any(material.get("role") == "supplement"
+                                 and not material.get("excluded_from_supplement_counts")
+                                 for material in paper["materials"])
+        reason = _reason(discovery.get("reason"))
+        if active_supplements and state == "none_declared":
             state = "checked"
+            reason = (reason + " 已有明确补充材料记录，当前空列表不能将其改为未声明补材。").strip()
         previous = paper.get("supplement_check", {}).get("status")
-        if not (state in {"unknown", "uninspected"} and previous in {"checked", "none_declared"}):
-            paper["supplement_check"] = {"status": state, "reason": _reason(discovery.get("reason"))}
+        preserve_prior = (state in {"unknown", "uninspected"} and previous in {"checked", "none_declared"}
+                          and not (previous == "none_declared" and active_supplements))
+        if not preserve_prior:
+            paper["supplement_check"] = {"status": state, "reason": reason}
         if discovery.get("main_pdf_status") in {"pending", "downloaded", "missing", "needs_attention"}:
             paper["main_pdf_status"] = discovery["main_pdf_status"]
         self.flush()
@@ -682,7 +780,7 @@ class MaterialsStore:
         paper = self._paper(record)
         candidates = []
         for material in paper["materials"]:
-            if material.get("role") != "supplement":
+            if material.get("role") != "supplement" or material.get("excluded_from_supplement_counts"):
                 continue
             if material.get("download_status") == "downloaded" and _material_file(self.job_dir, material) is not None:
                 continue
@@ -809,13 +907,19 @@ class MaterialsStore:
             return False
         try:
             for material in paper["materials"]:
-                required = material.get("role") == "supplement" or (paper.get("main_pdf_status") == "downloaded" and material.get("role") == "main_pdf")
+                required = (material.get("role") == "supplement" and not material.get("excluded_from_supplement_counts")) or (paper.get("main_pdf_status") == "downloaded" and material.get("role") == "main_pdf")
                 required = required or (paper.get("main_pdf_status") == "missing" and material.get("role") == "main_html")
                 if required and (material.get("download_status") != "downloaded" or _material_file(self.job_dir, material) is None):
                     return False
         except MaterialsError:
             return False
         return True
+
+    def verify_saved(self, record):
+        """Verify recorded originals before an explicit material-only retry."""
+        for material in self._paper(record)["materials"]:
+            if material.get("download_status") == "downloaded" and _material_file(self.job_dir, material) is None:
+                raise MaterialsError("清单中已保存的材料原件缺失或路径无法核验，请先核查；未重新下载或覆盖。")
 
     def flush(self):
         if _reparse(self.job_dir) or _reparse(self.job_dir.parent) or _reparse(self.path.parent) or _reparse(self.path):

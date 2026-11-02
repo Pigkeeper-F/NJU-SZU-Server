@@ -78,6 +78,8 @@ async function main() {
 
     const legacy = normalizeFieldsAssistInput({ ...base(), currentFields: [{ ...field, valueType: 'string' }] });
     assert.equal(legacy.currentFields[0].valueType, 'text');
+    const associated = normalizeFieldsAssistInput({ ...base(), currentFields: [{ ...field, conditionKeys: ['outcome', 'group', 'time'] }] });
+    assert.deepEqual(associated.currentFields[0].conditionKeys, ['outcome', 'group', 'time'], 'Confirmed row associations survive field discussion');
     const expandedFields = Array.from({ length: 200 }, (_, index) => ({ ...field, key: 'f' + index, label: '字段' + index }));
     assert.equal(normalizeFieldsAssistInput({ ...base(), currentFields: expandedFields }).currentFields.length, 200,
       'A grouped legacy schema can expand beyond50 without truncation');
@@ -94,6 +96,10 @@ async function main() {
       { ...base(), currentFields: 'not fields' }, { ...base(), currentFields: [null] },
       { ...base(), currentFields: [{ ...field, key: '__proto__' }] }, { ...base(), currentFields: [{ ...field, valueType: 'code' }] },
       { ...base(), currentFields: [{ ...field, required: 'true' }] }, { ...base(), currentFields: [field, field] },
+      { ...base(), currentFields: [{ ...field, conditionKeys: 'group' }] },
+      { ...base(), currentFields: [{ ...field, conditionKeys: ['group', 'group'] }] },
+      { ...base(), currentFields: [{ ...field, conditionKeys: ['__proto__'] }] },
+      { ...base(), currentFields: [{ ...field, conditionKeys: [null] }] },
       { ...base(), currentFields: Array.from({ length: 201 }, (_, index) => ({ ...field, key: 'f' + index })) },
       { ...base(), approvedDoc: 'x'.repeat(20001) }, { ...base(), model: 'x'.repeat(101) },
       { ...base(), execute: true }, { ...base(), moduleMessages: Array.from({ length: 61 }, () => ({ role: 'user', text: 'x' })) },

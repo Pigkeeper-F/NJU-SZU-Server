@@ -226,12 +226,12 @@ class BrowserTests(unittest.TestCase):
                 self.assertEqual(len(context.pages[-1].gotos), 1)
                 self.assertEqual(context.creates, 1)
 
-    def test_timeout_is_attention_and_original_page_remains(self):
+    def test_navigation_timeout_with_usable_dom_is_not_failure(self):
         context = Context([{"error": TimeoutError("Page.goto: Timeout 60000ms exceeded")}])
         fetcher = self.fetcher(context)
         result = fetcher.fetch_page("https://publisher.test/slow", {"per_paper_timeout_sec": 300})
-        self.assertEqual(result["reason"], "load_timeout")
-        self.assertEqual(context.pages[-1].gotos[0][1]["timeout"], 60000)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(context.pages[-1].gotos[0][1]["timeout"], 120000)
         self.assertFalse(context.pages[-1].closed)
 
     def test_access_error_records_requested_article_not_previous_page(self):
@@ -452,6 +452,31 @@ class LocalDOMTests(unittest.TestCase):
         self.page.set_content(html)
         return self.page.evaluate(mod._SNAPSHOT_JS)
 
+    def test_doi_pdf_reader_hidden_actual_pdf_menu_and_reading_progress(self):
+        bookmarks = ''.join(f'<a href="https://reader.test/doi/epdf/10.1080/10495398.2021.1972005#ref{n}">Section {n}</a>' for n in range(63))
+        html = ('<meta name="citation_doi" content="10.1080/10495398.2021.1972005">'
+            '<button>PDF</button><div role="progressbar" aria-label="Reading progress is 10%"></div>'
+            '<a href="https://reader.test/doi/epdf/10.1080/10495398.2021.1972005#ref1">Skip to content</a>'
+            '<a href="#pdf">PDF book mark</a>' + bookmarks +
+            '<div style="display:none"><a href="https://reader.test/doi/pdf/10.1080/10495398.2021.1972005">PDF • 1.3 MB</a>'
+            '<a href="https://other.test/doi/pdf/10.1080/10495398.2021.1972005">PDF</a></div>')
+        self.page.route("https://reader.test/**", lambda route: route.fulfill(status=200, content_type="text/html", body=html))
+        try:
+            self.page.goto("https://reader.test/doi/epdf/10.1080/10495398.2021.1972005")
+            data = self.page.evaluate(mod._SNAPSHOT_JS)
+            self.assertTrue(data["reader_ready"])
+            self.assertFalse(data["download_pending"])
+            self.assertTrue(mod._snapshot_usable(data))
+            self.assertIn("https://reader.test/doi/pdf/10.1080/10495398.2021.1972005", [a["url"] for a in data["links"]])
+            self.assertNotIn("https://other.test/doi/pdf/10.1080/10495398.2021.1972005", [a["url"] for a in data["links"]])
+            self.assertEqual([a["url"] for a in data["links"] if a["text"] == "PDF"], ["https://reader.test/doi/pdf/10.1080/10495398.2021.1972005"])
+            self.assertEqual(data["links"][0]["url"], "https://reader.test/doi/pdf/10.1080/10495398.2021.1972005")
+            self.assertFalse(any('#' in a['url'] or 'Skip' in a['text'] or 'book mark' in a['text'] for a in data['links']))
+            self.assertIn(data["links"][0], data["links"][:8])
+        finally:
+            self.page.unroute("https://reader.test/**")
+            self.page.goto("about:blank")
+
     def test_pubmed_sources_with_database_names_are_included_but_related_articles_are_not(self):
         links = "".join(f'<a href="https://publisher.test/article/{n}">Publisher {n}</a>' for n in range(10))
         data = self.evaluate('<h1>Heat stress in broilers</h1><div class="full-text-links">'
@@ -459,6 +484,8 @@ class LocalDOMTests(unittest.TestCase):
                              '<a href="https://mdpi.test/2076/paper">MDPI</a>' + links + '</div>'
                              '<section id="similar-articles"><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC999/">Related paper</a></section>')
         actual = [item["url"] for item in data["links"]]
+        self.assertTrue(data["bibliographic_ready"])
+        self.assertTrue(mod._snapshot_usable(data))
         self.assertIn("https://pmc.ncbi.nlm.nih.gov/articles/PMC123/", actual)
         self.assertIn("https://mdpi.test/2076/paper", actual)
         self.assertNotIn("https://pmc.ncbi.nlm.nih.gov/articles/PMC999/", actual)

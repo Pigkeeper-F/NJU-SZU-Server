@@ -14,6 +14,10 @@
   let literatureFieldsDialog = null;
   const literatureFieldsAssistWatchers = new Set();
   let literatureMaterialsDialog = null;
+  let literatureHistoryDetailsDialog = null;
+  let literatureNewTaskDialog = null;
+  let literatureSegmentDialog = null;
+  const literatureWorkspaceManagers = new Map();
   let account = null;
   let checking = false;
   let loginBusy = false;
@@ -33,11 +37,15 @@
   panel.className = 'codex-panel';
   panel.hidden = true;
   document.getElementById('module-space').before(panel);
-  function persist() { try { localStorage.setItem(key, JSON.stringify(saved)); } catch (_) {} }
+  function persist() { try { localStorage.setItem(key, JSON.stringify(saved)); } catch (_) {} root.LiteratureDiscussions?.schedule?.(Store.getState().activeModuleId); }
   function task(id) {
     if (!tasks[id]) tasks[id] = { files: [], busy: false, backend: saved[id]?.backend || preferences.backend || 'codex', model: saved[id]?.model ?? preferences.model ?? '', execute: false, executeOnce: false, error: '', job: null, filesOpen: false, logOpen: false,
       literatureConfig: saved[id]?.literatureConfig || null,
       literatureConfigOpen: typeof saved[id]?.literatureConfigOpen === 'boolean' ? saved[id].literatureConfigOpen : null,
+      literatureRuleReview: saved[id]?.literatureRuleReview || null,
+      literatureConfigNotice: saved[id]?.literatureConfigNotice || '',
+      literatureReviewNeedsSync: saved[id]?.literatureReviewNeedsSync === true,
+      literaturePreparePending: saved[id]?.literaturePreparePending || null,
       literatureJob: null, literatureBusy: false, literatureError: '',
       literatureUntil: saved[id]?.literatureUntil || 'discover', literatureJobs: null, literatureJobsTried: false, literatureJobsLoading: false, literatureJobsError: '', literatureIncludeDeleted: false, literatureHistoryBusy: null,
       literatureConfirmJob: null, literatureConfirmDrafts: null };
@@ -45,7 +53,9 @@
   }
   function node(tag, text, cls) { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (cls) el.className = cls; return el; }
   async function request(url, options = {}) {
-    const response = await fetch(url, { ...options, headers: { 'X-Workbench': '1', ...(options.headers || {}) } });
+    let response;
+    try { response = await fetch(url, { ...options, headers: { 'X-Workbench': '1', ...(options.headers || {}) } }); }
+    catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { transport: true, endpoint: url, method: options.method || 'GET' }); }
     const data = await response.json();
     if (!response.ok) throw Object.assign(new Error(data.error || '本地服务请求失败'), { status: response.status, code: data.code, sessionId: data.sessionId });
     return data;
@@ -72,10 +82,48 @@
       const sid = await session(id);
       t.files = (await request('/api/codex/files?session=' + sid)).files;
       t.cleanResultsKey = null;
+      if (Store.getState().modules.find(mod => mod.id === id)?.type === 'clean-data') await loadCleanAcceptanceRuns(id, true);
       if (Store.getState().modules.find(mod => mod.id === id)?.type === 'plotting') await loadPlotRuns(id);
       t.error = '';
-    } catch (error) { t.error = error.message; }
+    } catch (error) {
+      const mod=Store.getState().modules.find(item=>item.id===id);
+      if (mod?.type!=='clean-data' || !noteUnavailableCleanSession(id,saved[id]?.sessionId,error)) t.error=error.message;
+    }
     render();
+  }
+  async function syncCleanRuleUpdate(id) {
+    const t=task(id),sid=saved[id]?.sessionId,projectId=root.TaskManager?.currentTaskId?.();
+    const mod=Store.getState().modules.find(item=>item.id===id);
+    if (!sid || mod?.type!=='clean-data' || !root.TaskManager?.applyCleanRuleUpdate) return { applied:false, reason:'not_applicable' };
+    if (t.cleanRuleSyncPromise) return t.cleanRuleSyncPromise;
+    const current=()=>saved[id]?.sessionId===sid && (!projectId || root.TaskManager?.currentTaskId?.()===projectId)
+      && Store.getState().activeModuleId===id && Store.getState().modules.some(item=>item.id===id && item.type==='clean-data');
+    const operation=(async()=>{
+      const data=await request('/api/codex/clean/rule-update?session='+encodeURIComponent(sid));
+      if (!current()) throw Object.assign(Error('任务或模块已切换，规则更新保留在原任务，未覆盖当前内容'),{code:'CLEAN_SYNC_CONTEXT_CHANGED'});
+      if (!data.update) return { applied:false, reason:'no_update' };
+      if (data.update.sessionId!==sid) throw Error('规则更新与当前文件会话不一致，原内容保留');
+      const result=root.TaskManager.applyCleanRuleUpdate(id,data.update);
+      if (!result?.applied && !result?.unchanged) {
+        const reasons={'busy-or-editing':'当前有任务或核验草稿正在编辑，原规则和草稿保留；请结束当前操作后执行',
+          'draft-changed':'当前有尚未保存的规则草稿，更新未覆盖草稿',
+          'approved-rules-changed':'当前已确认规则的正文与授权更新不同，原版本保留',
+          'storage-failed':'浏览器未能保存新规则版本，已回滚保留旧版',
+          'invalid-resolution':'页面未能核对A规则更新，原版本保留，请重新加载本页'};
+        throw Error(result?.message || reasons[result?.reason] || '当前任务与待同步的A规则不匹配，原规则和讨论保留');
+      }
+      const inputName=data.update.binding.inputName;
+      saved[id]={...saved[id],cleanStandardNames:[...new Set([...cleanStandardNames(id).filter(name=>name!==data.update.binding.sourceName && name!==inputName),...(data.update.standardFiles || []).map(file=>file.name)])],
+        inputBatch:{...(saved[id]?.inputBatch || {}),names:[inputName],label:'A规则已绑定的80条原始数据',text:'原件保留；版本和SHA-256已写入当前执行规则。'},cleanRuleUpdateId:data.update.id};
+      persist();t.cleanRuleSyncError='';t.cleanRuleSyncNotice='A规则已同步为执行版，输入版本与异常策略已落实；原规则历史及讨论保留。';
+      try { await request('/api/codex/clean/rule-update-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:sid,updateId:data.update.id,afterSha256:data.update.afterSha256,version:result.version,moduleId:id,projectId})}); }
+      catch(error) { t.cleanRuleSyncNotice+=' 当前规则已在浏览器保存，服务端回执暂未收到，刷新时会重试。'; }
+      return result;
+    })();
+    t.cleanRuleSyncPromise=operation;
+    try { return await operation; }
+    catch(error) { if(current())t.cleanRuleSyncError=error.message;throw error; }
+    finally { if(t.cleanRuleSyncPromise===operation)t.cleanRuleSyncPromise=null; }
   }
   async function check() {
     checking = true; render();
@@ -97,14 +145,21 @@
     modelPicker.value = t.model || ''; modelPicker.disabled = !!t.busy || checking || !account?.loggedIn;
     loginButton.textContent = account?.loggedIn ? '本机 Codex 已连接' : '登录本机 Codex'; loginButton.disabled = loginBusy || !!t.busy;
     refreshButton.disabled = checking;
-    const connectionError = account?.error?.includes('workspace routing discovery timed out') ? 'Codex 工作区连接超时，请检查本机网络后重试。' : account?.error;
-    connectionStatus.textContent = checking ? '检查连接中…' : loginNotice || connectionError || (account?.loggedIn ? '本机 Codex 已登录 · ' + (account.models || []).length + ' 个模型 · 推理 ' + (account.effort || 'high') : '未连接，请先安装 Codex CLI 并点击登录');
+    const connectionError = /workspace routing discovery (?:failed|timed out)/i.test(account?.error || '') ? 'Codex 工作区连接失败，请检查本机网络与 Codex 连接后重试。' : account?.error;
+    connectionStatus.textContent = checking ? '检查连接中…' : loginNotice || connectionError || (account?.loggedIn ? '本机 Codex 已登录 · ' + (account.models || []).length + ' 个模型' + (account.effort ? ' · 推理 ' + account.effort : '') : '未连接，请先安装 Codex CLI 并点击登录');
     document.querySelectorAll('[data-api-settings]').forEach(item => { item.hidden = backendPicker.value !== 'api'; });
   }
   function saveConnection() {
     const id = Store.getState().activeModuleId;
     preferences = { backend: backendPicker.value, model: modelPicker.value };
-    if (id) { Object.assign(task(id), preferences); saved[id] = { ...saved[id], ...preferences }; persist(); }
+    if (id) {
+      const t = task(id); Object.assign(t, preferences); saved[id] = { ...saved[id], ...preferences };
+      if (Store.getState().modules.find(mod => mod.id === id)?.type === 'literature-mining' && t.literatureConfig) {
+        t.literatureConfig.extraction = { ...t.literatureConfig.extraction, model: preferences.model || account?.model || null };
+        saved[id].literatureConfig = t.literatureConfig;
+      }
+      persist();
+    }
     try { localStorage.setItem('fa_codex_connection_v1', JSON.stringify(preferences)); } catch (_) {}
     render(); ModuleSpace.render();
   }
@@ -146,6 +201,31 @@
     } catch (error) { t.error = error.message; }
     finally { t.busy = false; t.filesOpen = false; render(); ModuleSpace.render(); }
   }
+  function cleanStandardNames(id) {
+    return [...new Set((Array.isArray(saved[id]?.cleanStandardNames) ? saved[id].cleanStandardNames : []).filter(name=>typeof name==='string' && name && !/[\\/\x00-\x1f]/.test(name)))];
+  }
+  async function uploadCleanStandards(mod, files) {
+    const t=task(mod.id);
+    if (!files.length || t.busy || t.cleanAcceptanceBusy || t.cleanAcceptanceLoading || root.ModuleSpace?.isBusy()) return false;
+    const projectId=root.TaskManager?.currentTaskId?.();
+    const current=()=>Store.getState().modules.some(value=>value.id===mod.id && value.type==='clean-data') && (!projectId || root.TaskManager?.currentTaskId?.()===projectId);
+    t.busy=true;t.cleanStandardError='';t.preparedCleanPlan=null;t.executeOnce=false;render();
+    try {
+      if (!current()) throw new Error('当前项目已改变，请在原清洗模块上传标准。');
+      const sid=await session(mod.id);
+      for (const file of files) {
+        if (!current()) throw new Error('项目已改变；已上传的标准原件保留，不继续上传。');
+        if (!/\.(md|txt|pdf|docx|csv|tsv|xlsx|xls|json)$/i.test(file.name) || file.size>20*1024*1024) throw new Error('标准原件支持 MD、TXT、PDF、DOCX、CSV、TSV、Excel、JSON，每份不超过20MB。');
+        const result=await request('/api/codex/upload?session='+encodeURIComponent(sid)+'&group=reference&name='+encodeURIComponent(file.name),{method:'POST',body:file});
+        if (!current() || saved[mod.id]?.sessionId!==sid) throw new Error('项目或会话已改变；上传原件保留在原任务，未应用到当前页面。');
+        t.files=Array.isArray(result.files) ? result.files : t.files;
+        if (!result.name) throw new Error('未收到标准原件名称，请刷新文件后核对。');
+        saved[mod.id]={...saved[mod.id],cleanStandardNames:[...new Set([...cleanStandardNames(mod.id),result.name])]};delete saved[mod.id].cleanHandoff;Store.invalidateCleanAcceptance?.(mod.id,null,'人工标准原件已改变，请纳入同一方案并重新确认');persist();
+      }
+      t.cleanStandardNotice='标准原件已保留，尚未采纳。点击“讨论清洗核验”，将采用的要求写入同一方案并确认；文件不会当作待清洗数据。';return true;
+    } catch(error) {t.cleanStandardError=error.message;return false;}
+    finally {t.busy=false;render();ModuleSpace.render();}
+  }
   async function watch(id, jobId) {
     const t = task(id); t.busy = true;
     try {
@@ -170,6 +250,11 @@
             saved[id].delivered = job.id; persist();
           }
           if (Store.getState().modules.find(mod => mod.id === id)?.type === 'plotting') await loadPlotRuns(id);
+          if (Store.getState().modules.find(mod => mod.id === id)?.type === 'clean-data') {
+            // A completed conversation is not necessarily a cleaning execution.
+            // Only the backend's frozen/legacy run list can select this job.
+            await loadCleanAcceptanceRuns(id, true, job.id);
+          }
           break;
         }
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -192,7 +277,9 @@
     delete saved[id].jobId; persist();
   }
   function literatureCompletedMessage(job) {
-    const base = '候选检索已保存 ' + job.count + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。';
+    if (job.files?.includes('fulltext/status.json')) return literatureStatusText(job) + literatureProcessingBasisMessage(job);
+    const candidateCount = Number.isSafeInteger(job.counters?.candidates) ? job.counters.candidates : job.count;
+    const base = '候选检索已保存 ' + candidateCount + ' 条待复核记录；这不是已纳入文献，也未提取全文。可在文献检索区下载清单。';
     const extra = literatureDeliverableSummary(job);
     return (extra ? base + extra : base) + literatureProcessingBasisMessage(job);
   }
@@ -213,6 +300,26 @@
     if (files.includes('dedupe/dedupe.json')) return '已完成跨来源去重；疑似重复组未静默合并，见下载区待审清单。';
     return '';
   }
+  function literatureStatusText(job) {
+    if (job.status !== 'completed' || !job.files?.includes('fulltext/status.json')) return String(job.message || '');
+    const counters = job.counters || {}, parts = [];
+    const hasCount = value => Number.isSafeInteger(value) && value >= 0;
+    if (job.files.includes('export/literature.xlsx') || job.files.includes('export/literature.csv')) {
+      const count = hasCount(counters.uniqueGroups) ? counters.uniqueGroups : counters.candidates;
+      parts.push('文献表已导出' + (hasCount(count) ? '：' + count + ' 条文献记录' : ''));
+      parts.push('参数明细表已导出' + (hasCount(counters.parameterRows) ? '：' + counters.parameterRows + ' 行' : ''));
+    } else parts.push(literatureDeliverableSummary(job) || '本轮材料处理已结束');
+    if (hasCount(counters.fulltextFetched)) {
+      let body = '已获取正文 ' + counters.fulltextFetched + ' 篇';
+      const formats = [];
+      if (hasCount(counters.fulltextPdf)) formats.push('PDF ' + counters.fulltextPdf + ' 篇');
+      if (hasCount(counters.fulltextHtml)) formats.push('网页正文 ' + counters.fulltextHtml + ' 篇');
+      if (formats.length) body += '（' + formats.join(' / ') + '）';
+      parts.push(body);
+    }
+    if (hasCount(counters.materialsIncomplete) && counters.materialsIncomplete > 0) parts.push('材料仍有缺口 ' + counters.materialsIncomplete + ' 篇');
+    return parts.join('；') + '。';
+  }
   async function checkLiteratureRuntime(sources = []) {
     const restart = '当前端口后台需要更新。请关闭对应的旧启动窗口，重新打开本项目启动器，再刷新页面；已有任务和文件保留。';
     let runtime;
@@ -229,7 +336,7 @@
   async function autoOpenLiteratureBrowser(id, job) {
     const source = job.attention?.source, reason = job.attention?.reason;
     const t = task(id);
-    if (job.status !== 'needs_attention' || job.stage === 'awaiting_confirmation' || job.deferredOnly === true
+    if (job.status !== 'needs_attention' || job.stage === 'awaiting_confirmation' || job.deferredOnly === true || job.attention?.reason === 'deferred_materials'
       || !LITERATURE_EXECUTABLE_SOURCES.includes(source) || !['login', 'verification', 'access_required'].includes(reason)) {
       t.literatureAutoOpenNotice = ''; return false;
     }
@@ -298,34 +405,450 @@
     if (job?.id) saved[mod.id] = { ...saved[mod.id], literatureJobId: job.id };
     persist();
   }
+  function literatureWorkspaceBusy(id) {
+    const t = task(id);
+    return !!(t.busy || t.literatureBusy || t.literatureJob?.status === 'running' || t.literatureFieldsAssistBusy
+      || t.literatureHistoryBusy || t.literatureAutoOpening || root.ModuleSpace?.isBusy() || root.LiteratureUI?.isBusy());
+  }
+  function literatureWorkspaceManager(mod) {
+    if (!root.LiteratureTaskWorkspaces || !root.TaskManager?.currentTaskId) return null;
+    const projectId = root.TaskManager.currentTaskId();
+    if (!projectId) return null;
+    const managerKey = projectId + ':' + mod.id;
+    if (!literatureWorkspaceManagers.has(managerKey)) {
+      const manager = root.LiteratureTaskWorkspaces.createManager({ moduleId: mod.id, adapter: {
+        snapshotClient: () => JSON.parse(JSON.stringify({ ...saved[mod.id], literatureConfig: task(mod.id).literatureConfig,
+          literatureUntil: task(mod.id).literatureUntil, literaturePreparePending: task(mod.id).literaturePreparePending || null })),
+        applyClient: client => {
+          const next = { ...saved, [mod.id]: JSON.parse(JSON.stringify(client || {})) };
+          localStorage.setItem(key, JSON.stringify(next));
+          const previous = tasks[mod.id];
+          if (previous) previous.literatureWatchGeneration = (previous.literatureWatchGeneration || 0) + 1;
+          saved = next;
+          delete tasks[mod.id];
+        },
+        isBusy: () => literatureWorkspaceBusy(mod.id),
+        closeDialogs: () => {
+          const t = task(mod.id);
+          if (t.literatureJob?.id && t.literatureConfirmDrafts && !saveLiteratureFieldDrafts(t, t.literatureJob)) {
+            throw new Error(t.literatureFieldsError || '字段草稿尚未保存，未切换任务');
+          }
+          closeLiteratureFields();
+          root.LiteratureRuleReview?.close();
+          if (literatureMaterialsDialog?.open) literatureMaterialsDialog.close();
+        }
+      } });
+      literatureWorkspaceManagers.set(managerKey, manager);
+    }
+    return literatureWorkspaceManagers.get(managerKey);
+  }
+  function literatureNewTaskSeed(mod, mode, reuse) {
+    const t = task(mod.id);
+    const source = t.literatureConfig || t.literatureJob?.config;
+    const config = reuse && source ? JSON.parse(JSON.stringify(source)) : {
+      topic: '', query: '', sources: ['google-scholar'], sourceQueries: {}, publicationYearFrom: null, publicationYearTo: null,
+      geography: '', language: '', studyTypes: [], inclusion: [], exclusion: [], targetFields: [], limit: 10
+    };
+    if (reuse && t.literatureJob?.id) {
+      const fields = literatureFieldDrafts[t.literatureJob.id]?.fields;
+      if (Array.isArray(fields) && fields.length) config.fieldDefinitions = JSON.parse(JSON.stringify(fields));
+    }
+    config.searchMode = mode === 'formal' ? 'formal' : 'test';
+    config.stopMode = mode === 'formal' ? 'end' : 'count';
+    config.perSourceLimit = mode === 'formal' ? null : 10;
+    config.limit = 10;
+    if (mode === 'formal' && config.limits) delete config.limits.discover;
+    return { backend: t.backend, model: t.model, literatureConfig: config, literatureUntil: 'discover',
+      literatureConfigOpen: false };
+  }
+  function scholarTrialSeed(current, options = {}) {
+    const query = String(options.query || '').trim();
+    const yearFrom = Number(options.yearFrom), yearTo = Number(options.yearTo);
+    if (!query || query.length > 32768) throw new Error('请填写有效的谷歌学术短查询');
+    if (!Number.isInteger(yearFrom) || !Number.isInteger(yearTo) || yearFrom < 1800 || yearTo > new Date().getUTCFullYear() + 1 || yearFrom > yearTo) throw new Error('请核对预试起止年份');
+    const source = current.literatureConfig || current.literatureJob?.config || {};
+    const config = JSON.parse(JSON.stringify(source));
+    Object.assign(config, { topic: config.topic || '谷歌学术短查询预试', query, sources: ['google-scholar'], sourceQueries: { 'google-scholar': query },
+      publicationYearFrom: yearFrom, publicationYearTo: yearTo, searchMode: 'formal', stopMode: 'end', perSourceLimit: null, limit: 10,
+      batch: { size: 10, maxBatches: 1 }, scholarPlan: { version: 1, topics: [{ id: 'trial-topic', label: '短查询预试', query }], yearSpan: 5, sort: 'relevance', trialMaxPages: 2 } });
+    if (config.limits) delete config.limits.discover;
+    return { backend: current.backend, model: current.model, literatureConfig: config, literatureUntil: 'discover', literatureConfigOpen: true };
+  }
+  async function hydrateLiteratureWorkspace(mod) {
+    const t = task(mod.id), jobId = saved[mod.id]?.literatureJobId;
+    if (!jobId) { render(); return; }
+    t.literatureBusy = true; render();
+    try {
+      const job = await request('/api/literature/job?id=' + encodeURIComponent(jobId));
+      if (task(mod.id) !== t || saved[mod.id]?.literatureJobId !== jobId) return;
+      t.literatureJob = job;
+      t.literatureError = job.deletedAt ? '该检索记录已删除，可在历史任务中恢复；讨论和配置仍保留。' : '';
+      // Loading a context only reads its saved job. Execution and login remain explicit actions.
+    } catch (error) { if (task(mod.id) === t) t.literatureError = error.message; }
+    finally { if (task(mod.id) === t) { t.literatureBusy = false; render(); } }
+  }
+  function openNewLiteratureTask(mod) {
+    const manager = literatureWorkspaceManager(mod);
+    if (!manager || literatureWorkspaceBusy(mod.id)) return;
+    const ensured = manager.ensure();
+    if (!ensured.ok) { task(mod.id).literatureError = ensured.error; render(); return; }
+    if (literatureNewTaskDialog?.open) return;
+    const dialog = node('dialog', undefined, 'literature-new-task-dialog');
+    const form = node('form');
+    form.append(node('h2', '新建文献任务'));
+    form.append(node('p', '小样、正式检索或不同主题分别新建。原任务保留，创建后先核对设置，不会立即检索。'));
+    const nameLabel = node('label', '任务名称');
+    const nameInput = node('input'); nameInput.required = true; nameInput.maxLength = 80;
+    nameInput.placeholder = '例如：肉鸡热应激 · 正式检索'; nameLabel.append(nameInput);
+    const modeLabel = node('label', '运行模式');
+    const modeInput = node('select');
+    [['test', '小样测试（每来源10条）'], ['formal', '正式检索（到可访问末页）']].forEach(([value, label]) => {
+      const option = node('option', label); option.value = value; modeInput.append(option);
+    });
+    modeLabel.append(modeInput);
+    const reuseLabel = node('label', '初始内容');
+    const reuseInput = node('select');
+    [['blank', '空白开始（适合其他主题）'], ['reuse', '复用当前规则和表头（需重新核对）']].forEach(([value, label]) => {
+      const option = node('option', label); option.value = value; reuseInput.append(option);
+    });
+    reuseLabel.append(reuseInput);
+    const errorText = node('p', '', 'codex-error'); errorText.setAttribute('role', 'alert');
+    const actions = node('div', undefined, 'dialog-actions');
+    const cancel = node('button', '取消', 'quiet-button'); cancel.type = 'button'; cancel.onclick = () => dialog.close();
+    const create = node('button', '创建并核对设置', 'primary-button'); create.type = 'submit';
+    actions.append(cancel, create); form.append(nameLabel, modeLabel, reuseLabel,
+      node('p', '复用只复制规则和字段草稿，不复制候选、材料、提取结果或审核通过状态。'), errorText, actions);
+    form.onsubmit = event => {
+      event.preventDefault();
+      if (literatureWorkspaceBusy(mod.id)) { errorText.textContent = '当前有任务正在处理，请完成或停止后再新建。'; return; }
+      const reuse = reuseInput.value === 'reuse';
+      const result = manager.create({ name: nameInput.value, mode: modeInput.value,
+        seedClient: literatureNewTaskSeed(mod, modeInput.value, reuse), seedDoc: reuse ? mod.doc : null });
+      if (!result.ok) { errorText.textContent = result.error; return; }
+      const fresh = Store.getState().modules.find(item => item.id === mod.id);
+      saved[mod.id] = { ...saved[mod.id], literatureSource: literatureSource(fresh) }; persist();
+      dialog.close(); render(); ModuleSpace.render();
+    };
+    dialog.append(form); document.body.append(dialog); literatureNewTaskDialog = dialog;
+    dialog.addEventListener('close', () => { if (literatureNewTaskDialog === dialog) literatureNewTaskDialog = null; dialog.remove(); });
+    dialog.showModal(); nameInput.focus();
+  }
+  function openScholarTrial(mod) {
+    const manager = literatureWorkspaceManager(mod);
+    if (!manager || literatureWorkspaceBusy(mod.id) || literatureNewTaskDialog?.open) return;
+    const ensured = manager.ensure();
+    if (!ensured.ok) { task(mod.id).literatureError = ensured.error; render(); return; }
+    const dialog = node('dialog', undefined, 'literature-new-task-dialog'), form = node('form');
+    form.append(node('h2', '谷歌学术小范围预试（最多2页，仅候选）'));
+    form.append(node('p', '单独保存本次预试，原任务和已有候选保留。只试研究的一小部分，不能代表整个研究已检全；不会下载全文或提取数据。'));
+    const name = node('input'); name.required = true; name.maxLength = 80; name.value = '谷歌学术预试 · 肉鸡热应激';
+    const query = node('textarea'); query.required = true; query.rows = 2; query.maxLength = 32768; query.value = 'broiler "heat stress"';
+    const from = node('input'), to = node('input');
+    [from, to].forEach(field => { field.type = 'number'; field.step = '1'; field.required = true; field.min = '1800'; field.max = String(new Date().getUTCFullYear() + 1); });
+    from.value = '2020'; to.value = '2024';
+    [['预试任务名称', name], ['短查询（可以修改，不改变原研究范围）', query], ['起始年份（可以修改）', from], ['截止年份（可以修改）', to]].forEach(([label, field]) => { const wrap = node('label', label); field.setAttribute('aria-label', label); wrap.append(field); form.append(wrap); });
+    form.append(node('p', '创建后请在新工作区核查实际短查询、年份、分批计划和“仅检索候选”；确认后再点开始。创建草稿不会自动确认或启动。'));
+    const error = node('p', '', 'codex-error'); error.setAttribute('role', 'alert');
+    const actions = node('div', undefined, 'dialog-actions'), cancel = node('button', '取消', 'quiet-button'), create = node('button', '创建预试草稿并核对', 'primary-button');
+    cancel.type = 'button'; cancel.onclick = () => dialog.close(); create.type = 'submit'; actions.append(cancel, create); form.append(error, actions);
+    form.onsubmit = event => {
+      event.preventDefault();
+      if (literatureWorkspaceBusy(mod.id)) { error.textContent = '当前任务仍在处理，请完成或停止后再创建预试。'; return; }
+      try {
+        const seedClient = scholarTrialSeed(task(mod.id), { query: query.value, yearFrom: from.value, yearTo: to.value });
+        const result = manager.create({ name: name.value, mode: 'formal', seedClient, seedDoc: null });
+        if (!result.ok) { error.textContent = result.error; return; }
+        const fresh = Store.getState().modules.find(item => item.id === mod.id);
+        saved[mod.id] = { ...saved[mod.id], literatureSource: literatureSource(fresh) }; persist();
+        dialog.close(); render(); ModuleSpace.render();
+      } catch (failure) { error.textContent = failure.message; }
+    };
+    dialog.append(form); document.body.append(dialog); literatureNewTaskDialog = dialog;
+    dialog.addEventListener('close', () => { if (literatureNewTaskDialog === dialog) literatureNewTaskDialog = null; dialog.remove(); });
+    dialog.showModal(); query.focus();
+  }
+  function literatureTaskSelector(mod, t) {
+    const manager = literatureWorkspaceManager(mod);
+    if (!manager) return null;
+    const ensured = manager.ensure();
+    const box = node('div', undefined, 'literature-task-selector');
+    const add = node('button', '＋ 新建文献任务', 'quiet-button'); add.type = 'button';
+    add.disabled = literatureWorkspaceBusy(mod.id) || !ensured.ok;
+    add.onclick = () => openNewLiteratureTask(Store.getState().modules.find(item => item.id === mod.id) || mod);
+    if (!ensured.ok) { box.append(add, node('p', ensured.error, 'codex-error')); return box; }
+    const label = node('label', '当前文献任务');
+    const select = node('select'); select.setAttribute('aria-label', '切换当前项目内的文献任务');
+    const active = manager.active();
+    manager.list().forEach(context => {
+      const option = node('option', context.name + (context.mode === 'formal' ? ' · 正式' : ' · 小样'));
+      option.value = context.id; select.append(option);
+    });
+    select.value = active?.id || ''; select.disabled = literatureWorkspaceBusy(mod.id);
+    select.onchange = () => {
+      const result = manager.switch(select.value);
+      if (!result.ok) { t.literatureError = result.error; render(); return; }
+      render(); ModuleSpace.render(); void hydrateLiteratureWorkspace(mod);
+    };
+    label.append(select); box.append(label, add);
+    const trial = node('button', '谷歌学术小范围预试（最多2页，仅候选）', 'quiet-button'); trial.type = 'button';
+    trial.disabled = literatureWorkspaceBusy(mod.id);
+    trial.onclick = () => openScholarTrial(Store.getState().modules.find(item => item.id === mod.id) || mod); box.append(trial);
+    if (root.LiteratureDiscussions) {
+      const discussions = node('button', '讨论记录', 'quiet-button'); discussions.type = 'button'; discussions.onclick = () => root.LiteratureDiscussions.open(mod.id);
+      const saveDiscussion = node('button', '保存讨论与草稿', 'quiet-button'); saveDiscussion.type = 'button'; saveDiscussion.onclick = () => root.LiteratureDiscussions.save(mod.id, true);
+      const saveState = root.LiteratureDiscussions.status(mod.id);
+      const discussionStatus = node('p', saveState.text, saveState.error ? 'codex-error' : 'codex-status');
+      discussionStatus.setAttribute('data-literature-discussion-scope', root.TaskManager.currentTaskId() + ':' + mod.id + ':' + active.id);
+      box.append(discussions, saveDiscussion, discussionStatus);
+      const origin = saved[mod.id]?.literatureDiscussionOrigin;
+      if (!(mod.messages || []).length) {
+        box.append(node('p', '当前文献工作区暂无讨论；这不表示其他工作区的原讨论被删除。点击“讨论记录”查看所有已保存讨论。', 'codex-status'));
+        if (origin) { const back = node('button', '回到原讨论', 'primary-button'); back.type = 'button'; back.disabled = literatureWorkspaceBusy(mod.id); back.onclick = () => root.LiteratureDiscussions.returnOrigin(mod.id); box.append(back); }
+      }
+    }
+    if (saved[mod.id]?.literatureDiscussionEditingForJobId) {
+      box.append(node('p', '正在继续讨论并修改检索规则。下方发送修改要求后，点击“从对话更新规则并核查”；新草稿保存成功才进入核查。原检索结果保留。', 'codex-status'));
+      if (!(mod.messages || []).some(message => message.role === 'user')) box.append(node('p', '当前工作区没有已保存的讨论。可先点“讨论记录”查找旧讨论，或在下方补充修改要求；历史任务详情不会保存完整聊天。', 'codex-error'));
+    }
+    if (!t.literatureJob?.id && !saved[mod.id]?.literatureJobId) box.append(node('span', '草稿 · 尚未检索', 'codex-status'));
+    return box;
+  }
+  function literatureSegmentSelection(preview, fromStage, until, paperIds) {
+    const stages = ['extract', 'validate', 'export'];
+    if (!preview?.sourceJobId || !Array.isArray(preview.papers) || !stages.includes(fromStage) || !stages.includes(until)
+      || stages.indexOf(until) < stages.indexOf(fromStage) || !preview.allowedStages?.includes(fromStage)) throw new Error('请选择有效的开始与结束阶段。');
+    if (!Array.isArray(paperIds) || !paperIds.length || new Set(paperIds).size !== paperIds.length) throw new Error('请至少选择一篇文献，不要重复选择。');
+    paperIds.forEach(id => {
+      const paper = preview.papers.find(item => item.paperId === id);
+      if (!paper || paper.eligible?.[fromStage]?.allowed !== true) throw new Error((paper?.title || id) + '：' + (paper?.eligible?.[fromStage]?.reason || '前置成果尚不能复用'));
+    });
+    return { sourceJobId: preview.sourceJobId, paperIds: [...paperIds], fromStage, until };
+  }
+  async function createLiteratureSegmentTask(mod, input) {
+    const t = task(mod.id), source = t.literatureJob;
+    if (literatureWorkspaceBusy(mod.id) || !source?.id || source.deletedAt) return null;
+    let selection;
+    try {
+      selection = literatureSegmentSelection(input.preview, input.fromStage, input.until, input.paperIds);
+      if (selection.sourceJobId !== source.id || !input.requestId) throw new Error('来源任务已变化，请重新打开范围设置。');
+    } catch (error) { t.literatureError = error.message; render(); return null; }
+    const manager = literatureWorkspaceManager(mod);
+    if (!manager) { t.literatureError = '请先载入当前项目的文献任务目录。'; render(); return null; }
+    const preserved = manager.saveActive();
+    if (!preserved.ok) { t.literatureError = preserved.error; render(); return null; }
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      await checkLiteratureRuntime(source.config?.sources || []);
+      const next = await request('/api/literature/segment-task', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...selection, requestId: input.requestId }) });
+      const segment = next?.segmentTask;
+      if (!next?.id || next.id === source.id || next.status !== 'needs_attention' || next.materialReplenishment
+        || segment?.sourceJobId !== source.id || segment.fromStage !== selection.fromStage || segment.until !== selection.until
+        || JSON.stringify(segment.paperIds?.slice().sort()) !== JSON.stringify(selection.paperIds.slice().sort())) throw new Error('新任务范围未核对通过；原任务保留，未执行。');
+      // Workspace creation snapshots the source and never seeds its output or
+      // approval binding. Attach the new paused backend job only afterwards.
+      t.literatureBusy = false;
+      const known = manager.list().find(item => item.jobId === next.id);
+      const result = known ? manager.switch(known.id) : manager.create({
+        name: ('已有成果 · ' + literatureStageLabel(segment.fromStage) + '至' + literatureStageLabel(segment.until) + ' · ' + segment.paperIds.length + '篇').slice(0, 80),
+        mode: source.config?.searchMode === 'formal' ? 'formal' : 'test',
+        seedClient: { backend: t.backend, model: t.model, literatureConfig: JSON.parse(JSON.stringify(next.config || {})), literatureUntil: segment.until, literatureConfigOpen: false } });
+      if (!result.ok) throw new Error(result.error + ' 新任务已暂停保存在历史记录：' + next.id);
+      const fresh = Store.getState().modules.find(item => item.id === mod.id) || mod;
+      attachLiteratureJob(fresh, next);
+      const active = task(mod.id);
+      if (segment.fromStage === 'extract' && !known) {
+        active.literatureConfirmJob = next.id;
+        active.literatureConfirmDrafts = JSON.parse(JSON.stringify(input.fieldMode === 'blank' ? [] : input.preview.suggestedFields || next.config?.fieldDefinitions || []));
+        saveLiteratureFieldDrafts(active, next);
+      }
+      manager.saveActive(); render(); ModuleSpace.render();
+      if (segment.fromStage === 'extract') openLiteratureFields(fresh);
+      return next;
+    } catch (error) { task(mod.id).literatureError = error.message; render(); return null; }
+    finally { t.literatureBusy = false; }
+  }
+  async function openLiteratureSegmentDialog(mod) {
+    const t = task(mod.id), source = t.literatureJob;
+    if (!source?.id || source.deletedAt || literatureWorkspaceBusy(mod.id) || literatureSegmentDialog?.open) return;
+    t.literatureBusy = true; t.literatureError = ''; render();
+    let preview;
+    try {
+      preview = await request('/api/literature/segment-preview?id=' + encodeURIComponent(source.id));
+      if (task(mod.id) !== t || task(mod.id).literatureJob?.id !== source.id) return;
+    } catch (error) { t.literatureError = error.message; render(); return; }
+    finally { t.literatureBusy = false; render(); }
+    const dialog = node('dialog', undefined, 'literature-help-dialog'); dialog.style.width = 'min(1100px, 94vw)'; dialog.style.maxHeight = '90vh'; dialog.style.overflowY = 'auto';
+    dialog.setAttribute('aria-label', '从已有成果开始');
+    const form = node('form'); form.append(node('h2', '从已有成果开始'));
+    form.append(node('p', '选择已有文献和执行范围，建立独立的暂停任务。原检索、材料、提取和导出保留，不重新检索或下载。'));
+    const stages = ['extract', 'validate', 'export'];
+    const fromLabel = node('label', '从哪一步开始'), from = node('select'); from.setAttribute('aria-label', '开始阶段');
+    const untilLabel = node('label', '运行到哪一步'), until = node('select'); until.setAttribute('aria-label', '结束阶段');
+    stages.forEach(stage => {
+      const a = node('option', literatureStageLabel(stage)); a.value = stage; a.disabled = !preview.allowedStages?.includes(stage); from.append(a);
+      const b = node('option', literatureStageLabel(stage)); b.value = stage; until.append(b);
+    });
+    from.value = preview.allowedStages?.find(stage => stages.includes(stage)) || 'extract'; until.value = from.value;
+    fromLabel.append(from); untilLabel.append(until); form.append(fromLabel, untilLabel);
+    const fieldLabel = node('label', '初始表头'), fieldMode = node('select'); fieldMode.setAttribute('aria-label', '初始提取表头');
+    [['reuse', '沿用已有字段并重新核对'], ['blank', '空白表头，先讨论填写']].forEach(([value, text]) => { const option = node('option', text); option.value = value; fieldMode.append(option); });
+    fieldMode.value = 'reuse'; fieldLabel.append(fieldMode); form.append(fieldLabel);
+    const scope = node('p', '', 'codex-status'), count = node('p', '', 'codex-status'), papers = node('div'); count.setAttribute('aria-live', 'polite');
+    papers.style.maxHeight = '45vh'; papers.style.overflowY = 'auto';
+    const errorText = node('p', '', 'codex-error'); errorText.setAttribute('role', 'alert');
+    const create = node('button', '创建暂停任务并核对表头', 'primary-button'); create.type = 'submit';
+    const cancel = node('button', '取消', 'quiet-button'); cancel.type = 'button'; cancel.onclick = () => dialog.close();
+    const selected = new Set();
+    let submitting = false, requestId = null, signature = '';
+    function refresh() {
+      Array.from(until.children).forEach(option => { option.disabled = stages.indexOf(option.value) < stages.indexOf(from.value); });
+      if (stages.indexOf(until.value) < stages.indexOf(from.value)) until.value = from.value;
+      fieldLabel.hidden = from.value !== 'extract';
+      scope.textContent = from.value === 'extract' ? '已有全文将复用。创建后先核对表头，另行确认才开始执行。'
+        : '只读沿用已有提取字段和前置成果，不改表头、不重做前一步；创建后另行确认范围才执行。';
+      create.textContent = from.value === 'extract' ? '创建暂停任务并核对表头' : '创建暂停任务并核对范围';
+      papers.replaceChildren();
+      (preview.papers || []).forEach(paper => {
+        const eligibility = paper.eligible?.[from.value];
+        if (eligibility?.allowed !== true) selected.delete(paper.paperId);
+        const wrap = node('label', paper.paperId + ' · ' + paper.title), check = node('input'); check.type = 'checkbox';
+        wrap.style.display = 'block';
+        check.setAttribute('aria-label', '选择文献 ' + paper.paperId);
+        check.disabled = submitting || eligibility?.allowed !== true; check.checked = selected.has(paper.paperId);
+        check.onchange = () => { if (check.checked) selected.add(paper.paperId); else selected.delete(paper.paperId); refresh(); };
+        wrap.prepend(check); papers.append(wrap);
+        if (eligibility?.allowed !== true) papers.append(node('p', '暂不可从此步开始：' + (eligibility?.reason || '前置成果尚不能复用'), 'codex-status'));
+      });
+      count.textContent = '已选择 ' + selected.size + ' 篇；可自由勾选，例如先选择 5 篇测试。';
+      create.disabled = submitting || selected.size === 0;
+      from.disabled = submitting; until.disabled = submitting; fieldMode.disabled = submitting; cancel.disabled = submitting;
+    }
+    from.onchange = refresh; until.onchange = refresh;
+    form.append(scope, count, papers, errorText, cancel, create);
+    form.onsubmit = async event => {
+      event.preventDefault(); if (submitting) return;
+      errorText.textContent = '';
+      let selection;
+      try { selection = literatureSegmentSelection(preview, from.value, until.value, [...selected]); }
+      catch (error) { errorText.textContent = error.message; return; }
+      const nextSignature = JSON.stringify(selection);
+      if (!requestId || signature !== nextSignature) {
+        requestId = root.crypto?.randomUUID?.(); signature = nextSignature;
+        if (!requestId) { errorText.textContent = '无法建立任务请求标识，请在支持安全任务创建的浏览器中打开平台。'; return; }
+      }
+      submitting = true; refresh();
+      const next = await createLiteratureSegmentTask(mod, { ...selection, preview, fieldMode: fieldMode.value, requestId });
+      submitting = false;
+      if (next) dialog.close(); else { errorText.textContent = task(mod.id).literatureError || '创建未完成，原任务保留。'; refresh(); }
+    };
+    dialog.append(form); document.body.append(dialog); literatureSegmentDialog = dialog;
+    dialog.addEventListener('close', () => { if (literatureSegmentDialog === dialog) literatureSegmentDialog = null; dialog.remove(); });
+    refresh(); dialog.showModal();
+  }
+  function literatureSegmentSummary(mod, t, job, readOnlyResults) {
+    const segment = job.segmentTask;
+    const box = node('section', undefined, 'literature-confirm literature-segment-summary');
+    box.append(node('h4', '从已有成果开始 · ' + segment.paperIds.length + ' 篇'));
+    box.append(node('p', literatureStageLabel(segment.fromStage) + ' → ' + literatureStageLabel(segment.until) + '；来源任务 ' + segment.sourceJobId.slice(0, 8) + '。原任务与已有文件保留，不重新检索或下载。', 'codex-status'));
+    box.append(node('p', '本次文献：' + segment.paperIds.join('、'), 'codex-status'));
+    if (segment.schemaLocked) {
+      const fields = job.config?.fieldDefinitions || [];
+      box.append(node('p', '字段只读沿用已有提取结果：' + (fields.map(field => field.label || field.key).join('、') || '以来源任务已确认字段为准。'), 'codex-status'));
+    }
+    if (job.status === 'needs_attention' && job.stage === 'awaiting_segment_confirmation') {
+      box.append(node('p', '尚未运行。核对文献范围与前置成果后，点击下方按钮开始；不会重新提取或获取材料。', 'codex-status'));
+      const start = node('button', '确认范围并开始执行', 'primary-button'); start.type = 'button';
+      start.disabled = readOnlyResults || t.busy || t.literatureBusy || !!root.LiteratureUI?.isBusy();
+      start.onclick = () => continueLiterature(mod, { until: segment.until, confirmSegment: true }); box.append(start);
+    }
+    return box;
+  }
   async function startLiterature(mod) {
     const t = task(mod.id);
+    if (t.literatureJob?.id || saved[mod.id]?.literatureJobId) {
+      t.literatureError = '当前文献任务已有检索记录。正式检索或其他主题请先点“新建文献任务”；继续原结果请使用“继续下一阶段”。'; render(); return;
+    }
+    if (t.literaturePreparePending || saved[mod.id]?.literaturePreparePending) {
+      t.literatureError = '本次规则整理尚未应用，请先重新读取结果或结束并重新整理；不会按旧草稿开始检索。'; render(); return;
+    }
     if (!t.literatureConfig) { t.literatureError = '请先从对话整理运行配置并核对'; render(); return; }
     let config;
     try {
-      config = newLiteratureSearchConfig(t.literatureConfig);
-      config.extraction = { ...config.extraction, model: t.model || account?.model || config.extraction?.model || null };
+      config = effectiveLiteratureReviewConfig(t);
     } catch (error) { t.literatureError = error.message; render(); return; }
+    if (config.scholarPlan?.trialMaxPages != null && (t.literatureUntil || 'discover') !== 'discover') {
+      t.literatureError = '本次谷歌学术预试只检索候选，请将执行范围改为“仅检索候选”并重新核查。'; render(); return;
+    }
     if (saved[mod.id]?.literatureSource !== literatureSource(mod)) { t.literatureError = '对话或已批准文档有更新，请重新整理规则后再检索'; render(); return; }
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
+    if (!root.LiteratureRuleReview?.matches(t.literatureRuleReview, config, t.literatureUntil || 'discover', literatureSource(mod))
+      || saved[mod.id]?.literatureReviewAppliedRevision !== t.literatureRuleReview?.revision) {
+      t.literatureError = '请先逐项核查当前配置，并点击“使用已确认配置”。配置变化后只需重新确认受影响的项目。';
+      render(); await openLiteratureRuleReview(mod); return;
+    }
+    const projectId = root.TaskManager?.currentTaskId?.() || '', manager = literatureWorkspaceManager(mod), workspaceId = manager?.active()?.id || mod.id;
+    const current = () => task(mod.id) === t && (root.TaskManager?.currentTaskId?.() || '') === projectId
+      && (!manager || manager.active()?.id === workspaceId);
     t.literatureBusy = true; t.literatureError = ''; render();
     try {
+      const sessionId = await session(mod.id);
+      if (!current()) return;
       await checkLiteratureRuntime(config.sources || []);
-      const body = { config, until: t.literatureUntil || 'discover' };
+      if (!current()) return;
+      const body = { config, until: t.literatureUntil || 'discover', sessionId, workspaceId,
+        reviewId: t.literatureRuleReview.id, reviewRevision: t.literatureRuleReview.revision };
       const job = await request('/api/literature/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!current()) return;
       t.literatureJob = job;
       t.literatureConfig = JSON.parse(JSON.stringify(job.config || config));
       saved[mod.id] = { ...saved[mod.id], literatureJobId: job.id, literatureConfig: t.literatureConfig };
       persist();
+      if (typeof literatureWorkspaceManager === 'function') literatureWorkspaceManager(mod)?.saveActive();
       await watchLiterature(mod.id, job.id);
-    } catch (error) { t.literatureError = error.message; }
-    finally { t.literatureBusy = false; render(); }
+    } catch (error) { if (current()) t.literatureError = error.message; }
+    finally { t.literatureBusy = false; if (current()) render(); }
   }
   async function continueLiterature(mod, options = {}) {
     const t = task(mod.id);
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy) return;
     const job = t.literatureJob;
     if (!job?.id) { t.literatureError = '没有可继续的检索任务'; render(); return; }
+    if (saved[mod.id]?.literatureReadOnlyJobId === job.id) { t.literatureError = '当前只读查看原结果；请返回材料补齐任务继续。'; render(); return; }
+    const segment = job.segmentTask;
+    if (segment && (!['extract', 'validate', 'export'].includes(segment.fromStage) || !['extract', 'validate', 'export'].includes(segment.until)
+      || LITERATURE_STAGE_ORDER.indexOf(segment.until) < LITERATURE_STAGE_ORDER.indexOf(segment.fromStage))) {
+      t.literatureError = '分段任务范围无效，请从历史记录重新载入。'; render(); return;
+    }
+    const awaitingSegment = !!segment && ((job.status === 'needs_attention' && job.stage === 'awaiting_segment_confirmation')
+      || (job.status === 'cancelled' && segment.schemaLocked === true));
+    if (options.confirmSegment === true && (!awaitingSegment || segment.schemaLocked !== true)) {
+      t.literatureError = '当前任务不在执行范围确认关口。'; render(); return;
+    }
+    if (awaitingSegment && options.confirmSegment !== true) {
+      t.literatureError = '请先核对所选文献和执行范围，再点击“确认范围并开始执行”。'; render(); return;
+    }
+    if (segment && job.status === 'needs_attention' && job.stage === 'awaiting_confirmation') {
+      t.literatureError = '请先在提取字段表中核对表头、含义、单位和关联条件，再确认开始执行。'; render(); return;
+    }
+    if (segment?.fromStage === 'extract' && job.status === 'cancelled' && segment.fieldsConfirmed !== true) {
+      t.literatureError = '本次表头尚未确认，请先点击“核对表头后继续”，核对后再开始执行。'; render(); return;
+    }
+    if (segment && options.until && options.until !== segment.until) {
+      t.literatureError = '本次任务的开始与结束阶段已固定；其他范围请另建独立任务。'; render(); return;
+    }
+    const retrySkipped = options.retrySkipped === true;
+    const hasSkippedMaterials = Array.isArray(job.materialSkippedActions) && job.materialSkippedActions.some(item => item.status === 'skipped' && item.paperId && item.reason);
+    if (retrySkipped && (!job.materialReplenishment?.parentJobId || !hasSkippedMaterials || job.status === 'running' || job.deletedAt)) {
+      t.literatureError = '当前没有可重新核查的已跳过材料，或任务仍在运行；请刷新任务状态后再试。'; render(); return;
+    }
+    const completedSkippedRetry = retrySkipped && job.status === 'completed' && hasSkippedMaterials;
+    if ((options.deferAccess === true || options.retryDeferred === true || retrySkipped) && (!job.materialReplenishment?.parentJobId || (job.resumeStage !== 'fulltext' && !completedSkippedRetry))) {
+      t.literatureError = '仅材料补齐任务可保留问题页或重新检查待处理文献。'; render(); return;
+    }
+    if (job.attention?.reason === 'deferred_materials' && options.retryDeferred !== true && !retrySkipped) {
+      t.literatureError = '其他文献已处理；请完成登录、手动验证或权限确认，或确认保留的页面已经就绪，再点击“我已处理，重新检查待处理文献”。人工等待不限时。'; render(); return;
+    }
     const deferSource = options.deferSource;
     const restoreFrozenOrder = deferSource !== undefined && t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig)
       && sameLiteratureDeferralConfig(job.config, t.literatureConfig);
@@ -338,8 +861,12 @@
       || deferSource !== job.attention?.source || !LITERATURE_EXECUTABLE_SOURCES.includes(deferSource) || !job.config?.sources?.includes(deferSource))) {
       t.literatureError = '只能暂缓当前等待人工处理的检索来源；请刷新任务状态后重试。'; render(); return;
     }
-    const until = options.until || (deferSource !== undefined ? job.until || t.literatureUntil || 'discover' : t.literatureUntil || job.until || 'discover');
-    const effectiveResumeStage = job.resumeStage || (job.status === 'completed' && (job.files?.includes('candidates.json') || job.files?.includes('candidates.csv')) ? (job.files?.includes('dedupe/dedupe.json') ? 'fulltext' : 'dedupe') : null);
+    const until = segment ? segment.until : job.materialReplenishment?.parentJobId ? 'fulltext'
+      : options.until || (deferSource !== undefined ? job.until || t.literatureUntil || 'discover' : t.literatureUntil || job.until || 'discover');
+    const effectiveResumeStage = completedSkippedRetry ? 'fulltext' : literatureResumeStage(job);
+    if (job.materialReplenishment?.parentJobId && !effectiveResumeStage) {
+      t.literatureError = '本次材料补齐已完成；原提取和导出结果保留，可点击查看。'; render(); return;
+    }
     if (effectiveResumeStage && LITERATURE_STAGE_ORDER.indexOf(until) < LITERATURE_STAGE_ORDER.indexOf(effectiveResumeStage)) {
       t.literatureError = '请先在“本次做到哪一步”选择“' + literatureStageLabel(effectiveResumeStage) + '”或更后的阶段，再继续原任务'; render(); return;
     }
@@ -347,7 +874,12 @@
     try {
       await checkLiteratureRuntime(job.config?.sources || []);
       const body = { id: job.id, until, ...(deferSource !== undefined ? { deferSource } : {}),
-        ...(options.skipUnavailable !== undefined ? { skipUnavailable: options.skipUnavailable } : {}) };
+        ...(options.skipUnavailable !== undefined ? { skipUnavailable: options.skipUnavailable } : {}),
+        ...(options.deferAccess === true || options.retryDeferred === true || retrySkipped ? { deferAccess: true } : {}),
+        ...(options.retryDeferred === true ? { retryDeferred: true } : {}),
+        ...(retrySkipped ? { retrySkipped: true } : {}),
+        ...(options.resumeConfirmed === true ? { resumeConfirmed: true } : {}),
+        ...(options.confirmSegment === true ? { confirmSegment: true } : {}) };
       const next = await request('/api/literature/advance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (restoreFrozenOrder || restoreStopped) {
         t.literatureConfig = JSON.parse(JSON.stringify(job.config));
@@ -359,6 +891,67 @@
       }
       applyLiteratureJob(mod, next);
       await watchLiterature(mod.id, next.id || job.id);
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  function literatureResumeStage(job) {
+    if (!job) return null;
+    if (job.materialReplenishment?.parentJobId) return job.status === 'completed' ? null : 'fulltext';
+    const stages = job.stages || {};
+    if (job.status === 'completed' && ['discover', 'dedupe', 'fulltext', 'extract', 'validate', 'export'].every(stage => stages[stage] === 'done')) return null;
+    if (['discover', 'dedupe', 'fulltext', 'extract', 'validate', 'export'].includes(job.resumeStage)) return job.resumeStage;
+    if (job.resumeStage || job.status !== 'completed') return null;
+    // Infer only an old candidate-only snapshot. A finished downstream run
+    // cannot be silently turned back into full-text acquisition.
+    const files = Array.isArray(job.files) ? job.files : [];
+    if (['fulltext', 'extract', 'validate', 'export'].some(stage => stages[stage] === 'done')
+      || files.some(name => /^(?:fulltext|extraction|validation|export)\//.test(name))) return null;
+    if (!files.includes('candidates.json') && !files.includes('candidates.csv')) return null;
+    return files.includes('dedupe/dedupe.json') || stages.dedupe === 'done' ? 'fulltext' : 'dedupe';
+  }
+  async function replenishLiteratureMaterials(mod) {
+    const t = task(mod.id), original = t.literatureJob;
+    if (t.busy || t.literatureBusy || root.LiteratureUI?.isBusy() || !original?.id || original.canReplenishMaterials !== true) return;
+    const parentDraft = JSON.parse(JSON.stringify({ id: original.id, config: t.literatureConfig, until: t.literatureUntil,
+      configOpen: t.literatureConfigOpen, source: saved[mod.id]?.literatureSource }));
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      await checkLiteratureRuntime(original.config?.sources || []);
+      const next = await request('/api/literature/replenish-materials', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: original.id }) });
+      if (!next?.id || next.id === original.id || next.materialReplenishment?.parentJobId !== original.id || next.until !== 'fulltext') {
+        throw new Error('未收到可核对的独立材料补齐任务；原候选、提取和导出结果保留，请刷新历史查看。');
+      }
+      t.literatureConfig = JSON.parse(JSON.stringify(next.config || original.config)); t.literatureUntil = 'fulltext';
+      saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureUntil: 'fulltext',
+        literatureMaterialsParentId: original.id, literatureMaterialsChildId: next.id, literatureMaterialsParentDraft: parentDraft,
+        literatureReadOnlyJobId: null, literatureSource: literatureSource(mod) };
+      applyLiteratureJob(mod, next);
+      if (typeof literatureWorkspaceManager === 'function') literatureWorkspaceManager(mod)?.saveActive();
+      await watchLiterature(mod.id, next.id);
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
+  async function viewLiteratureMaterialsRelatedJob(mod, targetId) {
+    const t = task(mod.id), job = t.literatureJob;
+    const parentId = job?.materialReplenishment?.parentJobId || saved[mod.id]?.literatureMaterialsParentId;
+    const childId = saved[mod.id]?.literatureMaterialsChildId;
+    if (!targetId || ![parentId, childId].includes(targetId) || t.busy || t.literatureBusy || job?.status === 'running' || root.LiteratureUI?.isBusy()) return;
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      const next = await request('/api/literature/job?id=' + encodeURIComponent(targetId));
+      if (next?.id !== targetId || next.deletedAt) throw new Error('关联任务不可读取，请从历史记录核对；原材料和结果保留。');
+      const draft = next.id === parentId && saved[mod.id]?.literatureMaterialsParentDraft?.id === parentId ? saved[mod.id].literatureMaterialsParentDraft : null;
+      t.literatureConfig = JSON.parse(JSON.stringify(draft ? draft.config : next.config || {}));
+      t.literatureUntil = draft?.until || (next.materialReplenishment?.parentJobId ? 'fulltext' : next.until || 'discover');
+      if (draft) t.literatureConfigOpen = draft.configOpen;
+      saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureUntil: t.literatureUntil,
+        literatureMaterialsParentId: parentId, literatureMaterialsChildId: childId || job?.id,
+        literatureReadOnlyJobId: next.id === parentId ? next.id : null,
+        literatureDelivered: [next.id, next.status, next.stage || '', next.events?.length || 0].join(':'),
+        literatureSource: draft ? draft.source : literatureSource(mod), literatureConfigOpen: t.literatureConfigOpen };
+      applyLiteratureJob(mod, next);
+      if (typeof literatureWorkspaceManager === 'function') literatureWorkspaceManager(mod)?.saveActive();
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
@@ -424,6 +1017,7 @@
     finally { t.literatureBusy = false; render(); }
   }
   function literatureAttentionMessage(job) {
+    if (job.stage === 'prepared' && job.status === 'needs_attention') return '已载入已确认方案，尚未执行检索。选好“本次做到哪一步”后点击“开始检索”，或导入该式导出的完整题录；遇到登录或验证时再按提示处理。';
     const source = job.attention?.source;
     if (job.resumeStage === 'fulltext') return String(job.message || job.error || '全文获取已暂停，已有材料保留。');
     if (job.deferredOnly === true) return '已暂缓，当前没有其他待检索来源。原来源仍待补检，已有候选保留；可用已有候选建立后续处理运行，或在原页面核对后点击“补检该来源”。';
@@ -452,22 +1046,51 @@
     } catch (error) { t.literatureError = error.message; }
     finally { t.literatureBusy = false; render(); }
   }
+  async function openLiteratureMaterialActionPage(mod, paperId) {
+    const t = task(mod.id), job = t.literatureJob;
+    if (!job?.materialReplenishment?.parentJobId || !Array.isArray(job.materialManualActions)
+      || !job.materialManualActions.some(item => item.paperId === paperId && item.status !== 'skipped' && ['login', 'verification', 'access_required', 'page_not_ready'].includes(item.reason))
+      || t.busy || t.literatureBusy || job.status === 'running' || root.LiteratureUI?.isBusy()) return;
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      await checkLiteratureRuntime(job.config?.sources || []);
+      await request('/api/literature/material-action-page', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: job.id, paperId }) });
+      const reason = job.materialManualActions.find(item => item.paperId === paperId)?.reason;
+      const pendingPage = reason === 'page_not_ready';
+      t.literatureMaterialNotice = pendingPage
+        ? '已请求显示保留的原页面。页面尚未就绪，保留后稍后检查；确认页面加载或文件生成完成后，再点击“我已处理，重新检查待处理文献”。'
+        : reason === 'verification'
+        ? '已请求显示本篇保留的验证页。请手动完成验证码；窗口保留，人工验证不限时。完成后回平台点击“我已处理，重新检查待处理文献”。'
+        : '已请求显示本篇原官方问题页。人工登录不限时，窗口保留；处理后回平台点击“我已处理，重新检查待处理文献”。';
+    } catch (error) { t.literatureError = error.message; }
+    finally { t.literatureBusy = false; render(); }
+  }
   async function confirmLiteratureFields(mod) {
     const t = task(mod.id);
     if (root.LiteratureUI?.isBusy() || t.busy || t.literatureBusy || t.literatureFieldsAssistBusy) return;
     const job = t.literatureJob;
     if (!job?.id) { t.literatureError = '没有可确认的检索任务'; render(); return; }
+    if (job.materialReplenishment?.parentJobId || saved[mod.id]?.literatureReadOnlyJobId === job.id) {
+      t.literatureError = '当前仅补齐材料或只读查看原结果，不执行参数提取。'; render(); return;
+    }
+    if (job.segmentTask && (job.segmentTask.schemaLocked || job.segmentTask.fromStage !== 'extract')) {
+      t.literatureError = '本次沿用已有提取字段，只确认执行范围，不修改表头或重做提取。'; render(); return;
+    }
     if (literatureFieldsAssistState(mod, job).pending) return;
-    if (job.status !== 'needs_attention' || job.stage !== 'awaiting_confirmation') {
+    const stoppedFieldGate = job.status === 'cancelled' && job.segmentTask?.fromStage === 'extract' && job.segmentTask.fieldsConfirmed !== true;
+    if (!stoppedFieldGate && (job.status !== 'needs_attention' || job.stage !== 'awaiting_confirmation')) {
       t.literatureFieldsError = '当前可先保存字段草稿；运行到提取阶段后再确认。'; renderLiteratureFieldsDialog(); return;
     }
     if (t.literatureConfig && !sameLiteratureConfig(job.config, t.literatureConfig)) {
       t.literatureFieldsError = '检索设置已改变，请从历史任务重新载入原配置后再确认提取字段；字段草稿会保留。'; renderLiteratureFieldsDialog(); return;
     }
-    // This explicit action starts extraction on the existing task. A stale
-    // search-stage selector outside the dialog must not block this checkpoint
-    // or silently broaden it to validation/export.
-    const until = 'extract';
+    // The field gate uses the segment's frozen range, or extraction only for
+    // an ordinary task. The outer search-stage selector cannot broaden it.
+    const until = job.segmentTask ? job.segmentTask.until : 'extract';
+    if (!['extract', 'validate', 'export'].includes(until)) {
+      t.literatureFieldsError = '当前分段任务的结束阶段无效，请重新载入任务。'; renderLiteratureFieldsDialog(); return;
+    }
     ensureLiteratureFieldDrafts(t, job);
     let fields;
     try { fields = validatedLiteratureFields(t); }
@@ -531,14 +1154,398 @@
     render();
     if (job.status === 'running') watchLiterature(mod.id, job.id).catch(() => {});
   }
+  function attachLiteratureHistoryContext(mod, job) {
+    try {
+      if (!job?.id || job.deletedAt) throw new Error('该历史任务不可载入；已删除任务请先恢复。');
+      if (literatureWorkspaceBusy(mod.id)) throw new Error('当前有对话、文献运行或任务切换正在处理；可以只读查看，处理结束后再载入。');
+      const manager = literatureWorkspaceManager(mod);
+      const origin = manager?.active?.(), originProjectId = root.TaskManager?.currentTaskId?.();
+      if (manager) {
+        const ready = manager.saveActive(); if (!ready.ok) throw new Error(ready.error);
+        const known = manager.list().find(context => context.jobId === job.id);
+        const result = known ? manager.switch(known.id) : manager.create({ name: String(job.config?.topic || '历史文献任务 ' + job.id.slice(0, 8)).slice(0, 80),
+          mode: job.config?.searchMode === 'formal' ? 'formal' : 'test',
+          seedClient: { backend: task(mod.id).backend, model: task(mod.id).model,
+            literatureConfig: JSON.parse(JSON.stringify(job.config || {})), literatureUntil: job.until || 'discover', literatureConfigOpen: false } });
+        if (!result.ok) throw new Error(result.error);
+      }
+      // Existing workspaces can contain a newer scientific draft. Loading a
+      // saved run updates its metadata without replacing that draft or chat.
+      commitLiteratureRevision(mod, { ...saved[mod.id], literatureJobId: job.id, literatureHistoryLoadedJobId: job.id,
+        ...(origin && manager.active()?.id !== origin.id ? { literatureDiscussionOrigin: { projectId: originProjectId, workspaceId: origin.id, name: origin.name } } : {}) }, { literatureJob: job, literatureError: '' }, manager);
+      ModuleSpace.render(); return { ok: true };
+    } catch (error) {
+      task(mod.id).literatureError = '载入历史任务失败：' + error.message; render();
+      return { ok: false, error: task(mod.id).literatureError };
+    }
+  }
+  function closeLiteratureHistoryDetails() {
+    const state = literatureHistoryDetailsDialog; if (!state) return;
+    literatureHistoryDetailsDialog = null; state.element.close(); state.element.remove();
+  }
+  function continueLiteratureHistoryDiscussion(state) {
+    if (!literatureHistoryDetailsCurrent(state)) { state.notice = '工作区已切换，请重新打开历史任务。'; renderLiteratureHistoryDetails(state); return; }
+    const job = state.job;
+    if (!job?.id || job.deletedAt || job.status === 'running' || job.segmentTask || job.materialReplenishment?.parentJobId || literatureWorkspaceBusy(state.mod.id)) {
+      state.notice = '这次任务当前不能进入讨论修改；请等待运行或其他操作结束。'; renderLiteratureHistoryDetails(state); return;
+    }
+    try {
+      const previous = saved[state.mod.id] || {};
+      const alreadyHere = previous.literatureJobId === job.id || previous.literatureRevisionParentId === job.id
+        || previous.literatureRevisionOriginal?.job?.id === job.id || previous.literatureDiscussionEditingForJobId === job.id;
+      if (!alreadyHere) {
+        const attached = attachLiteratureHistoryContext(state.mod, job);
+        if (!attached?.ok) throw new Error(attached?.error || '未能保留当前草稿，未进入修改讨论。');
+      }
+      const fresh = Store.getState().modules.find(item => item.id === state.mod.id);
+      if (!fresh) throw new Error('文献模块已变化，原讨论未改动。');
+      const next = { ...saved[fresh.id], literatureDiscussionEditingForJobId: job.id };
+      commitLiteratureRevision(fresh, next, { literatureError: '' }, literatureWorkspaceManager(fresh));
+      closeLiteratureHistoryDetails(); render(); ModuleSpace.render();
+      if (!(fresh.messages || []).some(message => message.role === 'user') && root.LiteratureDiscussions?.open) {
+        void root.LiteratureDiscussions.open(fresh.id); return;
+      }
+      const input = document.getElementById?.('composer-input'); input?.focus?.();
+    } catch (error) { state.task = task(state.mod.id); state.notice = '未能继续讨论：' + error.message; renderLiteratureHistoryDetails(state); }
+  }
+  function literatureHistoryDetailsCurrent(state) {
+    return literatureHistoryDetailsDialog === state && task(state.mod.id) === state.task
+      && (root.TaskManager?.currentTaskId?.() || '') === state.projectId && Store.getState().activeModuleId === state.mod.id;
+  }
+  function renderLiteratureHistoryDetails(state) {
+    if (literatureHistoryDetailsDialog !== state) return;
+    const content = state.content; content.replaceChildren();
+    if (state.loading) { content.append(node('p', '正在读取这次任务的最新存档…', 'codex-status')); return; }
+    if (state.error) content.append(node('p', '历史详情读取失败：' + state.error + ' 当前任务、讨论和草稿未因查看而改动。', 'codex-error'));
+    const job = state.job;
+    if (job) {
+      content.append(node('h3', job.config?.topic || '未登记研究主题'));
+      const meta = node('dl', undefined, 'literature-history-details-meta');
+      const time = value => value && !Number.isNaN(new Date(value).getTime()) ? new Date(value).toLocaleString('zh-CN') : '未记录';
+      [['任务编号', job.id], ['状态', LITERATURE_STATUS_LABELS[job.status] || job.status || '未知'], ['创建时间', time(job.createdAt)],
+        ['更新时间', time(job.updatedAt)], ['执行到', literatureStageLabel(job.until || 'discover')],
+        ['当前阶段', literatureStageLabel(job.stage || 'queued')], ['候选条数', Number.isFinite(job.count) ? String(job.count) : '尚未记录']]
+        .forEach(([label, value]) => meta.append(node('dt', label), node('dd', value)));
+      content.append(meta, node('p', literatureStatusText(job), 'codex-status'));
+      if (job.message) content.append(node('p', '运行消息：' + job.message));
+      if (job.error) content.append(node('p', '运行问题：' + job.error, 'codex-error'));
+      if (job.status === 'running') content.append(node('p', '这次任务仍在运行。这里只读取已有进度；点击“刷新详情”读取最新记录，不会继续或重新运行。', 'codex-status'));
+      const files = literatureDeliverables(job);
+      content.append(node('h3', '已保存文件'));
+      if (files) {
+        // History must show its actual files immediately, even for a stopped
+        // run. The ordinary workbench keeps its compact disclosures separately.
+        Array.from(files.children).filter(child => child.tagName === 'DETAILS').forEach(child => { child.open = true; });
+        content.append(files);
+      } else content.append(node('p', job.status === 'running' ? '此轮尚未产生结果文件；任务运行中，可以稍后刷新。' : '此轮尚未产生结果文件。不能据此认定已完成数据提取。', 'codex-status'));
+      const frozen = node('button', '查看启动时的已确认配置', 'quiet-button'); frozen.type = 'button';
+      frozen.disabled = !root.LiteratureRuleReview?.openFrozenJob;
+      frozen.onclick = () => {
+        if (!literatureHistoryDetailsCurrent(state)) { state.notice = '工作区已切换，请关闭后重新查看该任务。'; renderLiteratureHistoryDetails(state); return; }
+        void root.LiteratureRuleReview.openFrozenJob(job.id, { title: job.config?.topic, sourceLabels: LITERATURE_SOURCE_LABELS, request,
+          isCurrent: () => literatureHistoryDetailsCurrent(state) });
+      };
+      content.append(frozen, node('p', '启动时的配置与核查记录只读；旧任务未保存核查快照时会明确提示。查看不会把它覆盖到当前草稿。', 'codex-status'));
+      const queries = node('details', undefined, 'literature-history-details-queries'); queries.append(node('summary', '本次存档的检索式'));
+      const sourceQueries = job.config?.sourceQueries;
+      if (job.config?.query) queries.append(node('p', '通用检索式'), node('pre', job.config.query));
+      if (sourceQueries && typeof sourceQueries === 'object') Object.entries(sourceQueries).forEach(([source, query]) => {
+        queries.append(node('p', LITERATURE_SOURCE_LABELS[source] || source), node('pre', typeof query === 'string' ? query : JSON.stringify(query, null, 2)));
+      });
+      if (!job.config?.query && !Object.keys(sourceQueries || {}).length) queries.append(node('p', '这次存档未记录检索式。', 'codex-status'));
+      content.append(queries);
+      if (Array.isArray(job.events) && job.events.length) {
+        const events = node('details'); events.append(node('summary', '阶段记录 · ' + job.events.length + ' 条'));
+        job.events.forEach(event => events.append(node('p', [time(event.at), literatureStageLabel(event.stage || ''), event.message || ''].filter(Boolean).join(' · '))));
+        content.append(events);
+      }
+    }
+    if (state.notice) content.append(node('p', state.notice, 'codex-status'));
+    const actions = node('div', undefined, 'literature-history-details-actions');
+    const refresh = node('button', '刷新详情', 'quiet-button'); refresh.type = 'button'; refresh.onclick = () => loadLiteratureHistoryDetails(state); actions.append(refresh);
+    if (job) {
+      const busy = literatureWorkspaceBusy(state.mod.id), current = literatureHistoryDetailsCurrent(state);
+      if (!job.segmentTask && !job.materialReplenishment?.parentJobId) {
+        const discuss = node('button', '继续讨论并更新规则', 'primary-button'); discuss.type = 'button';
+        discuss.disabled = busy || !current || job.status === 'running' || !!job.deletedAt || !!state.error;
+        discuss.title = '进入讨论修改草稿，保留已有新规则；从对话更新成功后再逐项核查，不启动或继续检索。';
+        discuss.onclick = () => continueLiteratureHistoryDiscussion(state); actions.append(discuss);
+      }
+      const load = node('button', '载入此任务到工作区', 'quiet-button'); load.type = 'button'; load.disabled = busy || !current || !!job.deletedAt || !!state.error;
+      const reason = !current ? '工作区已切换，请关闭后重新查看。' : busy ? '当前有任务或对话正在处理；可以只读查看，处理结束后刷新详情再载入。'
+        : job.deletedAt ? '此任务已删除，请先在历史列表恢复。' : '载入会切换到对应文献工作区；该工作区已有的讨论和规则草稿保留，不会重新运行任务。';
+      load.title = reason; actions.append(load); content.append(node('p', reason, 'codex-status'));
+      load.onclick = () => {
+        if (!literatureHistoryDetailsCurrent(state)) { state.notice = '工作区已切换，未载入历史任务。'; renderLiteratureHistoryDetails(state); return; }
+        if (literatureWorkspaceBusy(state.mod.id)) { state.notice = '当前仍在处理其他操作，未载入。可以继续只读查看，处理结束后再试。'; renderLiteratureHistoryDetails(state); return; }
+        const result = attachLiteratureHistoryContext(state.mod, job);
+        state.task = task(state.mod.id);
+        state.loaded = result?.ok === true;
+        state.notice = result?.ok ? '已载入这次任务。该工作区原有讨论和规则草稿保留；关闭详情后可在工作区继续查看。' : result?.error || '未能载入该任务，原草稿保留。';
+        renderLiteratureHistoryDetails(state); state.heading.focus?.();
+      };
+      if (state.loaded && !job.segmentTask && !job.materialReplenishment?.parentJobId) {
+        const revised = node('button', task(state.mod.id).literatureReviewNeedsSync || !sameLiteratureConfig(job.config, task(state.mod.id).literatureConfig)
+          ? '继续逐项核查当前草稿' : '从历史配置建立修改草稿', 'primary-button'); revised.type = 'button';
+        revised.disabled = busy || !current || job.status === 'running' || !!job.deletedAt;
+        revised.title = '显式导入历史依据，再同步当前讨论和最新草稿；旧结果保留，核查后才会按新配置开始。';
+        revised.onclick = () => {
+          if (!literatureHistoryDetailsCurrent(state)) { state.notice = '工作区已切换，未建立修改草稿。'; renderLiteratureHistoryDetails(state); return; }
+          closeLiteratureHistoryDetails(); return reviseLiteratureConfiguration(state.mod, { fromHistory: true });
+        }; actions.append(revised);
+      }
+    }
+    content.append(actions);
+  }
+  async function loadLiteratureHistoryDetails(state) {
+    if (!literatureHistoryDetailsCurrent(state)) { state.notice = '工作区已切换，请关闭后重新查看。'; renderLiteratureHistoryDetails(state); return; }
+    state.loading = true; state.error = ''; renderLiteratureHistoryDetails(state);
+    try {
+      const job = await request('/api/literature/job?id=' + encodeURIComponent(state.jobId));
+      if (!literatureHistoryDetailsCurrent(state)) return;
+      if (job?.id !== state.jobId) throw new Error('返回的任务编号不匹配，未载入任何任务。');
+      state.job = job;
+    } catch (error) { if (!literatureHistoryDetailsCurrent(state)) return; state.error = error.message; }
+    finally {
+      if (literatureHistoryDetailsDialog === state) { state.loading = false; if (!literatureHistoryDetailsCurrent(state)) state.notice = '工作区已切换，请关闭后重新查看。'; renderLiteratureHistoryDetails(state); }
+    }
+  }
+  async function openLiteratureHistoryDetails(mod, job) {
+    if (!job?.id) return;
+    closeLiteratureHistoryDetails();
+    const dialog = node('dialog', undefined, 'literature-help-dialog literature-history-details-dialog'); dialog.setAttribute('aria-label', '历史文献任务详情');
+    const head = node('div', undefined, 'literature-help-head'), heading = node('h2', '历史任务详情 · ' + job.id.slice(0, 8)); heading.tabIndex = -1;
+    const close = node('button', '关闭', 'quiet-button'); close.type = 'button'; close.onclick = closeLiteratureHistoryDetails;
+    head.append(heading, close); const content = node('div');
+    dialog.append(head, node('p', '这里查看当时的存档和文件。要修改规则，请点下方“继续讨论并更新规则”；仅查看或关闭不会修改当前草稿。', 'codex-status'), content);
+    const state = { element: dialog, heading, content, mod, task: task(mod.id), projectId: root.TaskManager?.currentTaskId?.() || '', jobId: job.id, job: null, notice: '' };
+    literatureHistoryDetailsDialog = state;
+    dialog.onclose = () => { if (literatureHistoryDetailsDialog === state) literatureHistoryDetailsDialog = null; dialog.remove(); };
+    document.body.append(dialog); dialog.showModal(); await loadLiteratureHistoryDetails(state);
+  }
   function literatureSource(mod) {
     const entries = (mod.messages || []).filter(message => message.role === 'user' || message.role === 'assistant');
     return JSON.stringify({ messages: entries.map(message => [message.id, message.at]),
       approvedDoc: mod.doc?.status === 'approved' ? [mod.doc.content, mod.doc.approvedAt] : null });
   }
+  function effectiveLiteratureReviewConfig(t) {
+    // Once reviewed, the saved values are the execution basis. Do not silently
+    // reorder sources or replace reviewed stop/model settings at launch time.
+    const config = JSON.parse(JSON.stringify(t.literatureConfig));
+    normalizeLiteratureDraftRules(config, message => { t.literatureConfigNotice = message; });
+    if (!config.searchMode) Object.assign(config, newLiteratureSearchConfig(config));
+    config.extraction = { ...config.extraction, model: config.extraction?.model || t.model || account?.model || null };
+    return config;
+  }
+  function commitLiteratureRevision(mod, nextClient, updates, manager = literatureWorkspaceManager(mod)) {
+    const t = task(mod.id), previousSaved = saved, previousRaw = localStorage.getItem(key);
+    const previous = Object.fromEntries(Object.keys(updates).map(name => [name, t[name]]));
+    let written = false;
+    try {
+      const nextSaved = { ...saved, [mod.id]: nextClient };
+      // Unlike the general autosave helper, a revision transition must fail
+      // visibly before detaching the original job if storage is unavailable.
+      localStorage.setItem(key, JSON.stringify(nextSaved)); written = true;
+      saved = nextSaved; Object.assign(t, updates);
+      const stored = manager?.saveActive(); if (stored?.ok === false) throw new Error(stored.error || '文献任务快照未能保存');
+      root.LiteratureDiscussions?.schedule?.(mod.id);
+    } catch (error) {
+      saved = previousSaved; Object.assign(t, previous);
+      let restoration = '';
+      if (written) try { if (previousRaw === null) localStorage.removeItem(key); else localStorage.setItem(key, previousRaw); }
+      catch (_) { restoration = ' 浏览器恢复保存失败，请保留当前页面；原绑定和草稿仍在内存中。'; }
+      throw new Error('切换未保存，原任务或修改草稿已保留：' + error.message + restoration);
+    }
+  }
+  async function reviseLiteratureConfiguration(mod, options = {}) {
+    const t = task(mod.id), job = t.literatureJob;
+    if (!job?.id || job.segmentTask || job.materialReplenishment?.parentJobId || saved[mod.id]?.literatureReadOnlyJobId === job.id
+      || job.deletedAt || job.status === 'running' || t.busy || t.literatureBusy || root.LiteratureUI?.isBusy() || root.ModuleSpace?.isBusy()) return;
+    const projectId = root.TaskManager?.currentTaskId?.() || '', manager = literatureWorkspaceManager(mod), workspaceId = manager?.active()?.id || mod.id;
+    const sameContext = () => task(mod.id) === t && (root.TaskManager?.currentTaskId?.() || '') === projectId && (!manager || manager.active()?.id === workspaceId);
+    const current = () => sameContext() && Store.getState().activeModuleId === mod.id && t.literatureJob?.id === job.id;
+    const snapshot = () => {
+      const fresh = Store.getState().modules?.find(item => item.id === mod.id); if (!fresh) return null;
+      return { config: JSON.parse(JSON.stringify(t.literatureConfig || job.config || {})), until: t.literatureUntil || job.until || 'discover',
+        source: literatureSource(fresh), context: { messages: (fresh.messages || []).filter(message => ['user', 'assistant'].includes(message.role))
+          .map(message => ({ role: message.role, text: message.text })), approvedDoc: fresh.doc?.status === 'approved' ? fresh.doc.content : '' },
+        reviewSignature: JSON.stringify([t.literatureRuleReview?.id, t.literatureRuleReview?.revision, saved[mod.id]?.literatureReviewAppliedRevision]) };
+    };
+    const basis = snapshot(), basisSignature = JSON.stringify(basis);
+    if (!basis) { t.literatureError = '当前文献模块已变化，未建立修改草稿。'; render(); return; }
+    const initialClient = JSON.parse(JSON.stringify(saved[mod.id] || {})), originalClient = JSON.parse(JSON.stringify(initialClient));
+    delete originalClient.literatureRevisionDraft; delete originalClient.literatureRevisionOriginal;
+    const backup = { client: originalClient, job: JSON.parse(JSON.stringify(job)), ...(manager?.captureCurrent ? { context: manager.captureCurrent() } : {}) };
+    t.literatureBusy = true; t.literatureError = ''; render();
+    try {
+      const sessionId = await session(mod.id); if (!current()) return;
+      if (JSON.stringify(snapshot()) !== basisSignature) throw new Error('讨论、草稿或确认版本已变化，尚未建立修改草稿；请按当前内容重试。');
+      const { source, context } = basis;
+      const input = { jobId: job.id, sessionId, workspaceId, source, context, ...(options.fromHistory === true ? { fromHistory: true } : {}) }, signature = JSON.stringify({ input, basisSignature });
+      if (t.literatureRevisionForkAttempt?.signature !== signature) {
+        const requestId = root.crypto?.randomUUID?.(); if (!requestId) throw new Error('浏览器无法建立修订请求标识，原任务保留。');
+        t.literatureRevisionForkAttempt = { signature, requestId };
+      }
+      let review = await request('/api/literature/rule-review/fork', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...input, requestId: t.literatureRevisionForkAttempt.requestId }) });
+      if (!current()) return;
+      if (saved[mod.id]?.sessionId !== sessionId || JSON.stringify(snapshot()) !== basisSignature) throw new Error('讨论、草稿或确认版本已变化，旧响应未覆盖当前草稿；请按当前内容重试。');
+      if (!review?.id || review.sessionId !== sessionId || review.workspaceId !== workspaceId || review.parentJobId !== job.id || !review.config || !Array.isArray(review.items)) throw new Error('修订草稿与当前任务不匹配，原任务保留。');
+      if (JSON.stringify(review.config) !== JSON.stringify(basis.config) || review.until !== basis.until) {
+        review = await request('/api/literature/rule-review/action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: review.id, sessionId, revision: review.revision, action: 'sync', config: basis.config, until: basis.until, source, context }) });
+        if (!current()) return;
+        if (saved[mod.id]?.sessionId !== sessionId || JSON.stringify(snapshot()) !== basisSignature) throw new Error('同步期间草稿或讨论已变化，旧响应未覆盖；原任务和当前草稿保留。');
+        if (!review?.id || review.sessionId !== sessionId || review.workspaceId !== workspaceId || review.parentJobId !== job.id || !review.config || !Array.isArray(review.items)) throw new Error('同步的修订草稿不属于当前文献任务，原草稿保留。');
+      }
+      const next = { ...saved[mod.id], literatureConfig: JSON.parse(JSON.stringify(review.config)), literatureUntil: review.until,
+        literatureRuleReviewId: review.id, literatureRuleReview: review, literatureReviewNeedsSync: false, literatureSource: source,
+        literatureRevisionParentId: job.id, literatureRevisionOriginal: backup, literatureConfigNotice: options.fromHistory === true
+          ? '已从历史配置建立修改草稿，并保留当前讨论和最新规则；核查后才会按新配置建立新任务，旧结果保留。' : '正在修改原任务配置。确认后将建立新的检索任务，原结果保留。' };
+      for (const key of ['literatureJobId', 'literatureDelivered', 'literatureAutoOpenStamp', 'literatureReadOnlyJobId', 'literatureReviewAppliedRevision', 'literatureRevisionDraft', 'literatureHistoryLoadedJobId']) delete next[key];
+      commitLiteratureRevision(mod, next, { literatureWatchGeneration: (t.literatureWatchGeneration || 0) + 1,
+        literatureJob: null, literatureConfig: JSON.parse(JSON.stringify(review.config)), literatureUntil: review.until,
+        literatureRuleReview: review, literatureReviewNeedsSync: false, literatureConfigNotice: next.literatureConfigNotice,
+        literatureJobsTried: false, literatureBusy: false, literatureRevisionNeedsHistoryImport: false }, manager);
+      render(); await openLiteratureRuleReview(Store.getState().modules.find(item => item.id === mod.id) || mod);
+    } catch (error) { if (sameContext()) {
+      if (['REVIEW_SESSION_MISMATCH', 'REVIEW_WORKSPACE_MISMATCH'].includes(error.code)) t.literatureRevisionNeedsHistoryImport = true;
+      t.literatureError = error.message; render();
+    } }
+    finally { if (sameContext()) { t.literatureBusy = false; render(); } }
+  }
+  function swapLiteratureRevision(mod, toOriginal) {
+    const t = task(mod.id), client = saved[mod.id];
+    if (!client || t.busy || t.literatureBusy || t.literatureJob?.status === 'running' || root.LiteratureUI?.isBusy() || root.ModuleSpace?.isBusy()) return;
+    const target = toOriginal ? client.literatureRevisionOriginal : client.literatureRevisionDraft;
+    if (!target?.client || !target.job && toOriginal) return;
+    root.LiteratureRuleReview?.close();
+    const previousJob = t.literatureJob;
+    const manager = literatureWorkspaceManager(mod);
+    const next = JSON.parse(JSON.stringify(target.client));
+    if (toOriginal) {
+      const draftClient = JSON.parse(JSON.stringify(client)); delete draftClient.literatureRevisionDraft;
+      next.literatureRevisionDraft = { client: draftClient, job: previousJob ? JSON.parse(JSON.stringify(previousJob)) : null,
+        ...(manager?.captureCurrent ? { context: manager.captureCurrent() } : {}) };
+    }
+    try {
+      if (target.context && manager?.restoreCurrent) {
+        const envelope = JSON.parse(JSON.stringify(target.context)); envelope.snapshot.client = next;
+        const restored = manager.restoreCurrent(envelope); if (!restored.ok) throw new Error(restored.error);
+        const freshTask = task(mod.id); freshTask.literatureJob = target.job ? JSON.parse(JSON.stringify(target.job)) : null;
+        freshTask.literatureError = ''; ModuleSpace.render();
+        root.LiteratureDiscussions?.schedule?.(mod.id);
+        if (freshTask.literatureJob?.id) void hydrateLiteratureWorkspace(mod);
+        render(); return;
+      }
+      commitLiteratureRevision(mod, next, { literatureWatchGeneration: (t.literatureWatchGeneration || 0) + 1,
+        literatureJob: target.job ? JSON.parse(JSON.stringify(target.job)) : null,
+        literatureConfig: JSON.parse(JSON.stringify(next.literatureConfig || target.job?.config || null)),
+        literatureUntil: next.literatureUntil || target.job?.until || 'discover', literatureRuleReview: next.literatureRuleReview || null,
+        literatureReviewNeedsSync: next.literatureReviewNeedsSync === true, literatureConfigNotice: next.literatureConfigNotice || '',
+        literatureError: '这份旧备份未单独保存讨论快照；已保留当前讨论，没有把它当作原讨论恢复。可在“讨论记录”查找原文。', literatureJobsTried: false });
+      if (t.literatureJob?.id) void hydrateLiteratureWorkspace(mod);
+    } catch (error) { t.literatureError = error.message; }
+    render();
+  }
+  async function openLiteratureRuleReview(mod, options = {}) {
+    const t = task(mod.id);
+    if (!root.LiteratureRuleReview) return;
+    const frozenJobId = t.literatureJob?.id || saved[mod.id]?.literatureJobId;
+    if (frozenJobId && options.draft !== true) {
+      if (t.literatureJob?.segmentTask) return;
+      const fromHistory = saved[mod.id]?.literatureHistoryLoadedJobId === frozenJobId || t.literatureRevisionNeedsHistoryImport === true
+        || /原任务规则快照不属于当前文献(?:会话|任务|工作区)/.test(t.literatureError || '');
+      const projectId = root.TaskManager?.currentTaskId?.() || '', manager = literatureWorkspaceManager(mod), workspaceId = manager?.active()?.id || mod.id;
+      const current = () => task(mod.id) === t && (root.TaskManager?.currentTaskId?.() || '') === projectId
+        && (!manager || manager.active()?.id === workspaceId) && Store.getState().activeModuleId === mod.id
+        && (t.literatureJob?.id || saved[mod.id]?.literatureJobId) === frozenJobId;
+      await root.LiteratureRuleReview.openFrozenJob(frozenJobId, { title: t.literatureJob?.config?.topic,
+        sourceLabels: LITERATURE_SOURCE_LABELS, isCurrent: current, request,
+        onRevise: t.literatureJob?.id === frozenJobId && saved[mod.id]?.literatureReadOnlyJobId !== frozenJobId
+          && !t.literatureJob?.materialReplenishment?.parentJobId ? () => reviseLiteratureConfiguration(mod, { fromHistory }) : null,
+        reviseLabel: fromHistory ? '从历史配置建立修改草稿' : '修改配置并继续',
+        canRevise: !!t.literatureJob && !t.literatureJob.deletedAt && t.literatureJob.status !== 'running' && !t.busy && !t.literatureBusy && !root.ModuleSpace?.isBusy() });
+      return;
+    }
+    if (!t.literatureConfig || t.literatureBusy || t.busy) return;
+    const projectId = root.TaskManager?.currentTaskId?.() || '', manager = literatureWorkspaceManager(mod);
+    const workspaceId = manager?.active()?.id || mod.id;
+    const current = () => task(mod.id) === t && (root.TaskManager?.currentTaskId?.() || '') === projectId
+      && (!manager || manager.active()?.id === workspaceId) && Store.getState().activeModuleId === mod.id;
+    try {
+      const sid = await session(mod.id);
+      if (!current()) return;
+      const fresh = Store.getState().modules.find(item => item.id === mod.id); if (!fresh) return;
+      const config = effectiveLiteratureReviewConfig(t), source = literatureSource(fresh);
+      const independentDraft = !!frozenJobId && options.draft === true;
+      const reviewId = independentDraft ? saved[mod.id]?.literatureDraftReviewForJobId === frozenJobId ? saved[mod.id]?.literatureDraftReviewId : null : saved[mod.id]?.literatureRuleReviewId;
+      const draftNotice = independentDraft ? '正在核查当前规则草稿；旧任务的冻结配置只读保留。这里显示的检索式就是当前草稿实际值，不会先复制旧任务配置。' : '';
+      const staleNotice = saved[mod.id]?.literatureSource !== source ? '讨论有新内容，但尚未成功整理到当前规则草稿；下面显示已有草稿，不表示新要求已经写入。请先核对实际检索式，或返回“从对话更新规则并核查”。' : '';
+      t.literatureConfig = JSON.parse(JSON.stringify(config));
+      saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureConfigNotice: t.literatureConfigNotice }; persist();
+      await root.LiteratureRuleReview.open({ sessionId: sid, workspaceId, config, until: t.literatureUntil || 'discover', source,
+        reviewId, model: t.model || account?.model,
+        context: { messages: (fresh.messages || []).filter(message => message.role === 'user' || message.role === 'assistant')
+          .map(message => ({ role: message.role, text: message.text })), approvedDoc: fresh.doc?.status === 'approved' ? fresh.doc.content : '' },
+        sourceLabels: LITERATURE_SOURCE_LABELS, request, isCurrent: current,
+        formatNotice: [draftNotice, staleNotice, t.literatureConfigNotice || ''].filter(Boolean).join('\n'),
+        revisionParentId: saved[mod.id]?.literatureRevisionParentId || '',
+        onSave: review => {
+          if (!current()) return;
+          t.literatureRuleReview = review; t.literatureConfig = JSON.parse(JSON.stringify(review.config)); t.literatureUntil = review.until; t.literatureReviewNeedsSync = false;
+          saved[mod.id] = { ...saved[mod.id], literatureRuleReviewId: review.id, literatureRuleReview: review,
+            literatureConfig: t.literatureConfig, literatureUntil: review.until, literatureReviewNeedsSync: false,
+            ...(independentDraft ? { literatureDraftReviewForJobId: frozenJobId, literatureDraftReviewId: review.id } : {}) };
+          persist(); manager?.saveActive(); render();
+        },
+        onApply: review => {
+          if (!current()) return;
+          if (independentDraft) {
+            const originalClient = JSON.parse(JSON.stringify(saved[mod.id] || {})); delete originalClient.literatureRevisionOriginal; delete originalClient.literatureRevisionDraft;
+            const original = { client: originalClient, job: JSON.parse(JSON.stringify(t.literatureJob || { id: frozenJobId })), ...(manager?.captureCurrent ? { context: manager.captureCurrent() } : {}) };
+            const next = { ...saved[mod.id], literatureConfig: JSON.parse(JSON.stringify(review.config)), literatureUntil: review.until, literatureSource: source,
+              literatureRuleReviewId: review.id, literatureRuleReview: review, literatureReviewAppliedRevision: review.revision,
+              literatureRevisionParentId: frozenJobId, literatureRevisionOriginal: original, literatureReviewNeedsSync: false };
+            for (const name of ['literatureJobId', 'literatureDelivered', 'literatureAutoOpenStamp', 'literatureReadOnlyJobId']) delete next[name];
+            commitLiteratureRevision(mod, next, { literatureJob: null, literatureConfig: next.literatureConfig, literatureUntil: review.until,
+              literatureRuleReview: review, literatureReviewNeedsSync: false, literatureError: '', literatureBusy: false }, manager);
+            render(); return;
+          }
+          t.literatureConfig = JSON.parse(JSON.stringify(review.config)); t.literatureUntil = review.until; t.literatureError = '';
+          saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureUntil: review.until,
+            literatureSource: source, literatureRuleReviewId: review.id, literatureRuleReview: review, literatureReviewAppliedRevision: review.revision,
+            ...(independentDraft ? { literatureDraftReviewForJobId: frozenJobId, literatureDraftReviewId: review.id } : {}) };
+          persist(); manager?.saveActive(); render();
+        }, onConfigError: () => {
+          if (!current()) return;
+          t.literatureConfigOpen = true;
+          saved[mod.id] = { ...saved[mod.id], literatureConfigOpen: true }; persist(); render();
+          const settings = panel.querySelector('.literature-config');
+          if (settings) { settings.open = true; settings.scrollIntoView?.({ block: 'center', behavior: 'smooth' }); }
+        }, onClose: () => { if (current()) render(); }
+      });
+    } catch (error) { if (current()) { t.literatureError = error.message; render(); } }
+  }
   const LITERATURE_CONFIG_KEYS = ['topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language',
-    'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit', 'sourceQueries', 'searchMode', 'perSourceLimit', 'stopMode'];
+    'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit', 'sourceQueries', 'searchMode', 'perSourceLimit', 'stopMode', 'scholarPlan', 'screeningPolicy', 'researchPlan'];
   const LITERATURE_CONFIG_EXTRA_KEYS = ['batch', 'fieldDefinitions', 'templates', 'fulltext', 'extraction', 'limits'];
+  function literatureDraftRuleList(value) {
+    if (value === undefined || value === null) return [];
+    if (typeof value === 'string') return value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const entries = Array.isArray(value) ? value : [value];
+    return entries.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry) ?? String(entry));
+  }
+  function normalizeLiteratureDraftRules(config, onFormatNotice) {
+    const names = { studyTypes: '研究类型', inclusion: '纳入规则', exclusion: '排除规则', targetFields: '目标字段' }, converted = [];
+    Object.keys(names).forEach(key => {
+      const value = config[key];
+      if (value != null && (!Array.isArray(value) || value.some(entry => typeof entry !== 'string'))) converted.push(names[key]);
+      config[key] = literatureDraftRuleList(value);
+    });
+    if (converted.length) onFormatNotice?.('格式兼容提示：' + converted.join('、') + '已整理为待核查列表。文字只按完整行分项，结构化内容以完整 JSON 文本保留；未删减规则，尚未自动确认。');
+    return config;
+  }
   function literatureConfigKey(config, keys = LITERATURE_CONFIG_KEYS) {
     if (!config) return '';
     return JSON.stringify(keys.map(key => key === 'sourceQueries'
@@ -574,61 +1581,274 @@
       || JSON.stringify([...one.sources].sort()) !== JSON.stringify([...other.sources].sort())) return false;
     return sameLiteratureConfig(one, { ...other, sources: [...one.sources] });
   }
-  function parseLiteratureConfig(text) {
+  function parseLiteratureConfig(text, options = {}) {
     const raw = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     const start = raw.indexOf('{'); const end = raw.lastIndexOf('}');
     if (start < 0 || end <= start) throw new Error('AI 未返回运行配置；请重试或手动填写');
-    const config = JSON.parse(raw.slice(start, end + 1));
+    let config = JSON.parse(raw.slice(start, end + 1));
     if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('AI 返回的配置格式无效');
-    if (!Array.isArray(config.sources)) throw new Error('AI 未明确返回检索来源，请重新整理规则');
-    const parsed = {
-      topic: String(config.topic || ''), query: String(config.query || ''),
-      sources: config.sources,
-      publicationYearFrom: config.publicationYearFrom ?? null, publicationYearTo: config.publicationYearTo ?? null,
-      geography: String(config.geography || ''), language: String(config.language || ''),
-      studyTypes: Array.isArray(config.studyTypes) ? config.studyTypes : [],
-      inclusion: Array.isArray(config.inclusion) ? config.inclusion : [],
-      exclusion: Array.isArray(config.exclusion) ? config.exclusion : [],
-      targetFields: Array.isArray(config.targetFields) ? config.targetFields : [],
-      limit: config.limit ?? 10
+    const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key), copy = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+    const notices = [], baseline = options.baseline && typeof options.baseline === 'object' && !Array.isArray(options.baseline) ? options.baseline : {};
+    if (own(config, 'config')) {
+      if (Object.keys(config).length !== 1 || !config.config || typeof config.config !== 'object' || Array.isArray(config.config)) throw new Error('AI 配置包装格式无效；仅支持单独的 {"config":{...}}，原草稿保留');
+      config = config.config; notices.push('已读取明确的 config 对象；内容仍为待核查草稿。');
+    }
+    const allowed = [...LITERATURE_CONFIG_KEYS, ...LITERATURE_CONFIG_EXTRA_KEYS, 'version'];
+    const returned = Object.keys(config), unknown = returned.filter(key => !allowed.includes(key));
+    if (!returned.length || unknown.length) throw new Error(unknown.length ? 'AI 返回了不支持的配置字段：' + unknown.join('、') + '；未把说明文字当作配置更新，原草稿保留' : 'AI 返回了空配置，未更新任何规则；原草稿保留');
+    if (own(config, 'searchMode') && !['test', 'formal'].includes(config.searchMode)) throw new Error('请选择测试运行或正式检索；原草稿保留');
+    const inherited = [], take = (key, fallback) => {
+      if (own(config, key)) return copy(config[key]);
+      if (own(baseline, key)) { inherited.push(key); return copy(baseline[key]); }
+      return fallback;
     };
-    if (config.sourceQueries !== undefined) {
-      if (!config.sourceQueries || typeof config.sourceQueries !== 'object' || Array.isArray(config.sourceQueries)
-        || Object.values(config.sourceQueries).some(value => typeof value !== 'string' || value.length > 2000)) {
-        throw new Error('各来源检索式格式无效；请重新整理或手动填写');
+    const sources = take('sources', null), knownSources = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed', 'pmc', 'openalex', 'europe-pmc', 'semantic-scholar'];
+    if (!Array.isArray(sources)) throw new Error(own(config, 'sources') ? 'AI 返回的检索来源必须是列表；原草稿保留' : 'AI 未明确返回检索来源，当前也无有效来源基线；请重新整理规则');
+    if (!sources.length || sources.some(value => typeof value !== 'string' || !knownSources.includes(value)) || new Set(sources).size !== sources.length) throw new Error('检索来源为空、重复或不受识别；未静默沿用或删除来源，原草稿保留');
+    const parsed = { sources };
+    for (const key of ['topic', 'query', 'geography', 'language']) {
+      const value = take(key, ''); if (typeof value !== 'string') throw new Error((key === 'query' ? '默认检索式' : key) + '必须是文本；原草稿保留'); parsed[key] = value;
+    }
+    if (parsed.query.length > 32768) throw new Error('默认检索式超过32768字符；原草稿保留，未自动删减检索词');
+    for (const key of ['publicationYearFrom', 'publicationYearTo']) parsed[key] = take(key, null);
+    for (const key of ['studyTypes', 'inclusion', 'exclusion', 'targetFields']) parsed[key] = take(key, []);
+    normalizeLiteratureDraftRules(parsed, message => notices.push(message));
+    parsed.limit = take('limit', 10);
+    for (const key of ['searchMode', 'stopMode', 'perSourceLimit', 'version']) if (own(config, key) || own(baseline, key)) parsed[key] = take(key, null);
+    if (own(config, 'scholarPlan') || own(baseline, 'scholarPlan')) {
+      const value = take('scholarPlan', null);
+      if (value != null && (typeof value !== 'object' || Array.isArray(value))) throw new Error('谷歌学术分批计划必须为对象；清空请明确使用 null');
+      if (value != null) parsed.scholarPlan = value;
+    }
+    for (const key of ['screeningPolicy', 'researchPlan']) {
+      if (own(config, key) || own(baseline, key)) {
+        const value = take(key, null);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('已确认方案与筛选规则须保留完整对象，不能隐式清空');
+        parsed[key] = value;
       }
-      parsed.sourceQueries = Object.fromEntries(Object.entries(config.sourceQueries).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value));
     }
-    ['batch', 'templates', 'fulltext', 'extraction', 'limits'].forEach(key => {
-      if (config[key] && typeof config[key] === 'object' && !Array.isArray(config[key])) parsed[key] = config[key];
+    if (own(config, 'sourceQueries')) {
+      if (!config.sourceQueries || typeof config.sourceQueries !== 'object' || Array.isArray(config.sourceQueries)
+        || Object.values(config.sourceQueries).some(value => typeof value !== 'string')) {
+        throw new Error('各来源检索式格式无效：须为来源标识对应字符串的对象；原草稿保留');
+      }
+      if (Object.values(config.sourceQueries).some(value => value.length > 32768)) throw new Error('各来源检索式每项最多32768字符；原草稿保留，未自动删减检索词');
+      const entries = Object.entries(config.sourceQueries);
+      if (entries.some(([key, value]) => !knownSources.includes(key) || !value.trim())) throw new Error('各来源检索式含未知来源或空白文本；未隐式删除旧式，清空整组请明确使用 {}');
+      const prior = baseline.sourceQueries && typeof baseline.sourceQueries === 'object' && !Array.isArray(baseline.sourceQueries) ? baseline.sourceQueries : {};
+      parsed.sourceQueries = entries.length ? { ...copy(prior), ...Object.fromEntries(entries.map(([key, value]) => [key, value.trim()])) } : {};
+      if (entries.length && Object.keys(prior).some(key => !own(config.sourceQueries, key))) notices.push('部分来源检索式未更新，沿用当前草稿对应值；仍需核对。');
+    } else if (baseline.sourceQueries !== undefined) { parsed.sourceQueries = JSON.parse(JSON.stringify(baseline.sourceQueries)); notices.push('各来源检索式未更新，沿用当前草稿；省略不表示清空，仍需核对。'); }
+    const extraNames = { batch: '分批设置', fieldDefinitions: '字段定义', templates: '交付模板', fulltext: '全文设置', extraction: '提取设置', limits: '阶段边界' }, unchanged = [];
+    Object.keys(extraNames).forEach(key => {
+      if (!Object.prototype.hasOwnProperty.call(config, key)) {
+        if (Object.prototype.hasOwnProperty.call(baseline, key)) { parsed[key] = JSON.parse(JSON.stringify(baseline[key])); unchanged.push(extraNames[key]); }
+        return;
+      }
+      const value = config[key];
+      if (key === 'fieldDefinitions') {
+        if (!Array.isArray(value) || !value.every(field => field && typeof field === 'object' && !Array.isArray(field))) throw new Error('字段定义必须是对象列表；清空请明确使用 []');
+        parsed[key] = value; return;
+      }
+      if (value === null) { parsed[key] = null; return; }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(extraNames[key] + '必须是对象；清空请明确使用 null');
+      const prior = baseline[key] && typeof baseline[key] === 'object' && !Array.isArray(baseline[key]) ? baseline[key] : {};
+      if (Object.keys(prior).some(child => !Object.prototype.hasOwnProperty.call(value, child))) unchanged.push(extraNames[key] + '部分内容');
+      parsed[key] = { ...JSON.parse(JSON.stringify(prior)), ...value };
     });
-    if (Array.isArray(config.fieldDefinitions) && config.fieldDefinitions.every(field => field && typeof field === 'object' && !Array.isArray(field))) {
-      parsed.fieldDefinitions = config.fieldDefinitions;
+    if (unchanged.length) notices.push(unchanged.join('、') + '未更新，沿用当前草稿；省略不表示清空，仍需逐项核查。');
+    if (inherited.length) notices.push('省略的来源、研究范围或执行设置沿用当前草稿（' + inherited.join('、') + '）；未自动确认。');
+    const hasBaseline = Object.keys(baseline).some(key => allowed.includes(key));
+    let result;
+    if (!hasBaseline || own(config, 'searchMode') && config.searchMode !== baseline.searchMode) {
+      result = newLiteratureSearchConfig(parsed);
+      if (hasBaseline) result.sources = parsed.sources;
+    } else {
+      result = parsed;
+      if (result.searchMode !== undefined && !['test', 'formal'].includes(result.searchMode)) throw new Error('请选择测试运行或正式检索；原草稿保留');
+      if (result.stopMode != null && !['count', 'end'].includes(result.stopMode)) throw new Error('检索停止方式必须是 count 或 end；原草稿保留');
     }
-    return newLiteratureSearchConfig({ ...parsed, searchMode: config.searchMode ?? 'test', stopMode: config.stopMode });
+    if (notices.length) options.onFormatNotice?.(notices.join('\n'));
+    return result;
+  }
+  function literaturePrepareFailure(phase, error) {
+    const network = error.transport === true || /Failed to fetch|NetworkError|Load failed/i.test(error.message || '');
+    const routing = /workspace routing discovery (?:failed|timed out)/i.test(error.message || '');
+    return phase + '失败：' + (routing ? 'Codex 工作区连接失败，请检查连接后再整理。' : network ? '与本地工作台的连接中断。' : error.message) + ' 原规则、确认记录和已有结果保留。';
+  }
+  function literaturePrepareReviewSignature(mod) {
+    const review = task(mod.id).literatureRuleReview || saved[mod.id]?.literatureRuleReview;
+    return JSON.stringify({ id: review?.id || saved[mod.id]?.literatureRuleReviewId || null, revision: review?.revision ?? null,
+      ready: review?.ready === true, appliedRevision: saved[mod.id]?.literatureReviewAppliedRevision ?? null });
+  }
+  function literaturePrepareBasis(mod) {
+    // Store returns a clone. Re-read it rather than relying on the object from
+    // the original click after an asynchronous session request or poll.
+    const fresh = typeof Store === 'undefined' ? mod : Store.getState().modules?.find(item => item.id === mod.id);
+    if (!fresh) return null;
+    const t = task(mod.id), messages = (fresh.messages || []).filter(message => ['user', 'assistant'].includes(message.role))
+      .map(message => ({ role: message.role, text: message.text }));
+    const approvedDoc = fresh.doc?.status === 'approved' ? fresh.doc.content : '', baseline = t.literatureConfig ? JSON.parse(JSON.stringify(t.literatureConfig)) : null;
+    return { messages, approvedDoc, baseline, source: literatureSource(fresh), configSignature: JSON.stringify(baseline),
+      contextSignature: JSON.stringify({ messages, approvedDoc }), reviewSignature: literaturePrepareReviewSignature(mod),
+      until: t.literatureUntil || 'discover', selectedMode: t.literatureConfig?.searchMode || saved[mod.id]?.literatureDraftMode,
+      model: t.model || account?.model || null };
+  }
+  function saveLiteraturePreparation(mod, pending, manager, required = false) {
+    const t = task(mod.id), previousClient = saved[mod.id], previousPending = t.literaturePreparePending;
+    const previousRaw = localStorage.getItem(key);
+    const next = { ...saved[mod.id] }; if (pending) next.literaturePreparePending = pending; else delete next.literaturePreparePending;
+    saved[mod.id] = next; t.literaturePreparePending = pending;
+    try {
+      localStorage.setItem(key, JSON.stringify(saved));
+      const stored = manager?.saveActive(); if (stored?.ok === false) throw new Error(stored.error || '文献任务快照未能保存');
+    } catch (error) {
+      if (required) {
+        saved[mod.id] = previousClient; t.literaturePreparePending = previousPending;
+        try { if (previousRaw === null) localStorage.removeItem(key); else localStorage.setItem(key, previousRaw); } catch (_) {}
+      }
+      throw new Error('整理进度未能可靠保存：' + error.message + (pending?.id ? '。已受理编号 ' + pending.id + '，请保留当前页面后检查进度。' : '。尚未再次提交。'));
+    }
+  }
+  async function checkLiteraturePrepareProgress(mod, initialJob = null, options = {}) {
+    const t = task(mod.id), pending = t.literaturePreparePending || saved[mod.id]?.literaturePreparePending;
+    if (!pending?.id || t.literatureBusy && !initialJob) return;
+    if (['failed', 'unavailable', 'basis_changed'].includes(pending.status) || pending.status === 'invalid_result' && options.retryInvalid !== true) {
+      t.literatureError = literaturePrepareFailure('本次规则整理', new Error(pending.error || '该次整理已结束或不能应用。')) + ' 可显式结束本次等待，再按当前内容重新整理。'; render(); return;
+    }
+    const projectId = root.TaskManager?.currentTaskId?.() || '', manager = literatureWorkspaceManager(mod), workspaceId = manager?.active()?.id || mod.id;
+    const current = () => task(mod.id) === t && (root.TaskManager?.currentTaskId?.() || '') === projectId && (!manager || manager.active()?.id === workspaceId)
+      && saved[mod.id]?.sessionId === pending.sessionId && (t.literaturePreparePending || saved[mod.id]?.literaturePreparePending)?.id === pending.id;
+    if (pending.projectId !== projectId || pending.workspaceId !== workspaceId || saved[mod.id]?.sessionId !== pending.sessionId) {
+      t.literatureError = '整理记录不属于当前文献任务或文件会话，未读取或应用。请回到原文献任务检查。'; render(); return;
+    }
+    t.literatureBusy = true; t.literatureError = ''; render();
+    let phase = '读取整理进度';
+    try {
+      let job = initialJob || pending.resultSnapshot || null, deadline = Date.now() + 10 * 60 * 1000;
+      while (true) {
+        if (!job) job = await request('/api/codex/job?id=' + encodeURIComponent(pending.id));
+        if (!current()) return;
+        if (job.status !== 'running' && job.status !== 'queued') break;
+        if (Date.now() >= deadline) throw new Error('等待超过10分钟，可稍后点击“检查整理进度”；不会重新提交。');
+        await new Promise(resolve => setTimeout(resolve, 1200));
+        if (!current()) return; job = null;
+      }
+      if (job.id !== pending.id || job.sessionId && job.sessionId !== pending.sessionId) throw new Error('返回的整理运行编号或文件会话不匹配，未应用结果');
+      if (job.status !== 'completed') {
+        pending.status = 'failed'; pending.error = job.error || '本次整理未完成';
+        saveLiteraturePreparation(mod, pending, manager); throw new Error(pending.error);
+      }
+      phase = '读取整理结果';
+      // Keep the received reply before parsing it. A format rejection is not a
+      // reason to lose the only copy or run the model a second time.
+      if (!pending.resultSnapshot) {
+        pending.resultSnapshot = { id: job.id, sessionId: pending.sessionId, status: 'completed', text: job.text, model: job.model || null };
+        saveLiteraturePreparation(mod, pending, manager);
+      }
+      const basis = literaturePrepareBasis(mod);
+      if (!basis || basis.source !== pending.source || basis.contextSignature !== pending.contextSignature || basis.configSignature !== pending.configSignature
+        || basis.until !== pending.until || basis.reviewSignature !== pending.reviewSignature) {
+        pending.status = 'basis_changed'; saveLiteraturePreparation(mod, pending, manager);
+        throw new Error('讨论、配置或执行阶段已变化，本次旧结果未套用。结果编号已保留，可结束本次整理后按当前要求重新整理。');
+      }
+      let notice = '';
+      const config = parseLiteratureConfig(job.text, { baseline: pending.baseline, onFormatNotice: message => { notice = message; } });
+      const hasBaseline = pending.baseline && Object.keys(pending.baseline).length > 0;
+      const nextConfig = !hasBaseline && pending.selectedMode === 'formal'
+        ? newLiteratureSearchConfig({ ...config, searchMode: 'formal', stopMode: 'end', perSourceLimit: null }) : config;
+      const next = { ...saved[mod.id], literatureConfig: nextConfig, literatureSource: pending.source, literatureConfigNotice: notice,
+        literatureReviewNeedsSync: true, literatureRuleReview: t.literatureRuleReview ? { ...t.literatureRuleReview, ready: false, needsSync: true } : null };
+      delete next.literaturePreparePending; delete next.literatureReviewAppliedRevision;
+      phase = '保存整理草稿';
+      commitLiteratureRevision(mod, next, { literatureConfig: nextConfig, literatureConfigNotice: notice, literaturePreparePending: null,
+        literatureRuleReview: next.literatureRuleReview, literatureReviewNeedsSync: true }, manager);
+      return { ok: true, id: pending.id };
+    } catch (error) {
+      if (current()) {
+        if (error.message.includes('运行记录不存在') || error.status === 404) {
+          pending.status = 'unavailable'; pending.error = '本次文字整理的运行记录已不存在，后台可能已重启。';
+          try { saveLiteraturePreparation(mod, pending, manager); } catch (_) {}
+        }
+        if (phase === '读取整理结果' && ['accepted', 'invalid_result'].includes(pending.status)) { pending.status = 'invalid_result'; pending.error = error.message; try { saveLiteraturePreparation(mod, pending, manager); } catch (_) {} }
+        t.literatureError = literaturePrepareFailure(phase, error) + (pending.status === 'accepted' ? ' 点击“检查整理进度”找回同一次整理，不会重新生成。' : '');
+      }
+    } finally { if (task(mod.id) === t && (root.TaskManager?.currentTaskId?.() || '') === projectId && (!manager || manager.active()?.id === workspaceId) && saved[mod.id]?.sessionId === pending.sessionId) { t.literatureBusy = false; render(); } }
+  }
+  function endLiteraturePreparation(mod) {
+    const t = task(mod.id), pending = t.literaturePreparePending || saved[mod.id]?.literaturePreparePending;
+    if (!pending || t.literatureBusy) return false;
+    try {
+      saveLiteraturePreparation(mod, null, literatureWorkspaceManager(mod), true);
+      t.literatureError = '已结束页面对本次整理的等待。未停止后台任务，原草稿和确认记录未改动；再次点击“从对话更新规则并核查”才会发起新的整理。';
+      render(); return true;
+    }
+    catch (error) { t.literatureError = error.message; } render(); return false;
+  }
+  async function checkLiteraturePrepareConnection(mod) {
+    const t = task(mod.id), pending = t.literaturePreparePending || saved[mod.id]?.literaturePreparePending;
+    if (!pending || t.literatureBusy) return;
+    const projectId = root.TaskManager?.currentTaskId?.() || '', manager = literatureWorkspaceManager(mod), workspaceId = manager?.active()?.id || mod.id;
+    const current = () => task(mod.id) === t && (root.TaskManager?.currentTaskId?.() || '') === projectId && (!manager || manager.active()?.id === workspaceId)
+      && saved[mod.id]?.sessionId === pending.sessionId && (t.literaturePreparePending || saved[mod.id]?.literaturePreparePending) === pending;
+    if (!current()) return;
+    try {
+      await request('/api/literature/runtime');
+      if (!current()) return;
+      t.literatureError = '本地后台现已连接。但上次提交没有运行编号，仍不能判断是否已受理；没有重新发送。可继续等待，或显式“放弃本次等待”后再决定是否新提交。';
+    } catch (error) { if (!current()) return; t.literatureError = literaturePrepareFailure('检查本地连接', error); } render();
   }
   async function prepareLiterature(mod) {
     const t = task(mod.id);
-    const messages = (mod.messages || []).filter(message => message.role === 'user' || message.role === 'assistant').slice(-30)
-      .map(message => ({ role: message.role, text: message.text }));
-    if (!messages.some(message => message.role === 'user')) { t.literatureError = '当前模块还没有用户提出的检索需求；请先讨论主题与检索规则'; render(); return; }
+    const previousPending = t.literaturePreparePending || saved[mod.id]?.literaturePreparePending;
+    if (previousPending) {
+      if (previousPending.id) return await checkLiteraturePrepareProgress(mod);
+      t.literatureError = '上一次整理请求的受理状态未知。原草稿保留；为避免重复生成，尚未再次提交。请先检查本地连接和原会话状态。'; render(); return;
+    }
+    if (t.literatureBusy || t.busy) return;
+    const projectId = root.TaskManager?.currentTaskId?.() || '', manager = literatureWorkspaceManager(mod), workspaceId = manager?.active()?.id || mod.id;
+    const current = () => task(mod.id) === t && (root.TaskManager?.currentTaskId?.() || '') === projectId
+      && (!manager || manager.active()?.id === workspaceId) && (!pending || saved[mod.id]?.sessionId === pending.sessionId);
+    const basis = literaturePrepareBasis(mod);
+    if (!basis?.messages.some(message => message.role === 'user')) { t.literatureError = '当前模块还没有用户提出的检索需求；请先讨论主题与检索规则'; render(); return; }
     t.literatureBusy = true; t.literatureError = ''; render();
+    let pending = null, phase = '连接文件会话', submitted = false;
     try {
-      const source = literatureSource(mod);
       const sid = await session(mod.id);
+      if (!current()) return;
+      const freshBasis = literaturePrepareBasis(mod);
+      if (JSON.stringify(freshBasis) !== JSON.stringify(basis)) { t.literatureError = '连接会话期间讨论、配置、模型或确认版本已变化，尚未提交整理。请按当前内容重新点击。'; return; }
+      pending = { status: 'submitting', projectId, workspaceId, sessionId: sid, source: basis.source, baseline: basis.baseline, until: basis.until,
+        selectedMode: basis.selectedMode, configSignature: basis.configSignature, contextSignature: basis.contextSignature,
+        reviewSignature: basis.reviewSignature, submittedAt: new Date().toISOString() };
+      phase = '保存整理提交标记'; saveLiteraturePreparation(mod, pending, manager, true);
+      phase = '提交规则整理'; submitted = true;
       const started = await request('/api/literature/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: sid, messages, model: t.model || account?.model, approvedDoc: mod.doc?.status === 'approved' ? mod.doc.content : '' }) });
-      let job = started;
-      while (job.status === 'running') {
-        await new Promise(resolve => setTimeout(resolve, 1200));
-        job = await request('/api/codex/job?id=' + encodeURIComponent(started.id));
+        body: JSON.stringify({ sessionId: sid, messages: basis.messages, currentConfig: basis.baseline, until: basis.until, model: basis.model, approvedDoc: basis.approvedDoc }) });
+      if (!current()) return;
+      if (!started?.id) throw new Error('后台未返回整理运行编号，无法确认是否受理。');
+      pending = { ...pending, id: started.id, status: 'accepted' }; phase = '保存已受理整理编号'; saveLiteraturePreparation(mod, pending, manager);
+      return await checkLiteraturePrepareProgress(mod, started);
+    } catch (error) {
+      if (current()) {
+        if (submitted && !pending?.id) {
+          const uncertain = error.transport === true || !error.status;
+          if (uncertain) { pending.status = 'unknown'; try { saveLiteraturePreparation(mod, pending, manager); } catch (_) {} }
+          else try { saveLiteraturePreparation(mod, null, manager, true); } catch (_) {}
+          t.literatureError = literaturePrepareFailure(phase, error) + (uncertain ? ' 本次提交受理状态未知，未自动重发；请先检查本地连接和原会话状态。' : ' 后台已拒绝本次请求，可修正后再整理。');
+        } else t.literatureError = literaturePrepareFailure(phase, error) + (pending?.id ? ' 点击“检查整理进度”读取已受理任务，不会再次提交。' : '');
       }
-      if (job.status !== 'completed') throw new Error(job.error || '整理规则失败');
-      t.literatureConfig = parseLiteratureConfig(job.text);
-      saved[mod.id] = { ...saved[mod.id], literatureConfig: t.literatureConfig, literatureSource: source };
-      persist();
-    } catch (error) { t.literatureError = error.message; }
-    finally { t.literatureBusy = false; render(); }
+    } finally { if (current()) { t.literatureBusy = false; render(); } }
+  }
+  async function prepareLiteratureAndReview(mod, options = {}) {
+    const t = task(mod.id), projectId = root.TaskManager?.currentTaskId?.() || '';
+    const manager = literatureWorkspaceManager(mod), workspaceId = manager?.active()?.id;
+    const result = options.retryResult === true ? await checkLiteraturePrepareProgress(mod, null, { retryInvalid: true }) : await prepareLiterature(mod);
+    if (!result?.ok || task(mod.id) !== t || (root.TaskManager?.currentTaskId?.() || '') !== projectId
+      || (manager && manager.active()?.id !== workspaceId) || t.literaturePreparePending || !t.literatureReviewNeedsSync) return;
+    const fresh = Store.getState().modules.find(item => item.id === mod.id);
+    if (!fresh || Store.getState().activeModuleId !== mod.id || saved[mod.id]?.literatureSource !== literatureSource(fresh)) return;
+    return openLiteratureRuleReview(fresh, { draft: true });
   }
   function manualLiterature(mod) {
     const t = task(mod.id);
@@ -641,12 +1861,12 @@
   const LITERATURE_STAGE_LABELS = { 'queued': '排队中', 'environment': '准备环境', 'browser': '启动浏览器', 'discover': '检索候选', 'search': '检索候选', 'save': '保存候选',
     'dedupe': '跨来源去重', 'fulltext': '获取全文', 'fulltext_review': '复核全文缓存', 'fulltext_ready': '待核查全文', 'extraction': '提取参数', 'extract': '提取参数', 'validation': '校验参数', 'validate': '校验参数',
     'export': '导出两表', 'verification': '等待人工验证', 'login': '等待登录', 'access_required': '等待访问权限',
-    'results_unrecognized': '待核对检索页面', 'awaiting_confirmation': '等待确认字段',
+    'results_unrecognized': '待核对检索页面', 'awaiting_confirmation': '等待确认字段', 'awaiting_segment_confirmation': '等待确认执行范围',
     'completed': '已完成', 'failed': '失败', 'cancelled': '已停止', 'interrupted': '已中断', 'running': '进行中' };
   const LITERATURE_STAGE_STATES = { 'pending': '待运行', 'running': '进行中', 'done': '已完成', 'failed': '失败', 'skipped': '已跳过' };
   const LITERATURE_COUNTER_LABELS = { 'candidates': '候选', 'uniqueGroups': '去重组', 'fulltextFetched': '已获取全文',
     'fulltextPdf': 'PDF正文', 'fulltextHtml': '网页正文文本', 'fulltextPartial': '正文结构不完整',
-    'fulltextComplete': '正文完整', 'materialsComplete': '补充材料完整', 'materialsPartial': '补充材料不全',
+    'fulltextComplete': '正文完整', 'materialsComplete': '补材无已知缺口', 'materialsPartial': '补材部分取得',
     'materialsUnverified': '补充材料未核查',
     'fulltextAbstract': '仅题录/摘要（非全文）', 'fulltextUnavailable': '待补充',
     'fulltextAttention': '待人工处理', 'fulltextPending': '尚未处理', 'fulltextSkipped': '本轮跳过（含补材）',
@@ -654,18 +1874,25 @@
   const LITERATURE_UNTIL_OPTIONS = [['discover', '仅检索候选'], ['dedupe', '续跑到去重'], ['fulltext', '续跑到全文获取'],
     ['extract', '续跑到参数提取'], ['validate', '续跑到校验'], ['export', '完整流水线']];
   const LITERATURE_STATUS_LABELS = { 'running': '进行中', 'completed': '已完成', 'needs_attention': '需要人工', 'failed': '失败', 'cancelled': '已停止' };
+  function literatureJobStatusLabel(job) {
+    return job.stage === 'prepared' && job.status === 'needs_attention' ? '待开始检索' : (LITERATURE_STATUS_LABELS[job.status] || job.status || '未知');
+  }
   const LITERATURE_SOURCE_LABELS = { 'google-scholar': 'Google Scholar', 'cnki': '中国知网', 'web-of-science': 'Web of Science 核心合集',
     'wanfang': '万方', 'scopus': 'Scopus', 'pubmed': 'PubMed',
     'pmc': 'PMC', 'openalex': 'OpenAlex', 'europe-pmc': 'Europe PMC', 'semantic-scholar': 'Semantic Scholar' };
   // 可使用平台专用浏览器的来源。PubMed 默认走 API，仅在已转官方网页且
   // 实际等待登录/验证时显示浏览器入口；其他开放 API 源不在此列。
   const LITERATURE_EXECUTABLE_SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
-  const LITERATURE_FILE_LABELS = { 'run_config.json': '运行配置（冻结）', 'processing-basis.json': '本次处理依据', 'candidates.json': '候选清单 JSON（累计）', 'candidates.csv': '候选清单 CSV（累计）',
+  const LITERATURE_FILE_LABELS = { 'run_config.json': '运行配置（冻结）', 'rule-review-confirmed.json': '已确认配置与逐项核查记录', 'processing-basis.json': '本次处理依据', 'candidates.json': '候选清单 JSON（累计）', 'candidates.csv': '候选清单 CSV（累计）',
     'dedupe/dedupe.json': '去重结果 JSON', 'dedupe/dedupe.csv': '去重结果 CSV', 'fulltext/status.json': '全文获取状态',
     'fulltext/review.json': '全文缓存复核报告', 'fulltext/materials.json': '每篇材料清单 JSON',
     'extraction/check_report.json': '提取校验报告', 'validation/validation.json': '校验结果 JSON', 'validation/validation.md': '待审核清单',
     'export/literature.csv': '文献表 CSV', 'export/literature.xlsx': '文献表 Excel', 'export/parameters.csv': '参数明细表 CSV',
-    'export/parameters.xlsx': '参数明细表 Excel', 'export/export_report.md': '导出报告' };
+    'export/parameters.xlsx': '参数明细表 Excel', 'export/export_report.md': '导出报告',
+    'fulltext/manual-actions.json': '人工待处理清单 JSON', 'fulltext/manual-actions.csv': '人工待处理清单 CSV',
+    'fulltext/manual-actions.md': '人工待处理清单说明',
+    'fulltext/skipped-materials.json': '已跳过材料缺口 JSON', 'fulltext/skipped-materials.csv': '已跳过材料缺口 CSV',
+    'fulltext/skipped-materials.md': '已跳过材料缺口说明' };
   const LITERATURE_FILE_GROUPS = [['dedupe', '去重产物'], ['fulltext', '已保存材料与全文记录'], ['extraction', '提取产物'], ['validation', '校验产物'], ['export', '导出产物']];
   function literatureStageLabel(stage) { return LITERATURE_STAGE_LABELS[stage] || String(stage || ''); }
   function literatureFileLabel(name) {
@@ -691,28 +1918,87 @@
     const files = (Array.isArray(job.files) ? job.files : []).filter(name => typeof name === 'string');
     if (!files.length) return null;
     const box = node('div', undefined, 'literature-deliverables');
-    literatureFileGroups(files).forEach(group => {
-      const section = node('div', undefined, 'literature-deliverable-group');
-      section.append(node('span', group.label + ' · ' + group.files.length + ' 个', 'literature-deliverable-title'));
+    const disclosureState = literatureDeliverables.disclosureState ||= new Map();
+    const rememberDisclosure = (details, summary, groupKey, initiallyOpen = false) => {
+      const key = JSON.stringify([job.id, groupKey]);
+      details.open = disclosureState.has(key) ? disclosureState.get(key) : initiallyOpen;
+      summary.onclick = () => disclosureState.set(key, !details.open);
+      details.ontoggle = () => { if (details.isConnected) disclosureState.set(key, details.open); };
+    };
+    const link = name => {
+      const anchor = node('a', literatureFileLabel(name));
+      anchor.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name);
+      anchor.title = name;
+      return anchor;
+    };
+    const counts = job.counters || {};
+    const gaps = [
+      ['materialsIncomplete', '材料不完整'], ['fulltextPartial', '正文不完整'],
+      ['fulltextUnavailable', '全文待补'], ['fulltextAttention', '待人工处理']
+    ].filter(([key]) => Number.isInteger(counts[key]) && counts[key] > 0)
+      .map(([key, label]) => label + ' ' + counts[key] + ' 篇');
+    if (!gaps.length) {
+      for (const [key, label] of [['materialsPartial', '补充材料不全'], ['materialsUnverified', '补充材料未核查']]) {
+        if (Number.isInteger(counts[key]) && counts[key] > 0) gaps.push(label + ' ' + counts[key] + ' 篇');
+      }
+    }
+    if (gaps.length) {
+      const notice = node('div', undefined, 'literature-deliverable-notice');
+      notice.append(node('p', '材料提醒：' + gaps.join(' · ') + '。各项可能重叠，请查看每篇材料清单。'));
+      const status = ['fulltext/materials.json', 'fulltext/status.json'].find(name => files.includes(name));
+      if (status) notice.append(link(status));
+      box.append(notice);
+    }
+    if (files.includes('validation/validation.md')) {
+      const notice = node('div', undefined, 'literature-deliverable-notice');
+      notice.append(node('p', '核查提醒：请查看待审核清单并回原件确认；自动校验完成不代表已人工核查。'));
+      notice.append(link('validation/validation.md')); box.append(notice);
+    }
+    const groups = literatureFileGroups(files);
+    groups.filter(group => group.key === 'export').concat(groups.filter(group => group.key !== 'export')).forEach(group => {
+      const isExport = group.key === 'export';
+      const section = node('details', undefined, 'literature-deliverable-group' + (isExport ? ' literature-deliverable-export' : ''));
+      const summary = node('summary', (isExport ? '最终导出文件' : group.label) + ' · ' + group.files.length + ' 个', 'literature-deliverable-title');
+      rememberDisclosure(section, summary, group.key, isExport);
+      section.append(summary);
       if (group.key === 'fulltext') section.append(node('p', '保存了文件不代表已确认全文，请以全文状态和复核报告中的分类为准。', 'codex-status'));
       const list = node('div', undefined, 'literature-deliverable-list');
       const collapsed = group.files.length > 8;
-      const link = name => {
-        const anchor = node('a', literatureFileLabel(name));
-        anchor.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name);
-        anchor.title = name;
-        return anchor;
-      };
       (collapsed ? group.files.slice(0, 6) : group.files).forEach(name => list.append(link(name)));
       if (collapsed) {
         const more = node('details', undefined, 'literature-deliverable-more');
-        more.append(node('summary', '展开其余 ' + (group.files.length - 6) + ' 个文件'));
+        const moreSummary = node('summary', '展开其余 ' + (group.files.length - 6) + ' 个文件');
+        rememberDisclosure(more, moreSummary, group.key + ':more');
+        more.append(moreSummary);
         const inner = node('div', undefined, 'literature-deliverable-list');
         group.files.slice(6).forEach(name => inner.append(link(name)));
         more.append(inner); list.append(more);
       }
       section.append(list); box.append(section);
     });
+    return box;
+  }
+  function literatureDiscoveryProgress(job) {
+    const progress = job?.discoveryProgress;
+    if (!progress || progress.source !== 'google-scholar') return null;
+    const box = node('section', undefined, 'literature-confirm literature-discovery-progress'); box.setAttribute('aria-live', 'polite');
+    box.append(node('h4', progress.trialMaxPages != null ? '谷歌学术预试进度（仅候选）' : '谷歌学术分批进度'));
+    const batch = [];
+    if (progress.batchLabel) batch.push(progress.batchLabel);
+    if (Number.isInteger(progress.yearFrom) && Number.isInteger(progress.yearTo)) batch.push(progress.yearFrom + '—' + progress.yearTo);
+    if (batch.length) box.append(node('p', '当前批次：' + batch.join(' · '), 'codex-status'));
+    const counts = [];
+    if (Number.isInteger(progress.pagesSaved) && progress.pagesSaved >= 0) counts.push('计划累计已保存 ' + progress.pagesSaved + ' 页');
+    if (Number.isInteger(progress.nextPage) && progress.nextPage >= 1) counts.push('下次检查第 ' + progress.nextPage + ' 页');
+    if (Number.isInteger(progress.processedBatches) && progress.processedBatches >= 0) counts.push('已处理批次 ' + progress.processedBatches);
+    if (Number.isInteger(progress.pendingBatches) && progress.pendingBatches >= 0) counts.push('待继续批次 ' + progress.pendingBatches);
+    if (counts.length) box.append(node('p', counts.join(' · '), 'codex-status'));
+    if (Number.isInteger(progress.coverageGaps) && progress.coverageGaps > 0) box.append(node('p', '覆盖缺口：' + progress.coverageGaps + ' 项，仍有受限或未完成的批次；不能视为检全。', 'codex-error'));
+    const statuses = { pending: '当前批次待继续；已有候选保留。', processed: '当前批次已处理，完整覆盖情况以批次记录和缺口为准。',
+      coverage_limited: '当前批次覆盖受限，已保存断点和缺口。', trial_complete: '已到本次预试页数上限，预试结束；这只验证一小部分，不代表完整检索。' };
+    if (statuses[progress.status]) box.append(node('p', statuses[progress.status], 'codex-status'));
+    if (progress.recoveryMessage) box.append(node('p', progress.recoveryMessage, 'codex-status'));
+    box.append(node('p', '刷新页面只读取已保存进度；需要继续时请显式操作，不会因刷新重新发起检索。', 'codex-status'));
     return box;
   }
   function literatureStageBar(job) {
@@ -730,11 +2016,23 @@
     if (job.resumeStage) meta.push('下一阶段：' + literatureStageLabel(job.resumeStage));
     if (job.until) meta.push('本次运行到：' + literatureStageLabel(job.until));
     if (job.counters && typeof job.counters === 'object') {
-      Object.keys(job.counters).forEach(key => {
+      ['candidates', 'fulltextFetched', 'extractedPapers', 'parameterRows'].forEach(key => {
         if (typeof job.counters[key] === 'number') meta.push((LITERATURE_COUNTER_LABELS[key] || key) + ' ' + job.counters[key]);
       });
     }
     if (meta.length) bar.append(node('span', meta.join(' · '), 'literature-stage-meta'));
+    const counterKeys = Object.keys(job.counters || {}).filter(key => typeof job.counters[key] === 'number');
+    if (counterKeys.length) {
+      const details = node('details', undefined, 'literature-stage-statistics');
+      const summary = node('summary', '详细统计 · ' + counterKeys.length + ' 项');
+      const disclosureState = literatureStageBar.disclosureState ||= new Map();
+      details.open = disclosureState.get(job.id) === true;
+      summary.onclick = () => disclosureState.set(job.id, !details.open);
+      details.ontoggle = () => { if (details.isConnected) disclosureState.set(job.id, details.open); };
+      const list = node('div', undefined, 'literature-statistics-grid');
+      counterKeys.forEach(key => list.append(node('span', (LITERATURE_COUNTER_LABELS[key] || key) + ' ' + job.counters[key])));
+      details.append(summary, list); bar.append(details);
+    }
     return bar;
   }
   function literatureConfirmFields(t, job) {
@@ -791,8 +2089,16 @@
     const drafts = t.literatureConfirmDrafts || [];
     if (!drafts.length) throw new Error('请点击“新增提取字段”，填写本次要提取的表头。');
     if (drafts.length > 200) throw new Error('每个任务最多设置200个提取字段。');
-    const fields = drafts.map(draft => ({ ...JSON.parse(JSON.stringify(draft)), key: String(draft.key || '').trim(), label: String(draft.label || '').trim(),
-      meaning: String(draft.meaning || '').trim(), unit: String(draft.unit || '').trim(), valueType: draft.valueType || 'text', required: draft.required === true }));
+    const fields = drafts.map(draft => {
+      const field = { ...JSON.parse(JSON.stringify(draft)), key: String(draft.key || '').trim(), label: String(draft.label || '').trim(),
+        meaning: String(draft.meaning || '').trim(), unit: String(draft.unit || '').trim(), valueType: draft.valueType || 'text', required: draft.required === true };
+      if (draft.conditionKeys !== undefined) {
+        const keys = typeof draft.conditionKeys === 'string' ? draft.conditionKeys.split(/[,，]/) : draft.conditionKeys;
+        if (!Array.isArray(keys) || keys.length > 32 || keys.some(key => typeof key !== 'string' || key.trim().length > 100)) throw new Error('关联条件请用逗号分隔，最多32项，每项不超过100字。');
+        field.conditionKeys = [...new Set(keys.map(key => key.trim()).filter(Boolean))];
+      }
+      return field;
+    });
     if (fields.some(field => !field.key || field.key.length > 100)) throw new Error('字段标识无效，请删除该行后重新新增。');
     if (new Set(fields.map(field => field.key)).size !== fields.length) throw new Error('字段标识重复，请删除重复行后重新新增。');
     if (fields.some(field => !field.label || field.label.length > 200)) throw new Error('请为每个字段填写表头名称（最多200字）。');
@@ -828,9 +2134,10 @@
       if (!field || typeof field !== 'object' || Array.isArray(field)
         || ['key', 'label', 'meaning', 'unit'].some(key => typeof field[key] !== 'string')
         || !['text', 'number'].includes(field.valueType) || typeof field.required !== 'boolean') throw new Error('AI 字段的名称、含义、单位或类型不完整，原字段没有改变。');
-      return { key: field.key.trim(), label: field.label.trim(), meaning: field.meaning.trim(), unit: field.unit.trim(), valueType: field.valueType, required: field.required };
+      return { key: field.key.trim(), label: field.label.trim(), meaning: field.meaning.trim(), unit: field.unit.trim(), valueType: field.valueType, required: field.required,
+        ...(field.conditionKeys !== undefined ? { conditionKeys: field.conditionKeys } : {}) };
     });
-    if (fields.length) validatedLiteratureFields({ literatureConfirmDrafts: fields });
+    const validated = fields.length ? validatedLiteratureFields({ literatureConfirmDrafts: fields }) : fields;
     if (new Set(fields.map(field => field.key.toLocaleLowerCase())).size !== fields.length
       || new Set(fields.map(field => field.label.toLocaleLowerCase())).size !== fields.length) throw new Error('AI 字段存在重复标识或表头，请重新整理。');
     const lines = value => {
@@ -838,7 +2145,7 @@
       if (!Array.isArray(items) || items.length > 100 || items.some(item => typeof item !== 'string' || item.length > 2000)) throw new Error('AI 待确认事项格式无效，请重新整理。');
       return items.filter(item => item.trim()).map(item => item.trim());
     };
-    return { fields, unresolved: lines(value.unresolved), notes: lines(value.notes) };
+    return { fields: validated, unresolved: lines(value.unresolved), notes: lines(value.notes) };
   }
   async function watchLiteratureFieldsAssist(mod, jobId) {
     const t = task(mod.id), state = literatureFieldsAssistState(mod, { id: jobId });
@@ -882,7 +2189,7 @@
   }
   async function requestLiteratureFieldsAssist(mod, mode, retry = false, autoApply = false) {
     const t = task(mod.id), job = t.literatureJob;
-    if (!job?.id || t.busy || t.literatureBusy || job.status === 'running' || root.LiteratureUI?.isBusy() || t.literatureFieldsAssistBusy) return;
+    if (!job?.id || job.segmentTask?.schemaLocked || t.busy || t.literatureBusy || job.status === 'running' || root.LiteratureUI?.isBusy() || t.literatureFieldsAssistBusy) return;
     ensureLiteratureFieldDrafts(t, job);
     const state = literatureFieldsAssistState(mod, job);
     if (state.pending?.id) { void watchLiteratureFieldsAssist(mod, job.id); return; }
@@ -1029,7 +2336,7 @@
   }
   function openLiteratureFields(mod) {
     const t = task(mod.id), job = t.literatureJob;
-    if (!job?.id || t.literatureBusy || t.busy || job.status === 'running') return;
+    if (!job?.id || t.literatureBusy || t.busy || job.status === 'running' || job.segmentTask?.schemaLocked) return;
     ensureLiteratureFieldDrafts(t, job);
     closeLiteratureFields();
     const dialog = node('dialog', undefined, 'literature-help-dialog');
@@ -1099,7 +2406,8 @@
   }
   function literatureConfirmForm(mod, t, job) {
     const box = node('div', undefined, 'literature-confirm');
-    const awaitingConfirm = job.status === 'needs_attention' && job.stage === 'awaiting_confirmation';
+    const awaitingConfirm = (job.status === 'needs_attention' && job.stage === 'awaiting_confirmation')
+      || (job.status === 'cancelled' && job.segmentTask?.fromStage === 'extract' && job.segmentTask.fieldsConfirmed !== true);
     box.append(node('p', awaitingConfirm ? '请核对表头名称、字段含义和单位；确认后继续当前任务的提取。'
       : '先讨论并填写提取字段。保存草稿后可继续获取全文，进入提取阶段时再确认。'));
     box.append(node('p', '当前任务 ' + job.id.slice(0, 8) + ' · 已有候选与全文保留；编辑字段不会重新检索。', 'codex-status'));
@@ -1114,7 +2422,9 @@
     };
     if (awaitingConfirm) tableHead.append(nextButton());
     box.append(tableHead);
-    if (awaitingConfirm) box.append(node('p', '下一步：按本表提取原任务的已保存材料，完成提取后停止。缺失材料和待确认问题会保留标记。', 'codex-status'));
+    if (awaitingConfirm) box.append(node('p', job.segmentTask
+      ? '下一步：只处理本次选定的 ' + job.segmentTask.paperIds.length + ' 篇，按本表提取已有材料，运行到“' + literatureStageLabel(job.segmentTask.until) + '”后停止。原任务保留。'
+      : '下一步：按本表提取原任务的已保存材料，完成提取后停止。缺失材料和待确认问题会保留标记。', 'codex-status'));
     if (!drafts.length) box.append(node('p', '还没有提取字段，点击“新增提取字段”开始填写。', 'codex-status'));
     const notice = node('p', t.literatureFieldsError || '草稿自动保存在本浏览器，保存草稿不会启动提取。', t.literatureFieldsError ? 'codex-error' : 'codex-status');
     notice.setAttribute('aria-live', 'polite');
@@ -1134,6 +2444,15 @@
         field.oninput = () => { draft[key] = field.value; saveDraft(); };
         wrap.append(field); cell.append(wrap);
       });
+      const conditionWrap = node('label', '每条数值需关联的条件（可选）');
+      conditionWrap.setAttribute('style', 'grid-column: 1 / -1; grid-row: 2;');
+      const conditionInput = node('input'); conditionInput.type = 'text'; conditionInput.maxLength = 3200;
+      conditionInput.setAttribute('aria-label', '第' + (index + 1) + '个字段关联条件键');
+      conditionInput.placeholder = '如指标、处理组、时间点，用逗号分隔（先讨论确认）';
+      conditionInput.value = Array.isArray(draft.conditionKeys) ? draft.conditionKeys.join(', ') : String(draft.conditionKeys || '');
+      conditionInput.disabled = disabled;
+      conditionInput.oninput = () => { draft.conditionKeys = conditionInput.value.split(/[,，]/).map(key => key.trim()).filter(Boolean); saveDraft(); };
+      conditionWrap.append(conditionInput); cell.append(conditionWrap);
       const typeWrap = node('label', '类型');
       const type = node('select');
       const types = ['text', 'number'].concat(['text', 'number'].includes(draft.valueType) ? [] : [draft.valueType]);
@@ -1152,7 +2471,7 @@
       remove.onclick = () => removeLiteratureField(mod, t, job, index); cell.append(remove);
       fields.append(cell);
     });
-    box.append(fields);
+    box.append(node('p', '先讨论确认每条数值需关联哪些条件，如指标、处理组、时间点，再用逗号分隔填写。目前各行填写的条件会合并用于本次所有数值；不确定时先留空，不会自动补造。', 'codex-status'), fields);
     const actions = node('div', undefined, 'literature-confirm-actions');
     const add = node('button', '新增提取字段', 'quiet-button'); add.type = 'button'; add.disabled = disabled || drafts.length >= 200;
     add.onclick = () => addLiteratureField(mod, t, job); actions.append(add);
@@ -1185,7 +2504,7 @@
         row.append(node('span', job.deletedAt ? '已删除，可恢复' : job.deferredOnly === true ? '已暂缓，待补检'
           : (job.processingBasis ? '现有候选后续处理 · ' : '') + (LITERATURE_STATUS_LABELS[job.status] || job.status || '') + (job.stage ? ' · ' + literatureStageLabel(job.stage) : ''), 'literature-history-status'));
         const historyMessage = job.deferredOnly === true ? '当前没有其他待检索来源，已有' + job.count + '条候选可继续处理。'
-          : job.processingBasis ? literatureProcessingBasisMessage(job) : String(job.message || '');
+          : job.processingBasis ? literatureProcessingBasisMessage(job) : literatureStatusText(job);
         const historyNote = node('span', job.processingBasis ? historyMessage : historyMessage.slice(0, 60), 'literature-history-message');
         historyNote.title = historyMessage; row.append(historyNote);
         if (job.deletedAt) {
@@ -1193,8 +2512,8 @@
           restore.disabled = !!t.literatureHistoryBusy || t.literatureJobsLoading;
           restore.onclick = () => changeLiteratureHistory(mod, job, true); row.append(restore);
         } else {
-          const open = node('button', '查看', 'quiet-button'); open.type = 'button'; open.disabled = t.literatureBusy || t.busy;
-          open.onclick = () => attachLiteratureJob(mod, job);
+          const open = node('button', '查看', 'quiet-button'); open.type = 'button'; open.title = '只读查看这次任务的最新状态和已保存文件，不切换当前工作区';
+          open.onclick = () => openLiteratureHistoryDetails(mod, job);
           const remove = node('button', '删除', 'quiet-button'); remove.type = 'button';
           remove.disabled = job.status === 'running' || !!t.literatureHistoryBusy || t.literatureJobsLoading;
           remove.title = job.status === 'running' ? '请先停止正在运行的任务' : '从历史列表隐藏，可恢复；文件和进度保留';
@@ -1207,8 +2526,134 @@
     if (t.literatureJobsError) box.append(node('p', '历史任务列表读取失败：' + t.literatureJobsError, 'codex-error'));
     return box;
   }
+  function literatureReaderSize() {
+    if (Number.isFinite(literatureReaderSize.value)) return literatureReaderSize.value;
+    try {
+      const value = Number(localStorage.getItem('research_literature_reader_size_v1'));
+      return value >= 18 && value <= 28 ? value : 20;
+    } catch (_) { return 20; }
+  }
+  function literatureReaderControls() {
+    const size = literatureReaderSize();
+    document.documentElement?.style?.setProperty('--literature-reader-size', size + 'px');
+    const controls = node('div', undefined, 'literature-reader-controls');
+    controls.setAttribute('aria-label', '文献区文字大小');
+    controls.append(node('span', '字号'));
+    const value = node('span', size + ' px'); value.setAttribute('aria-live', 'polite');
+    [-2, 2].forEach(delta => {
+      const button = node('button', delta < 0 ? 'A−' : 'A＋', 'quiet-button'); button.type = 'button';
+      button.setAttribute('aria-label', delta < 0 ? '缩小文献文字' : '放大文献文字');
+      button.disabled = delta < 0 ? size <= 18 : size >= 28;
+      button.onclick = () => {
+        const next = Math.max(18, Math.min(28, size + delta));
+        literatureReaderSize.value = next;
+        try { localStorage.setItem('research_literature_reader_size_v1', String(next)); } catch (_) {}
+        document.documentElement?.style?.setProperty('--literature-reader-size', next + 'px');
+        render();
+      };
+      if (delta < 0) controls.append(button, value); else controls.append(button);
+    });
+    return controls;
+  }
+  function compactLiteraturePanel(mod, t, box) {
+    if (!box.children || typeof box.replaceChildren !== 'function') return;
+    const children = Array.from(box.children), job = t.literatureJob;
+    const hasClass = (element, name) => String(element.className || '').split(/\s+/).includes(name);
+    const retained = [], operations = [], process = [], finalFiles = [], notices = [], attention = [];
+    children.forEach(child => {
+      if (hasClass(child, 'literature-overview') || hasClass(child, 'literature-task-selector')) retained.push(child);
+      else if (hasClass(child, 'literature-deliverables')) {
+        Array.from(child.children).forEach(section => {
+          if (hasClass(section, 'literature-deliverable-export')) finalFiles.push(section);
+          else if (hasClass(section, 'literature-deliverable-notice')) notices.push(section);
+          else process.push(section);
+        });
+      } else if (hasClass(child, 'literature-material-skipped')) attention.push(child);
+      else if (hasClass(child, 'literature-history') || (child.tagName === 'DETAILS' && !hasClass(child, 'literature-config') && !hasClass(child, 'literature-guidance'))) process.push(child);
+      else if (hasClass(child, 'literature-confirm') || hasClass(child, 'codex-error')) attention.push(child);
+      else operations.push(child);
+    });
+    const pieces = [];
+    if (job) {
+      const state = literatureJobStatusLabel(job);
+      pieces.push((job.until ? literatureStageLabel(job.until) + ' · ' : '') + state);
+      const counters = job.counters || {};
+      const exported = job.status === 'completed' && job.files?.some(name => /^export\/literature\.(xlsx|csv)$/.test(name));
+      const records = Number.isSafeInteger(counters.uniqueGroups) ? counters.uniqueGroups : counters.candidates;
+      if (exported && Number.isSafeInteger(records)) pieces.push('文献表 ' + records + ' 条文献记录');
+      else if (Number.isSafeInteger(counters.candidates)) pieces.push('候选 ' + counters.candidates);
+      if (Number.isSafeInteger(counters.fulltextFetched)) pieces.push('已获取正文 ' + counters.fulltextFetched + ' 篇');
+      if (Number.isSafeInteger(counters.fulltextPdf)) pieces.push('PDF ' + counters.fulltextPdf + ' 篇');
+      if (Number.isSafeInteger(counters.fulltextHtml)) pieces.push('网页正文 ' + counters.fulltextHtml + ' 篇');
+      if (Number.isSafeInteger(counters.parameterRows)) pieces.push('参数记录 ' + counters.parameterRows + ' 行');
+    } else pieces.push('尚未检索 · 先讨论需求并核对设置');
+    const summary = node('p', pieces.join('　·　'), 'literature-task-summary');
+    summary.setAttribute('aria-live', 'polite');
+    let contextId = '';
+    try { if (typeof literatureWorkspaceManager === 'function') contextId = literatureWorkspaceManager(mod)?.active()?.id || ''; } catch (_) {}
+    const key = [mod.id, contextId, job?.id || 'draft'].join(':');
+    const states = compactLiteraturePanel.disclosureState || (compactLiteraturePanel.disclosureState = new Map());
+    function disclosure(name, className, suffix, initial) {
+      const element = node('details', undefined, className), stateKey = key + ':' + suffix;
+      element.open = states.has(stateKey) ? states.get(stateKey) : initial;
+      const heading = node('summary', name);
+      // Initial open also emits toggle; only an explicit click records a preference.
+      heading.onclick = event => { if (!event?.defaultPrevented) states.set(stateKey, !element.open); };
+      element.append(heading); return element;
+    }
+    const settings = disclosure('检索与执行设置（展开操作）', 'literature-workspace-section', 'operations', !job);
+    operations.forEach(child => settings.append(child));
+    const fileCount = Array.isArray(job?.files) ? job.files.filter(name => !String(name).startsWith('export/')).length : 0;
+    const files = disclosure('材料、过程文件与历史记录' + (fileCount ? ' · ' + fileCount + ' 个文件' : ''), 'literature-process-files', 'files', false);
+    process.forEach(child => files.append(child));
+    box.replaceChildren(...retained, summary);
+    // A running task always keeps its stop action visible, even with settings closed.
+    if (job?.status === 'running') {
+      const toolbar = operations.find(child => hasClass(child, 'literature-toolbar'));
+      const stop = toolbar && Array.from(toolbar.children).find(child => child.tagName === 'BUTTON' && child.textContent === '停止');
+      if (stop) box.append(stop);
+    }
+    attention.forEach(child => box.append(child));
+    const body = disclosure('任务详情与全部成果（点击展开 / 收起）', 'literature-panel-body', 'all', !job || ['running', 'needs_attention'].includes(job.status));
+    if (notices.length) {
+      const short = node('div', undefined, 'literature-compact-warning');
+      const missing = job?.counters?.materialsIncomplete;
+      short.append(node('span', Number.isFinite(missing) && missing > 0 ? '材料仍有缺口 ' + missing + ' 篇；结果需回原件核查。' : '结果需回原件核查。'));
+      notices.forEach(child => {
+        const source = child.querySelector?.('a');
+        if (source) {
+          const link = node('a', source.textContent, 'literature-warning-link'); link.href = source.href; short.append(link);
+        }
+      });
+      box.append(short);
+      const warnings = node('div', undefined, 'literature-compact-notices');
+      notices.forEach(child => warnings.append(child)); body.append(warnings);
+    }
+    if (finalFiles.length) {
+      const quick = node('div', undefined, 'literature-primary-downloads');
+      [['parameters', '参数明细表'], ['literature', '文献表']].forEach(([stem, label]) => {
+        const name = ['export/' + stem + '.xlsx', 'export/' + stem + '.csv'].find(candidate => job.files.includes(candidate));
+        if (!name) return;
+        const link = node('a', label + (name.endsWith('.xlsx') ? ' Excel' : ' CSV'), 'quiet-button');
+        link.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name); quick.append(link);
+      });
+      if (quick.children.length) box.append(quick);
+      const exports = node('div', undefined, 'literature-deliverables literature-main-results');
+      finalFiles.forEach(child => exports.append(child)); body.append(exports);
+    }
+    body.append(settings, files); box.append(body);
+    // Keep native history/log disclosures open during the same job's polling updates.
+    Array.from(box.querySelectorAll?.('details') || []).forEach(details => {
+      const heading = Array.from(details.children).find(child => child.tagName === 'SUMMARY');
+      if (!heading || typeof heading.onclick === 'function') return;
+      const stateKey = key + ':native:' + (details.className || heading.textContent.split(' · ')[0]);
+      if (states.has(stateKey)) details.open = states.get(stateKey);
+      heading.onclick = event => { if (!event?.defaultPrevented) states.set(stateKey, !details.open); };
+    });
+  }
   function literaturePanel(mod, t, container = panel) {
     const box = node('div', undefined, 'literature-connector');
+    const scholarTrial = (t.literatureJob?.config || t.literatureConfig)?.scholarPlan?.trialMaxPages != null;
     let timeoutAttention = null;
     const overview = node('div', undefined, 'literature-overview');
     const introduction = node('div');
@@ -1216,23 +2661,213 @@
     const help = node('button', '使用说明', 'quiet-button'); help.type = 'button';
     help.onclick = () => document.dispatchEvent(new CustomEvent('literature-help-open'));
     overview.append(introduction, help); box.append(overview);
+    if (root.LiteratureConfirmedPlan) {
+      const confirmed = node('button', '载入五库已确认方案', 'primary-button'); confirmed.type = 'button';
+      confirmed.disabled = literatureWorkspaceBusy(mod.id);
+      confirmed.onclick = () => root.LiteratureConfirmedPlan.open({
+        onPrepared: job => {
+          const manager = literatureWorkspaceManager(mod);
+          if (!manager) throw new Error('当前文献工作区尚未就绪');
+          const result = manager.create({ name: job.config.topic.slice(0, 80), mode: 'formal',
+            seedClient: { backend: task(mod.id).backend, model: task(mod.id).model, literatureJobId: job.id,
+              literatureConfig: JSON.parse(JSON.stringify(job.config)), literatureUntil: 'discover', literatureConfigOpen: false } });
+          if (!result.ok) throw new Error(result.error);
+          attachLiteratureJob(mod, job); root.ModuleSpace?.render();
+        }
+      });
+      overview.append(confirmed);
+      if (t.literatureJob?.config?.screeningPolicy) {
+        const screening = node('button', '筛选记录与待定全文', 'quiet-button'); screening.type = 'button';
+        screening.disabled = literatureWorkspaceBusy(mod.id);
+        screening.onclick = () => root.LiteratureConfirmedPlan.open({ job: t.literatureJob });
+        overview.append(screening);
+      }
+    }
+    if (typeof literatureReaderControls === 'function') overview.append(literatureReaderControls());
+    if (typeof literatureTaskSelector === 'function') {
+      const selector = literatureTaskSelector(mod, t);
+      if (selector) box.append(selector);
+    }
     const row = node('div', undefined, 'codex-toolbar literature-toolbar');
-    const prepare = node('button', t.literatureBusy ? '处理中…' : '从对话整理规则', 'quiet-button');
-    prepare.type = 'button'; prepare.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy(); prepare.onclick = () => prepareLiterature(mod); row.append(prepare);
-    if (!t.literatureConfig) {
+    const readOnlyResults = !!t.literatureJob?.id && saved[mod.id]?.literatureReadOnlyJobId === t.literatureJob.id;
+    const segment = t.literatureJob?.segmentTask;
+    const preparePending = t.literaturePreparePending || saved[mod.id]?.literaturePreparePending;
+    const prepareEnded = ['failed', 'unavailable', 'invalid_result', 'basis_changed'].includes(preparePending?.status);
+    const prepare = node('button', t.literatureBusy ? '处理中…' : prepareEnded ? '本次整理已结束' : preparePending?.id ? '检查整理进度' : preparePending ? '整理受理状态未知' : '从对话更新规则并核查', 'quiet-button');
+    prepare.type = 'button'; prepare.disabled = readOnlyResults || t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || prepareEnded || !!preparePending && !preparePending.id;
+    prepare.onclick = () => prepareLiteratureAndReview(mod); if (!segment) row.append(prepare);
+    if (!segment && preparePending) {
+      const recovery = node('section', undefined, 'literature-confirm literature-prepare-recovery');
+      recovery.append(node('h4', prepareEnded ? '本次规则整理未应用' : preparePending.id ? '规则整理进度已保留' : '规则整理受理状态未知'));
+      recovery.append(node('p', '本次整理结果尚未写入。下方显示原草稿，不能据此认为本轮新检索式已经生效。', 'codex-status'));
+      recovery.append(node('p', prepareEnded
+        ? literaturePrepareFailure('本次规则整理', new Error(preparePending.error || '运行记录无法恢复，或整理依据已变化。')) + ' 不会继续反复读取或自动提交。'
+        : preparePending.id
+        ? '同一次整理编号：' + preparePending.id + '。刷新或断线后点击“检查整理进度”只读取该任务，不会重新提交或启动文献检索。'
+        : '未收到运行编号，不能确定后台是否已受理。原草稿和确认记录保留；不会自动重发。', 'codex-status'));
+      if (!prepareEnded) {
+        const checkPrepare = node('button', preparePending.id ? '检查整理进度' : '检查本地连接', 'quiet-button'); checkPrepare.type = 'button';
+        checkPrepare.disabled = t.literatureBusy || t.busy; checkPrepare.onclick = () => preparePending.id ? checkLiteraturePrepareProgress(mod) : checkLiteraturePrepareConnection(mod); recovery.append(checkPrepare);
+      }
+      if (preparePending.status === 'invalid_result' && preparePending.id) {
+        const reread = node('button', '重新读取这次整理结果', 'quiet-button'); reread.type = 'button';
+        reread.disabled = readOnlyResults || t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+        reread.onclick = () => prepareLiteratureAndReview(mod, { retryResult: true });
+        recovery.append(reread, node('p', '重新读取已收到的回复，不再次调用AI。原回复已不存在时会明确提示；只有点击“结束本次并重新整理”才会生成新的回复。', 'codex-status'));
+      }
+      recovery.append(node('p', '“放弃本次等待”只结束页面等待，不停止可能已受理的后台整理，也不修改原草稿或确认。放弃后，再次点击“从对话更新规则并核查”才会新提交。', 'codex-status'));
+      const abandon = node('button', '放弃本次等待', 'quiet-button'); abandon.type = 'button'; abandon.disabled = t.literatureBusy || t.busy;
+      abandon.onclick = () => endLiteraturePreparation(mod); recovery.append(abandon);
+      if (prepareEnded) {
+        recovery.append(node('p', '“结束本次并重新整理”会清除这次页面等待，按当前对话新提交一次规则整理；不会启动文献检索，原草稿和确认在新草稿生成前保留。', 'codex-status'));
+        const retryPrepare = node('button', '结束本次并重新整理', 'quiet-button'); retryPrepare.type = 'button';
+        retryPrepare.disabled = readOnlyResults || t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+        retryPrepare.onclick = () => { if (endLiteraturePreparation(mod)) return prepareLiteratureAndReview(mod); }; recovery.append(retryPrepare);
+      }
+      box.append(recovery);
+    }
+    if (!t.literatureConfig && !segment) {
       const manual = node('button', '手动填写', 'quiet-button'); manual.type = 'button'; manual.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
       manual.onclick = () => manualLiterature(mod); row.append(manual);
     }
     const job = t.literatureJob;
-    const awaitingConfirm = !!job && job.status === 'needs_attention' && job.stage === 'awaiting_confirmation';
-    const awaitingAccess = !!job && job.status === 'needs_attention' && !awaitingConfirm;
+    if (job?.config?.researchPlan) {
+      const handoff = node('section', undefined, 'literature-confirm');
+      handoff.append(node('h4', '此库已确认方案'), node('p', '检索式与篇关摘规则已绑定。按库分阶段处理；每批导入累计保存，导入完成不等于已覆盖全部检索结果。', 'codex-status'));
+      const queryDetails = node('details'); queryDetails.append(node('summary', '查看本次实际检索式与筛选规则'));
+      const queryText = job.config.scholarPlan?.topics?.map(topic => topic.id + ' · ' + topic.query).join('\n\n') || job.config.query;
+      const pre = node('pre', queryText); pre.style.whiteSpace = 'pre-wrap'; pre.style.overflowWrap = 'anywhere'; pre.style.maxHeight = '260px'; pre.style.overflow = 'auto';
+      queryDetails.append(pre, node('p', '筛选版本：' + job.config.screeningPolicy.id));
+      const policy = node('pre', job.config.screeningPolicy.text); policy.style.whiteSpace = 'pre-wrap'; policy.style.maxHeight = '240px'; policy.style.overflow = 'auto'; queryDetails.append(policy);
+      handoff.append(queryDetails);
+      const copyQuery = node('button', '复制本次检索式', 'quiet-button'); copyQuery.type = 'button';
+      copyQuery.onclick = async () => { try { await navigator.clipboard.writeText(queryText); copyQuery.textContent = '已复制'; } catch (_) { copyQuery.textContent = '请展开上方检索式手动复制'; } }; handoff.append(copyQuery);
+      const file = node('input'); file.type = 'file'; file.accept = '.ris,.bib,.bibtex,.csv,.tsv,.txt'; file.hidden = true;
+      const importButton = node('button', '导入此库题录（可分批）', 'quiet-button'); importButton.type = 'button';
+      importButton.disabled = readOnlyResults || literatureWorkspaceBusy(mod.id) || job.stages?.extract === 'done';
+      importButton.onclick = () => file.click();
+      file.onchange = async () => {
+        const selected = file.files?.[0]; if (!selected) return;
+        if (selected.size > 3 * 1024 * 1024) { t.literatureError = '请将题录按不超过3MB的批次导入；已导入批次会保留。'; render(); return; }
+        t.literatureBusy = true; t.literatureError = ''; importButton.disabled = true;
+        try {
+          const content = await selected.text();
+          await request('/api/literature/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobId: job.id, source: job.config.sources[0], filename: selected.name, content }) });
+          const fresh = await request('/api/literature/job?id=' + encodeURIComponent(job.id)); applyLiteratureJob(mod, fresh);
+          t.literatureUntil = 'fulltext'; saved[mod.id] = { ...saved[mod.id], literatureUntil: 'fulltext' }; persist();
+        } catch (error) { t.literatureError = error.message; }
+        finally { t.literatureBusy = false; render(); }
+      };
+      handoff.append(importButton, file, node('p', '可导入RIS、BibTeX、CSV或TSV，请在数据库导出时包含摘要、关键词和DOI。缺失信息会保留为待定。', 'codex-status'));
+      if (job.config.sources.some(source => ['cnki', 'web-of-science', 'scopus', 'wanfang'].includes(source))) handoff.append(node('p', '完整字段式需要数据库高级／专业检索入口。平台只在能核对该入口和实际检索条件时继续；无法识别时会停下，也可在原库检索后导出题录到这里累计导入。', 'codex-status'));
+      box.append(handoff);
+    }
+    if (!segment && !job?.config?.researchPlan && (job?.id || saved[mod.id]?.literatureJobId)) {
+      const frozen = node('section', undefined, 'literature-confirm literature-frozen-review');
+      frozen.append(node('h4', '本次任务的已确认配置'), node('p', '查看启动时保存的逐项核查记录。该记录只读，不修改当前设置或继续运行任务。', 'codex-status'));
+      const viewConfirmed = node('button', '查看已确认配置', 'quiet-button'); viewConfirmed.type = 'button';
+      viewConfirmed.onclick = () => openLiteratureRuleReview(mod); frozen.append(viewConfirmed); box.append(frozen);
+      if (job?.id && !readOnlyResults && !job.materialReplenishment?.parentJobId) {
+        const fromHistory = saved[mod.id]?.literatureHistoryLoadedJobId === job.id || t.literatureRevisionNeedsHistoryImport === true
+          || /原任务规则快照不属于当前文献(?:会话|任务|工作区)/.test(t.literatureError || '');
+        const revise = node('button', fromHistory ? '从历史配置建立修改草稿' : '修改配置并继续', 'primary-button'); revise.type = 'button';
+        revise.disabled = t.busy || t.literatureBusy || job.status === 'running' || !!job.deletedAt || !!root.LiteratureUI?.isBusy() || !!root.ModuleSpace?.isBusy();
+        revise.title = fromHistory ? '将历史配置显式导入当前文献工作区，保留当前讨论和最新草稿；重新核查后才会建立新任务。'
+          : '从本任务冻结配置建立修订草稿。确认后用新配置开始新任务，原结果和任务保留，不复用旧断点。';
+        revise.onclick = () => reviseLiteratureConfiguration(mod, { fromHistory }); frozen.append(revise);
+        if (t.literatureConfig) {
+          const latestDraft = node('section', undefined, 'literature-confirm literature-review-draft-entry');
+          latestDraft.append(node('h4', '当前规则草稿'), node('p', saved[mod.id]?.literatureSource !== literatureSource(mod)
+            ? '讨论已更新，但尚未成功整理进当前草稿；核查页显示已有实际值，不表示新检索式已经写入。可先继续整理或核对。'
+            : '直接核查当前草稿的实际检索式；旧任务及其冻结记录保留，不会先复制旧配置，也不会开始检索。', 'codex-status'));
+          const checkDraft = node('button', '继续逐项核查', 'primary-button'); checkDraft.type = 'button'; checkDraft.disabled = t.busy || t.literatureBusy || !!root.LiteratureUI?.isBusy();
+          checkDraft.title = '直接打开当前规则草稿；旧运行的冻结配置仍可单独只读查看。';
+          checkDraft.onclick = () => openLiteratureRuleReview(mod, { draft: true }); latestDraft.append(checkDraft); box.append(latestDraft);
+        }
+      }
+      if (saved[mod.id]?.literatureRevisionDraft) {
+        const draft = node('button', saved[mod.id].literatureRevisionDraft.job?.id ? '回到修改后的任务' : '回到修改草稿', 'quiet-button'); draft.type = 'button';
+        draft.disabled = t.busy || t.literatureBusy || job?.status === 'running'; draft.onclick = () => swapLiteratureRevision(mod, false); frozen.append(draft);
+      }
+      if (saved[mod.id]?.literatureRevisionOriginal) {
+        const back = node('button', '返回原任务', 'quiet-button'); back.type = 'button';
+        back.disabled = t.busy || t.literatureBusy || job?.status === 'running'; back.onclick = () => swapLiteratureRevision(mod, true); frozen.append(back);
+      }
+    }
+    if (!segment && !job?.id && !saved[mod.id]?.literatureJobId && saved[mod.id]?.literatureRevisionParentId) {
+      const revision = node('section', undefined, 'literature-confirm literature-revision-draft');
+      revision.append(node('h4', '修改配置草稿'), node('p', '来源任务 ' + saved[mod.id].literatureRevisionParentId.slice(0, 8)
+        + '。确认后按新配置建立新的检索任务；原任务和已有结果保留，不复用旧断点。', 'codex-status'));
+      const back = node('button', '返回原任务', 'quiet-button'); back.type = 'button'; back.disabled = t.busy || t.literatureBusy;
+      back.onclick = () => swapLiteratureRevision(mod, true); revision.append(back); box.append(revision);
+    }
+    const replenishing = !!job?.materialReplenishment?.parentJobId;
+    if (job?.id && job.files?.some(name => /^(?:fulltext|extraction|validation|export)\//.test(name))) {
+      const entry = node('section', undefined, 'literature-confirm literature-segment-entry');
+      const fromExisting = node('button', '从已有成果开始', 'quiet-button'); fromExisting.type = 'button';
+      fromExisting.disabled = t.literatureBusy || t.busy || job.status === 'running' || !!job.deletedAt || !!root.LiteratureUI?.isBusy();
+      fromExisting.title = '自由选择文献和提取、校验、导出范围，创建独立暂停任务；原成果保留。';
+      fromExisting.onclick = () => openLiteratureSegmentDialog(mod); entry.append(fromExisting);
+      entry.append(node('span', ' 选择文献与执行范围，建立独立暂停任务。', 'codex-status')); box.append(entry);
+    }
+    if (segment) box.append(literatureSegmentSummary(mod, t, job, readOnlyResults));
+    const relatedChildId = job?.id && saved[mod.id]?.literatureMaterialsParentId === job.id ? saved[mod.id]?.literatureMaterialsChildId : null;
+    if (job?.canReplenishMaterials === true || replenishing || relatedChildId) {
+      const materialsAction = node('section', undefined, 'literature-confirm literature-replenishment');
+      const candidateCount = replenishing ? job.materialReplenishment.candidateCount : job.counters?.candidates ?? job.count;
+      materialsAction.append(node('p', '沿用原' + (Number.isSafeInteger(candidateCount) ? candidateCount : '待核对的')
+        + '篇候选；仅补材料；原提取和导出结果保留。', 'codex-status'));
+      const actions = node('div', undefined, 'literature-confirm-actions');
+      if (job.canReplenishMaterials === true && !readOnlyResults) {
+        const replenish = node('button', '补齐PDF和补充材料', 'primary-button'); replenish.type = 'button';
+        replenish.disabled = t.busy || t.literatureBusy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
+        replenish.title = '按原任务冻结候选建立独立材料补齐任务；不重新检索、不重做提取或导出。';
+        replenish.onclick = () => replenishLiteratureMaterials(mod); actions.append(replenish);
+      }
+      if (replenishing) {
+        const original = node('button', '查看原提取和导出结果', 'quiet-button'); original.type = 'button';
+        original.disabled = t.busy || t.literatureBusy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
+        original.onclick = () => viewLiteratureMaterialsRelatedJob(mod, job.materialReplenishment.parentJobId); actions.append(original);
+      } else if (relatedChildId) {
+        materialsAction.append(node('p', '当前只读查看原提取和导出结果。', 'codex-status'));
+        const child = node('button', '查看材料补齐任务', 'quiet-button'); child.type = 'button';
+        child.disabled = t.busy || t.literatureBusy || !!root.LiteratureUI?.isBusy();
+        child.onclick = () => viewLiteratureMaterialsRelatedJob(mod, relatedChildId); actions.append(child);
+      }
+      materialsAction.append(actions); box.append(materialsAction);
+    }
+    const awaitingConfirm = !!job && ((job.status === 'needs_attention' && job.stage === 'awaiting_confirmation')
+      || (job.status === 'cancelled' && segment?.fromStage === 'extract' && segment.fieldsConfirmed !== true));
+    const awaitingAccess = !!job && job.status === 'needs_attention' && !awaitingConfirm && job.stage !== 'awaiting_segment_confirmation';
+    const awaitingStart = awaitingAccess && job.stage === 'prepared';
     const sameConfig = !t.literatureConfig || !job?.config || sameLiteratureConfig(job.config, t.literatureConfig);
-    const start = node('button', '确认配置并检索', 'primary-button');
-    start.type = 'button'; start.disabled = t.literatureBusy || !!root.LiteratureUI?.isBusy() || t.busy || !t.literatureConfig || (awaitingAccess && sameConfig);
+    if (!segment && !job?.id && !saved[mod.id]?.literatureJobId && t.literatureConfig) {
+      const review = t.literatureRuleReview;
+      const reviewEntry = node('section', undefined, 'literature-confirm literature-review-draft-entry');
+      reviewEntry.append(node('h4', saved[mod.id]?.literatureRevisionParentId ? '修改配置草稿 · 继续核查' : '本次规则草稿 · 逐项核查'));
+      const reviewButton = node('button', review?.id ? '继续逐项核查' : '开始逐项核查', 'quiet-button'); reviewButton.type = 'button';
+      reviewButton.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+      reviewButton.onclick = () => openLiteratureRuleReview(mod); reviewEntry.append(reviewButton);
+      if (review?.id) {
+        let currentReview = false;
+        try { currentReview = root.LiteratureRuleReview?.matches(review, effectiveLiteratureReviewConfig(t), t.literatureUntil || 'discover', literatureSource(mod)); } catch (_) {}
+        reviewEntry.append(node('span', t.literatureReviewNeedsSync ? '新草稿待同步核查 · 原确认历史保留'
+          : currentReview && saved[mod.id]?.literatureReviewAppliedRevision === review.revision
+            ? '逐项核查已确认并应用' : '已确认 ' + (review.progress?.confirmed ?? 0) + '/' + (review.progress?.total ?? review.items?.length ?? 14) + ' · 修改配置后需核对受影响项', 'codex-status'));
+      }
+      else if (t.literatureReviewNeedsSync) reviewEntry.append(node('span', '新草稿待逐项核查', 'codex-status'));
+      box.append(reviewEntry);
+    }
+    const start = node('button', saved[mod.id]?.literatureRevisionParentId && !job?.id ? '按修改后的配置开始'
+      : t.literatureRuleReview?.ready ? '按已确认配置检索' : '确认配置并检索', 'primary-button');
+    start.type = 'button'; start.disabled = t.literatureBusy || !!root.LiteratureUI?.isBusy() || t.busy || !t.literatureConfig || !!preparePending || !!job?.id || !!saved[mod.id]?.literatureJobId || (awaitingAccess && sameConfig);
+    if (preparePending) start.title = '本次规则整理尚未应用；先读取整理结果或结束后重新整理，再核查新草稿。';
+    if (job?.id || saved[mod.id]?.literatureJobId) start.title = '本任务已有检索记录；正式检索或其他主题请先点击“新建文献任务”。';
     if (awaitingAccess && sameConfig) start.title = '原任务等待人工处理；请用下方“检查并继续”，保留已有来源的结果。';
+    if (awaitingStart && sameConfig) start.title = '此库任务已准备，请用下方“开始检索”，无需重建任务。';
     if (awaitingConfirm) start.title = '当前任务停在字段确认关口；本按钮发起一次新检索，继续原任务请在字段表格点击“核对表格并开始提取”。';
-    start.onclick = () => startLiterature(mod); row.append(start);
-    if (job && ['running', 'needs_attention'].includes(job.status)) {
+    start.onclick = () => startLiterature(mod); if (!segment) row.append(start);
+    if (job && (job.status === 'running' || (!segment && job.status === 'needs_attention'))) {
       const stop = node('button', '停止', 'quiet-button'); stop.type = 'button';
       stop.onclick = async () => {
         try { t.literatureJob = await request('/api/literature/cancel?id=' + encodeURIComponent(t.literatureJob.id), { method: 'POST' }); }
@@ -1241,16 +2876,30 @@
       };
       row.append(stop);
     }
-    const effectiveResumeStage = job?.resumeStage || (job?.status === 'completed' && (job?.files?.includes('candidates.json') || job?.files?.includes('candidates.csv')) ? (job?.files?.includes('dedupe/dedupe.json') ? 'fulltext' : 'dedupe') : null);
+    const effectiveResumeStage = literatureResumeStage(job);
     const canAdvance = !!job && !!effectiveResumeStage && ['completed', 'failed', 'needs_attention'].includes(job.status)
-      && job.status !== 'needs_attention';
-    if (canAdvance && !job.cnkiRetryPaperId) {
+      && job.status !== 'needs_attention' && !(scholarTrial && job.status === 'completed');
+    if (canAdvance && !readOnlyResults && !job.cnkiRetryPaperId) {
       const label = job.status === 'completed' ? '继续下一阶段' : job.status === 'failed' ? (job.stage === 'interrupted' ? '继续中断的任务' : '重试当前阶段') : '继续';
       const advance = node('button', label, job.status === 'completed' ? 'primary-button' : 'quiet-button'); advance.type = 'button'; advance.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
-      advance.title = '继续原任务，运行到上方所选阶段；请先选择下一阶段或更后的目标。';
+      advance.title = segment ? '继续本次已固定的执行范围，复用前置成果。' : '继续原任务，运行到上方所选阶段；请先选择下一阶段或更后的目标。';
       advance.onclick = () => continueLiterature(mod); row.append(advance);
     }
-    if (job?.status === 'cancelled' && job.resumeStage === 'fulltext' && !job.cnkiRetryPaperId) {
+    if (segment && job.status === 'cancelled' && effectiveResumeStage && !readOnlyResults) {
+      const needsFields = segment.fromStage === 'extract' && segment.fieldsConfirmed !== true;
+      const resumeSegment = node('button', needsFields ? '核对表头后继续' : '继续本次执行范围', 'primary-button'); resumeSegment.type = 'button';
+      resumeSegment.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+      resumeSegment.title = '沿用本次选定文献、已确认字段与结束阶段；逐篇完成的成果保留。';
+      resumeSegment.onclick = () => needsFields ? openLiteratureFields(mod)
+        : continueLiterature(mod, { until: segment.until, ...(segment.schemaLocked ? { confirmSegment: true } : {}) }); row.append(resumeSegment);
+    }
+    if (job?.status === 'cancelled' && job.config?.researchPlan && effectiveResumeStage && !readOnlyResults && !segment) {
+      const resume = node('button', '从已保存断点继续', 'primary-button'); resume.type = 'button';
+      resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+      resume.title = '沿用原检索式和筛选规则，复用已完成记录；不会自动跳过失败项。';
+      resume.onclick = () => continueLiterature(mod, { until: job.until || effectiveResumeStage, resumeConfirmed: true }); row.append(resume);
+    }
+    if (job?.status === 'cancelled' && !job.config?.researchPlan && job.resumeStage === 'fulltext' && !readOnlyResults && !job.cnkiRetryPaperId) {
       const stopped = node('button', '按原任务继续（跳过失败项）', 'primary-button'); stopped.type = 'button';
       stopped.title = '恢复原任务冻结设置与已有候选，保留已存材料，跳过无法取得的正文或补材；只运行到全文获取。';
       stopped.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
@@ -1261,50 +2910,122 @@
       const materials = node('button', '每篇材料清单', 'quiet-button'); materials.type = 'button';
       materials.title = '只读查看正文PDF、网页正文和补充材料的保存与读取状态，不运行任务。';
       materials.onclick = () => openLiteratureMaterials(mod); row.append(materials);
-      if (job.canReviewFulltext === true) {
+      if (job.canReviewFulltext === true && !readOnlyResults && !replenishing && !segment) {
         const review = node('button', '复核已保存全文', 'quiet-button'); review.type = 'button';
         review.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
         review.title = '仅离线复核缓存，保留原文件和备份；不打开网页、不重新检索或下载。';
         review.onclick = () => reviewLiteratureFulltext(mod); row.append(review);
       }
-      const editFields = node('button', '设置提取字段', 'quiet-button'); editFields.type = 'button';
+      const editFields = node('button', '设置提取字段', 'quiet-button'); editFields.type = 'button'; editFields.hidden = readOnlyResults || replenishing || !!segment?.schemaLocked;
       editFields.disabled = t.literatureBusy || t.busy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
       editFields.onclick = () => openLiteratureFields(mod); row.append(editFields);
     }
     const untilWrap = node('label', '本次做到哪一步');
     const until = node('select'); until.setAttribute('aria-label', '本次运行到');
-    LITERATURE_UNTIL_OPTIONS.forEach(([value, title]) => { const option = node('option', title); option.value = value; until.append(option); });
-    until.value = t.literatureUntil || 'discover'; until.disabled = t.literatureBusy || t.busy;
-    until.onchange = () => { t.literatureUntil = until.value; saved[mod.id] = { ...saved[mod.id], literatureUntil: t.literatureUntil }; persist(); };
-    untilWrap.append(until); row.append(untilWrap);
+    (scholarTrial ? [['discover', '仅检索候选（预试不获取全文）']] : replenishing ? [['fulltext', '仅补齐全文与补充材料']] : LITERATURE_UNTIL_OPTIONS).forEach(([value, title]) => { const option = node('option', value === 'fulltext' && job?.config?.screeningPolicy ? '篇关摘筛选并获取全文' : title); option.value = value; until.append(option); });
+    until.value = scholarTrial ? 'discover' : replenishing ? 'fulltext' : t.literatureUntil || 'discover'; until.disabled = scholarTrial || replenishing || readOnlyResults || t.literatureBusy || t.busy;
+    until.onchange = () => { t.literatureUntil = until.value; saved[mod.id] = { ...saved[mod.id], literatureUntil: t.literatureUntil }; persist(); render(); };
+    untilWrap.append(until); if (!segment) row.append(untilWrap);
     box.append(row);
     const flowNotes = node('details', undefined, 'literature-deliverable-group');
     flowNotes.append(node('summary', '流程与登录说明（点击展开）'));
     flowNotes.append(node('p', '讨论需求 → 确认设置 → 执行 → 核查结果', 'codex-status'));
     flowNotes.append(node('p', '候选检索支持 ' + Object.values(LITERATURE_SOURCE_LABELS).join(' / ') + '；开放 API 源免验证码。', 'codex-status'));
     flowNotes.append(node('p', '登录流程：需要登录、验证或机构权限时，平台会尝试自动打开本任务的官方页面。请在平台专用检索浏览器操作，它会保存该浏览器的登录状态；普通 Edge/Chrome 的登录不会自动共享。完成后回到本平台点击“检查并继续”，任务才会恢复。', 'codex-status'));
-    flowNotes.append(node('p', '后台对每次页面加载或候选获取设置1分钟时限，超时后暂停并保留已保存结果；正式检索每页单独计时，依赖准备另行提示。', 'codex-status'));
+    flowNotes.append(node('p', '全文页面按加载、生成和传输进展等待，确认就绪后取材；长时间没有新进展或达到活动保护上限时，保留尚未就绪的页面，稍后显式重新检查。人工登录与等待不限时。', 'codex-status'));
     if (job?.files?.includes('fulltext/status.json') || job?.resumeStage === 'fulltext') {
       flowNotes.append(node('p', job.fulltextFailurePolicy === 'skip'
-        ? '全文获取逐篇处理：无法取得的正文或补充材料记录原因后跳过，继续下一篇；登录、验证或限流页面保留，同一受限站点本轮不反复请求。已有材料保留，不重复下载；本地文件校验问题仍需处理。'
-        : '全文获取逐篇处理：同篇文献复用任务页，确认文件和状态已保存后关闭；文件生成或下载中会等待完成，登录、验证、限流或错误时保留原页并暂停。摘要与待补充项不自动重复请求。', 'codex-status'));
+        ? '全文获取逐篇处理：已确认无法取得的正文或补充材料记录原因后跳过，继续下一篇；登录、验证、机构权限或尚未就绪的页面保留再查。文件保存完成后及时关闭，已有材料不重复下载；本地文件校验问题仍需处理。'
+        : '全文获取逐篇处理：同篇文献复用任务页，文件保存完成后及时关闭；持续加载、生成或传输时继续等待，尚未就绪的页面保留再查。登录、验证和机构权限保留待处理，明确不可获取的材料记录原因；已有材料不重复下载。', 'codex-status'));
     }
-    box.append(flowNotes);
+    if (!segment) box.append(flowNotes);
     if (job?.processingBasis) box.append(node('p', literatureProcessingBasisMessage(job), 'codex-status'));
     const executionOrder = job ? Array.isArray(job.executionOrder) ? job.executionOrder : job.config?.sources : newLiteratureSourceOrder(t.literatureConfig?.sources);
-    if (!job?.processingBasis && Array.isArray(executionOrder) && executionOrder.length) box.append(node('p', (job ? '当前任务执行顺序：' : '新检索执行顺序：')
+    if (!segment && !job?.processingBasis && Array.isArray(executionOrder) && executionOrder.length) box.append(node('p', (job ? '当前任务执行顺序：' : '新检索执行顺序：')
       + executionOrder.map(source => LITERATURE_SOURCE_LABELS[source] || source).join(' → '), 'codex-status'));
     if (job) {
       const deferred = Array.isArray(job.deferredSources) ? [...new Set(job.deferredSources)].filter(source => job.config?.sources?.includes(source)) : [];
-      box.append(node('p', '状态：' + (job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : deferred.length && job.status === 'completed' ? '仍有暂缓来源待补检，检索尚未全部完成' : job.message || literatureStageLabel(job.stage) || job.status)
-        + (job.status === 'completed' ? ' · ' + job.count + ' 条待复核' : ''), 'codex-status'));
+      box.append(node('p', '状态：' + (job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : deferred.length && job.status === 'completed' ? '仍有暂缓来源待补检，检索尚未全部完成' : literatureStatusText(job) || literatureStageLabel(job.stage) || job.status), 'codex-status'));
+      const discoveryProgress = typeof literatureDiscoveryProgress === 'function' ? literatureDiscoveryProgress(job) : null; if (discoveryProgress) box.append(discoveryProgress);
       if (deferred.length) box.append(node('p', '暂缓来源待补检：' + deferred.map(source => LITERATURE_SOURCE_LABELS[source] || source).join('、')
         + '。已有候选保留，检索尚未全部完成；可打开原页面处理后点击“' + (job.deferredOnly === true ? '补检该来源' : '检查并继续') + '”补检。', 'codex-status'));
       const stages = literatureStageBar(job);
       if (stages) box.append(stages);
-      if (awaitingConfirm) box.append(node('p', '提取字段等待确认：点击“设置提取字段”，按讨论填入表格，核对后点击“核对表格并开始提取”。', 'codex-status'));
+      if (awaitingConfirm) {
+        const fieldsAttention = node('section', undefined, 'literature-confirm'); fieldsAttention.setAttribute('aria-live', 'polite');
+        fieldsAttention.append(node('h4', '当前需要处理：确认提取字段'));
+        fieldsAttention.append(node('p', '提取字段等待确认：按讨论填入表格，核对名称、含义和单位后，再点击“核对表格并开始提取”。已有候选与材料保留。', 'codex-status'));
+        const reviewFields = node('button', '核对提取字段', 'primary-button'); reviewFields.type = 'button';
+        reviewFields.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
+        reviewFields.onclick = () => openLiteratureFields(mod); fieldsAttention.append(reviewFields); box.append(fieldsAttention);
+      }
     }
-    if (job?.status !== 'running' && !job?.deletedAt && Array.isArray(job?.cnkiRetryItems) && job.cnkiRetryItems.length) {
+    const manualActions = Array.isArray(job?.materialManualActions) ? job.materialManualActions.filter(item => item.status !== 'skipped'
+      && ['login', 'verification', 'access_required', 'page_not_ready'].includes(item.reason)) : [];
+    if (replenishing && manualActions.length) {
+      const manual = node('section', undefined, 'literature-confirm literature-material-manual');
+      manual.setAttribute('aria-live', 'polite');
+      manual.append(node('h4', '待处理与待重查文献 · ' + manualActions.length + ' 篇'));
+      manual.append(node('p', '原窗口保留，人工等待不限时。逐篇处理登录、验证或权限，或等待页面就绪；点击“我已处理，重新检查待处理文献”后才检查，不会自动重试或重新下载已存PDF。', 'codex-status'));
+      const verificationCount = manualActions.filter(item => item.reason === 'verification').length;
+      if (verificationCount) manual.append(node('p', verificationCount + ' 篇需要手动完成验证码。请在保留的原页面验证，不会自动反复打开验证页。'
+        + (job.status === 'running' ? '本轮继续处理其他文献；你可先完成验证，本轮结束后再点击重新检查。' : '验证完成后，点击“我已处理，重新检查待处理文献”继续。'), 'codex-status'));
+      manualActions.forEach(item => {
+        const entry = node('div', undefined, 'literature-confirm');
+        entry.append(node('h4', String(item.paperId || '文献ID待核对') + ' · ' + String(item.title || '题名待核对')));
+        const missing = Array.isArray(item.supplements?.missing) ? item.supplements.missing : [];
+        const checkStatus = item.supplements?.checkStatus || item.supplements?.status || 'unknown';
+        const checkLabels = { unknown: '尚未检查', checked: '已检查', none_declared: '未声明补充材料', unverified: '尚未核查', complete: '核查完成', partial: '待补充', page_not_ready: '页面尚未就绪，暂未核实' };
+        const pending = Array.isArray(item.supplements?.pending) ? item.supplements.pending : [];
+        const pdfState = item.mainPdfMissing === true ? '正文PDF待补' : item.mainPdfMissing === false ? '正文PDF已保存' : '正文PDF尚未核实';
+        entry.append(node('p', pdfState + '；'
+          + '补充材料状态：' + (checkLabels[checkStatus] || checkStatus)
+          + (missing.length ? '；待补：' + missing.join('、') : '')
+          + (pending.length ? '；待核对附件：' + pending.join('、') : ''), 'codex-status'));
+        const reasonLabels = { verification: '需要手动完成验证码', login: '需要登录', access_required: '需要确认机构或订阅权限', page_not_ready: '页面尚未就绪，保留后稍后检查' };
+        entry.append(node('p', '原因：' + [reasonLabels[item.reason] || item.reason, item.message].filter(Boolean).join(' · '), 'codex-status'));
+        if (item.reason === 'verification') entry.append(node('p', '请在本篇保留的原页面手动完成验证，窗口保留、人工等待不限时；完成后回到这里重新检查。', 'codex-status'));
+        const open = node('button', item.reason === 'page_not_ready' ? '查看保留的原页面' : item.reason === 'verification' ? '查看原页面并手动验证' : '打开这篇官方问题页', 'quiet-button'); open.type = 'button';
+        open.disabled = !item.paperId || t.busy || t.literatureBusy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
+        open.setAttribute('aria-label', '打开官方问题页：' + String(item.paperId || '未知文献'));
+        open.onclick = () => openLiteratureMaterialActionPage(mod, item.paperId); entry.append(open); manual.append(entry);
+      });
+      if (t.literatureMaterialNotice) manual.append(node('p', t.literatureMaterialNotice, 'codex-status'));
+      if (job.status !== 'running') {
+        const retry = node('button', '我已处理，重新检查待处理文献', 'primary-button'); retry.type = 'button';
+        retry.disabled = t.busy || t.literatureBusy || !!root.LiteratureUI?.isBusy();
+        retry.onclick = () => continueLiterature(mod, { until: 'fulltext', deferAccess: true, retryDeferred: true }); manual.append(retry);
+      }
+      box.append(manual);
+    }
+    if (replenishing && Array.isArray(job.materialSkippedActions) && job.materialSkippedActions.length) {
+      const skipped = node('details', undefined, 'literature-deliverable-group literature-material-skipped');
+      skipped.append(node('summary', '已跳过材料缺口 · ' + job.materialSkippedActions.length + ' 篇'));
+      skipped.append(node('p', '这些记录表示本轮尚未补齐或尚不能确认材料完整，不代表附件不存在。你可点击重新核查；已有正文、PDF和原提取导出结果保留，已保存的文件不会重复下载。不自动重试。', 'codex-status'));
+      job.materialSkippedActions.forEach(item => {
+        const entry = node('div', undefined, 'literature-confirm');
+        entry.append(node('h4', String(item.paperId || '文献ID待核对') + ' · ' + String(item.title || '题名待核对')));
+        const missing = Array.isArray(item.supplements?.missing) ? item.supplements.missing : [];
+        const checkStatus = item.supplements?.checkStatus || item.supplements?.status || 'unknown';
+        const checkLabels = { unknown: '尚未核查', unverified: '尚未核查', needs_attention: '等待人工核查', partial: '尚未齐全', checked: '已检查', none_declared: '未声明补充材料', none_found: '本次未发现补充材料' };
+        entry.append(node('p', (item.mainPdfMissing === true ? '正文PDF待补' : item.mainPdfMissing === false ? '正文PDF已保存' : '正文PDF尚未核实')
+          + (missing.length ? '；待核查记录：' + missing.join('、') : '；补充材料核查：' + (checkLabels[checkStatus] || checkStatus)), 'codex-status'));
+        entry.append(node('p', '原因：' + [item.reason, item.message].filter(Boolean).join(' · '), 'codex-status')); skipped.append(entry);
+      });
+      const retry = node('button', '重新核查这些材料', 'primary-button'); retry.type = 'button';
+      retry.disabled = readOnlyResults || !!job.deletedAt || t.busy || t.literatureBusy || job.status === 'running' || !!root.LiteratureUI?.isBusy();
+      retry.title = '仅重新核查本任务已跳过的材料；沿用原候选和已保存文件，不重新检索或进入提取。';
+      retry.onclick = () => continueLiterature(mod, { until: 'fulltext', deferAccess: true, retrySkipped: true }); skipped.append(retry);
+      const reports = node('div', undefined, 'literature-deliverable-list');
+      ['json', 'csv', 'md'].forEach(extension => {
+        const name = 'fulltext/skipped-materials.' + extension;
+        if (!job.files?.includes(name)) return;
+        const link = node('a', LITERATURE_FILE_LABELS[name]);
+        link.href = '/api/literature/download?id=' + encodeURIComponent(job.id) + '&name=' + encodeURIComponent(name); reports.append(link);
+      });
+      skipped.append(reports); box.append(skipped);
+    }
+    if (!readOnlyResults && job?.status !== 'running' && !job?.deletedAt && Array.isArray(job?.cnkiRetryItems) && job.cnkiRetryItems.length) {
       const retry = node('details', undefined, 'literature-deliverable-group');
       retry.append(node('summary', '逐篇重试知网全文 · ' + job.cnkiRetryItems.length + ' 篇'));
       retry.append(node('p', '选择一篇，按完整题名进入知网正常检索与详情页，再获取全文。每次只处理这一篇；不会重新检索候选、批量重试其他文献或进入数据提取。', 'codex-status'));
@@ -1331,23 +3052,32 @@
         || (job.resumeStage === 'fulltext' && String(job.message || '').startsWith('全文页面加载超过1分钟')))) timeoutAttention = attention;
       const hasSourcePage = LITERATURE_EXECUTABLE_SOURCES.includes(job.attention?.source);
       const fulltextPaused = job.resumeStage === 'fulltext';
+      const deferredMaterials = replenishing && job.attention?.reason === 'deferred_materials';
       const materialsOnly = job.cnkiRetryItems?.some(item => item.id === job.cnkiRetryPaperId && item.materials_only);
-      attention.append(node('h4', job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : '当前需要处理：' + (fulltextPaused ? '全文获取' : hasSourcePage ? LITERATURE_SOURCE_LABELS[job.attention.source] : job.resumeStage === 'extract' ? '全文核查与提取确认' : '检索暂停')));
+      attention.append(node('h4', awaitingStart ? '任务已准备，尚未开始' : job.deferredOnly === true ? '已暂缓，当前没有其他待检索来源' : '当前需要处理：' + (fulltextPaused ? '全文获取' : hasSourcePage ? LITERATURE_SOURCE_LABELS[job.attention.source] : job.resumeStage === 'extract' ? '全文核查与提取确认' : '检索暂停')));
       attention.append(node('p', literatureAttentionMessage(job), 'codex-status'));
+      if (replenishing) attention.append(node('p', deferredMaterials
+        ? '其他可处理文献已处理。人工等待不限时，窗口保留；请按上方清单处理登录问题或确认页面已就绪，显式重新检查后才继续。'
+        : '人工登录与等待不限时，窗口保留。持续加载、生成或传输时继续等待，未就绪的页面保留再查；可先保留问题页，继续处理其他篇。', 'codex-status'));
       if (t.literatureAutoOpenNotice && job.deferredOnly !== true) attention.append(node('p', t.literatureAutoOpenNotice, 'codex-status'));
       const actions = node('div', undefined, 'literature-confirm-actions');
-      if (hasSourcePage || fulltextPaused) {
+      if (!deferredMaterials && (hasSourcePage || fulltextPaused)) {
         const open = node('button', fulltextPaused ? '查看原全文任务页' : job.deferredOnly === true ? '查看原页面' : '打开登录/检索页面', 'quiet-button'); open.type = 'button';
         open.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy();
         open.onclick = () => openLiteratureBrowser(mod);
         actions.append(open);
       }
-      const resume = node('button', fulltextPaused ? (materialsOnly ? '继续这篇材料' : job.cnkiRetryPaperId ? '继续这篇知网文献' : '继续获取全文') : job.resumeStage === 'extract' ? '继续提取' : job.deferredOnly === true ? '补检该来源' : '检查并继续', 'primary-button'); resume.type = 'button';
+      const resume = node('button', awaitingStart ? '开始检索' : fulltextPaused ? (materialsOnly ? '继续这篇材料' : job.cnkiRetryPaperId ? '继续这篇知网文献' : '继续获取全文') : job.resumeStage === 'extract' ? '继续提取' : job.deferredOnly === true ? '补检该来源' : '检查并继续', 'primary-button'); resume.type = 'button';
       resume.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
       resume.onclick = () => job.cnkiRetryPaperId && fulltextPaused ? retryLiteratureCnki(mod, job.cnkiRetryPaperId)
         : continueLiterature(mod, fulltextPaused ? { until: 'fulltext' } : {});
-      actions.append(resume);
-      if (fulltextPaused && !job.cnkiRetryPaperId) {
+      if (!deferredMaterials) actions.append(resume);
+      if (replenishing && fulltextPaused && !deferredMaterials) {
+        const deferAccess = node('button', '先留待处理，继续其他文献', 'primary-button'); deferAccess.type = 'button';
+        deferAccess.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
+        deferAccess.onclick = () => continueLiterature(mod, { until: 'fulltext', deferAccess: true }); actions.append(deferAccess);
+      }
+      if (fulltextPaused && !job.cnkiRetryPaperId && !replenishing) {
         const skip = node('button', '跳过无法获取的文献，继续', 'primary-button'); skip.type = 'button';
         skip.title = '本任务无法取得的正文或补充材料记入待补充清单，继续下一篇；保留已保存材料，只运行到全文获取。';
         skip.disabled = t.literatureBusy || t.busy || !!root.LiteratureUI?.isBusy() || !sameConfig;
@@ -1375,7 +3105,7 @@
       }
       attention.append(actions); box.append(attention);
     }
-    if (t.literatureConfig) {
+    if (t.literatureConfig && !segment) {
       const config = t.literatureConfig;
       const details = node('details', undefined, 'literature-config');
       details.open = typeof t.literatureConfigOpen === 'boolean' ? t.literatureConfigOpen : !awaitingAccess;
@@ -1399,13 +3129,14 @@
       const fields = node('div', undefined, 'literature-config-fields');
       function input(label, key, type = 'text') {
         const wrap = node('label', label); const field = node('input'); field.type = type;
+        if (key === 'query') field.maxLength = 32768;
         if (type === 'number') { field.min = '1800'; field.max = String(new Date().getFullYear() + 1); }
         field.value = config[key] ?? ''; field.oninput = () => { config[key] = type === 'number' ? (field.value ? Number(field.value) : null) : field.value; persistConfig(); };
         wrap.append(field); fields.append(wrap);
       }
       function lines(label, key) {
-        const wrap = node('label', label); const field = node('textarea'); field.rows = 2; field.value = (config[key] || []).join('\n');
-        field.oninput = () => { config[key] = field.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean); persistConfig(); };
+        const wrap = node('label', label); const field = node('textarea'); field.rows = 2; field.value = literatureDraftRuleList(config[key]).join('\n');
+        field.oninput = () => { config[key] = literatureDraftRuleList(field.value); persistConfig(); };
         wrap.append(field); fields.append(wrap);
       }
       function persistConfig() { saved[mod.id] = { ...saved[mod.id], literatureConfig: config }; persist(); }
@@ -1416,9 +3147,10 @@
       const modeWrap = node('label', '运行模式'); const mode = node('select'); mode.setAttribute('aria-label', '文献检索运行模式');
       if (!config.searchMode) { const legacy = node('option', '历史任务（按原数量）'); legacy.value = ''; mode.append(legacy); }
       [['test', '测试运行（每来源10条）'], ['formal', '正式检索（检索到末页）']].forEach(([value, label]) => {
+        if (value === 'formal' && config.scholarPlan?.trialMaxPages != null) label = '谷歌学术预试（最多' + config.scholarPlan.trialMaxPages + '页，仅候选）';
         const option = node('option', label); option.value = value; mode.append(option);
       });
-      mode.value = config.searchMode || ''; mode.disabled = t.literatureBusy || t.busy;
+      mode.value = config.searchMode || ''; mode.disabled = t.literatureBusy || t.busy || config.scholarPlan?.trialMaxPages != null;
       mode.onchange = () => {
         if (!['test', 'formal'].includes(mode.value)) return;
         config.searchMode = mode.value; config.stopMode = mode.value === 'formal' ? 'end' : 'count'; config.perSourceLimit = mode.value === 'formal' ? null : 10; config.limit = 10;
@@ -1426,7 +3158,8 @@
         resetDiscoverBudget(); persistConfig(); render();
       };
       modeWrap.append(mode); fields.append(modeWrap);
-      const quantity = !config.searchMode ? '历史配置保持原数量：每来源每批最多 ' + (config.batch?.size ?? config.limit ?? 10) + ' 条。继续原任务不会改变数量；切换模式将用于新检索。'
+      const quantity = config.scholarPlan?.trialMaxPages != null ? '谷歌学术预试：最多保存' + config.scholarPlan.trialMaxPages + '页，仅候选；内部使用分页模式，不会运行整个正式研究，也不会下载全文或提取数据。短查询和年份可编辑，修改后需重新核查。'
+        : !config.searchMode ? '历史配置保持原数量：每来源每批最多 ' + (config.batch?.size ?? config.limit ?? 10) + ' 条。继续原任务不会改变数量；切换模式将用于新检索。'
         : config.searchMode === 'formal' && config.stopMode !== 'end' ? '历史正式配置保持原数量：每来源候选上限 ' + (config.perSourceLimit ?? 100) + ' 条。继续原任务沿用原上限；发起新的正式检索会改为检索到可访问末页，不混用旧结果。'
         : config.searchMode === 'formal' ? '正式检索：自动翻页，直到各来源数据库当前可访问末页，不按候选数量停止。遇到登录、验证、网站访问限制或其他问题时暂停并保留已有结果；可访问末页不代表主题相关文献已全部获取。'
         : '测试运行：每个来源最多取10条候选，用于检查检索词和流程；不会自动扩大到正式数量。';
@@ -1435,15 +3168,31 @@
       newLiteratureSourceOrder(Object.keys(LITERATURE_SOURCE_LABELS)).forEach(value => {
         const label = LITERATURE_SOURCE_LABELS[value];
         const wrap = node('label', label); const check = node('input'); check.type = 'checkbox'; check.checked = config.sources.includes(value);
-        check.disabled = t.literatureBusy || t.busy;
+        check.disabled = t.literatureBusy || t.busy || config.scholarPlan?.trialMaxPages != null;
         check.onchange = () => { config.sources = check.checked ? [...new Set([...config.sources, value])] : config.sources.filter(source => source !== value); resetDiscoverBudget(); persistConfig(); render(); };
         wrap.prepend(check); sources.append(wrap);
       });
       fields.append(sources);
+      if (config.scholarPlan?.topics?.length) {
+        const plan = node('details', undefined, 'literature-deliverable-group');
+        plan.append(node('summary', '谷歌学术实际分批查询（' + config.scholarPlan.topics.length + '个主题，可修改）'));
+        plan.append(node('p', (config.scholarPlan.version === 2 ? '以下查询先检索完整年份，过宽或截断才有限细分；' : '以下主题查询按5年区间执行；') + '按相关性排序。它们是实际执行的检索式，默认检索式和下方来源检索式不能代替此计划。', 'codex-status'));
+        config.scholarPlan.topics.forEach(topic => {
+          const wrap = node('label', topic.label || topic.id), field = node('textarea'); field.rows = 2; field.maxLength = 32768; field.value = topic.query || '';
+          field.setAttribute('aria-label', '谷歌学术主题短查询 ' + (topic.label || topic.id)); field.disabled = t.literatureBusy || t.busy;
+          field.oninput = () => {
+            topic.query = field.value;
+            if (config.scholarPlan.trialMaxPages != null && config.scholarPlan.topics.length === 1) { config.query = field.value; config.sourceQueries = { ...config.sourceQueries, 'google-scholar': field.value }; }
+            persistConfig();
+          }; wrap.append(field); plan.append(wrap);
+        });
+        fields.append(plan);
+      }
       newLiteratureSourceOrder(config.sources).forEach(source => {
         const wrap = node('label', (LITERATURE_SOURCE_LABELS[source] || source) + ' 检索式（留空沿用默认）');
-        const field = node('textarea'); field.rows = 2; field.maxLength = 2000;
+        const field = node('textarea'); field.rows = 2; field.maxLength = 32768;
         field.value = config.sourceQueries?.[source] || ''; field.disabled = t.literatureBusy || t.busy;
+        if (source === 'google-scholar' && config.scholarPlan) { field.readOnly = true; wrap.append(node('small', '已启用分批计划，请在上方“实际分批查询”修改短查询。')); }
         const examples = {
           'google-scholar': '例如：broiler "heat stress" "growth performance"',
           cnki: '例如：肉鸡 热应激 增重',
@@ -1470,9 +3219,10 @@
       lines('研究类型（每行一项）', 'studyTypes'); lines('纳入规则（每行一项）', 'inclusion');
       lines('排除规则（每行一项）', 'exclusion'); lines('目标参数字段（每行一项）', 'targetFields');
       details.append(fields); box.append(details);
+      if (t.literatureConfigNotice) box.append(node('p', t.literatureConfigNotice, 'codex-status'));
       if (config.sources.some(source => !LITERATURE_SOURCE_LABELS[source])) box.append(node('p', '配置含无法识别的来源，请重新选择本次检索来源。', 'codex-error'));
       if (job && !sameConfig) box.append(node('p', '当前设置与已有任务的冻结配置不同。继续旧任务请从历史任务重新载入；确认新设置并检索会创建新任务，不混用旧结果。', 'codex-status'));
-    } else box.append(node('p', '先在本模块对话确认规则，再点“从对话整理规则”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
+    } else if (!segment) box.append(node('p', '先在本模块对话讨论规则，再点“从对话更新规则并核查”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
     if (!job) box.append(node('p', '已接入 Google Scholar、中国知网、万方、Web of Science 核心合集、Scopus 和 PubMed，按研究需要选择来源。PubMed 公开检索通常无需登录；其他来源需要登录、验证或机构权限时暂停，请在官方页面操作后继续。全文提取前需要你确认参数字段含义与单位。', 'codex-status'));
     if (job) {
       const deliverables = literatureDeliverables(job);
@@ -1485,6 +3235,7 @@
     }
     box.append(literatureHistory(mod, t));
     if (t.literatureError) box.append(node('p', t.literatureError, 'codex-error'));
+    if (typeof compactLiteraturePanel === 'function') compactLiteraturePanel(mod, t, box);
     container.append(box);
     if (timeoutAttention && typeof timeoutAttention.scrollIntoView === 'function') {
       const event = Array.isArray(job.events) ? job.events[job.events.length - 1] : null;
@@ -1500,10 +3251,13 @@
     const t = task(module.id);
     if (t.busy) throw new Error('文件上传或 Codex 任务正在进行');
     const executeRequested = t.executeOnce || t.execute;
-    const plotPlan = module.type === 'plotting' && executeRequested ? t.preparedPlotPlan : undefined;
     const cleanPlan = module.type === 'clean-data' && executeRequested ? t.preparedCleanPlan : undefined;
+    if (module.type === 'clean-data' && executeRequested) {
+      const basis = basisForClean(module);
+      if (!cleanPlan || !basis || basis.text !== cleanPlan.text || basis.version !== cleanPlan.version || JSON.stringify(cleanPlan.standardNames || [])!==JSON.stringify(cleanStandardNames(module.id))) throw new Error('请先核对并确认当前清洗方案及标准原件，再从方案入口执行。');
+    }
+    const plotPlan = module.type === 'plotting' && executeRequested ? t.preparedPlotPlan : undefined;
     if (module.type === 'plotting' && executeRequested && !plotPlan) throw new Error('请在绘图方案中审核后点击生成');
-    if (module.type === 'clean-data' && executeRequested && !cleanPlan) throw new Error('请先确认清洗规则并选择本次输入');
     t.preparedPlotPlan = null;
     t.preparedCleanPlan = null;
     t.executeOnce = false;
@@ -1520,8 +3274,10 @@
         }).filter(Boolean);
         if (sources.length) messages = [{role:'user', text:'三条并列准备路径中已有的已确认来源说明（仅作为来源上下文；不代表输入文件已导入或允许直接执行，计算仍依据本模块确认的方案）：\n' + sources.map(up => up.name + (up.version ? ' · 规则 v' + up.version : '') + '\n' + up.text.slice(0, 4000)).join('\n\n')}, ...messages];
       }
-      if (module.type === 'clean-data' && batch) messages = [{ role: 'user', text: '当前下载交接批次（来源信息，不替代本模块的清洗规则）：\n仅处理以下当前输入文件，其他 input 文件为历史保留，不自动合并：\n' + batch.names.join('\n') + '\n获取依据：' + batch.label + '\n' + batch.text.slice(0, 1500) }, ...messages];
-      const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, step: module.step || null, mode: module.mode }, messages, execute: executeRequested, model: t.model || null, ...(plotPlan ? {plotPlan} : {}), ...(cleanPlan ? {cleanPlan} : {}), ...(module.type === 'clean-data' ? { cleanInputs: cleanInputSelection(module.id) } : {}) }) });
+      if (module.type === 'clean-data' && batch) messages = [{ role: 'user', text: '当前下载交接批次（来源信息，不替代本模块的清洗规则）：\n仅处理以下当前输入文件，其他 input 文件为历史保留，不自动合并：\n' + batch.names.filter(name=>!cleanStandardNames(module.id).includes(name)).join('\n') + '\n获取依据：' + batch.label + '\n' + batch.text.slice(0, 1500) }, ...messages];
+      if (module.type === 'clean-data' && cleanStandardNames(module.id).length) messages=[{role:'user',text:'本模块提供的人工核验标准原件（reference目录；提供文件不表示已经采纳或通过）：\n'+cleanStandardNames(module.id).map(name=>'reference/'+name).join('\n')+'\n讨论时先读取能够解析的原件，把拟采用标准整理到同一清洗方案的“人工核验标准”，每项写明核验内容、方法、通过条件、必需与否，依据引用完整原件名及页/节。未能读取或存在歧义时明确说明并提供原件，不能声称已完整理解。研究者确认方案后才采用；执行时不得代替人工签署核验通过。'},...messages];
+      const job = await request('/api/codex/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sid, module: { type: module.type, step: module.step || null, mode: module.mode }, messages, execute: executeRequested, model: t.model || null, ...(plotPlan ? {plotPlan} : {}), ...(cleanPlan ? {cleanPlan} : {}), ...(module.type === 'clean-data' ? { cleanInputs: (Array.isArray(saved[module.id]?.cleanInputs) ? saved[module.id].cleanInputs : (Array.isArray(cleanPlan?.inputs) ? cleanPlan.inputs : [])) } : {}) }) });
+      if (cleanPlan) { t.cleanAcceptanceRunId = job.id; t.cleanAcceptance = null; t.cleanAcceptanceKey = null; saved[module.id].cleanAcceptanceRunId = job.id; Store.markRun(module.id, {dir:job.id,artifacts:[]}); Store.setModuleStatus(module.id,'doing'); }
       if (plotPlan) { t.plotSelectedRunId = job.id; saved[module.id].plotSelectedRunId = job.id; Store.setModuleStatus(module.id,'doing'); }
       if (cleanPlan) Store.setModuleStatus(module.id,'doing');
       saved[module.id].jobId = job.id; persist();
@@ -1535,11 +3291,44 @@
     const sid = await session(id);
     t.files = (await request('/api/codex/files?session=' + sid)).files;
     const mod = Store.getState().modules.find(item => item.id === id);
+    if (mod?.type === 'clean-data') {
+      const basis = basisForClean(mod);
+      if (!basis) throw new Error('请先确认本模块清洗方案；草稿改变后须重新确认。');
+      // Only a data file explicitly named by the approved plan can be rebound.
+      // Reference originals remain available; a hash-checked input copy is used.
+      const namedData = [...basis.text.matchAll(/(?:数据来源|输入文件|原始数据)[：:]\s*`([^`]+)`/g)].map(match=>match[1]);
+      const referencedData = [...new Set(namedData)].filter(name=>t.files.some(file=>file.group==='reference' && file.name===name) && /\.(csv|tsv|xlsx|xls|parquet|json)$/i.test(name));
+      if (referencedData.length) {
+        const result = await request('/api/codex/clean/bind-input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:sid,names:referencedData,confirm:true})});
+        if (saved[id]?.sessionId!==sid || basisForClean(mod)?.text!==basis.text) throw new Error('任务或规则已改变，输入副本保留在原任务，请重新打开当前任务。');
+        t.files=result.files;
+        saved[id]={...saved[id],cleanStandardNames:cleanStandardNames(id).filter(name=>!result.boundSources.includes(name)),inputBatch:{...(saved[id]?.inputBatch || {}),names:result.inputNames,label:'已确认规则指定的原始数据',text:'原件保留，SHA-256一致的输入副本已绑定。'}};
+        t.cleanStandardNotice='原规则指定的数据已接为清洗输入；参考原件、规则和讨论保留。';persist();
+      }
+      const prepared=root.CleanExecutionPlan?.prepare(basis.text);
+      if (!t.files.some(file=>file.group==='input')) { render(); return false; }
+      const standardNames=cleanStandardNames(id), compiled=root.CleanVerificationRules?.compile(prepared?.executionText || basis.text);
+      if (standardNames.some(name=>!t.files.some(file=>file.group==='reference' && file.name===name))) throw new Error('标准原件缺失，请刷新并重新关联后讨论确认，原数据保留。');
+      if (compiled?.manualChecks?.state==='needs_discussion') throw new Error('人工核验标准仍有待明确事项，请在同一方案补齐后确认。');
+      if (standardNames.some(name=>!compiled?.manualChecks?.rules?.some(rule=>!rule.reason && [rule.basis,rule.sourceText].filter(Boolean).join('\n').includes(name)))) throw new Error('标准原件尚未落实为已确认的人工核验项。请在同一方案中整理，并在依据写明完整原件名。');
+      const inputs = t.files.filter(file => file.group === 'input' && !standardNames.includes(file.name) && /\.(csv|tsv|xlsx|xls|json|txt)$/i.test(file.name)).map(file => file.name);
+      const selected = saved[id]?.inputBatch?.names;
+      const inputNames = Array.isArray(selected) ? inputs.filter(name => selected.includes(name)) : inputs;
+      if (!inputNames.length) throw new Error('当前批次没有可用的清洗输入，请核对交接或上传文件。');
+      t.preparedCleanPlan = {text:basis.text,version:basis.version,inputNames,standardNames};
+    }
     if (!t.files.some(file => file.group === 'input')) { render(); return false; }
     if (mod?.type === 'clean-data') {
-      const basis = root.TaskManager?.rulesForModule(id), inputs = cleanInputSelection(id);
+      const basis = root.TaskManager?.rulesForModule(id);
+      const known = t.files.filter(file => file.group === 'input' && /\.(csv|tsv|xlsx|xls)$/i.test(file.name));
+      const previous = Array.isArray(saved[id]?.cleanInputs) ? saved[id].cleanInputs : null;
+      const batch = saved[id]?.inputBatch;
+      const inputs = previous
+        ? previous.filter(entry => known.some(file => file.name === entry.name))
+        : known.filter(file => !batch || batch.names.includes(file.name)).map(file => ({ name: file.name, encoding: 'utf-8-sig', sheets: null }));
       if (!basis?.text || !inputs.length) throw new Error('请确认清洗规则，并在“数据检查与处理范围”中选择文件');
-      t.preparedCleanPlan = { text: basis.text, version: basis.version, confirmed: true, inputs };
+      t.preparedCleanPlan = { text: basis.text, version: basis.version, confirmed: true, inputs,
+        inputNames: inputs.map(item => item.name), standardNames: Array.isArray(saved[id]?.cleanStandardNames) ? saved[id].cleanStandardNames : [] };
     }
     if (mod?.type === 'plotting') {
       const basis = root.TaskManager?.rulesForModule(id);
@@ -1632,6 +3421,215 @@
       t.error = '';
     } catch (error) { cancelPreparedExecution(mod.id); t.error = error.message; render(); }
   }
+  async function discussDownloadVerification(mod) {
+    if (!mod || mod.type !== 'download-data') return false;
+    const t = task(mod.id);
+    const state = Store.getState(), current = state.modules.find(item => item.id === mod.id);
+    if (!current || current.type !== 'download-data' || state.activeModuleId !== mod.id) return false;
+    if (t.busy || t.downloadVerificationOpening || t.sourceJob?.status === 'running' || root.ModuleSpace?.isBusy()) return false;
+    if (typeof root.ModuleSpace?.discussDownloadVerification !== 'function') {
+      t.error = '核验方法讨论入口尚未载入，请刷新页面后再试。'; render(); return false;
+    }
+    t.downloadVerificationOpening = true; t.error = ''; render();
+    try {
+      const opened = await root.ModuleSpace.discussDownloadVerification(mod.id);
+      if (opened !== true) throw new Error('当前无法打开核验方法讨论，请先处理正在进行的任务或未保存的编辑，再重试。');
+      return true;
+    } catch (error) { t.error = error.message; return false; }
+    finally { t.downloadVerificationOpening = false; render(); }
+  }
+  function downloadVerificationControls(mod, t) {
+    if (mod?.type !== 'download-data') return null;
+    const box = node('section', undefined, 'download-verification-discussion');
+    const discuss = node('button', t.downloadVerificationOpening ? '正在打开…' : '讨论核验方法', 'quiet-button'); discuss.type = 'button';
+    discuss.setAttribute('aria-label', '讨论下载核验方法');
+    discuss.disabled = !!(t.busy || t.downloadVerificationOpening || t.sourceJob?.status === 'running' || root.ModuleSpace?.isBusy());
+    discuss.title = '在同一份下载方案中讨论核验与验收，保留原已审核方案；不会开始下载或自动确认。';
+    discuss.onclick = () => discussDownloadVerification(mod);
+    box.append(discuss, node('p', '核验与验收写在同一份下载方案里。先讨论并查看草稿，核对后再决定是否保存；本入口不会下载或自动审核。', 'codex-status'));
+    const currentPlan = mod.doc?.content || basisForDownload(mod)?.text;
+    if (currentPlan && root.DownloadProfessionalRules) {
+      const compiled = root.DownloadProfessionalRules.compile(currentPlan);
+      const automatic = compiled.rules.filter(rule => rule.kind !== 'manual'), manual = compiled.rules.filter(rule => rule.kind === 'manual');
+      const details = node('details'); details.open = false;
+      details.append(node('summary', compiled.state === 'none' ? '本方案明确无额外专业规则（展开查看依据）'
+        : '本方案专业规则：' + automatic.length + ' 项可自动检查，' + manual.length + ' 项需讨论或判断'));
+      details.append(node('p', mod.doc?.status === 'approved' ? '已审核方案中的规则将用于下载后的实际数据检查；当前展示执行计划，不表示已经检查通过。' : '当前已保存方案仍待确认；审核后才会用于实际检查。这里不会开始下载。', 'codex-status'));
+      if (compiled.rationale) details.append(node('p', compiled.rationale, 'codex-status'));
+      compiled.rules.forEach(rule => details.append(node('p', rule.id + ' · ' + rule.label + '：' + (rule.kind === 'manual' ? '需判断：' + rule.reason : '可自动检查') + '；依据：' + rule.basis, 'codex-status')));
+      box.append(details);
+    } else box.append(node('p', '讨论方案时一并确定专业规则及依据。确认后检查实际数据；无法判断或暂不支持的项目会列入待处理。', 'codex-status'));
+    return box;
+  }
+  function downloadAcceptanceContext(mod) {
+    if (mod?.type !== 'download-data') return null;
+    const state = saved[mod.id] || {}, run = state.download, t = task(mod.id);
+    const id = state.sourceJobId || run?.sourceJobId || t.sourceJob?.id || null;
+    if (!state.sessionId || (!id && !run?.files?.length)) return null;
+    if (id && ((run?.sourceJobId && run.sourceJobId !== id) || (t.sourceJob?.id && t.sourceJob.id !== id))) return null;
+    return { sessionId: state.sessionId, id, run, key: JSON.stringify([state.sessionId, id || 'legacy', id ? null : [run?.text, run?.files?.map(file => file.storedName)]]) };
+  }
+  function downloadAcceptanceReport(mod, t) {
+    const scope = downloadAcceptanceContext(mod);
+    if (!scope) return null;
+    if (t.sourceAcceptanceKey === scope.key) return t.sourceAcceptance || null;
+    const report = t.sourceJob?.id === scope.id ? t.sourceJob.verification : null;
+    return report?.id && Array.isArray(report.checks) && Array.isArray(report.issues) ? report : null;
+  }
+  function downloadAcceptanceReady(report) {
+    return !!(report?.id && report.status === 'ready' && Array.isArray(report.checks) && Array.isArray(report.issues)
+      && !(report.summary?.blockingIssues > 0) && !(report.summary?.openDecisions > 0)
+      && !report.issues.some(issue => issue.severity === 'error' || issue.resolution?.decision === 'reject'
+        || (issue.decisionRequired && issue.resolution?.decision !== 'accept')));
+  }
+  function downloadAcceptanceCanHandoff(mod, t) {
+    const run = saved[mod.id]?.download;
+    return !!(!t.busy && !t.sourceAcceptanceLoading && !t.sourceAcceptanceBusy && !root.ModuleSpace?.isBusy()
+      && run?.files?.length && !run.failures?.length && downloadAcceptanceReady(downloadAcceptanceReport(mod, t))
+      && (!t.sourceJob || (t.sourceJob.status === 'completed' && run.sourceJobId === t.sourceJob.id)));
+  }
+  function downloadAcceptanceVerifyBody(mod, scope) {
+    if (scope.id) return { sessionId: scope.sessionId, id: scope.id, confirm: true };
+    const basis = basisForDownload(mod, scope.run?.sourceType);
+    if (!scope.run?.files?.length || !basis?.text || basis.text !== scope.run.text) throw new Error('本批旧文件尚无可追溯核验记录；请先核对并审核对应的原下载方案，文件保留，不会重新下载。');
+    const names = scope.run.files.map(file => file.storedName);
+    if (names.some(name => typeof name !== 'string' || !name)) throw new Error('原下载记录的文件对应关系不完整，不能自动认定已核验。');
+    return { sessionId: scope.sessionId, confirm: true, rules: basis.text, names, sources: scope.run.sources || [] };
+  }
+  function applyDownloadAcceptanceReport(mod, t, scope, report) {
+    if (downloadAcceptanceContext(mod)?.key !== scope.key) throw new Error('当前下载批次已变化，核验回复没有应用到另一批文件，请重新载入。');
+    if (!report || typeof report.id !== 'string' || !report.id || !['ready', 'needs_decision', 'blocked', 'rejected', 'checking'].includes(report.status)
+      || !Array.isArray(report.checks) || !Array.isArray(report.issues) || (scope.id && report.jobId && report.jobId !== scope.id)) throw new Error('未收到可核对的完整验收报告；已有文件和方案保留。');
+    if (!scope.id) {
+      if (typeof report.jobId !== 'string' || !report.jobId || !scope.run) throw new Error('旧文件的核验记录尚未建立，未改变原下载记录。');
+      const state = saved[mod.id]; state.sourceJobId = report.jobId; scope.run.sourceJobId = report.jobId;
+      state.sourceBasis ||= { text: scope.run.text, label: scope.run.label, sourceType: scope.run.sourceType };
+      t.sourceJob = { id: report.jobId, status: 'completed', kind: 'files', verification: report }; persist();
+    } else if (t.sourceJob?.id === scope.id) t.sourceJob.verification = report;
+    t.sourceAcceptance = report; t.sourceAcceptanceKey = downloadAcceptanceContext(mod).key;
+    t.sourceAcceptanceLoadedKey = t.sourceAcceptanceKey; t.sourceAcceptanceError = '';
+    return report;
+  }
+  async function loadDownloadAcceptance(mod, verify = false) {
+    const t = task(mod.id), scope = downloadAcceptanceContext(mod);
+    if (!scope || t.sourceAcceptanceLoading || t.sourceAcceptanceBusy || t.busy || t.sourceJob?.status === 'running' || root.ModuleSpace?.isBusy()) return null;
+    if (!scope.id && !verify) return null;
+    const generation = t.sourceAcceptanceGeneration || 0;
+    t.sourceAcceptanceLoading = true; t.sourceAcceptanceBusy = verify; t.sourceAcceptanceError = '';
+    t.sourceAcceptanceLoadedKey = scope.key; render();
+    try {
+      const report = verify ? await request('/api/codex/source/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(downloadAcceptanceVerifyBody(mod, scope)) })
+        : await request('/api/codex/source/verification?session=' + encodeURIComponent(scope.sessionId) + '&id=' + encodeURIComponent(scope.id));
+      if (downloadAcceptanceContext(mod)?.key !== scope.key || (t.sourceAcceptanceGeneration || 0) !== generation) return null;
+      if (!verify && (report === null || report?.status === 'not_checked')) { t.sourceAcceptance = null; t.sourceAcceptanceKey = scope.key; return null; }
+      return applyDownloadAcceptanceReport(mod, t, scope, report);
+    } catch (error) { if (downloadAcceptanceContext(mod)?.key === scope.key && (t.sourceAcceptanceGeneration || 0) === generation) t.sourceAcceptanceError = error.message; return null; }
+    finally { if ((t.sourceAcceptanceGeneration || 0) === generation) { t.sourceAcceptanceLoading = false; t.sourceAcceptanceBusy = false; } render(); }
+  }
+  async function decideDownloadAcceptance(mod, reportId, issueId, decision, note) {
+    const t = task(mod.id), scope = downloadAcceptanceContext(mod), report = downloadAcceptanceReport(mod, t);
+    if (!scope?.id || t.busy || t.sourceAcceptanceLoading || t.sourceAcceptanceBusy || t.sourceJob?.status === 'running' || root.ModuleSpace?.isBusy()) return false;
+    const issue = report?.id === reportId && report.issues.find(item => item.id === issueId);
+    if (!issue || issue.resolution || !['accept', 'reject'].includes(decision)
+      || (decision === 'accept' && (issue.severity !== 'warning' || issue.canAccept !== true || !issue.decisionRequired))) {
+      t.sourceAcceptanceError = '本项状态已变化，或不能接受该问题；请刷新核验报告后再处理。'; render(); return false;
+    }
+    if (typeof note !== 'string' || !note.trim() || note.trim().length > 2000) {
+      t.sourceAcceptanceError = '请填写本项决定的理由（1至2000字），便于后续核查。'; render(); return false;
+    }
+    t.sourceAcceptanceBusy = true; t.sourceAcceptanceError = ''; render();
+    try {
+      const next = await request('/api/codex/source/verification/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: scope.sessionId, id: scope.id, reportId, issueId, decision, note: note.trim() }) });
+      applyDownloadAcceptanceReport(mod, t, scope, next); return true;
+    } catch (error) { t.sourceAcceptanceError = error.message; return false; }
+    finally { t.sourceAcceptanceBusy = false; render(); }
+  }
+  function downloadAcceptanceArtifact(mod, artifact, label) {
+    const name = typeof artifact === 'string' ? artifact : artifact?.name;
+    if (typeof name !== 'string' || !name || /^[\\/]|^[a-z]:|^[a-z]+:\/\//i.test(name) || name.split(/[\\/]/).includes('..')) return null;
+    const link = node('a', label || artifact?.label || '查看依据文件', 'quiet-button');
+    link.href = '/api/codex/download?session=' + encodeURIComponent(saved[mod.id]?.sessionId || '') + '&group=output&name=' + encodeURIComponent(name); return link;
+  }
+  function downloadAcceptancePanel(mod, t) {
+    const scope = downloadAcceptanceContext(mod), run = saved[mod.id]?.download;
+    if (mod?.type !== 'download-data') return null;
+    const box = node('section', undefined, 'download-acceptance-card'); box.setAttribute('aria-label', '下载核验与待处理问题');
+    box.append(node('h3', '下载核验与待处理问题'));
+    const report = downloadAcceptanceReport(mod, t);
+    const checking = !!(t.sourceAcceptanceLoading || t.sourceAcceptanceBusy || report?.status === 'checking');
+    const locked = !!(checking || t.busy || t.sourceJob?.status === 'running' || root.ModuleSpace?.isBusy());
+    if (scope?.id && t.sourceJob?.status !== 'running' && !t.busy && !t.sourceAcceptanceLoading && !t.sourceAcceptanceBusy
+      && t.sourceAcceptanceLoadedKey !== scope.key && t.sourceAcceptanceQueuedKey !== scope.key) {
+      t.sourceAcceptanceQueuedKey = scope.key;
+      void Promise.resolve().then(() => { if (t.sourceAcceptanceQueuedKey === scope.key) t.sourceAcceptanceQueuedKey = null; return loadDownloadAcceptance(mod); });
+    }
+    const labels = { ready: '核验已就绪，仍待本批统一确认', needs_decision: '有变化或缺口需要决定', blocked: '存在阻断问题，需处理后重新核验', rejected: '已退回处理，尚不能交接', checking: '正在核验已有文件' };
+    box.append(node('p', checking ? '正在读取或核验已有本地文件，不会重新下载。' : report ? labels[report.status]
+      : !scope && !run?.files?.length ? '暂无本批文件。下载完成后可核验已有文件，不会自动重新下载。'
+      : !scope && (saved[mod.id]?.sourceJobId || t.sourceJob?.id) ? '当前任务与文件批次尚不能对应，未显示通过；请刷新下载状态核对记录，原文件保留。'
+      : scope?.id ? '本批尚无完整验收报告，未视为通过。' : '本批旧文件尚无验收报告；可核验已有文件并建立可追溯记录，不会重新下载。', 'codex-status'));
+    const actions = node('div', undefined, 'codex-toolbar');
+    const verify = node('button', '核验已有文件', 'quiet-button'); verify.type = 'button'; verify.disabled = !scope || locked;
+    verify.onclick = () => loadDownloadAcceptance(mod, true); actions.append(verify);
+    if (scope?.id) {
+      const refresh = node('button', '刷新核验报告', 'quiet-button'); refresh.type = 'button';
+      refresh.disabled = !!(t.sourceAcceptanceLoading || t.sourceAcceptanceBusy || t.busy || t.sourceJob?.status === 'running' || root.ModuleSpace?.isBusy());
+      refresh.onclick = () => loadDownloadAcceptance(mod); actions.append(refresh);
+    }
+    box.append(actions);
+    if (report) {
+      const summary = report.summary || {}, baseline = report.baseline || {};
+      const counts = [['currentRows', '本批记录'], ['baselineRows', '基准记录'], ['added', '新增'], ['revised', '修订'], ['removed', '删除'], ['schemaChanges', '字段变化'], ['unitChanges', '单位变化'], ['professionalPassed', '专业检查通过'], ['professionalPending', '专业检查待处理'], ['professionalExceptions', '专业例外已接受']]
+        .filter(([key]) => Number.isFinite(summary[key])).map(([key, label]) => label + ' ' + summary[key]);
+      if (counts.length) box.append(node('p', counts.join(' · '), 'codex-status'));
+      const years = [['addedYears', '新增年份'], ['missingYears', '缺失年份']].filter(([key]) => Array.isArray(summary[key]) && summary[key].length)
+        .map(([key, label]) => label + '：' + summary[key].join('、'));
+      if (years.length) box.append(node('p', years.join('；'), 'codex-status'));
+      box.append(node('p', baseline.mode === 'first' ? '首次获取：没有旧版可比较，不表示已完成更新差异核对。'
+        : baseline.mode === 'comparable' ? '比较基准：' + (baseline.label || baseline.jobId || '已记录版本')
+        : baseline.mode === 'incompatible' ? '旧版不可直接比较：' + (baseline.reason || '口径或结构不一致，需核对') : '比较基准以报告中的已记录范围为准。', 'codex-status'));
+      const normal = node('details', undefined, 'download-acceptance-normal'); normal.open = false;
+      const accepted = report.issues.filter(issue => issue.severity !== 'error' && issue.resolution?.decision === 'accept');
+      const informational = report.issues.filter(issue => issue.severity !== 'error' && !issue.decisionRequired && !issue.resolution);
+      normal.append(node('summary', '检查记录与已记录决定 · ' + (report.checks.length + accepted.length + informational.length) + ' 项（展开查看）'));
+      report.checks.forEach(check => { const item = node('div'); item.append(node('strong', check.label || check.id), node('p', String(check.status || '') + (check.evidence ? ' · ' + (typeof check.evidence === 'string' ? check.evidence : JSON.stringify(check.evidence)) : ''), 'codex-status')); normal.append(item); });
+      accepted.forEach(issue => normal.append(node('p', (issue.title || issue.id) + '：已接受本次变化/缺口；理由：' + (issue.resolution.note || '见决定记录'), 'codex-status')));
+      informational.forEach(issue => normal.append(node('p', (issue.title || issue.id) + '：' + (issue.impact || issue.recommendation || '见报告记录'), 'codex-status')));
+      box.append(normal);
+      report.issues.filter(issue => issue.severity === 'error' || (issue.resolution?.decision !== 'accept' && (issue.decisionRequired || issue.resolution?.decision === 'reject'))).forEach(issue => {
+        const item = node('section', undefined, 'download-acceptance-issue'); item.setAttribute('aria-label', '待处理问题 ' + issue.id);
+        item.append(node('h4', '问题：' + (issue.title || issue.id)), node('p', '影响：' + (issue.impact || '请核对报告中的影响范围。')));
+        const evidence = node('details'); evidence.open = false; evidence.append(node('summary', '查看依据与已尝试的处理'));
+        (Array.isArray(issue.evidence) ? issue.evidence : []).forEach(value => {
+          evidence.append(node('p', [value.label, value.detail].filter(Boolean).join('：')));
+          const link = downloadAcceptanceArtifact(mod, value.artifact); if (link) evidence.append(link);
+        });
+        const attempts = Array.isArray(issue.attempts) ? issue.attempts : [];
+        evidence.append(node('p', '已尝试：' + (attempts.length ? attempts.map(value => typeof value === 'string' ? value : [value.label, value.detail, value.outcome].filter(Boolean).join('；')).join('；') : '尚无已记录的处理尝试。'), 'codex-status'));
+        item.append(evidence, node('p', '建议：' + (issue.recommendation || '核对依据后处理，再核验已有文件。')));
+        if (issue.resolution?.decision === 'reject') item.append(node('p', '已退回：' + (issue.resolution.note || '见决定记录') + '；处理后重新核验。', 'codex-error'));
+        else {
+          item.append(node('p', issue.severity === 'error' ? '此项不能强行接受；请处理原因后重新核验。' : issue.decisionPrompt || (issue.decisionRequired ? '需要你决定是否接受本次变化或缺口。' : '此项尚待处理，尚未视为通过。'), 'codex-status'));
+          const note = node('textarea'); note.rows = 2; note.maxLength = 2000; note.setAttribute('aria-label', '决定理由 ' + issue.id); note.placeholder = '写明依据和本次决定的理由'; note.disabled = locked;
+          const noteKey = report.id + ':' + issue.id; t.sourceAcceptanceNotes ||= {}; note.value = t.sourceAcceptanceNotes[noteKey] || '';
+          note.oninput = () => { t.sourceAcceptanceNotes[noteKey] = note.value; }; item.append(note);
+          if (issue.severity === 'warning' && issue.canAccept === true && issue.decisionRequired) {
+            const accept = node('button', '接受本次变化/缺口', 'quiet-button'); accept.type = 'button'; accept.disabled = locked;
+            accept.onclick = () => decideDownloadAcceptance(mod, report.id, issue.id, 'accept', note.value); item.append(accept);
+          }
+          const reject = node('button', '退回处理', 'quiet-button'); reject.type = 'button'; reject.disabled = locked;
+          reject.onclick = () => decideDownloadAcceptance(mod, report.id, issue.id, 'reject', note.value); item.append(reject);
+        }
+        box.append(item);
+      });
+      const files = node('details'); files.open = false; files.append(node('summary', '下载完整核验报告与差异依据'));
+      (Array.isArray(report.artifacts) ? report.artifacts : []).forEach(artifact => { const link = downloadAcceptanceArtifact(mod, artifact); if (link) files.append(link); }); box.append(files);
+      if (downloadAcceptanceReady(report)) box.append(node('p', '需决定事项已处理。请核对本批后点击“确认文件并进入清洗”一次统一确认；这里不会自动确认或执行清洗。', 'codex-status'));
+    }
+    if (t.sourceAcceptanceError) box.append(node('p', t.sourceAcceptanceError, 'codex-error'));
+    return box;
+  }
   function basisForDownload(mod, sourceType) {
     if (mod.doc && (mod.doc.status !== 'approved' || sourceType === 'rules')) return null;
     if (!sourceType && mod.doc?.status === 'approved') return { text: mod.doc.content, label: '已审核下载方案', sourceType: 'doc' };
@@ -1700,6 +3698,15 @@
     try {
       while (true) {
         const job = await request('/api/codex/source/status?session=' + encodeURIComponent(saved[id]?.sessionId || '') + '&id=' + encodeURIComponent(jobId));
+        if (job.status !== 'running') {
+          const acceptanceStamp = JSON.stringify([saved[id]?.sessionId, job.id, job.status, job.verification?.id, job.verification?.status]);
+          if (t.sourceAcceptanceTerminalStamp !== acceptanceStamp) {
+            t.sourceAcceptanceGeneration = (t.sourceAcceptanceGeneration || 0) + 1;
+            t.sourceAcceptance = null; t.sourceAcceptanceKey = null; t.sourceAcceptanceLoadedKey = null; t.sourceAcceptanceQueuedKey = null;
+            t.sourceAcceptanceLoading = false; t.sourceAcceptanceBusy = false;
+            t.sourceAcceptanceTerminalStamp = acceptanceStamp;
+          }
+        }
         t.sourceJob = job; t.files = job.files || t.files; render();
         if (job.status !== 'running') {
           const stamp = job.id + ':' + job.status;
@@ -1790,10 +3797,15 @@
     t.busy = true; t.error = ''; t.job = null; document.getElementById('download-start').disabled = true; render();
     document.getElementById('download-sources').disabled = true;
     const run = { ...basis, sources, files: [], failures: [], confirmed: false };
+    let completed = false;
     try {
       const sid = await session(id);
       Store.rejectRun(id, 'data', '开始重新下载；本次结果须重新检查并确认。');
       Store.setModuleStatus(id, 'doing');
+      delete saved[id].sourceJobId; delete saved[id].sourceBasis;
+      t.sourceJob = null; t.sourceAcceptanceGeneration = (t.sourceAcceptanceGeneration || 0) + 1;
+      t.sourceAcceptance = null; t.sourceAcceptanceKey = null; t.sourceAcceptanceLoadedKey = null; t.sourceAcceptanceQueuedKey = null;
+      t.sourceAcceptanceTerminalStamp = null; t.sourceAcceptanceError = ''; t.sourceAcceptanceLoading = false; t.sourceAcceptanceBusy = false;
       saved[id].download = run; persist();
       for (let i = 0; i < sources.length; i++) {
         status.textContent = '正在下载 ' + (i + 1) + ' / ' + sources.length + '：' + (sources[i].name || sources[i].url);
@@ -1805,22 +3817,35 @@
       }
       t.files = (await request('/api/codex/files?session=' + sid)).files;
       const count = run.files.length;
-      status.textContent = '完成：成功 ' + count + ' 个，失败 ' + run.failures.length + ' 个。' + (count ? '请查看文件，再确认交给清洗。' : '请检查下载地址或网络后重试。');
+      completed = count === sources.length && count > 0 && !run.failures.length;
+      status.textContent = (completed ? '下载完成' : '下载尚未完成') + '：成功 ' + count + ' 个，失败 ' + run.failures.length + ' 个。' + (completed ? '正在核验本批已有文件，核验后仍需确认交给清洗。' : '成功文件已保留，失败项仍待处理，暂不交给清洗。');
       Store.appendMessage(id, basis.label + '：下载成功 ' + count + ' 个，失败 ' + run.failures.length + ' 个。原始文件和下载记录在“文件与结果”中；年份、范围和版本仍待核查。' + run.failures.map(item => '\n失败：' + item.source.url + '；' + item.error).join(''), 'system');
-      if (count) Store.markRun(id, { dir: '.workbench/' + sid + '/input', artifacts: run.files.map(file => ({ name: file.storedName, size: file.size })) });
+      if (completed) Store.markRun(id, { dir: '.workbench/' + sid + '/input', artifacts: run.files.map(file => ({ name: file.storedName, size: file.size })) });
       t.filesOpen = true;
-    } catch (error) { status.textContent = error.message; t.error = error.message; }
+    } catch (error) { completed = false; status.textContent = error.message; t.error = error.message; }
     finally { t.busy = false; document.getElementById('download-start').disabled = !!parseDownloadSources(document.getElementById('download-sources').value).error; document.getElementById('download-sources').disabled = false; render(); ModuleSpace.render(); }
+    if (completed && saved[id]?.download === run) {
+      const report = await loadDownloadAcceptance(current, true);
+      status.textContent = '下载完成：成功 ' + run.files.length + ' 个。' + (report ? '核验结果已显示在待处理问题中，仍需本批统一确认。' : '本批核验尚未就绪，请查看核验提示；已有文件保留。');
+    }
   };
   async function handoffDownload(mod) {
     const t = task(mod.id), run = saved[mod.id]?.download;
-    if (t.busy || !run?.files.length) return;
+    if (t.busy || t.sourceAcceptanceLoading || t.sourceAcceptanceBusy || !run?.files.length || root.ModuleSpace?.isBusy()) return;
     if (saved[mod.id]?.sourceJobId && (run.sourceJobId !== saved[mod.id].sourceJobId || t.sourceJob?.status !== 'completed')) { t.error = '当前下载任务尚未完成，请检查当前结果后再交接'; render(); return; }
     if (run.failures.length) { t.error = '仍有下载失败，请补齐清单后再交给清洗。成功文件已保留。'; render(); return; }
     const basis = basisForDownload(mod, run.sourceType);
     if (!basis || basis.text !== run.text) { t.error = '下载规则已变化，请先按当前规则重新核查或下载文件。'; render(); return; }
     t.busy = true; t.error = ''; render();
     try {
+      const scope = downloadAcceptanceContext(mod);
+      if (!scope) throw new Error('本批文件的来源记录尚不能核对，请先核验已有文件；不会重新下载。');
+      t.sourceAcceptanceBusy = true; render();
+      const verification = applyDownloadAcceptanceReport(mod, t, scope, await request('/api/codex/source/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(downloadAcceptanceVerifyBody(mod, scope)) }));
+      t.sourceAcceptanceBusy = false;
+      if (!downloadAcceptanceReady(verification)) throw new Error('本批核验尚未就绪；请先处理核验卡中的问题或待决定事项，再统一确认文件。');
+      const current = Store.getState().modules.find(item => item.id === mod.id), currentBasis = current && basisForDownload(current, run.sourceType);
+      if (!currentBasis || currentBasis.text !== run.text || saved[mod.id]?.download !== run) throw new Error('核验期间方案或批次已变化，未交接；请核对当前批次。');
       let clean = Store.getState().modules.find(item => item.type === 'clean-data');
       if (!clean) { Store.addModule('数据清洗'); clean = Store.getState().modules.find(item => item.type === 'clean-data'); }
       if (!clean) throw new Error('无法建立清洗模块');
@@ -1850,16 +3875,17 @@
         task(clean.id).files = existing; task(clean.id).filesOpen = true; task(clean.id).error = '';
         Store.selectModule(clean.id); return;
       }
-      const result = await request('/api/codex/import-input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: target, sourceSessionId: saved[mod.id].sessionId, names: run.files.map(file => file.storedName), confirm: true }) });
+      const result = await request('/api/codex/import-input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: target, sourceSessionId: saved[mod.id].sessionId, names: run.files.map(file => file.storedName), confirm: true,
+        sourceJobId: saved[mod.id].sourceJobId, verificationReportId: verification.id }) });
       task(clean.id).files = result.files; task(clean.id).filesOpen = true; task(clean.id).error = '';
-      saved[clean.id].inputBatch = { names: result.names, label: run.label, text: run.text };
+      saved[clean.id].inputBatch = { names: result.names, label: run.label, text: run.text, verification: { sourceJobId: saved[mod.id].sourceJobId, reportId: verification.id } };
       run.confirmed = true; persist(); Store.confirmRun(mod.id);
       Store.appendMessage(mod.id, '已人工确认 ' + run.files.length + ' 个下载文件并交给数据清洗。' + (run.failures.length ? '本次仍有 ' + run.failures.length + ' 个下载失败，须另行补充。' : ''), 'system');
       Store.appendMessage(clean.id, '已接收下载模块确认的 ' + run.files.length + ' 个原始文件，依据“' + run.label + '”。\n来源与获取要求（用于交接，清洗规则另行确认）：\n' + run.text + '\n交接文件：\n' + run.files.map(file => file.name + '；来源：' + file.finalUrl + '；SHA-256：' + file.sha256).join('\n') + '\n请先查看输入并讨论清洗规则，再执行清洗。', 'system');
       Store.approveModule(mod.id);
       Store.selectModule(clean.id);
     } catch (error) { t.error = error.code === 'SESSION_NOT_FOUND' && error.sessionId === saved[mod.id].sessionId ? '下载源文件会话已失效，请先找回原文件；本次下载记录和方案已保留。' : error.message; }
-    finally { t.busy = false; render(); ModuleSpace.render(); }
+    finally { t.sourceAcceptanceBusy = false; t.busy = false; render(); ModuleSpace.render(); }
   }
   async function runAudit(mod) {
     const t = task(mod.id);
@@ -1892,6 +3918,318 @@
     input.value = '请根据以下核查发现讨论问题来源与修改方案，先不要改代码或执行。我会检查并确认修改规则：\n\n' + finding.text.slice(0, 3200);
     input.dispatchEvent(new Event('input'));
     input.focus();
+  }
+  function basisForClean(mod) {
+    const rules = root.TaskManager?.rulesForModule(mod.id);
+    if (rules?.dirty) return null;
+    if (rules?.text) return {text:rules.text,version:rules.version || 1};
+    return mod.doc?.status === 'approved' && mod.doc.content ? {text:mod.doc.content,version:1} : null;
+  }
+  function cleanVerificationControls(mod, t) {
+    const box = node('section', undefined, 'clean-verification-discussion');
+    const busy=!!(t.busy || t.cleanAcceptanceBusy || t.cleanAcceptanceLoading || root.ModuleSpace?.isBusy());
+    const open = node('button', '讨论清洗核验', 'quiet-button'); open.type = 'button';
+    open.setAttribute('aria-label','讨论清洗核验'); open.disabled = busy;
+    open.onclick = () => {
+      try { if (root.TaskManager?.openCleanVerificationDraft?.(mod.id,{standardNames:cleanStandardNames(mod.id)}) !== true) throw new Error('当前无法打开，请先结束任务或处理未保存的编辑。'); t.cleanAcceptanceError = ''; }
+      catch (error) { t.cleanAcceptanceError = error.message; } render();
+    };
+    box.append(open, node('p','把人工标准直接粘贴到同一方案，或先提供原件，再讨论确认。自动检查与人工核验分别记录；本入口只讨论，不清洗或自动确认。','codex-status'));
+    const standards=node('details',undefined,'clean-standard-attachments');standards.open=false;standards.append(node('summary','人工标准原件 · '+cleanStandardNames(mod.id).length+' 份（提供或查看）'));
+    standards.append(node('p','上传只保留原件，不会自动采纳或签署通过。无法解析的内容请人工阅读原件，并把具体要求整理进方案。','codex-status'));
+    const upload=node('input');upload.type='file';upload.multiple=true;upload.accept='.md,.txt,.pdf,.docx,.csv,.tsv,.xlsx,.xls,.json';upload.disabled=busy;upload.setAttribute('aria-label','提供人工核验标准文件');upload.onchange=()=>uploadCleanStandards(mod,Array.from(upload.files || []));standards.append(upload);
+    cleanStandardNames(mod.id).forEach(name=>{
+      const row=node('div',undefined,'clean-standard-file'),link=node('a','查看原件：'+name,'quiet-button');link.href='/api/codex/download?session='+encodeURIComponent(saved[mod.id]?.sessionId || '')+'&group=reference&name='+encodeURIComponent(name);row.append(link);
+      const remove=node('button','移出本次标准','quiet-button');remove.type='button';remove.disabled=busy;remove.onclick=()=>{if(t.busy || t.cleanAcceptanceBusy || t.cleanAcceptanceLoading || root.ModuleSpace?.isBusy())return;saved[mod.id]={...saved[mod.id],cleanStandardNames:cleanStandardNames(mod.id).filter(value=>value!==name)};delete saved[mod.id].cleanHandoff;Store.invalidateCleanAcceptance?.(mod.id,null,'人工标准原件已改变，请在同一方案核对确认');t.preparedCleanPlan=null;t.executeOnce=false;persist();render();};row.append(remove);standards.append(row);
+    });
+    if(t.cleanStandardNotice)standards.append(node('p',t.cleanStandardNotice,'codex-status'));
+    if(t.cleanStandardError)standards.append(node('p',t.cleanStandardError,'codex-error'));
+    box.append(standards);
+    const basis = basisForClean(mod), plan = basis?.text || root.TaskManager?.rulesForModule(mod.id)?.draft || mod.doc?.content;
+    if (plan && root.CleanVerificationRules) {
+      const prepared=root.CleanExecutionPlan?.prepare(plan);
+      const compiled = root.CleanVerificationRules.compile(prepared?.executionText || plan);
+      const rules = Array.isArray(compiled.checks?.rules) ? compiled.checks.rules : [];
+      const checks = [...rules, ...(Array.isArray(compiled.valueRules?.rules) ? compiled.valueRules.rules : [])];
+      const auto = checks.filter(rule => rule.kind !== 'manual'), manual = checks.filter(rule => rule.kind === 'manual'), human=Array.isArray(compiled.manualChecks?.rules) ? compiled.manualChecks.rules : [];
+      const detail = node('details'); detail.open = false;
+      detail.append(node('summary','方案核验规则 · '+auto.length+' 项自动 · '+human.length+' 项人工 · '+manual.length+' 项需明确'));
+      detail.append(node('p',basis ? '当前已确认方案；实际检查结果以本次执行后的核验报告为准。' : '当前草稿待确认；未应用为执行或验收依据。','codex-status'));
+      if (!checks.length) detail.append(node('p','尚未整理成可执行规则；由智能体结合实际数据和方案补齐，不自行设定阈值。','codex-status'));
+      checks.forEach(rule => detail.append(node('p',(rule.id || '规则')+' · '+(rule.label || rule.field || rule.target || '')+'：'+(rule.kind === 'manual' ? '需判断：'+(rule.reason || '待补依据') : '可自动核对')+'；依据：'+(rule.basis || '见方案'),'codex-status')));
+      human.forEach(rule=>detail.append(node('p',(rule.id || '人工项')+' · '+rule.label+'：'+(rule.reason ? '需先补齐：'+rule.reason : (rule.required ? '必需人工核验' : '可选人工核验'))+'；方法：'+(rule.method || '待明确')+'；通过条件：'+(rule.condition || '待明确')+'；依据：'+(rule.basis || '待明确'),'codex-status')));
+      box.append(detail);
+    }
+    return box;
+  }
+  function noteUnavailableCleanSession(id, sid, error) {
+    const t=task(id);
+    if (saved[id]?.sessionId!==sid || !['SESSION_NOT_FOUND','SESSION_INCOMPLETE'].includes(error?.code) || (error.sessionId && error.sessionId!==sid)) return false;
+    t.cleanAcceptanceUnavailableSession=sid;
+    t.cleanAcceptanceNotice='本机尚无可用的清洗执行记录；浏览器中的方案和历史关联已保留。可检查工作台位置或恢复原任务文件后刷新，这里不会自动新建任务或清洗。';
+    t.cleanRuns=[];t.cleanRunsLoadedSession=sid;t.cleanAcceptance=null;t.cleanAcceptanceKey=null;t.cleanAcceptanceError='';t.cleanResultsError='';
+    if (t.error && /任务不存在|SESSION_NOT_FOUND|SESSION_INCOMPLETE/.test(t.error)) t.error='';
+    if (t.cleanAcceptancePollTimer) {clearTimeout(t.cleanAcceptancePollTimer);t.cleanAcceptancePollTimer=null;t.cleanAcceptancePollKey=null;}
+    return true;
+  }
+  function cleanAcceptanceScope(mod) {
+    const t = task(mod.id), sid = saved[mod.id]?.sessionId;
+    if (t.cleanAcceptanceUnavailableSession && t.cleanAcceptanceUnavailableSession===sid) return null;
+    const runId = t.cleanAcceptanceRunId || saved[mod.id]?.cleanAcceptanceRunId || t.cleanRuns?.[0]?.id;
+    if (!sid || !runId || t.cleanRunsLoadedSession !== sid) return null;
+    const run = (t.cleanRuns || []).find(item => item.id === runId);
+    if (!run) return null;
+    return {sessionId:sid,runId,run,key:JSON.stringify([sid,runId])};
+  }
+  function cleanStandardSelectionMatches(mod, run) {
+    if(!run)return false;
+    const frozen=Array.isArray(run.standardFiles) ? run.standardFiles.map(file=>file.name) : Array.isArray(run.standardNames) ? run.standardNames : [];
+    return JSON.stringify(cleanStandardNames(mod.id).slice().sort())===JSON.stringify([...new Set(frozen)].sort());
+  }
+  function cleanAcceptanceReady(report) {
+    return !!(report?.id && report.status === 'ready' && Array.isArray(report.checks) && Array.isArray(report.issues)
+      && !report.issues.some(issue => issue.severity === 'error' || issue.resolution?.decision === 'reject' || (issue.decisionRequired && issue.resolution?.decision !== 'accept'))
+      && !(report.manualChecks || []).some(check=>check.reason || check.resolution?.conclusion==='rejected' || (check.required && (check.resolution?.conclusion!=='passed' || !check.resolution.note?.trim() || !check.resolution.evidence?.trim() || !check.resolution.reviewer?.trim()))));
+  }
+  function cleanAcceptanceReport(mod, t) {
+    const scope = cleanAcceptanceScope(mod);
+    return scope && t.cleanAcceptanceKey === scope.key ? t.cleanAcceptance : null;
+  }
+  async function loadCleanAcceptanceRuns(id, force = false, completedRunId = null) {
+    const t = task(id), sid = saved[id]?.sessionId;
+    if (!sid || t.cleanRunsLoading || (!force && t.cleanRunsLoadedSession === sid)) return;
+    if (root.TaskManager?.applyCleanRuleUpdate) {
+      try { await syncCleanRuleUpdate(id); } catch(error) { if(error.code!=='CLEAN_SYNC_CONTEXT_CHANGED')t.cleanRuleSyncError=error.message; }
+      if (saved[id]?.sessionId!==sid || t.cleanRunsLoading) return;
+    }
+    const generation = (t.cleanRunsGeneration || 0) + 1; t.cleanRunsGeneration = generation; t.cleanRunsLoading = true;
+    try {
+      const data = await request('/api/codex/clean/runs?session='+encodeURIComponent(sid));
+      if (saved[id]?.sessionId !== sid || t.cleanRunsGeneration !== generation) return;
+      t.cleanRuns = Array.isArray(data.runs) ? data.runs : []; t.cleanRunsLoadedSession = sid; t.cleanAcceptanceError = ''; t.cleanAcceptanceUnavailableSession=null;t.cleanAcceptanceNotice='';
+      const selected = [completedRunId,t.cleanAcceptanceRunId,saved[id]?.cleanAcceptanceRunId].find(value=>value && t.cleanRuns.some(run=>run.id===value)) || t.cleanRuns[0]?.id || null;
+      t.cleanAcceptanceRunId = selected;
+      if (saved[id]?.cleanAcceptanceRunId !== (selected || undefined)) {
+        if (selected) saved[id].cleanAcceptanceRunId = selected;
+        else delete saved[id].cleanAcceptanceRunId;
+        persist();
+      }
+      if (!selected || t.cleanAcceptanceKey !== JSON.stringify([sid,selected])) {
+        t.cleanAcceptance = null; t.cleanAcceptanceKey = null; t.cleanAcceptanceLoadedKey = null;
+      }
+      const mod = Store.getState().modules.find(item=>item.id === id);
+      // Recover an explicit A-plan data binding after a server-side execution or
+      // refresh, without editing the approved text or any discussion history.
+      const run = t.cleanRuns.find(item=>item.id===selected), basis=mod && basisForClean(mod);
+      const prepared=basis && root.CleanExecutionPlan?.prepare(basis.text);
+      if (run && prepared && run.planText===basis.text && run.executionAdapter===prepared.adapter && Array.isArray(run.inputFiles)) {
+        const names=run.inputFiles.map(file=>file.name), standards=cleanStandardNames(id).filter(name=>!prepared.inputReferenceNames.includes(name));
+        if (prepared.inputReferenceNames.every(name=>names.includes(name)) && JSON.stringify(standards.slice().sort())===JSON.stringify((run.standardFiles || []).map(file=>file.name).sort())) {
+          saved[id]={...saved[id],cleanStandardNames:standards,inputBatch:{...(saved[id]?.inputBatch || {}),names,label:'已确认规则指定的原始数据',text:'原件保留，SHA-256一致的输入副本已绑定。'}};
+          persist();
+        }
+      }
+      if (mod && selected) await loadCleanAcceptance(mod, false, true);
+    } catch (error) {
+      if (saved[id]?.sessionId === sid && t.cleanRunsGeneration === generation) {
+        t.cleanRunsLoadedSession=sid;
+        if (!noteUnavailableCleanSession(id,sid,error)) t.cleanAcceptanceError='无法读取清洗核验记录：'+error.message+'。可点击“刷新核验记录”重试，原方案和文件关联保留。';
+      }
+    }
+    finally { if (t.cleanRunsGeneration === generation) { t.cleanRunsLoading = false; render(); } }
+  }
+  function queueCleanAcceptancePoll(mod) {
+    const t=task(mod.id),scope=cleanAcceptanceScope(mod),report=cleanAcceptanceReport(mod,t);
+    const current=Store.getState().modules.find(item=>item.id===mod.id);
+    if (t.cleanAcceptancePollTimer && (!scope || t.cleanAcceptancePollKey!==scope.key || report?.status!=='checking' || !current || Store.getState().activeModuleId!==mod.id)) {
+      clearTimeout(t.cleanAcceptancePollTimer);t.cleanAcceptancePollTimer=null;t.cleanAcceptancePollKey=null;
+    }
+    if (!scope || !current || Store.getState().activeModuleId!==mod.id || report?.status!=='checking' || t.cleanAcceptancePollTimer) return;
+    const key=scope.key;t.cleanAcceptancePollKey=key;
+    t.cleanAcceptancePollTimer=setTimeout(async()=>{
+      t.cleanAcceptancePollTimer=null;t.cleanAcceptancePollKey=null;
+      const state=Store.getState(),currentMod=state.modules.find(item=>item.id===mod.id);
+      if (!currentMod || state.activeModuleId!==mod.id || cleanAcceptanceScope(mod)?.key!==key || cleanAcceptanceReport(mod,t)?.status!=='checking') return;
+      if (!t.busy && !t.cleanAcceptanceBusy && !t.cleanAcceptanceLoading && !root.ModuleSpace?.isBusy()) await loadCleanAcceptance(currentMod);
+      queueCleanAcceptancePoll(currentMod);
+    },1500);
+  }
+  async function loadCleanAcceptance(mod, verify = false, internal = false) {
+    const t = task(mod.id), scope = cleanAcceptanceScope(mod);
+    if (!scope || t.cleanAcceptanceLoading || t.cleanAcceptanceBusy || (!internal && (t.busy || root.ModuleSpace?.isBusy()))) return null;
+    const generation = (t.cleanAcceptanceGeneration || 0)+1; t.cleanAcceptanceGeneration = generation;
+    t.cleanAcceptanceLoading = true; t.cleanAcceptanceError = ''; render();
+    try {
+      const report = verify ? await request('/api/codex/clean/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:scope.sessionId,runId:scope.runId,confirm:true})})
+        : await request('/api/codex/clean/verification?session='+encodeURIComponent(scope.sessionId)+'&run='+encodeURIComponent(scope.runId));
+      if (cleanAcceptanceScope(mod)?.key !== scope.key || t.cleanAcceptanceGeneration !== generation) return null;
+      if (!report || (report.runId && report.runId !== scope.runId)) throw new Error('核验报告与当前运行不匹配，请刷新记录。');
+      t.cleanAcceptance = report; t.cleanAcceptanceKey = scope.key; t.cleanAcceptanceLoadedKey = scope.key; queueCleanAcceptancePoll(mod); return report;
+    } catch (error) { if (cleanAcceptanceScope(mod)?.key === scope.key && t.cleanAcceptanceGeneration === generation && !noteUnavailableCleanSession(mod.id,scope.sessionId,error)) t.cleanAcceptanceError = error.message; return null; }
+    finally { if (t.cleanAcceptanceGeneration === generation) { t.cleanAcceptanceLoading = false; render(); } }
+  }
+  async function decideCleanAcceptance(mod, reportId, issueId, decision, note) {
+    const t = task(mod.id), scope = cleanAcceptanceScope(mod), report = cleanAcceptanceReport(mod,t);
+    if (!scope || t.busy || t.cleanAcceptanceBusy || t.cleanAcceptanceLoading || root.ModuleSpace?.isBusy()) return false;
+    const issue = report?.id === reportId && report.issues?.find(value => value.id === issueId);
+    if (!issue || issue.resolution || !['accept','reject'].includes(decision) || (decision === 'accept' && !(issue.severity === 'warning' && issue.canAccept === true && issue.decisionRequired))) {
+      t.cleanAcceptanceError = '本项已变化或不能接受，请刷新报告后处理。'; render(); return false;
+    }
+    if (typeof note !== 'string' || !note.trim()) { t.cleanAcceptanceError = '请填写本次决定的理由和依据。'; render(); return false; }
+    t.cleanAcceptanceBusy = true; t.cleanAcceptanceError = ''; render();
+    try {
+      const next = await request('/api/codex/clean/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:scope.sessionId,runId:scope.runId,reportId,issueId,decision,note:note.trim()})});
+      if (cleanAcceptanceScope(mod)?.key !== scope.key) throw new Error('运行版本已改变，决定未应用到当前页面。');
+      t.cleanAcceptance = next; t.cleanAcceptanceKey = scope.key; return true;
+    } catch(error) { t.cleanAcceptanceError = error.message; return false; }
+    finally { t.cleanAcceptanceBusy = false; render(); }
+  }
+  function cleanAcceptanceArtifact(mod, artifact, label) {
+    return downloadAcceptanceArtifact(mod, artifact, label);
+  }
+  async function recordCleanManualCheck(mod, reportId, checkId, conclusion, note, evidence, reviewer) {
+    const t=task(mod.id),scope=cleanAcceptanceScope(mod),report=cleanAcceptanceReport(mod,t),basis=basisForClean(mod),projectId=root.TaskManager?.currentTaskId?.();
+    if(!scope || t.busy || t.cleanAcceptanceBusy || t.cleanAcceptanceLoading || root.ModuleSpace?.isBusy())return false;
+    const check=report?.id===reportId && report.manualChecks?.find(value=>value.id===checkId);
+    if(!check || !scope.run?.planText || basis?.text!==scope.run.planText || !cleanStandardSelectionMatches(mod,scope.run) || ['not_checked','checking'].includes(report.status)) {t.cleanAcceptanceError='人工核验项、方案、标准原件或报告已变化，请刷新核对后记录。';render();return false;}
+    if(!['passed','rejected','needs_evidence'].includes(conclusion) || (conclusion==='passed' && check.reason)) {t.cleanAcceptanceError='此标准尚未明确，请回到同一方案补齐并确认，不能直接签署通过。';render();return false;}
+    if(typeof note!=='string' || !note.trim() || typeof reviewer!=='string' || !reviewer.trim() || (conclusion==='passed' && (typeof evidence!=='string' || !evidence.trim()))) {t.cleanAcceptanceError='请填写核验人、理由；通过还须记录实际核对位置和证据，标准来源不能代替核验证据。';render();return false;}
+    if(note.length>2000 || String(evidence || '').length>4000 || reviewer.length>120) {t.cleanAcceptanceError='核验记录过长，请精简理由、证据或核验人信息。';render();return false;}
+    t.cleanAcceptanceBusy=true;t.cleanAcceptanceError='';render();
+    try {
+      const next=await request('/api/codex/clean/manual-check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:scope.sessionId,runId:scope.runId,reportId,checkId,conclusion,note:note.trim(),evidence:String(evidence || '').trim(),reviewer:reviewer.trim(),rulesText:basis.text,standardNames:cleanStandardNames(mod.id)})});
+      if(cleanAcceptanceScope(mod)?.key!==scope.key || (projectId && root.TaskManager?.currentTaskId?.()!==projectId) || !Store.getState().modules.some(value=>value.id===mod.id && value.type==='clean-data') || basisForClean(mod)?.text!==basis.text || !cleanStandardSelectionMatches(mod,scope.run))throw new Error('项目、方案、标准原件或运行已变化；记录保留在原报告，未应用到当前页面。');
+      if(next.id!==reportId || next.runId!==scope.runId)throw new Error('返回的人工核验记录与当前报告不匹配，请刷新。');
+      t.cleanAcceptance=next;t.cleanAcceptanceKey=scope.key;t.cleanManualDrafts ||= {};t.cleanManualDrafts[reportId+':'+checkId]={note:note.trim(),evidence:String(evidence || '').trim(),reviewer:reviewer.trim()};
+      saved[mod.id]={...saved[mod.id],cleanReviewerName:reviewer.trim()};delete saved[mod.id].cleanHandoff;Store.invalidateCleanAcceptance?.(mod.id,scope.runId,'人工核验结论已更新，需重新确认后交接');persist();return true;
+    }catch(error){t.cleanAcceptanceError=error.message;return false;}
+    finally{t.cleanAcceptanceBusy=false;render();}
+  }
+  function cleanManualCheckPanel(mod,t,report,busy) {
+    const section=node('section',undefined,'clean-manual-checks');section.setAttribute('aria-label','人工核验标准与记录');
+    const checks=Array.isArray(report.manualChecks) ? report.manualChecks : [];
+    if(!checks.length)return section;
+    section.append(node('h4','人工核验标准与记录'),node('p','请按已确认标准检查实际结果，再记录结论。这里的人工通过单独留档，不会把自动检查改成通过；必需项未通过不能交给计算。','codex-status'));
+    const current=basisForClean(mod),scope=cleanAcceptanceScope(mod),locked=busy || !scope?.run?.planText || current?.text!==scope.run.planText || !cleanStandardSelectionMatches(mod,scope.run) || ['checking','not_checked'].includes(report.status);
+    const completed=node('details',undefined,'download-acceptance-normal');completed.open=false;completed.append(node('summary','已完成的人工核验（展开查看或修改）'));
+    checks.forEach(check=>{
+      const resolution=check.resolution,passed=!check.reason && resolution?.conclusion==='passed',item=node('details',undefined,'clean-manual-check');item.open=!passed && (check.required || !!resolution);
+      item.setAttribute('aria-label','人工核验 '+check.id);
+      const status={passed:'人工核验通过',rejected:'已退回',needs_evidence:'待补证据'}[resolution?.conclusion] || '待人工核验';
+      item.append(node('summary',(check.required ? '必需' : '可选')+' · '+(check.label || check.id)+' · '+status));
+      item.append(node('p','检查方法：'+(check.method || '待明确')),node('p','通过条件：'+(check.condition || '待明确')),node('p','标准依据：'+(check.basis || '待明确'),'codex-status'));
+      (Array.isArray(scope?.run?.standardFiles) ? scope.run.standardFiles.map(file=>file.name) : cleanStandardNames(mod.id)).filter(name=>[check.basis,check.sourceText].filter(Boolean).join('\n').includes(name)).forEach(name=>{const link=node('a','查看标准原件：'+name,'quiet-button');link.href='/api/codex/download?session='+encodeURIComponent(saved[mod.id]?.sessionId || '')+'&group=reference&name='+encodeURIComponent(name);item.append(link);});
+      if(check.reason)item.append(node('p','标准尚需完善：'+check.reason+'。请回同一清洗方案补齐并确认，不能直接签署通过。','codex-error'));
+      if(resolution)item.append(node('p','当前结论：'+status+'；核验人：'+(resolution.reviewer || '未记录')+'；时间：'+(resolution.at || '未记录')),node('p','理由：'+resolution.note),node('p','实际核验证据：'+(resolution.evidence || '尚待补充')));
+      t.cleanManualDrafts ||= {};const key=report.id+':'+check.id,draft=t.cleanManualDrafts[key] ||= {note:resolution?.note || '',evidence:resolution?.evidence || '',reviewer:resolution?.reviewer || saved[mod.id]?.cleanReviewerName || '研究者'};
+      const form=node('div',undefined,'clean-manual-fields'),note=node('textarea'),evidence=node('textarea'),reviewer=node('input');
+      note.rows=2;note.maxLength=2000;note.placeholder='说明检查结果及通过、退回或待补的理由';note.setAttribute('aria-label','人工核验理由 '+check.id);note.value=draft.note;note.disabled=locked;
+      evidence.rows=3;evidence.maxLength=4000;evidence.placeholder='记录实际核对位置和观察，例如原表第3页与结果第12—16行；引用标准文件本身不等于已检查结果';evidence.setAttribute('aria-label','人工核验证据 '+check.id);evidence.value=draft.evidence;evidence.disabled=locked;
+      reviewer.type='text';reviewer.maxLength=120;reviewer.setAttribute('aria-label','人工核验人 '+check.id);reviewer.value=draft.reviewer;reviewer.disabled=locked;
+      [['理由',note],['实际核对位置与证据',evidence],['核验人（可修改）',reviewer]].forEach(([label,field])=>{const wrap=node('label',label);wrap.append(field);form.append(wrap);});item.append(form);
+      const buttons=node('div',undefined,'codex-toolbar'),actions=[];
+      [['passed','人工核验通过'],['rejected','退回处理'],['needs_evidence','待补证据']].forEach(([conclusion,label])=>{const button=node('button',label,'quiet-button');button.type='button';button.onclick=()=>recordCleanManualCheck(mod,report.id,check.id,conclusion,note.value,evidence.value,reviewer.value);buttons.append(button);actions.push([conclusion,button]);});
+      const update=()=>{draft.note=note.value;draft.evidence=evidence.value;draft.reviewer=reviewer.value;actions.forEach(([conclusion,button])=>{button.disabled=locked || !note.value.trim() || !reviewer.value.trim() || (conclusion==='passed' && (!!check.reason || !evidence.value.trim()));});};note.oninput=update;evidence.oninput=update;reviewer.oninput=update;update();item.append(buttons);
+      if(check.history?.length){const history=node('details');history.open=false;history.append(node('summary','历次人工核验记录 · '+check.history.length+' 条'));check.history.forEach(entry=>history.append(node('p',({passed:'通过',rejected:'退回',needs_evidence:'待补证据'}[entry.conclusion] || entry.conclusion)+'；'+(entry.reviewer || '')+'；'+(entry.at || '')+'；理由：'+(entry.note || '')+'；证据：'+(entry.evidence || '无'))));item.append(history);}
+      if(passed)completed.append(item);else section.append(item);
+    });
+    if(checks.some(check=>!check.reason && check.resolution?.conclusion==='passed'))section.append(completed);
+    return section;
+  }
+  function cleanAcceptancePanel(mod,t) {
+    const box = node('section', undefined, 'download-acceptance-card clean-acceptance-card'); box.setAttribute('aria-label','清洗核验与待处理问题');
+    box.append(node('h3','清洗核验与待处理问题'));
+    if (saved[mod.id]?.sessionId && !t.busy && !t.cleanRunsLoading && t.cleanRunsLoadedSession !== saved[mod.id].sessionId && !t.cleanRunsQueued) {
+      t.cleanRunsQueued = true; void Promise.resolve().then(()=>{ t.cleanRunsQueued = false; return loadCleanAcceptanceRuns(mod.id); });
+    }
+    queueCleanAcceptancePoll(mod);
+    const scope = cleanAcceptanceScope(mod), report = cleanAcceptanceReport(mod,t), busy = !!(t.busy || t.cleanRunsLoading || t.cleanAcceptanceLoading || t.cleanAcceptanceBusy || root.ModuleSpace?.isBusy());
+    const runs = t.cleanRuns || [];
+    if (runs.length) {
+      const label = node('label','核验哪次清洗 '), select = node('select'); select.setAttribute('aria-label','核验哪次清洗');
+      runs.forEach((run,index)=>{ const option=node('option',(index === 0 ? '最新 · ' : '历史 · ')+(run.planVersion ? '方案 v'+run.planVersion+' · ' : '旧版未冻结方案 · ')+new Date(run.createdAt || run.updatedAt).toLocaleString('zh-CN')+' · '+run.id.slice(0,8)); option.value=run.id; select.append(option); });
+      select.value=scope?.runId || ''; select.disabled=busy;
+      select.onchange=()=>{ t.cleanAcceptanceRunId=select.value; t.cleanAcceptance=null; t.cleanAcceptanceKey=null; saved[mod.id]={...saved[mod.id],cleanAcceptanceRunId:select.value}; persist(); void loadCleanAcceptance(mod); render(); }; label.append(select); box.append(label);
+    }
+    const labels={ready:'核验已就绪，仍待本次统一确认',needs_decision:'有问题需要你决定',needs_manual:'必需人工核验尚未通过，请查看下面的标准和记录',blocked:'存在阻断问题，处理后重新核验',rejected:'已退回处理，尚不能交接',checking:'正在核验已有清洗结果',not_checked:'尚未核验，不表示通过'};
+    box.append(node('p',busy ? '正在读取或核验现有结果；不会重复清洗。' : t.cleanAcceptanceUnavailableSession && t.cleanAcceptanceUnavailableSession===saved[mod.id]?.sessionId ? t.cleanAcceptanceNotice : report ? labels[report.status] || '请查看本次核验记录。' : scope ? '已有结果尚未核验；旧文件与原结果保留，不自动重做。' : '暂无清洗执行记录。先讨论并确认方案，执行后再核验。','codex-status'));
+    const toolbar=node('div',undefined,'codex-toolbar');
+    const verify=node('button','核验已有清洗结果','quiet-button'); verify.type='button'; verify.disabled=!scope || busy; verify.onclick=()=>loadCleanAcceptance(mod,true); toolbar.append(verify);
+    const refresh=node('button','刷新核验记录','quiet-button'); refresh.type='button'; refresh.disabled=!saved[mod.id]?.sessionId || busy; refresh.onclick=()=>loadCleanAcceptanceRuns(mod.id,true); toolbar.append(refresh); box.append(toolbar);
+    if (report && Array.isArray(report.checks) && Array.isArray(report.issues)) {
+      const counts=[['inputRows','输入记录'],['cleanedRows','结果记录'],['pendingRows','待处理记录'],['duplicateRows','去重记录'],['excludedRows','排除记录'],['changedCells','改值'],['openDecisions','待决定问题'],['manualRequiredPending','必需人工待核验']].filter(([key])=>Number.isFinite(report.summary?.[key])).map(([key,label])=>label+' '+report.summary[key]);
+      if(counts.length) box.append(node('p',counts.join(' · '),'codex-status'));
+      const normal=node('details',undefined,'download-acceptance-normal'); normal.open=false; normal.append(node('summary','正常检查与已记录决定（展开查看）'));
+      report.checks.forEach(check=>normal.append(node('p',(check.label || check.id)+' · '+({passed:'通过',failed:'未通过',pending:'待判断',limited:'检查有限'}[check.status] || check.status || '')+(check.evidence ? '；'+(typeof check.evidence==='string' ? check.evidence : JSON.stringify(check.evidence)) : ''),'codex-status')));
+      report.issues.filter(issue=>issue.severity!=='error' && issue.resolution?.decision==='accept').forEach(issue=>normal.append(node('p',(issue.title || issue.id)+'：已接受本次例外；理由：'+issue.resolution.note,'codex-status'))); box.append(normal);
+      report.issues.filter(issue=>issue.severity==='error' || (issue.resolution?.decision!=='accept' && (issue.decisionRequired || issue.resolution?.decision==='reject'))).forEach(issue=>{
+        const item=node('section',undefined,'download-acceptance-issue'); item.setAttribute('aria-label','清洗待处理问题 '+issue.id);
+        item.append(node('h4','问题：'+(issue.title || issue.id)),node('p','影响：'+(issue.impact || '见记录定位和报告。')));
+        const evidence=node('details'); evidence.open=false; evidence.append(node('summary','查看原值、结果、依据与已尝试的处理'));
+        (Array.isArray(issue.evidence) ? issue.evidence : []).forEach(value=>{ evidence.append(node('p',typeof value==='string' ? value : [value.label,value.detail].filter(Boolean).join('：'))); const link=cleanAcceptanceArtifact(mod,value.artifact); if(link)evidence.append(link); });
+        evidence.append(node('p','已尝试：'+((issue.attempts || []).map(value=>typeof value==='string' ? value : [value.label,value.detail,value.outcome].filter(Boolean).join('；')).join('；') || '尚无已记录的处理尝试。'),'codex-status')); item.append(evidence,node('p','建议：'+(issue.recommendation || '核对并修正后重新核验。')));
+        if(issue.resolution?.decision==='reject') item.append(node('p','已退回：'+issue.resolution.note,'codex-error'));
+        else {
+          item.append(node('p',issue.severity==='error' ? '此项不能强行接受，需修复后重新核验。' : issue.decisionPrompt || '需要你决定是否接受本次例外。','codex-status'));
+          const note=node('textarea'); note.rows=2; note.maxLength=2000; note.placeholder='写明依据和本次决定理由'; note.setAttribute('aria-label','清洗决定理由 '+issue.id); note.disabled=busy;
+          t.cleanAcceptanceNotes ||= {}; const noteKey=report.id+':'+issue.id; note.value=t.cleanAcceptanceNotes[noteKey] || ''; note.oninput=()=>{t.cleanAcceptanceNotes[noteKey]=note.value;}; item.append(note);
+          if(issue.severity==='warning' && issue.canAccept===true && issue.decisionRequired) {const accept=node('button','接受本次例外','quiet-button');accept.type='button';accept.disabled=busy;accept.onclick=()=>decideCleanAcceptance(mod,report.id,issue.id,'accept',note.value);item.append(accept);}
+          const reject=node('button','退回处理','quiet-button'); reject.type='button';reject.disabled=busy;reject.onclick=()=>decideCleanAcceptance(mod,report.id,issue.id,'reject',note.value);item.append(reject);
+        } box.append(item);
+      });
+      box.append(cleanManualCheckPanel(mod,t,report,busy));
+      const files=node('details');files.open=false;files.append(node('summary','完整核验报告与逐条依据')); (report.artifacts || []).forEach(artifact=>{const link=cleanAcceptanceArtifact(mod,artifact);if(link)files.append(link);});box.append(files);
+    }
+    const currentBasis=basisForClean(mod), samePlan=!!(scope?.run?.planText && currentBasis?.text===scope.run.planText && cleanStandardSelectionMatches(mod,scope.run));
+    if(scope && !samePlan)box.append(node('p','当前方案或标准原件与本次冻结记录不一致，或原结果缺少冻结记录。原文件保留；新标准请在同一方案补齐确认，不能直接套用旧核验通过。','codex-status'));
+    const confirm=node('button',scope && saved[mod.id]?.cleanHandoff?.runId === scope.runId ? '查看已交接的计算模块' : '确认结果并交给计算','primary-button');confirm.type='button';confirm.disabled=busy || !samePlan || !cleanAcceptanceReady(report);confirm.onclick=()=>confirmCleanAcceptance(mod.id);box.append(confirm);
+    if(t.cleanAcceptanceError)box.append(node('p',t.cleanAcceptanceError,'codex-error'));
+    return box;
+  }
+  async function confirmCleanAcceptance(id) {
+    const mod=Store.getState().modules.find(item=>item.id===id),t=task(id);
+    if(!mod || mod.type!=='clean-data' || t.busy || t.cleanAcceptanceBusy || t.cleanAcceptanceLoading || root.ModuleSpace?.isBusy()) return false;
+    const projectId=root.TaskManager?.currentTaskId?.();let expected=null;
+    function assertContext(targetId) {
+      const state=Store.getState();
+      if (!state.modules.some(item=>item.id===id && item.type==='clean-data') || (projectId && root.TaskManager?.currentTaskId?.()!==projectId) || (targetId && !state.modules.some(item=>item.id===targetId && item.type==='calculation'))) throw new Error('工作台项目或模块已经变化，未继续交接；原清洗结果保留。');
+      if(expected && (cleanAcceptanceScope(mod)?.key!==expected.scope.key || basisForClean(mod)?.text!==expected.text || !cleanStandardSelectionMatches(mod,expected.scope.run)))throw new Error('方案、标准原件或运行已变化，未继续交接；原清洗结果保留。');
+    }
+    try {
+      assertContext();
+      const scope=cleanAcceptanceScope(mod),basis=basisForClean(mod);
+      if(!scope?.run || !basis || basis.text!==scope.run.planText || !cleanStandardSelectionMatches(mod,scope.run))throw new Error('请先选择与当前已确认方案及标准原件一致的清洗运行；新标准需纳入同一方案，旧结果保留，不自动重做。');
+      expected={scope,text:basis.text};
+      const previous=saved[id]?.cleanHandoff;
+      const delivered=previous?.runId===scope.runId && Store.getState().modules.find(item=>item.id===previous.targetModuleId);
+      if(delivered){ Store.selectModule(delivered.id); return true; }
+      const report=await loadCleanAcceptance(mod,true);
+      assertContext();
+      if(!cleanAcceptanceReady(report))throw new Error(t.cleanAcceptanceError || '本次核验未就绪，请先处理待决定或阻断问题。');
+      if(cleanAcceptanceScope(mod)?.key!==scope.key || basisForClean(mod)?.text!==basis.text || !cleanStandardSelectionMatches(mod,scope.run))throw new Error('核验期间方案、标准原件或运行变化，未交接。');
+      t.cleanAcceptanceBusy=true;t.error='';render();
+      const accepted=await request('/api/codex/clean/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:scope.sessionId,runId:scope.runId,reportId:report.id,rulesText:basis.text,confirm:true})});
+      assertContext();
+      if(!accepted.confirmed || !Array.isArray(accepted.cleanedNames) || !accepted.cleanedNames.length)throw new Error('后台未确认本次清洗结果，未创建下游输入。');
+      if(cleanAcceptanceScope(mod)?.key!==scope.key || basisForClean(mod)?.text!==basis.text || !cleanStandardSelectionMatches(mod,scope.run))throw new Error('确认后方案、标准原件或运行变化，未交接。');
+      assertContext();
+      let calculation=Store.getState().modules.find(item=>item.type==='calculation');
+      if(!calculation){Store.addModule('模型调整与计算');calculation=Store.getState().modules.find(item=>item.type==='calculation');}
+      if(!calculation)throw new Error('未找到计算模块；验收记录和结果已保留。');
+      const target=await session(calculation.id);
+      assertContext(calculation.id);
+      const result=await request('/api/codex/import-input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:target,sourceSessionId:scope.sessionId,names:accepted.cleanedNames,sourceGroup:'output',confirm:true,cleanRunId:scope.runId,cleanReportId:report.id})});
+      assertContext(calculation.id);
+      task(calculation.id).files=result.files;task(calculation.id).filesOpen=true;
+      saved[calculation.id]={...saved[calculation.id],inputBatch:{names:result.names,label:'已验收清洗结果',text:basis.text,cleanAcceptance:{runId:scope.runId,reportId:report.id,planSha256:report.planSha256,planText:basis.text}}};
+      scope.run.acceptanceConfirmed=accepted; saved[id]={...saved[id],cleanHandoff:{runId:scope.runId,reportId:report.id,targetModuleId:calculation.id}};persist();
+      const marked=Store.markRun(id,{dir:scope.runId,artifacts:accepted.cleanedNames.map(name=>({name,size:0})),cleanAcceptance:{runId:scope.runId,reportId:report.id,planSha256:report.planSha256,planText:basis.text}});
+      if(!marked || !Store.confirmRun(id))throw new Error('文件已交接，但本环节确认记录未保存，请刷新核验记录。');
+      Store.appendMessage(id,'已确认本次清洗结果并交给计算；核验报告与决定留档。没有启动计算。','system');
+      Store.appendMessage(calculation.id,'已接收清洗运行 '+scope.runId+' 的 '+result.names.length+' 个已核验结果文件。报告：'+report.id+'。先讨论并确认计算方案，再执行计算。','system');
+      Store.approveModule(id);Store.selectModule(calculation.id);return true;
+    }catch(error){t.cleanAcceptanceError=error.message;return false;}
+    finally{t.cleanAcceptanceBusy=false;render();ModuleSpace.render();}
   }
   async function loadCleanResults(id, runId) {
     const t = task(id), generation = (t.cleanResultsGeneration || 0) + 1;
@@ -1965,6 +4303,7 @@
   }
   function renderCleanResults(mod, t, list) {
     list.classList.add('clean-results');
+    if (t.cleanAcceptanceUnavailableSession && t.cleanAcceptanceUnavailableSession===saved[mod.id]?.sessionId) { list.append(node('p',t.cleanAcceptanceNotice,'codex-status')); return; }
     const key = JSON.stringify(t.files.map(file => [file.group, file.name, file.size]));
     if (saved[mod.id]?.sessionId && !t.cleanResultsLoading && t.cleanResultsKey !== key && (!t.busy || t.job?.status === 'completed')) {
       t.cleanResultsKey = key; loadCleanResults(mod.id, t.cleanResultsRunId);
@@ -2014,6 +4353,7 @@
     if (view.otherFiles.length) { const extra = node('details', undefined, 'clean-result-aux'); extra.append(node('summary', '其他保留文件（' + view.otherFiles.length + '）')); view.otherFiles.forEach(file => extra.append(cleanResultLink(mod.id, file))); list.append(extra); }
   }
   function render() {
+    root.LiteratureRuleReview?.closeIfContextChanged();
     root.TaskManager?.refreshControls();
     renderConnection();
     if (literatureFieldsDialog) {
@@ -2023,14 +4363,24 @@
     }
     const state = Store.getState();
     const mod = state.modules.find(m => m.id === state.activeModuleId);
+    document.body?.classList?.toggle('literature-reading-view', mod?.type === 'literature-mining');
     panel.hidden = !mod || !document.getElementById('records-view').hidden;
     if (panel.hidden) return;
     const t = task(mod.id);
+    const literatureView = mod.type === 'literature-mining';
+    const contextId = literatureView ? literatureWorkspaceManager(mod)?.active()?.id || '' : '';
+    const scrollKey = literatureView ? [mod.id, contextId, t.literatureJob?.id || saved[mod.id]?.literatureJobId || 'draft'].join(':') : '';
+    const previousScroll = literatureView && panel.literatureScrollKey === scrollKey ? panel.scrollTop : 0;
+    panel.literatureScrollKey = scrollKey;
+    if (literatureView) { panel.tabIndex = 0; panel.setAttribute('aria-label', '文献任务滚动区域'); }
+    else { panel.removeAttribute('tabindex'); panel.removeAttribute('aria-label'); }
     panel.replaceChildren();
     if (mod.type === 'download-data') {
       panel.append(node('h3', '按方案下载数据'));
       panel.append(node('p', '直接讨论 → 形成并审核方案 → 点击开始下载。FAOSTAT贸易矩阵自动定位官方整包并按年份筛选；方案已有文件地址的数据源也通过同一任务下载。大文件流式保存，每个文件支持至2GiB，无需手动找FAO链接。', 'codex-status'));
+      panel.append(downloadVerificationControls(mod, t));
     }
+    if (mod.type === 'clean-data') { panel.append(cleanVerificationControls(mod, t)); panel.append(cleanAcceptancePanel(mod, t)); }
     if (mod.type === 'calculation') panel.append(node('p', '输入可来自下载数据、数据清洗、文献挖掘中的一条或多条路径。将本次需要的成果文件上传到此处，再确定计算方式与方案。', 'codex-status'));
     const row = node('div', undefined, 'codex-toolbar');
     if (t.backend === 'codex') {
@@ -2048,7 +4398,7 @@
         const mode = node('select'); mode.setAttribute('aria-label', 'Codex 工作模式');
         [['plan', '查看数据 / 拟方案'], ['execute', '执行已确认步骤']].forEach(([value, title]) => { const option = node('option', title); option.value = value; mode.append(option); });
         mode.value = t.execute ? 'execute' : 'plan'; mode.disabled = t.busy;
-        mode.onchange = () => { t.execute = mode.value === 'execute'; };
+        mode.onchange = () => { t.execute = false; if (mode.value === 'execute') root.TaskManager?.openPlan(); else render(); };
         row.append(mode);
       }
     }
@@ -2056,6 +4406,7 @@
     if (mod.type === 'literature-mining') {
       literaturePanel(mod, t);
       if (t.error) panel.append(node('p', t.error, 'codex-error'));
+      panel.scrollTop = previousScroll;
       return;
     }
     if (t.backend === 'api' && mod.type !== 'download-data') { panel.append(node('p', 'API 模式提供文字指导；文件上传与实际执行需切换本机 Codex。')); return; }
@@ -2095,8 +4446,9 @@
     }
     const refreshButton = node('button', '刷新文件', 'quiet-button'); refreshButton.type = 'button'; refreshButton.disabled = t.busy; refreshButton.onclick = () => refresh(mod.id); fileRow.append(refreshButton);
     if (mod.type === 'download-data') {
+      const acceptance = downloadAcceptancePanel(mod, t); if (acceptance) panel.append(acceptance);
       const start = node('button', '按方案开始下载', 'primary-button'); start.type = 'button'; start.disabled = t.busy || !basisForDownload(mod) || !!root.ModuleSpace?.isBusy(); start.onclick = () => openDownload(mod); fileRow.append(start);
-      const handoff = node('button', saved[mod.id]?.download?.confirmed ? '查看已交接的清洗模块' : '确认文件并进入清洗', 'quiet-button'); handoff.type = 'button'; handoff.disabled = t.busy || !saved[mod.id]?.download?.files.length || !!saved[mod.id]?.download?.failures.length || !!t.sourceJob && (t.sourceJob.status !== 'completed' || saved[mod.id]?.download?.sourceJobId !== t.sourceJob.id); handoff.onclick = () => handoffDownload(mod); fileRow.append(handoff);
+      const handoff = node('button', saved[mod.id]?.download?.confirmed ? '查看已交接的清洗模块' : '确认文件并进入清洗', 'quiet-button'); handoff.type = 'button'; handoff.disabled = !downloadAcceptanceCanHandoff(mod, t); handoff.onclick = () => handoffDownload(mod); fileRow.append(handoff);
       const run = saved[mod.id]?.download;
       fileRow.append(node('span', run ? '下载成功 ' + run.files.length + ' 个，失败 ' + run.failures.length + ' 个；' + (run.confirmed ? '已确认交给清洗' : '待人工核查') : '先确认规则，下载后检查文件，再交给清洗。', 'codex-status'));
     }
@@ -2126,6 +4478,8 @@
     if (mod.type === 'clean-data') cleaningPanel(mod,t);
     if (mod.type === 'result-audit') panel.append(node('p', '先讨论并在上方确认核查原则，或直接上传已有标准；再核查结果、讨论定位。每个标准文件上限 20MB。', 'codex-status'));
     if (mod.type === 'clean-data' && saved[mod.id]?.inputBatch) panel.append(node('p', '当前交接输入 ' + saved[mod.id].inputBatch.names.length + ' 个；历史原始文件保留，不自动合并到本次清洗。', 'codex-status'));
+    if (mod.type === 'clean-data' && t.cleanRuleSyncNotice) panel.append(node('p',t.cleanRuleSyncNotice,'codex-status'));
+    if (mod.type === 'clean-data' && t.cleanRuleSyncError) panel.append(node('p','规则同步尚未完成：'+t.cleanRuleSyncError,'codex-error'));
     const list = node('div', undefined, 'codex-files');
     list.id = 'codex-file-list';
     if (mod.type === 'clean-data') renderCleanResults(mod, t, list);
@@ -2145,10 +4499,13 @@
     if (t.job?.events.length) { const log = node('details'); log.open = t.logOpen; log.ontoggle = () => { t.logOpen = log.open; }; log.append(node('summary', '执行进度')); log.append(node('pre', t.job.events.join('\n'))); panel.append(log); }
     if (t.error) panel.append(node('p', t.error, 'codex-error'));
   }
-  root.CodexUI = { render, reply, openDownload, prepareConfirmedExecution, cancelPreparedExecution, prepareRuleDiscussion, session, refresh,
+  root.CodexUI = { render, reply, openDownload, prepareConfirmedExecution, cancelPreparedExecution, prepareRuleDiscussion, session, refresh, confirmCleanAcceptance, syncCleanRuleUpdate,
+    cleanSessionId: id => saved[id]?.sessionId || null,
+    literatureWorkspace: id => { const mod = Store.getState().modules.find(item => item.id === id); return mod?.type === 'literature-mining' ? literatureWorkspaceManager(mod) : null; },
+    renderLiteratureWorkspace: id => { const mod = Store.getState().modules.find(item => item.id === id); render(); ModuleSpace.render(); if (mod) void hydrateLiteratureWorkspace(mod); },
     getConnection: mod => ({ backend: task(mod.id).backend, model: task(mod.id).model || (task(mod.id).backend === 'codex' ? account?.model : null) || null }),
     setInputBatch: (id, batch) => { saved[id] = { ...saved[id], inputBatch: batch }; persist(); },
-    useCodex: mod => !!mod && task(mod.id).backend === 'codex', getModel: mod => mod ? task(mod.id).model || null : null, busy: id => task(id).busy || task(id).literatureBusy,
+    useCodex: mod => !!mod && task(mod.id).backend === 'codex', getModel: mod => mod ? task(mod.id).model || null : null, busy: id => task(id).busy || task(id).literatureBusy || task(id).sourceAcceptanceLoading || task(id).sourceAcceptanceBusy || task(id).cleanAcceptanceLoading || task(id).cleanAcceptanceBusy || task(id).cleanRunsLoading,
     literatureJobId: id => (saved[id] && saved[id].literatureJobId) || '' };
   function closeFiles() {
     const files = panel.querySelector('.codex-attachments[open]');

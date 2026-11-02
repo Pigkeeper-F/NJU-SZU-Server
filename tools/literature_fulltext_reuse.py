@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sqlite3
 import tempfile
 import unicodedata
 import uuid
@@ -22,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 from contextlib import redirect_stderr
 
 from literature_fulltext_evidence import verified_saved_html
+import literature_identity as _identity
 
 
 PROOF_VERSION = "pdf-file-evidence-v1"
@@ -77,7 +79,9 @@ def identity(record):
     return {"doi": _doi(record.get("doi")), "cnki_id": _cnki_id(record),
             "title": _title(record.get("title")),
             "year": year if re.fullmatch(r"\d{4}", year) else "",
-            "authors": _authors(record.get("authors"))}
+            "authors": _authors(record.get("authors")),
+            "source_ids": _identity.source_ids(record),
+            "document_type": _norm(record.get("document_type"))}
 
 
 def match_identity(left, right):
@@ -86,10 +90,17 @@ def match_identity(left, right):
         return ""
     if left.get("cnki_id") and right.get("cnki_id") and left["cnki_id"] != right["cnki_id"]:
         return ""
+    if _identity.conflicts(left, right):
+        return ""
     if left.get("doi") and left["doi"] == right.get("doi"):
         return "doi_exact"
     if left.get("cnki_id") and left["cnki_id"] == right.get("cnki_id"):
         return "cnki_document_exact"
+    ids_left, ids_right = left.get("source_ids", {}), right.get("source_ids", {})
+    if any(ids_left[key] == ids_right[key] for key in ids_left.keys() & ids_right.keys()):
+        return "source_id_exact"
+    if left.get("document_type") and right.get("document_type") and left["document_type"] != right["document_type"]:
+        return ""
     if (len(left.get("title", "")) >= 8 and left.get("title") == right.get("title")
         and left.get("year") and left["year"] == right.get("year")
         and len(left.get("authors", "")) >= 2 and left["authors"] == right.get("authors")):
@@ -316,11 +327,59 @@ class ReuseCatalog:
         self.job_dir = Path(job_dir).absolute()
         self.load_targets = load_targets
         self.entries = []
+        self._by_key = {}
+        self._entry_ids = set()
         self._add_job(self.job_dir, targets)
+        cache = self._open_cache()
+        try:
+            self._load_other_jobs(cache)
+        finally:
+            if cache is not None:
+                cache.close()
+
+    def _open_cache(self):
+        """A disposable metadata index; saved task evidence stays authoritative."""
+        path = self.job_dir.parent / ".literature-fulltext-index.sqlite3"
+        if _reparse(self.job_dir.parent) or _reparse(path):
+            return None
+        connection = None
+        try:
+            connection = sqlite3.connect(path, timeout=2)
+            connection.execute("CREATE TABLE IF NOT EXISTS reuse_jobs (job TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, entries TEXT NOT NULL)")
+            connection.commit()
+            return connection
+        except (OSError, sqlite3.Error):
+            if connection is not None:
+                connection.close()
+            return None
+
+    def _fingerprint(self, folder):
+        values = []
+        for relative in ("job.json", "run_config.json", "candidates.json", "dedupe/dedupe.json", "fulltext/status.json"):
+            path = contained_file(folder, relative)
+            if path is None:
+                values.append([relative, None])
+                continue
+            info = path.stat()
+            values.append([relative, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino])
+        return _identity.digest(["reuse-catalog-v2", values])
+
+    def _load_other_jobs(self, cache):
         if not _reparse(self.job_dir.parent):
             for folder in sorted(self.job_dir.parent.iterdir(), key=lambda value: value.name):
                 if folder == self.job_dir or not UUID.fullmatch(folder.name) or not folder.is_dir() or _reparse(folder):
                     continue
+                try:
+                    fingerprint = self._fingerprint(folder)
+                    row = cache.execute("SELECT entries FROM reuse_jobs WHERE job=? AND fingerprint=?", (folder.name, fingerprint)).fetchone() if cache else None
+                    if row:
+                        saved = json.loads(row[0])
+                        if isinstance(saved, list):
+                            for entry in saved:
+                                self._register_entry(folder, entry["target"], entry["item"])
+                            continue
+                except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+                    fingerprint = None
                 metadata = _read_json(folder, "job.json")
                 if not isinstance(metadata, dict) or metadata.get("deletedAt") or metadata.get("status") in {"running", "preparing"}:
                     continue
@@ -331,9 +390,34 @@ class ReuseCatalog:
                 if any(contained_file(folder, relative) is None for relative in inputs):
                     continue
                 try:
-                    self._add_job(folder, load_targets(folder, config))
+                    start = len(self.entries)
+                    self._add_job(folder, self.load_targets(folder, config))
+                    if cache is not None and fingerprint:
+                        saved = [{"target": target, "item": item} for _, target, item in self.entries[start:]]
+                        try:
+                            cache.execute("INSERT OR REPLACE INTO reuse_jobs VALUES (?,?,?)", (folder.name, fingerprint, json.dumps(saved, ensure_ascii=False)))
+                            cache.commit()
+                        except sqlite3.Error:
+                            pass  # Cache failure never blocks safe local discovery.
                 except (OSError, ValueError, KeyError):
                     continue
+
+    def _keys(self, value):
+        keys = _identity.index_keys(value)
+        if value.get("cnki_id"):
+            keys.append("cnki:" + value["cnki_id"])
+        return keys
+
+    def _register_entry(self, folder, target, item):
+        marker = (str(folder), target.get("paper_id"), item.get("path"), item.get("content_sha256"))
+        if marker in self._entry_ids:
+            return
+        self._entry_ids.add(marker)
+        position = len(self.entries)
+        self.entries.append((Path(folder), copy.deepcopy(target), copy.deepcopy(item)))
+        for key in self._keys(identity(target)):
+            self._by_key.setdefault(key, set()).add(position)
+        self._by_key.setdefault("local:" + str(folder) + ":" + str(target.get("paper_id")), set()).add(position)
 
     def _add_job(self, folder, targets):
         status = _read_json(folder, "fulltext/status.json")
@@ -352,18 +436,22 @@ class ReuseCatalog:
                 continue
             if _doi(item.get("doi")) and _doi(target.get("doi")) and _doi(item.get("doi")) != _doi(target.get("doi")):
                 continue
-            self.entries.append((Path(folder), copy.deepcopy(target), copy.deepcopy(item)))
+            self._register_entry(folder, target, item)
 
     def register(self, target, item):
         if item.get("status") in FETCHED and not target.get("reuse_disabled"):
-            self.entries.append((self.job_dir, copy.deepcopy(target), copy.deepcopy(item)))
+            self._register_entry(self.job_dir, target, item)
 
     def try_reuse(self, target, skeleton):
         if target.get("reuse_disabled"):
             return {"status": "no_match"}
         expected = identity(target)
         blocked = None
-        for source_job, source_target, source_item in list(self.entries):
+        candidates = set()
+        for key in self._keys(expected) + ["local:" + str(self.job_dir) + ":" + str(target.get("paper_id"))]:
+            candidates.update(self._by_key.get(key, ()))
+        for position in sorted(candidates):
+            source_job, source_target, source_item = self.entries[position]
             same_item = source_job == self.job_dir and source_target["paper_id"] == target["paper_id"]
             reason = "same_task_record" if same_item and identity(source_target) == expected else match_identity(identity(source_target), expected)
             if not reason:

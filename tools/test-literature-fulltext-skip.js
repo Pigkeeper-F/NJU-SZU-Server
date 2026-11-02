@@ -186,7 +186,7 @@ async function routeAndUiTests() {
     checkLiteratureRuntime: async () => { calls.push({ kind: 'runtime' }); }, render() {}, persist() {},
     request: async (url, options) => { calls.push({ url, body: JSON.parse(options.body) }); return copy(task.literatureJob); },
     applyLiteratureJob: (_mod, value) => { task.literatureJob = value; }, watchLiterature: async (...args) => { watched.push(args); } });
-  vm.runInContext(productionFunction(source, 'continueLiterature') + '\nglobalThis.subject = continueLiterature;', context);
+  vm.runInContext(productionFunction(source, 'literatureResumeStage') + '\n' + productionFunction(source, 'continueLiterature') + '\nglobalThis.subject = continueLiterature;', context);
   await context.subject({ id: 'module-fixture' }, { until: 'fulltext', skipUnavailable: true });
   assert.equal(calls[0].kind, 'runtime');
   assert.deepEqual(calls[1], { url: '/api/literature/advance', body: { id: 'existing-fixture', until: 'fulltext', skipUnavailable: true } });
@@ -209,7 +209,7 @@ async function routeAndUiTests() {
       checkLiteratureRuntime: async sources => { assert.deepEqual(copy(sources), ['pubmed']); }, render() {}, persist() {},
       request: async (url, options) => { requests.push({ url, body: JSON.parse(options.body) }); if (scenario.fail) throw new Error('Fixture resume rejected'); return copy(current.literatureJob); },
       applyLiteratureJob: (_mod, value) => { current.literatureJob = value; }, watchLiterature: async (...args) => { watches.push(args); } });
-    vm.runInContext(productionFunction(source, 'continueLiterature') + '\nglobalThis.subject = continueLiterature;', stoppedContext);
+    vm.runInContext(productionFunction(source, 'literatureResumeStage') + '\n' + productionFunction(source, 'continueLiterature') + '\nglobalThis.subject = continueLiterature;', stoppedContext);
     await stoppedContext.subject({ id: 'module-fixture' }, { until: 'fulltext', skipUnavailable: true, ...(scenario.explicit ? { resumeStopped: true } : {}) });
     if (!scenario.explicit) {
       assert.equal(requests.length, 0); assert.match(current.literatureError, /设置已改变/);
@@ -225,14 +225,15 @@ async function routeAndUiTests() {
   }
 
   // Execute the real button block and its onclick, without constructing a page.
-  const buttonStart = source.indexOf('      if (fulltextPaused && !job.cnkiRetryPaperId) {');
+  const buttonStart = source.indexOf('      if (fulltextPaused && !job.cnkiRetryPaperId && !replenishing) {');
   const buttonEnd = source.indexOf('      if (fulltextPaused && job.cnkiRetryPaperId', buttonStart);
   assert.ok(buttonStart >= 0 && buttonEnd > buttonStart);
   const buttonCode = source.slice(buttonStart, buttonEnd);
   for (const scenario of [{ paused: true, scope: null, same: true, expected: 1 }, { paused: false, scope: null, same: true, expected: 0 },
-    { paused: true, scope: 'CNKI-001', same: true, expected: 0 }, { paused: true, scope: null, same: false, expected: 1 }]) {
+    { paused: true, scope: 'CNKI-001', same: true, expected: 0 }, { paused: true, scope: null, same: false, expected: 1 },
+    { paused: true, scope: null, same: true, materials: true, expected: 0 }]) {
     const buttons = [], continuations = [];
-    const buttonContext = vm.createContext({ fulltextPaused: scenario.paused, job: { cnkiRetryPaperId: scenario.scope },
+    const buttonContext = vm.createContext({ replenishing: scenario.materials === true, fulltextPaused: scenario.paused, job: { cnkiRetryPaperId: scenario.scope },
       t: { literatureBusy: false, busy: false }, sameConfig: scenario.same, root: { LiteratureUI: { isBusy: () => false } }, mod: { id: 'module-fixture' },
       node: (tag, label) => ({ tag, label }), actions: { append: value => buttons.push(value) },
       continueLiterature: (_mod, options) => continuations.push(copy(options)) });
@@ -243,15 +244,16 @@ async function routeAndUiTests() {
     }
   }
 
-  const stoppedStart = source.indexOf("    if (job?.status === 'cancelled' && job.resumeStage === 'fulltext' && !job.cnkiRetryPaperId) {");
+  const stoppedStart = source.indexOf("    if (job?.status === 'cancelled' && !job.config?.researchPlan && job.resumeStage === 'fulltext'");
   const stoppedEnd = source.indexOf('    if (job?.id) {', stoppedStart);
   assert.ok(stoppedStart >= 0 && stoppedEnd > stoppedStart);
   for (const scenario of [{ status: 'cancelled', stage: 'fulltext', scope: null, expected: 1 },
     { status: 'needs_attention', stage: 'fulltext', scope: null, expected: 0 },
     { status: 'cancelled', stage: 'discover', scope: null, expected: 0 },
-    { status: 'cancelled', stage: 'fulltext', scope: 'CNKI-001', expected: 0 }]) {
+    { status: 'cancelled', stage: 'fulltext', scope: 'CNKI-001', expected: 0 },
+    { status: 'cancelled', stage: 'fulltext', scope: null, readOnly: true, expected: 0 }]) {
     const buttons = [], continuations = [];
-    const buttonContext = vm.createContext({ job: { status: scenario.status, resumeStage: scenario.stage, cnkiRetryPaperId: scenario.scope },
+    const buttonContext = vm.createContext({ readOnlyResults: scenario.readOnly === true, job: { status: scenario.status, resumeStage: scenario.stage, cnkiRetryPaperId: scenario.scope },
       t: { literatureBusy: false, busy: false }, root: { LiteratureUI: { isBusy: () => false } }, mod: { id: 'module-fixture' },
       node: (tag, label) => ({ tag, label }), row: { append: value => buttons.push(value) },
       continueLiterature: (_mod, options) => continuations.push(copy(options)) });

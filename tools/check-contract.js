@@ -36,7 +36,7 @@ const UI_MODULES = [
 ];
 const STATIC_NODES = ["composer-input", "btn-send", "btn-add-module", "btn-sidebar-toggle", "sidebar-resizer"];
 // 【集成 · 2026-10-13】账号系统上工作台：index.html 在数据层之前先加载账号配置/存储与守卫
-const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.js", "js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/codex.js", "js/literature.js", "js/workspace.js", "js/tasks.js"];
+const EXPECTED_SCRIPTS = ["js/auth-config.js", "js/auth-storage.js", "js/guard.js", "js/store.js", "js/sidebar.js", "js/tabs.js", "js/chat.js", "js/app.js", "js/api-keys.js", "js/literature-rule-review.js", "js/literature-confirmed-plan.js", "js/download-professional-rules.js", "js/clean-verification-rules.js", "js/clean-execution-plan.js", "js/codex.js", "js/literature.js", "js/workspace.js", "js/tasks.js", "js/literature-task-workspaces.js", "js/literature-discussions.js"];
 // 账号系统独立文件（登录/注册页自带脚本，不进工作台 index.html 的渲染链）
 const AUTH_FILES = ["js/auth-config.js", "js/auth-storage.js", "js/auth-pages.js", "js/guard.js", "login.html", "register.html", "css/auth.css", "debug.html", "js/debug.js"];
 // 契约 §2「两种运行模式」：前端只允许 js/chat.js 里对同源 /api/… 的 fetch；其余脚本零联网。
@@ -69,7 +69,7 @@ for (const ah of ["login.html", "register.html"]) {
 const cssClasses = new Set([...css.matchAll(/\.([A-Za-z][\w-]*)/g)].map((m) => m[1]));
 
 // ---------- 1. 脚本顺序 ----------
-const scripts = [...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1]);
+const scripts = [...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1].replace(/\?.*$/, ''));
 if (JSON.stringify(scripts) !== JSON.stringify(EXPECTED_SCRIPTS)) {
   problems.push("index.html 脚本顺序不符（契约要求 " + EXPECTED_SCRIPTS.join(" → ") + "），实际: " + scripts.join(", "));
 } else {

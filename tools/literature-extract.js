@@ -8,9 +8,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { loadInputs, policyIdentity, digest } = require('./literature-screening');
 
 const TOP_KEYS = ['paper_id', 'source_pdf', 'status', 'classification_reason', 'rows', 'warnings', 'skip_reason'];
 const INSTRUCTIONS_VERSION = 'extract-contract-v1';
+const INPUT_COVERAGE_VERSION = 'extract-input-coverage-v1';
+const INPUT_COVERAGE_WARNING = '[input-coverage]';
 const DEFAULT_TOTAL_BUDGET_SEC = 1800;
 const PER_PAPER_TIMEOUT_MS = 600000;
 const PYTHON_STEP_TIMEOUT_MS = 600000;
@@ -47,6 +50,7 @@ const EXTRACT_INSTRUCTIONS = [
   '8) 无标定数字化的肉眼读图值不得直接当已提取值（应写进 warnings）。',
   '',
   '【材料状态】补充材料按原格式读取后的文本与位置见材料清单。missing、needs_attention、unreadable、unsupported 的材料不能假装已经读取；partial 或 truncated 只代表当前提供的部分内容。材料未齐或不可读必须写入 warnings，不得宣称全文与补充材料均已核查。',
+  '【输入覆盖】[PDF page N] 标记来自实际 PDF 第 N 页的文字，并不表示图片或扫描区域已读取。input_coverage 的 limitations 是程序确认的输入覆盖不足；有截断且提取出报告值时必须 status="partial"，注明未提供部分尚未提取，不能宣称整篇完整读取。',
   '【降级】只有正文及所有材料都没有可用内容时才输出 status="skipped" 并说明原因；正文 degraded 但补充表格有真实报告值时可从该材料提取，明确来源及未完成部分。',
 ].join('\n');
 
@@ -81,13 +85,33 @@ function buildExtractPrompt(bundle) {
     ].join('\n'),
     '【已确认字段定义】（field 只能取这里的 key）\n' + JSON.stringify(bundle.field_definitions || [], null, 2),
     '【条件键 condition_keys】' + JSON.stringify(bundle.condition_keys || []),
-    `【正文】kind=${fulltext.kind || ''} chars=${fulltext.chars || 0} truncated=${fulltext.truncated ? 'true' : 'false'}` +
+    `【正文】kind=${fulltext.kind || ''} chars=${fulltext.chars || 0} original_chars=${fulltext.original_chars ?? 'unknown'} truncated=${fulltext.truncated ? 'true' : 'false'}` +
       (bundle.degraded ? `\n【降级标记】${bundle.degraded.reason || ''}` : ''),
     String(fulltext.text || ''),
+    '【输入覆盖范围】\n' + JSON.stringify(bundle.input_coverage || { version: 'legacy', limitations: [] }, null, 2),
     '【材料完整性与可读性】\n' + JSON.stringify(bundle.materials_check || { manifest_present: false, supplement_check: { status: 'uninspected' } }, null, 2),
     '【同篇原始材料及读取结果】（content_ref=fulltext 的正文见上文；其余只使用实际提供的内容和位置）\n' + JSON.stringify(Array.isArray(bundle.materials) ? bundle.materials : [], null, 2),
   ];
   return sections.join('\n\n');
+}
+
+function applyInputCoverage(bundle, result) {
+  if (bundle?.input_coverage?.version !== INPUT_COVERAGE_VERSION) return result;
+  const limitations = Array.isArray(bundle.input_coverage.limitations) ? [...bundle.input_coverage.limitations] : [];
+  if (bundle.fulltext?.truncated === true && !limitations.length) limitations.push('正文输入已截断，未提供部分尚未提取。');
+  for (const material of bundle.materials || []) {
+    if (material?.content?.truncated === true && material.content_ref !== 'fulltext' && !material.excluded_from_supplement_counts) {
+      const note = `材料${material.filename || material.material_id || ''}输入已截断，未提供部分尚未提取。`;
+      if (!limitations.some(item => String(item).includes(material.filename || material.material_id || note))) limitations.push(note);
+    }
+  }
+  if (!limitations.length) return result;
+  const warnings = Array.isArray(result.warnings) ? [...result.warnings] : [];
+  for (const limitation of limitations) {
+    const warning = `${INPUT_COVERAGE_WARNING} ${limitation}`;
+    if (!warnings.includes(warning)) warnings.push(warning);
+  }
+  return { ...result, status: result.status === 'ok' ? 'partial' : result.status, warnings };
 }
 
 function parseExtractionJson(text) {
@@ -224,6 +248,20 @@ function skeletonUsable(data, paperId) {
   return !!data && data.paper_id === paperId && Array.isArray(data.rows);
 }
 
+// This binding is application metadata: never accept it from a model reply or
+// relabel an old result with a newly approved screening decision.
+function bindScreening(bundle, result) {
+  const bound = { ...result };
+  if (bundle.screening) bound.screening = { ...bundle.screening };
+  else delete bound.screening;
+  return bound;
+}
+
+function sameScreening(bundle, result) {
+  return !bundle.screening || (result?.screening
+    && JSON.stringify(canonical(bundle.screening)) === JSON.stringify(canonical(result.screening)));
+}
+
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') {
@@ -241,12 +279,16 @@ function bundledInputs(jobDir) {
 }
 
 // bundle 的字段定义与当前有效 schema 不一致 → 需要 --force 重建并重跑该篇（§2.4.4/§4.4）。
-function staleBundles(jobDir, schema) {
+function staleBundles(jobDir, schema, config) {
   const stale = [];
+  const context = policyIdentity(config?.screeningPolicy);
+  const bindings = context ? new Map(loadInputs(jobDir).map(input => [input.paper_id,
+    { ...context, inputHash: digest(input) }])) : null;
   for (const name of bundledInputs(jobDir)) {
     const bundle = readJson(path.join(jobDir, 'extraction', 'inputs', name));
     if (!bundle || !Array.isArray(bundle.field_definitions)) continue;
-    if (JSON.stringify(canonical(bundle.field_definitions)) !== JSON.stringify(canonical(schema.fields))) {
+    if (JSON.stringify(canonical(bundle.field_definitions)) !== JSON.stringify(canonical(schema.fields))
+        || (bindings && JSON.stringify(canonical(bundle.screening)) !== JSON.stringify(canonical(bindings.get(bundle.paper_id))))) {
       stale.push(path.basename(name, '.json'));
     }
   }
@@ -271,7 +313,9 @@ async function runExtractStage({ bridge, jobDir, config, python, onEvent, sessio
     return { ok: false, paused: true, extracted: 0, skipped: 0 };
   }
 
-  const prepareStale = staleBundles(jobDir, schema);
+  let prepareStale;
+  try { prepareStale = staleBundles(jobDir, schema, readJson(configPath)); }
+  catch (error) { return fail(error.message || '当前篇关摘筛选版本无法核验'); }
   const prepare = await pythonStep({
     python, script: path.join(root, 'tools', 'literature_extract.py'), config: configPath, jobDir,
     extraArgs: prepareStale.length ? ['--prepare', '--force'] : ['--prepare'], onEvent: emitEvent, cwd: root,
@@ -296,20 +340,29 @@ async function runExtractStage({ bridge, jobDir, config, python, onEvent, sessio
     if (!bundle || !bundle.paper_id) { skipped += 1; continue; }
     const outputPath = path.join(jobDir, 'extraction', `${paperId}.json`);
     const existing = readJson(outputPath);
-    if (!prepareStale.length && skeletonUsable(existing, paperId)) {  // §4.4 resume：结果已存在且骨架可用 → 不重复调用模型
+    if (!prepareStale.includes(paperId) && skeletonUsable(existing, paperId) && sameScreening(bundle, existing)) {
+      const covered = applyInputCoverage(bundle, existing);
+      if (covered !== existing) writeJsonAtomic(outputPath, covered);
       extracted += 1;
       written.push(`extraction/${paperId}.json`);
       continue;
     }
+    const saveResult = result => {
+      if (existing && bundle.screening && !sameScreening(bundle, existing)) {
+        const archive = path.join(jobDir, 'extraction', 'history', `${paperId}.${digest(existing)}.json`);
+        if (!fs.existsSync(archive)) writeJsonAtomic(archive, existing);
+      }
+      writeJsonAtomic(outputPath, bindScreening(bundle, result));
+    };
     const text = String(bundle.fulltext?.text || '');
     if (!text.trim() || bundle.degraded) {
-      writeJsonAtomic(outputPath, degradedResult(bundle, bundle.degraded?.reason || '全文正文为空，待补充'));
+      saveResult(degradedResult(bundle, bundle.degraded?.reason || '全文正文为空，待补充'));
       skipped += 1;
       written.push(`extraction/${paperId}.json`);
       continue;
     }
     if (Date.now() >= deadline) {
-      writeJsonAtomic(outputPath, degradedResult(bundle, '提取阶段超时，未完成（待补充）'));
+      saveResult(degradedResult(bundle, '提取阶段超时，未完成（待补充）'));
       skipped += 1;
       written.push(`extraction/${paperId}.json`);
       continue;
@@ -329,10 +382,10 @@ async function runExtractStage({ bridge, jobDir, config, python, onEvent, sessio
       failure = error.message || String(error);
     }
     if (reply && !failure) {
-      writeJsonAtomic(outputPath, reply);
+      saveResult(applyInputCoverage(bundle, reply));
       extracted += 1;
     } else {
-      writeJsonAtomic(outputPath, degradedResult(bundle, `待补充：${failure || '提取失败'}`));
+      saveResult(degradedResult(bundle, `待补充：${failure || '提取失败'}`));
       skipped += 1;
     }
     written.push(`extraction/${paperId}.json`);
@@ -357,4 +410,4 @@ async function runExtractStage({ bridge, jobDir, config, python, onEvent, sessio
   return { ok: true, extracted, skipped, bundles: bundles.length, sessionId: session };
 }
 
-module.exports = { EXTRACT_INSTRUCTIONS, buildExtractPrompt, parseExtractionJson, runExtractStage };
+module.exports = { EXTRACT_INSTRUCTIONS, buildExtractPrompt, parseExtractionJson, applyInputCoverage, runExtractStage };

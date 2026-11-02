@@ -204,6 +204,19 @@ class PubMedTests(unittest.TestCase):
             self.assertEqual(result["status"], "error", result)
             self.assertEqual(network.calls, [])
 
+    def test_long_query_is_preserved_and_oversize_is_explicit_without_network(self):
+        query = '(broiler OR swine) AND ' + 'temperature OR ' * 300 + 'humidity'
+        network = FakeNetwork(search(0, []))
+        result = pubmed.run(query, opener=network, sleep=self.sleep, clock=self.clock)
+        self.assertEqual(result["status"], "no_results", result)
+        self.assertEqual(parse_qs(urlsplit(network.calls[0][0]).query)["term"], [query])
+        rejected = FakeNetwork()
+        result = pubmed.run('x' * (pubmed.MAX_QUERY_CHARS + 1), opener=rejected, sleep=self.sleep, clock=self.clock)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("32768", result["message"])
+        self.assertIn("未自动截断", result["message"])
+        self.assertEqual(rejected.calls, [])
+
     def test_offset_pages_keep_actual_total_and_last_partial_page(self):
         network = FakeNetwork(search(12, ["111", "222"]), xml(article(pmid="111"), article(pmid="222")))
         result = self.run_query(network, page_index=1)

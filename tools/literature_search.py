@@ -24,6 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = Path(__file__).resolve().parent
 SOC_FETCH = ROOT / "SOC-database-pipeline-clean" / ".codex" / "skills" / "soc-paper-fetch" / "scripts"
+MAX_QUERY_CHARS = 32768  # Same search-expression bound as literature-config.js.
 
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
@@ -120,7 +121,7 @@ def candidate_prefix(source_key: str, batch_index: int) -> str:
     key = str(source_key or "google-scholar")
     prefix = SOURCE_PREFIXES.get(key, re.sub(r"[^A-Za-z0-9]", "", key).upper()[:6] or "SRC")
     return prefix if batch_index <= 1 else f"{prefix}-B{batch_index}"
-ATTENTION_REASONS = {"login", "verification", "access_required", "results_unrecognized"}
+ATTENTION_REASONS = {"login", "verification", "access_required", "results_unrecognized", "rate_limited", "access_blocked"}
 
 
 def normalize_doi(value: object) -> str:
@@ -196,16 +197,26 @@ def normalize_candidates(
     records: list[dict] = []
     seen: set[tuple[str, str]] = set()
     counters: dict[str, int] = {}
+
+    def complete_text(value: object) -> str:
+        if isinstance(value, list):
+            value = "; ".join(str(entry.get("name") or "") if isinstance(entry, dict) else str(entry)
+                              for entry in value if entry is not None)
+        return str(value or "").strip()
+
+    def keywords(value: object) -> list[str]:
+        values = value if isinstance(value, list) else re.split(r"[;；|]", str(value or ""))
+        return list(dict.fromkeys(str(entry).strip() for entry in values
+                                  if isinstance(entry, (str, int, float)) and str(entry).strip()))
+
     for item in raw:
         if not isinstance(item, dict):
             continue
-        title = str(item.get("title") or "").strip()[:500]
+        title = str(item.get("title") or "").strip()
         key = re.sub(r"\W+", "", title).casefold()
         item_source_key = str(item.get("source_key") or source_key)
-        source_title = (item_source_key, key)
-        if not title or not key or source_title in seen:
+        if not title or not key:
             continue
-        seen.add(source_title)
         links = []
         for link in item.get("fulltext_links") or []:
             if not isinstance(link, dict):
@@ -213,32 +224,77 @@ def normalize_candidates(
             url = safe_url(link.get("url"))
             if url:
                 links.append({"label": str(link.get("label") or "")[:100], "url": url})
-        byline = str(item.get("byline") or "").strip()[:500]
+        byline = str(item.get("byline") or "").strip()
         parsed = parse_byline(byline)
         source_prefix = SOURCE_PREFIXES.get(item_source_key, item_source_key.upper())
         prefix = source_prefix if batch_index <= 1 else f"{source_prefix}-B{batch_index}"
-        counters[item_source_key] = counters.get(item_source_key, 0) + 1
-        records.append({
-            "candidate_id": f"{prefix}-{counters[item_source_key]:03d}",
+        record = {
             "source": _sources.label_of(item_source_key) or source_label,
             "query": str(item.get("_query") or query),
             "retrieved_at": item.get("_retrieved_at") or retrieved_at,
             "title": title,
             "byline": byline,
-            "snippet": str(item.get("snippet") or "").strip()[:2000],
+            "snippet": str(item.get("snippet") or "").strip(),
             "result_url": safe_url(item.get("result_url")),
             "fulltext_links": links,
             "screening_status": "pending_review",
             "evidence_level": "search_result_snippet",
             "doi": normalize_doi(item.get("doi")),
             "year": result_year(item),
-            "authors": metadata_text(item.get("authors"), 500) or parsed["authors"],
-            "venue": metadata_text(item.get("venue"), 300) or parsed["venue"],
+            "authors": complete_text(item.get("authors")) or parsed["authors"],
+            "venue": complete_text(item.get("venue")) or parsed["venue"],
             "source_key": item_source_key,
             "batch_index": batch_index,
             "pmid": metadata_pmid(item.get("pmid")),
             "transport": metadata_transport(item.get("transport")) or metadata_transport(transport),
-        })
+        }
+        # An explicit abstract is different from a search excerpt. Never infer
+        # abstract completeness from its length or a caller's evidence label.
+        abstract = str(item.get("abstract") or "").strip()
+        if abstract:
+            record["abstract"] = abstract
+            record["abstract_source"] = complete_text(item.get("abstract_source"))
+            level = item.get("evidence_level")
+            record["evidence_level"] = level if level in {
+                "imported_abstract", "source_abstract", "verified_abstract"
+            } else "abstract_unverified"
+        elif item.get("evidence_level") in {"title_only", "search_result_title"}:
+            record["evidence_level"] = item["evidence_level"]
+        for field in ("author_keywords", "index_keywords", "keywords"):
+            if field in item:
+                record[field] = keywords(item[field])
+        combined_keywords = list(dict.fromkeys(record.get("keywords", [])
+                                              + record.get("author_keywords", [])
+                                              + record.get("index_keywords", [])))
+        if combined_keywords:
+            record["keywords"] = combined_keywords
+        for field in ("ut", "eid", "accession_number", "cnki_id", "document_type", "language", "publication_date"):
+            if field in item:
+                record[field] = complete_text(item[field])
+        if isinstance(item.get("source_identifiers"), dict):
+            record["source_identifiers"] = {
+                str(namespace): str(value).strip() for namespace, value in item["source_identifiers"].items()
+                if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip()
+            }
+        for field in ("source_url", "abstract_url"):
+            if field in item:
+                record[field] = safe_url(item[field])
+        if isinstance(item.get("hit_batches"), list):
+            record["hit_batches"] = [
+                {name: hit[name] for name in ("id", "topic_id", "label", "query", "year_from", "year_to", "sort") if name in hit}
+                for hit in item["hit_batches"] if isinstance(hit, dict)
+            ]
+        # Only collapse an identical metadata observation here. Bibliographic
+        # identity resolution belongs to dedupe; a shared title/DOI is not a
+        # licence to discard conflicting IDs, richer abstracts or another hit.
+        observation = json.dumps(record, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        source_observation = (item_source_key, hashlib.sha256(observation.encode("utf-8")).hexdigest())
+        if source_observation in seen:
+            continue
+        seen.add(source_observation)
+        counters[item_source_key] = counters.get(item_source_key, 0) + 1
+        record["candidate_id"] = f"{prefix}-{counters[item_source_key]:03d}"
+        records.append(record)
     return records
 
 
@@ -486,7 +542,9 @@ def write_results(
         "caution": "Search snippets are not verified abstracts or full text; all records await screening.",
         "batches": batches,
         "records": all_records,
-        "discovery_complete": not bool(search.get("pending_source") or search.get("deferred_sources")),
+        "discovery_complete": not bool(search.get("pending_source") or search.get("deferred_sources"))
+            and all(entry.get("scholar_summary", {}).get("discovery_complete", True)
+                    for entry in source_status.values()),
     }
     if source_status:
         report["source_status"] = source_status
@@ -497,10 +555,14 @@ def write_results(
     paths = _common.job_paths(output_dir)
     _common.atomic_write_json(paths["candidates_json"], report)
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=CSV_FIELDS)
+    include_hits = any("hit_batches" in record for record in all_records)
+    writer = csv.DictWriter(buffer, fieldnames=CSV_FIELDS + (["hit_batches"] if include_hits else []))
     writer.writeheader()
     for record in all_records:
-        writer.writerow(csv_cells(record))
+        cells = csv_cells(record)
+        if include_hits:
+            cells["hit_batches"] = safe_csv_cell(json.dumps(record.get("hit_batches", []), ensure_ascii=False))
+        writer.writerow(cells)
     _common.atomic_write_text(paths["candidates_csv"], buffer.getvalue(), encoding="utf-8-sig")
     result = {"count": len(records), "total": len(all_records), "batch_index": batch_index, "files": ["candidates.json", "candidates.csv"]}
     if "deferred_sources" in search:
@@ -516,6 +578,8 @@ def validate_config(config: object) -> None:
     limit = config.get("limit", 0)
     if not isinstance(query, str) or not query.strip() or not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10:
         raise ValueError("运行配置缺少检索式或包含未接通来源")
+    if len(query) > MAX_QUERY_CHARS:
+        raise ValueError(f"默认检索式超过{MAX_QUERY_CHARS}字符；原式未自动截断")
     mode = config.get("searchMode")
     stop_mode = config.get("stopMode", "count")
     if stop_mode not in ("count", "end"):
@@ -564,8 +628,15 @@ def validate_config(config: object) -> None:
     for key, value in source_queries.items():
         if not _sources.is_known(key):
             raise ValueError(f"分来源检索式包含未知来源：{key}")
-        if not isinstance(value, str) or not value.strip() or len(value) > 2000:
-            raise ValueError(f"{key} 检索式不能为空或超过 2000 字")
+        if not isinstance(value, str) or not value.strip() or len(value) > MAX_QUERY_CHARS:
+            raise ValueError(f"{key} 检索式必须为1到{MAX_QUERY_CHARS}字符；原式未自动截断")
+    if config.get("scholarPlan") is not None:
+        from literature_scholar_batches import normalize_plan
+        if "google-scholar" not in sources or mode != "formal" or stop_mode != "end":
+            raise ValueError("Scholar分批须显式选择谷歌学术及formal/end分页模式")
+        plan = normalize_plan(config["scholarPlan"], config.get("publicationYearFrom"), config.get("publicationYearTo"))
+        if plan["trialMaxPages"] is not None and sources != ["google-scholar"]:
+            raise ValueError("Scholar预试只允许谷歌学术来源，不能启动其他来源")
 
 
 def config_fingerprint(config: dict) -> str:
@@ -573,6 +644,9 @@ def config_fingerprint(config: dict) -> str:
     inputs = {key: config.get(key) for key in ("query", "sources", "publicationYearFrom", "publicationYearTo", "limit")}
     inputs["sourceQueries"] = config.get("sourceQueries") or {}
     inputs["batch"] = {"size": batch_size(config), "maxBatches": batch_max(config)}
+    if config.get("scholarPlan") is not None:
+        from literature_scholar_batches import normalize_plan
+        inputs["scholarPlan"] = normalize_plan(config["scholarPlan"], config.get("publicationYearFrom"), config.get("publicationYearTo"))
     if config.get("searchMode") is not None:
         inputs["searchMode"] = config["searchMode"]
         inputs["perSourceLimit"] = config.get("perSourceLimit", 10 if config["searchMode"] == "test" else 100)
@@ -608,7 +682,12 @@ def filtered_source_results(search: dict, config: dict, source: str, query: str,
         if need_post_filter and publication_year is None:
             unknown += 1
         # Keep only the published metadata contract, never browser/debug state.
-        clean = {key: item.get(key) for key in ("title", "byline", "snippet", "result_url", "fulltext_links", "doi", "year", "authors", "venue", "pmid", "transport") if key in item}
+        clean = {key: item.get(key) for key in (
+            "title", "byline", "snippet", "abstract", "abstract_source", "abstract_url", "evidence_level",
+            "author_keywords", "index_keywords", "keywords", "source_identifiers", "ut", "eid",
+            "accession_number", "cnki_id", "document_type", "language", "publication_date", "source_url",
+            "result_url", "fulltext_links", "doi", "year", "authors", "venue", "pmid", "transport",
+        ) if key in item}
         clean["pmid"] = metadata_pmid(clean.get("pmid"))
         clean["transport"] = metadata_transport(clean.get("transport")) or metadata_transport(search.get("transport"))
         clean.update(source_key=source, _query=query, _retrieved_at=retrieved_at)
@@ -640,10 +719,37 @@ def checkpoint_report(output_dir: Path, config: dict, state: dict) -> dict:
         raw.extend(entry.get("results") or [])
         search_url = search_url or safe_url(entry.get("url"))
         statuses[source] = {key: value for key, value in entry.items() if key != "results"}
-    return write_results(output_dir, config["query"], {"url": search_url, "results": raw,
+    result = write_results(output_dir, config["query"], {"url": search_url, "results": raw,
                          "source_status": statuses, "pending_source": state.get("pending_source"),
                          "deferred_sources": list(state.get("deferred_sources", []))},
                          config, batch_index=state["batch_index"])
+    scholar_entry = entries.get("google-scholar") or {}
+    if scholar_entry.get("scholar_schedule"):
+        result["discoveryProgress"] = scholar_progress(scholar_entry)
+        result["discovery_complete"] = scholar_entry.get("scholar_summary", {}).get("discovery_complete") is True and not bool(state.get("pending_source") or state.get("deferred_sources"))
+        result["trial_complete"] = scholar_entry.get("trial_complete") is True
+    return result
+
+
+def scholar_progress(entry: dict) -> dict:
+    schedule = entry.get("scholar_schedule") or {}
+    summary = entry.get("scholar_summary") or {}
+    active = next((b for b in schedule.get("batches", []) if b.get("id") == summary.get("current_batch_id")), None)
+    if active is None:
+        active = next((b for b in schedule.get("batches", []) if b.get("status") in {"pending", "running", "attention"}), None)
+    recovery = entry.get("recovery") or {}
+    return {"source": "google-scholar", "batchLabel": active.get("label") if active else None,
+            "batchId": active.get("id") if active else None,
+            "yearFrom": active.get("year_from") if active else None,
+            "yearTo": active.get("year_to") if active else None,
+            "pagesSaved": len(entry.get("pages") or []),
+            "nextPage": active.get("next_page", 0) + 1 if active else None,
+            "processedBatches": summary.get("processed_batches", 0),
+            "pendingBatches": summary.get("pending_batches", 0),
+            "coverageGaps": summary.get("coverage_limited_batches", 0),
+            "status": "trial_complete" if entry.get("trial_complete") else summary.get("status", "pending"),
+            "trialMaxPages": (schedule.get("plan") or {}).get("trialMaxPages"),
+            "recoveryMessage": str(recovery.get("message") or "")[:1000]}
 
 
 def _prepare_source_schedule(config: dict, state: dict, *, resume: bool, scrape_current: bool,
@@ -702,28 +808,73 @@ def _pause_deferred_sources(output_dir: Path, config: dict, state: dict) -> bool
 
 
 def _record_keys(row: dict) -> set[str]:
-    """Source-local identities, including the legacy normalized-title key."""
-    keys = set()
-    title = re.sub(r"\W+", "", str(row.get("title") or "").strip()[:500]).casefold()
-    if title:
-        keys.add("title:" + title)
-    doi, pmid = normalize_doi(row.get("doi")), metadata_pmid(row.get("pmid"))
-    if doi:
-        keys.add("doi:" + doi)
-    if pmid:
-        keys.add("pmid:" + pmid)
-    url = safe_url(row.get("result_url"))
-    if url:
-        keys.add("url:" + url)
-    return keys
+    """Exact source-observation key, not a premature bibliographic merge.
+
+    Results with the same title but different IDs, or additional metadata, must
+    reach dedupe intact. Query/time/hit ledgers are excluded so a repeated result
+    observation can still be recognised across pages and Scholar batches.
+    """
+    fields = ("title", "byline", "snippet", "abstract", "abstract_source", "abstract_url", "evidence_level",
+              "author_keywords", "index_keywords", "keywords", "source_identifiers", "ut", "eid",
+              "accession_number", "cnki_id", "document_type", "language", "publication_date", "source_url",
+              "result_url", "fulltext_links", "doi", "year", "authors", "venue", "pmid")
+    observation = {key: row[key] for key in fields if row.get(key) not in (None, "", [], {})}
+    if not observation:
+        return set()
+    if "doi" in observation:
+        observation["doi"] = normalize_doi(observation["doi"])
+    payload = json.dumps(observation, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return {"observation:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()}
 
 
 def _page_fingerprint(rows: list[dict]) -> str:
     # Ignore transient result-link tracking parameters and result order. A
     # repeated page must not count toward the target after a failed Next click.
-    identities = [sorted(key for key in _record_keys(row) if not key.startswith("url:"))
-                  or sorted(_record_keys(row)) for row in rows]
+    # This is only a page-position signature, never a record-deletion key.
+    # Preserve legacy signatures for old rows without newly available native
+    # IDs, so resuming an existing cursor does not silently disable this guard.
+    from literature_identity import source_ids
+    identities = []
+    for row in rows:
+        keys = set()
+        title = re.sub(r"\W+", "", str(row.get("title") or "").strip()[:500]).casefold()
+        if title:
+            keys.add("title:" + title)
+        doi, pmid = normalize_doi(row.get("doi")), metadata_pmid(row.get("pmid"))
+        if doi:
+            keys.add("doi:" + doi)
+        if pmid:
+            keys.add("pmid:" + pmid)
+        keys.update("source_id:" + namespace + ":" + value for namespace, value in source_ids(row).items()
+                    if namespace != "pubmed")
+        if not keys and safe_url(row.get("result_url")):
+            keys.add("url:" + safe_url(row.get("result_url")))
+        identities.append(sorted(keys))
     return hashlib.sha256(json.dumps(sorted(identities), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _saved_terminal_page_matches(search, source, page_index, entry, raw):
+    """Match a source's witnessed terminal recheck to our last committed page."""
+    proof = search.get("terminal_page_verified")
+    pages = entry.get("pages") or []
+    if (source != "cnki" or not isinstance(proof, dict) or not pages or not raw
+            or search.get("status") != "ok" or search.get("has_next") is not False
+            or search.get("source_limit_reached")
+            or search.get("diagnostics", {}).get("native_execution_verified") is not True
+            or proof.get("source") != source or isinstance(proof.get("page_index"), bool)
+            or proof.get("page_index") != page_index - 1
+            or pages[-1].get("page_index") != proof["page_index"]
+            or pages[-1].get("returned") != len(raw)
+            or pages[-1].get("fingerprint") != _page_fingerprint(raw)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(proof.get("result_fingerprint") or ""))):
+        return False
+    evidence = proof.get("pagination")
+    if not isinstance(evidence, dict):
+        return False
+    if evidence.get("kind") == "page_count":
+        return (type(evidence.get("page_number")) is int and type(evidence.get("total_pages")) is int
+                and evidence["page_number"] == evidence["total_pages"] == page_index)
+    return evidence.get("kind") in {"disabled_next", "explicit_end"}
 
 
 def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
@@ -799,6 +950,23 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
         entry.update(status="running", stop_reason=None)
         state.update(pending_source=source, pending_reason=None)
         persist()
+        if source == "google-scholar" and config.get("scholarPlan") is not None:
+            from literature_scholar_discovery import run_plan
+            outcome = run_plan(config, output_dir, entry, resumed=source == resumed_source,
+                               fetch=_run_source, normalize_page=filtered_source_results,
+                               record_keys=_record_keys, page_fingerprint=_page_fingerprint,
+                               persist=persist, emit=emit)
+            resumed_source = None
+            if outcome == "attention":
+                return stop(entry, source, reason=entry.get("reason", "results_unrecognized"), message=entry.get("message", "分批检索待继续"))
+            if outcome == "trial_complete":
+                state.update(pending_source=None, pending_reason=None)
+                result = persist()
+                emit("result", stage="completed", message=entry.get("message", "预试结束，覆盖尚未完成"), **result)
+                return 0
+            state.update(pending_source=_next_pending_source(config, state), pending_reason=None)
+            persist()
+            continue
         seen = set().union(*(_record_keys(row) for row in entry["results"])) if entry["results"] else set()
         while target is None or len(entry["results"]) < target:
             page_index = entry["next_page"]
@@ -812,6 +980,9 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
                                             config.get("publicationYearFrom"), config.get("publicationYearTo"),
                                             job_dir=output_dir, page_index=page_index, full_page=True)
             resumed_source = None  # only the paused page may read a manual tab
+            if isinstance(search.get("recovery"), dict):
+                entry["recovery"] = search["recovery"]
+                emit("stage", stage="search", source=source, message=str(search["recovery"].get("message") or "正在核对断点位置"))
             if search.get("status") in {"attention", "captcha"}:
                 reason = search.get("reason", "verification" if search.get("status") == "captcha" else "results_unrecognized")
                 if reason not in ATTENTION_REASONS:
@@ -826,6 +997,20 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
             if search.get("page_index", page_index) != page_index:
                 return stop(entry, source, message="返回页码与当前等待页不一致，已有成果已保留，请核对后继续。")
             raw = [row for row in search.get("results", []) if isinstance(row, dict)][:200]
+            if "terminal_page_verified" in search:
+                if not _saved_terminal_page_matches(search, source, page_index, entry, raw):
+                    return stop(entry, source, message="末页复核与已保存页不一致，已有成果和断点已保留，请核对后继续。")
+                # This is evidence about an existing page, not a newly fetched
+                # empty page. Keep counts, records, page ledger and next_page.
+                entry.update(status="ok", stop_reason="exhausted", reason=None,
+                    terminal_page_verified=search["terminal_page_verified"],
+                    message="已复核已保存页为官方末页，未新增或重复累计题录。")
+                total_count = search.get("total_count")
+                if type(total_count) is int and total_count >= 0:
+                    entry["total_count"] = total_count
+                result = persist()
+                emit("stage", stage="search", source=source, message=entry["message"], **result)
+                break
             signature = _page_fingerprint(raw)
             if raw and any(page.get("fingerprint") == signature for page in entry["pages"]):
                 return stop(entry, source, message="检测到重复检索页，已停止累加。请核对下一页是否加载成功后检查并继续。")

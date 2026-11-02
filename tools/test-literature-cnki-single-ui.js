@@ -48,7 +48,7 @@ async function main() {
   assert.equal(material.calls[1].url, '/api/literature/retry-cnki');
   assert.ok(source.includes("'重试这篇知网文献'") && source.includes("'继续这篇知网文献'"));
   assert.ok(source.includes('job.cnkiRetryItems.slice(0, 100)'));
-  assert.ok(source.includes('canAdvance && !job.cnkiRetryPaperId'), 'failed single-paper run must not offer a broad stage retry');
+  assert.match(source, /canAdvance\s*&&\s*!readOnlyResults\s*&&\s*!job\.cnkiRetryPaperId/, 'failed single-paper and read-only views must not offer a broad stage retry');
   assert.ok(source.includes('retryLiteratureCnki(mod, job.cnkiRetryPaperId)'), 'attention resume preserves the bound single-paper scope');
   assert.ok(source.includes('重新定位这篇知网文献') && source.includes('retryLiteratureCnki(mod, job.cnkiRetryPaperId, true)'));
   assert.ok(source.includes('保留原窗口，不重跑其他文献'));

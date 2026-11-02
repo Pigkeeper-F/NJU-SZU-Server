@@ -21,6 +21,8 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import literature_extra_sources as extra_sources
 import literature_pubmed
+import literature_native_queries as native_queries
+from literature_source_access import ACCESS_STATE_JS as _ACCESS_STATE_JS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +35,8 @@ SOURCES = {
 }
 _AUTH_KEYS = re.compile(r"token|ticket|session|password|passwd|authorization|saml|signature|auth|^sid$|^code$|^state$|^key$|^v$", re.I)
 _AUTH_PATH = re.compile(r"(?:^|[/_.-])(?:login|signin|sign-in|authorize|oauth|saml|sso|callback)(?:$|[/_.-])", re.I)
+_SCOPUS_CONTEXT_PROOF = "documents-title-abstract-keywords-v1"
+MAX_QUERY_CHARS = 32768  # Same search-expression bound as literature-config.js.
 
 
 def _dependencies():
@@ -73,6 +77,17 @@ def safe_url(value: Any) -> str:
         if any(_AUTH_KEYS.search(key) for key in pairs):
             if any(_AUTH_KEYS.search(key) and key.lower() != "v" for key in pairs):
                 return ""
+            # Current CNKI result anchors may identify an article solely by v.
+            # Keep this opaque *navigation* value only on the observed public
+            # article endpoint. It is not a stable bibliographic identifier.
+            # Elsewhere v retains its historical redaction behavior.
+            if (parsed.hostname.lower() == "kns.cnki.net"
+                    and parsed.path == "/kcms2/article/abstract" and set(pairs) == {"v"}):
+                values = pairs["v"]
+                if (parsed.scheme != "https" or parsed.port not in (None, 443)
+                        or len(values) != 1 or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,8192}", values[0])):
+                    return ""
+                return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(pairs, doseq=True), ""))
             pairs = {key: vals for key, vals in pairs.items() if not _AUTH_KEYS.search(key)}
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(pairs, doseq=True), ""))
     except (ValueError, TypeError):
@@ -98,7 +113,8 @@ def _target_id(context, page) -> str:
         session.detach()
 
 
-def _save_binding(job_dir, source, target_id, query_hash="", *, page_index=None, result_fingerprint=""):
+def _save_binding(job_dir, source, target_id, query_hash="", *, page_index=None, result_fingerprint="",
+                  scopus_context_proven=None, scholar_position=None, native_query_proof=None):
     path = _binding_path(job_dir)
     if path is None:
         return
@@ -108,12 +124,26 @@ def _save_binding(job_dir, source, target_id, query_hash="", *, page_index=None,
     previous = data.get(source) if isinstance(data.get(source), dict) else {}
     data[source] = {"target_id": target_id, "label": SOURCES[source][0],
                     "query_hash": query_hash or previous.get("query_hash", "")}
+    same_context = previous.get("target_id") == target_id and previous.get("query_hash") == data[source]["query_hash"]
+    if isinstance(native_query_proof, dict) and native_query_proof.get("version") == native_queries.PROOF:
+        data[source]["native_query_proof"] = dict(native_query_proof)
+    if source == "scopus" and (scopus_context_proven is True or
+            (scopus_context_proven is None and same_context
+             and previous.get("document_context_proof") == _SCOPUS_CONTEXT_PROOF)):
+        data[source]["document_context_proof"] = _SCOPUS_CONTEXT_PROOF
     if page_index is not None:
         data[source].update(page_index=page_index, result_fingerprint=result_fingerprint)
     elif previous.get("target_id") == target_id and previous.get("query_hash") == data[source]["query_hash"]:
         for key in ("page_index", "result_fingerprint"):
             if key in previous:
                 data[source][key] = previous[key]
+    if source == "google-scholar":
+        position = _clean_scholar_position(scholar_position)
+        if position is None and scholar_position is None and same_context and (
+                page_index is None or page_index == previous.get("page_index")):
+            position = _clean_scholar_position(previous.get("scholar_position"))
+        if position is not None and position["start"] // position["page_size"] == data[source].get("page_index"):
+            data[source]["scholar_position"] = position
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -214,19 +244,83 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
 
 
 def _snapshot(page, source, limit):
-    if source in extra_sources.SOURCE_INFO:
-        return extra_sources.snapshot(page, source, limit)
-    return page.evaluate(_SNAPSHOT_JS, {"source": source, "limit": limit})
+    arguments = {"source": source, "limit": limit}
+    current = (extra_sources.snapshot(page, source, limit) if source in extra_sources.SOURCE_INFO
+               else page.evaluate(_SNAPSHOT_JS, arguments))
+    access = page.evaluate(_ACCESS_STATE_JS, arguments)
+    # Keep the common safety signals consistent across every browser source.
+    # Only booleans cross this boundary; page text and redirect tokens do not.
+    return {**current, **{key: bool(current.get(key) or access.get(key))
+                         for key in ("rateLimited", "accessBlocked", "resultsLoading")}}
 
 
 def _normalized(text):
     return re.sub(r"\s+", " ", str(text or "")).strip().casefold()
 
 
+def _scopus_comparable(value):
+    """Canonicalize visible parenthesis spacing, never query meaning.
+
+    Spaces inside quoted or exact-brace phrases remain significant. Escaped
+    delimiters do not change phrase/parenthesis state. Invalid delimiters must
+    not become a query proof, even if both displayed strings are identical.
+    """
+    raw = str(value or "").strip()
+    output, mode, escaped, pending_space, depth = [], None, False, False, 0
+    first_outer_close = None
+    for index, character in enumerate(raw):
+        if escaped:
+            output.append(character.casefold())
+            escaped = False
+            continue
+        if mode is not None:
+            output.append(character.casefold())
+            if character == "\\":
+                escaped = True
+            elif character == ('"' if mode == "quote" else "}"):
+                mode = None
+            continue
+        if character.isspace():
+            pending_space = True
+            continue
+        if character == ")":
+            if depth == 0:
+                return None
+            depth -= 1
+            pending_space = False
+            output.append(character)
+            if depth == 0 and first_outer_close is None:
+                first_outer_close = index
+            continue
+        if character == "}":
+            return None
+        if pending_space and output and output[-1] != "(":
+            output.append(" ")
+        pending_space = False
+        output.append(character.casefold())
+        if character == "\\":
+            escaped = True
+        elif character == '"':
+            mode = "quote"
+        elif character == "{":
+            mode = "brace"
+        elif character == "(":
+            depth += 1
+    if mode is not None or escaped or depth:
+        return None
+    normalized = "".join(output)
+    wrapper = re.match(r"title-abs-key\s*\(", normalized)
+    if wrapper and first_outer_close == len(raw) - 1:
+        return normalized[wrapper.end():-1]
+    return normalized
+
+
 def _matches_query(snapshot, page_url, source, query):
     def comparable(value):
+        if source == "scopus":
+            return _scopus_comparable(value)
         normalized = _normalized(value)
-        wrapper = re.fullmatch(r"title-abs-key\s*\((.*)\)", normalized, re.S) if source == "scopus" else None
+        wrapper = None
         if source == "web-of-science":
             wrapper = re.fullmatch(r"ts\s*=\s*\((.*)\)", normalized, re.S)
         if wrapper:
@@ -256,11 +350,114 @@ def _matches_query(snapshot, page_url, source, query):
     return any(expected == comparable(value) for value in observed)
 
 
+def _clean_scholar_position(value):
+    """Persist only non-sensitive native cursor fields, never a URL or query."""
+    if not isinstance(value, dict) or type(value.get("version")) is not int or value.get("version") != 1:
+        return None
+    start = value.get("start")
+    if (isinstance(start, bool) or not isinstance(start, int) or start < 0 or start % 10
+            or type(value.get("page_size")) is not int or value.get("page_size") != 10
+            or value.get("sort") != "relevance"):
+        return None
+    for key in ("year_from", "year_to"):
+        year = value.get(key)
+        if year is not None and (isinstance(year, bool) or not isinstance(year, int) or year < 1):
+            return None
+    return {"version": 1, "start": start, "page_size": 10,
+            "year_from": value.get("year_from"), "year_to": value.get("year_to"), "sort": "relevance"}
+
+
+def _scholar_position(page, snapshot, query, year_from, year_to, *, anchor_position=None):
+    """A native position is proof only together with the frozen search scope."""
+    try:
+        parsed = urlsplit(page.url)
+        if (parsed.scheme != "https" or parsed.hostname != "scholar.google.com" or parsed.port not in (None, 443)
+                or parsed.path != "/scholar" or parsed.username or parsed.password):
+            return None
+        values = parse_qs(parsed.query, keep_blank_values=True)
+        if (values.get("q") != [query]
+                or not _matches_query(snapshot, page.url, "google-scholar", query)):
+            return None
+        for key, year in (("as_ylo", year_from), ("as_yhi", year_to)):
+            if values.get(key) != ([str(year)] if year is not None else None):
+                return None
+        if (values.get("scisbd") not in (None, ["0"])
+                or values.get("as_sdt") not in (None, ["0,5"])
+                or values.get("as_vis") not in (None, ["0"])
+                or any(key in values for key in ("cites", "related", "cluster", "lr", "as_occt",
+                    "as_sauthors", "as_publication", "as_q", "as_epq", "as_oq", "as_eq"))):
+            return None
+        starts = values.get("start", ["0"])
+        if len(starts) != 1 or not re.fullmatch(r"\d+", starts[0]):
+            return None
+        start = int(starts[0])
+        if values.get("num") != ["10"]:
+            # Native Next links can omit the default num=10. A missing value
+            # is usable only adjacent to an already verified ten-row anchor;
+            # it must never normalize an explicit size or lost year filter.
+            anchor = _clean_scholar_position(anchor_position)
+            count = snapshot.get("visible_result_count")
+            if ("num" in values or anchor is None
+                    or anchor["year_from"] != year_from or anchor["year_to"] != year_to
+                    or start not in (anchor["start"], anchor["start"] + 10)
+                    or type(count) is not int or not 1 <= count <= 10
+                    or len(snapshot.get("results") or []) != count):
+                return None
+        return _clean_scholar_position({"version": 1, "start": start, "page_size": 10,
+            "year_from": year_from, "year_to": year_to, "sort": "relevance"})
+    except (TypeError, ValueError):
+        return None
+
+
+def _scholar_saved_position(binding, query_hash, year_from, year_to):
+    position = _clean_scholar_position(binding.get("scholar_position"))
+    if (position is None or binding.get("query_hash") != query_hash
+            or position["year_from"] != year_from or position["year_to"] != year_to
+            or type(binding.get("page_index")) is not int
+            or position["start"] // 10 != binding.get("page_index")):
+        return None
+    return position
+
+
+def _scholar_explicit_scope_conflict(page, year_from, year_to):
+    """Missing legacy URL fields are unknown; explicit conflicting filters are not."""
+    try:
+        parsed = urlsplit(page.url)
+        if (parsed.scheme != "https" or parsed.hostname != "scholar.google.com" or parsed.port not in (None, 443)
+                or parsed.path != "/scholar" or parsed.username or parsed.password):
+            return False
+        values = parse_qs(parsed.query, keep_blank_values=True)
+        for key, year in (("as_ylo", year_from), ("as_yhi", year_to)):
+            if key in values and values[key] != ([str(year)] if year is not None else None):
+                return True
+        return bool(any(key in values and values[key] != [expected]
+                        for key, expected in (("num", "10"), ("scisbd", "0"), ("as_sdt", "0,5"), ("as_vis", "0")))
+                    or any(key in values for key in ("cites", "related", "cluster", "lr", "as_occt",
+                        "as_sauthors", "as_publication", "as_q", "as_epq", "as_oq", "as_eq")))
+    except (TypeError, ValueError):
+        return False
+
+
+def _navigate_scholar_checkpoint(page, query, position):
+    values = {"q": query, "hl": "en", "num": 10, "start": position["start"]}
+    if position["year_from"] is not None:
+        values["as_ylo"] = position["year_from"]
+    if position["year_to"] is not None:
+        values["as_yhi"] = position["year_to"]
+    page.goto(SOURCES["google-scholar"][1] + "?" + urlencode(values),
+              wait_until="domcontentloaded", timeout=60_000)
+    return True
+
+
 def _auth_reason(page, snapshot):
     if snapshot.get("service_error") == "wos_timeout_524":
         return None  # An explicit upstream timeout is not a login/challenge.
     if snapshot.get("captcha"):
         return "verification"
+    if snapshot.get("rateLimited"):
+        return "rate_limited"
+    if snapshot.get("accessBlocked"):
+        return "access_blocked"
     if snapshot.get("accessRequired"):
         return "access_required"
     try:
@@ -282,6 +479,8 @@ def _auth_reason(page, snapshot):
 _MESSAGES = {
     "login": "需要登录。请在该任务已打开的官方页面中完成个人或机构登录，然后回工作台检查并继续。",
     "verification": "需要人工验证。请在该任务已打开的页面中完成验证码，再回工作台检查并继续。",
+    "rate_limited": "来源提示访问频繁或请求次数受限，已停止该来源请求并保留断点。请按来源提示等待，恢复后在原任务检查并继续；不会自动刷新或换词重试。",
+    "access_blocked": "来源拒绝或限制了当前访问，已停止该来源请求并保留断点。请在原页面核对提示，访问恢复后检查并继续；不会自动刷新或换词重试。",
     "access_required": "当前会话没有所需数据库访问权限。请使用学校机构授权或授权网络登录后，回工作台检查并继续。",
     "results_unrecognized": "尚不能确认本次检索的结果页面。请查看该任务的官方页面，确认检索式和结果已加载后再继续。",
 }
@@ -356,6 +555,11 @@ def _wos_form_ready(page):
 def _submit_wos(page, query):
     # The official Core Collection basic-search URL is fixed.  No fabricated
     # undocumented URL search parameters or copied session identifiers are used.
+    if extra_sources.native_query_notice("web-of-science", query):
+        return False  # A compound native expression must never become Topic text.
+    current = _snapshot(page, "web-of-science", 10)
+    if current.get("service_error") or _auth_reason(page, current):
+        return False  # An access challenge can appear while the form is loading.
     topic = re.fullmatch(r"\s*TS\s*=\s*\((.*)\)\s*", query, re.I | re.S)
     # A persistent profile may remember Author/Title from a previous search.
     # Confirm Topic for every query, including ordinary unprefixed expressions.
@@ -394,6 +598,8 @@ def _submit_wos(page, query):
 
 
 def _navigate_search(page, source, query, year_from, year_to):
+    if extra_sources.native_query_notice(source, query):
+        return False  # Also protect direct/internal calls before any navigation.
     if source in extra_sources.SOURCE_INFO:
         return extra_sources.navigate(page, source, query, year_from, year_to)
     if source == "google-scholar":
@@ -401,6 +607,10 @@ def _navigate_search(page, source, query, year_from, year_to):
         del common
         scholar = importlib.import_module("google_scholar_search")
         url = scholar.build_search_url(query, year_from, year_to)
+        parts = urlsplit(url)
+        values = parse_qs(parts.query, keep_blank_values=True)
+        values["num"] = ["10"]  # Stable offsets are required for safe checkpoint recovery.
+        url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(values, doseq=True), ""))
     elif source == "cnki":
         # CNKI's visible input preserves form-encoded '+' as literal text.
         # Percent-encode spaces and actual plus signs distinctly so the page's
@@ -429,7 +639,8 @@ def _navigate_search(page, source, query, year_from, year_to):
         except Exception:
             pass
         return _submit_wos(page, query)
-    _wait_results(page, source)
+    # The caller waits for result/authentication state on this exact page.
+    # A container selector alone can be an empty AJAX shell.
     return True
 
 
@@ -499,7 +710,21 @@ _PAGINATION_JS = r"""/* literature_pagination */ ({source}) => {
     const pages=text(first('.small-paginate .page-number')).match(/^(\d+)\s*\/\s*(\d+)$/);
     if(pages && Number(pages[2])>0 && Number(pages[1])===Number(pages[2])) end=true;
   }
-  return {total_count:Number.isSafeInteger(total)&&total>=0?total:null,explicit_end:end};
+  let cnkiPages={};
+  if(source==='cnki') {
+    // KNS removes Next on its final page but retains the visible N / total
+    // page marker. Result counts and the mere absence of Next are not proof.
+    const marks=Array.from(document.querySelectorAll('.countPageMark')).filter(visible);
+    if(marks.length) {
+      const match=marks.length===1 && text(marks[0]).match(/^(\d+)\s*\/\s*(\d+)$/);
+      const current=match?Number(match[1]):null,last=match?Number(match[2]):null;
+      if(Number.isSafeInteger(current)&&Number.isSafeInteger(last)&&current>0&&current<=last) {
+        cnkiPages={page_number:current,total_pages:last,pagination_conflict:end&&current!==last};
+        end=current===last;
+      } else {cnkiPages={pagination_conflict:true};end=false;}
+    }
+  }
+  return {total_count:Number.isSafeInteger(total)&&total>=0?total:null,explicit_end:end,...cnkiPages};
 }"""
 
 
@@ -527,7 +752,20 @@ def _pagination(page, source):
     control = _next_control(page, source)
     disabled = _control_disabled(control) if control is not None else None
     has_next = False if data.get("explicit_end") else not disabled if disabled is not None else None
-    return {"has_next": has_next, "total_count": data.get("total_count")}
+    result = {"has_next": has_next, "total_count": data.get("total_count")}
+    if source == "cnki":
+        current, last = data.get("page_number"), data.get("total_pages")
+        if current is not None:
+            result.update(page_number=current, total_pages=last)
+        # Conflicting page controls may be an incomplete AJAX transition.
+        if (data.get("pagination_conflict") or (data.get("explicit_end") and disabled is False)
+                or (current is not None and current < last and disabled is True)):
+            result["has_next"] = None
+        elif has_next is False:
+            result["end_evidence"] = ({"kind": "page_count", "selector": ".countPageMark",
+                "page_number": current, "total_pages": last} if current is not None else
+                {"kind": "disabled_next" if disabled is True else "explicit_end"})
+    return result
 
 
 def _source_pagination(page, source, snapshot, pagination):
@@ -640,6 +878,53 @@ def _query_consistent(snapshot, page, source, query, *, submitted=False, trusted
     return _matches_query(snapshot, page.url, source, query) or submitted or trusted
 
 
+def _scopus_context_checks(page):
+    """Only explicit visible contradictions invalidate an actual submit proof.
+
+    A results page may no longer expose its basic search controls. Their
+    absence is not evidence of a different field; an Authors tab or an actual
+    non-Title/Abstract/Keywords selection is. No DOM text is exported.
+    """
+    field = extra_sources._scopus_fields(page)
+    wrong_mode = bool(page.evaluate(r"""/* scopus_visible_mode_conflict */ () => {
+      const visible=el=>!!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+      const text=el=>(el?.innerText || el?.textContent || '').trim().replace(/\s+/g,' ');
+      return Array.from(document.querySelectorAll('[role="tab"][aria-selected="true"],a[aria-current="page"],.search-tabs .active,#basic[aria-selected="true"],#s[aria-selected="true"]'))
+        .filter(visible).some(el=>/^(?:Authors?|Organizations?|作者|机构)$/i.test(text(el)));
+    }"""))
+    return {"visible_document_context_valid": bool(extra_sources.query_context_valid(page, "scopus")),
+            "visible_context_conflict": wrong_mode or bool(field and not extra_sources._is_title_abstract_keywords(field))}
+
+
+def _scopus_attention(current, page, query, *, submitted, bound_proven, context_checks):
+    """Explain the failing gate using booleans, never query/DOM/auth contents."""
+    current = current or {}
+    checks = {"official_page": bool(page and _official_result_page(page, "scopus")),
+              "visible_query_present": bool(current.get("queries")),
+              "query_matches": bool(page and _matches_query(current, page.url, "scopus", query)),
+              "submitted_document_context_proven": bool(submitted),
+              "bound_document_context_proven": bool(bound_proven),
+              "visible_document_context_valid": bool(context_checks.get("visible_document_context_valid")),
+              "visible_context_conflict": bool(context_checks.get("visible_context_conflict")),
+              "bibliographic_records_loaded": bool(current.get("results")),
+              "explicit_no_results": bool(current.get("noResults"))}
+    if not checks["official_page"]:
+        message = "尚不能确认当前是 Scopus 官方结果页面，已暂停；请查看本任务绑定的官方页面。"
+    elif checks["visible_query_present"] and not checks["query_matches"]:
+        message = "Scopus 页面显示的检索式与本任务冻结检索式不一致，已暂停；请核对完整检索式后再继续。"
+    elif checks["visible_context_conflict"]:
+        message = "Scopus 当前可见检索模式或字段与 Documents／Title, Abstract, Keywords 不一致，已暂停。"
+    elif not (checks["submitted_document_context_proven"] or checks["bound_document_context_proven"]):
+        message = "尚未取得本任务在 Scopus Documents／Title, Abstract, Keywords 的提交或页面绑定证明，已暂停；不能仅凭结果数量继续。"
+    elif not checks["visible_query_present"]:
+        message = "Scopus 结果页尚未显示可核对的检索式，已暂停；请待检索式和文献记录加载后再继续。"
+    elif not (checks["bibliographic_records_loaded"] or checks["explicit_no_results"]):
+        message = "Scopus 检索式已核对，但文献记录尚未加载或无法识别，已暂停；结果总数不等于题录已读取。"
+    else:
+        message = "Scopus 结果页仍有判据未能确认，已暂停；已有结果保留，请查看本任务的官方页面。"
+    return message, checks
+
+
 def _wos_summary_index(page):
     """Read only the observed official summary URL's one-based page number."""
     if not _official_result_page(page, "web-of-science"):
@@ -655,7 +940,7 @@ def _wos_result_context(page, current):
 
 def _wos_records_ready(current, limit, *, full_page=False):
     rows = current.get("results") or []
-    if not rows:
+    if not rows or current.get("resultsLoading"):
         return False
     visible = current.get("visible_result_count", len(rows))
     loaded = current.get("loaded_title_count", len(rows))
@@ -667,11 +952,39 @@ def _wos_records_ready(current, limit, *, full_page=False):
     return needed > 0 and loaded >= needed and len(rows) >= needed
 
 
+def _source_records_ready(current, limit, *, full_page=False):
+    """Do not advance past visible records whose title has not arrived yet."""
+    rows = current.get("results") or []
+    if not rows or current.get("resultsLoading"):
+        return False
+    visible = current.get("visible_result_count", len(rows))
+    if isinstance(visible, bool) or not isinstance(visible, int) or visible <= 0:
+        return False
+    needed = visible if full_page else min(limit, visible)
+    return len(rows) >= needed
+
+
+def _wait_source_records(page, source, current, limit, *, full_page=False):
+    """Bounded, read-only wait; never retry a request or navigate a login page."""
+    deadline = time.monotonic() + 15
+    while True:
+        if (_auth_reason(page, current) or current.get("service_error")
+                or (current.get("noResults") and not current.get("resultsLoading"))
+                or _source_records_ready(current, limit, full_page=full_page)
+                or (full_page and current.get("visible_result_count", 0) > limit)):
+            return current
+        if time.monotonic() >= deadline:
+            return {**current, "_source_loading_pending": True}
+        time.sleep(0.2)
+        current = _snapshot(page, source, limit)
+
+
 def _wait_wos_records(page, current, limit, *, full_page=False):
     """Wait on this exact tab without navigating, submitting, or paging it."""
     deadline = time.monotonic() + 15
     while True:
-        if (_auth_reason(page, current) or current.get("service_error") or current.get("noResults")
+        if (_auth_reason(page, current) or current.get("service_error")
+                or (current.get("noResults") and not current.get("resultsLoading"))
                 or _wos_records_ready(current, limit, full_page=full_page)
                 or (full_page and current.get("visible_result_count", 0) > limit)):
             return current
@@ -694,13 +1007,17 @@ def _advance_page(page, source, previous, limit):
     deadline = time.monotonic() + 15
     while True:
         current = _snapshot(page, source, limit)
-        if (_auth_reason(page, current) or current.get("service_error") or current.get("noResults")
+        if (_auth_reason(page, current) or current.get("service_error")
+                or (current.get("noResults") and not current.get("resultsLoading"))
                 or (current.get("results") and _row_fingerprint(current) != before
-                    and (source != "web-of-science" or _wos_records_ready(current, limit, full_page=limit > 10)))):
+                    and (_wos_records_ready(current, limit, full_page=limit > 10) if source == "web-of-science"
+                         else _source_records_ready(current, limit, full_page=limit > 10)))):
             return current
         if time.monotonic() >= deadline:
             if source == "web-of-science" and not _wos_records_ready(current, limit, full_page=limit > 10):
                 return {**current, "_wos_loading_pending": True}
+            if not _source_records_ready(current, limit, full_page=limit > 10):
+                return {**current, "_source_loading_pending": True}
             return None
         time.sleep(0.2)
 
@@ -737,10 +1054,16 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
     if source_key not in SOURCES:
         return {"status": "error", "reason": None, "message": "该检索来源未接通。", "source_key": source_key,
                 "url": "", "results": [], "applied_filters": {}, "deferred_rules": []}
-    if not isinstance(query, str) or not query.strip() or len(query) > 2000:
-        return {**_envelope(source_key, "error"), "message": "检索式无效。"}
+    if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY_CHARS:
+        return {**_envelope(source_key, "error"), "message": f"检索式必须为1到{MAX_QUERY_CHARS}字符；原式未自动截断。"}
     if isinstance(page_index, bool) or not isinstance(page_index, int) or page_index < 0:
         return {**_envelope(source_key, "error"), "message": "检索页码必须为非负整数。"}
+    native_notice = extra_sources.native_query_notice(source_key, query)
+    if native_notice:
+        # Dedicated positive-proof path; native expressions never enter the
+        # basic submitters below. Unknown layouts continue to fail closed.
+        return native_queries.run(sys.modules[__name__], source_key, query, limit, year_from, year_to,
+                                  job_dir=job_dir, page_index=page_index, full_page=full_page)
     limit = max(1, min(int(limit), 10))
     read_limit = 200 if full_page else limit
     api_failed = False
@@ -777,6 +1100,11 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
         options["transport"] = "browser_after_api_error"
     page = None
     current = None
+    submitted = False
+    scopus_context_proven = False
+    scopus_context_checks = {}
+    recovery = None
+    scholar_modern_position = False
 
     def response(status, *, results=None, reason=None, pagination=None, service_error=None):
         output = _envelope(source_key, status, results=results, reason=reason, **options)
@@ -784,7 +1112,14 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             error = service_error or (current or {}).get("service_error")
             output["message"] = (_WOS_TIMEOUT_MESSAGE if error == "wos_timeout_524" else
                                  _WOS_LOADING_MESSAGE if (current or {}).get("_wos_loading_pending") else _WOS_REVIEW_MESSAGE)
+        if source_key == "scopus" and status == "attention" and reason == "results_unrecognized":
+            output["message"], output["diagnostics"] = _scopus_attention(current, page, query,
+                submitted=submitted, bound_proven=scopus_context_proven, context_checks=scopus_context_checks)
         output.update(page_index=page_index, has_next=None, total_count=None)
+        if status == "attention" and source_key != "scopus" and (current or {}).get("_source_loading_pending"):
+            output["message"] = "当前来源文献列表尚未完整加载，已保留原页面和断点。请确认题录出现后检查并继续；未将空白或加载中的页面视为检索完成。"
+        if recovery is not None:
+            output["recovery"] = dict(recovery)
         if pagination:
             output.update(pagination)
         return output
@@ -796,10 +1131,15 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
             bindings = _load_json(_binding_path(job_dir), {}) if job_dir is not None else {}
             binding = bindings.get(source_key, {}) if isinstance(bindings, dict) else {}
+            if not isinstance(binding, dict):
+                binding = {}
+            scholar_saved = (_scholar_saved_position(binding, query_hash, year_from, year_to)
+                             if source_key == "google-scholar" else None)
+            scholar_anchor = scholar_saved
             proven_index = None
             recheck_auth = False
             inspect_bound_wos = source_key == "web-of-science" and not created
-            if scrape_current or page_index or inspect_bound_wos:
+            if scrape_current or page_index or not created:
                 current = _snapshot(page, source_key, read_limit)
                 recheck_service = bool(source_key == "web-of-science" and scrape_current
                                        and current.get("service_error") == "wos_timeout_524")
@@ -824,12 +1164,78 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 recheck_auth = bool(scrape_current and reason in ("login", "access_required"))
                 if reason and not recheck_auth:
                     return response("attention", reason=reason)
+                if (source_key != "web-of-science" and not recheck_auth
+                        and binding.get("query_hash") == query_hash
+                        and (current.get("resultContainer") or current.get("resultsLoading"))):
+                    current = _wait_source_records(page, source_key, current, read_limit, full_page=full_page)
+                    reason = _auth_reason(page, current)
+                    if reason:
+                        return response("attention", reason=reason)
+                    if current.get("_source_loading_pending"):
+                        return response("attention", reason="results_unrecognized")
+                if source_key == "google-scholar" and not recheck_auth:
+                    observed_position = _scholar_position(page, current, query, year_from, year_to,
+                        anchor_position=scholar_anchor)
+                    same_query = binding.get("query_hash") == query_hash
+                    if same_query and _scholar_explicit_scope_conflict(page, year_from, year_to):
+                        recovery = {"mode": "context_changed", "target_page": page_index + 1,
+                            "position_verified": False, "continuity_verified": False,
+                            "message": "Scholar当前页面的年份、排序、每页数量或额外筛选与原批次冲突，未沿用旧页码；已有结果保留，请核对后继续。"}
+                        return response("attention", reason="results_unrecognized")
+                    if (same_query and binding.get("scholar_position") is not None and scholar_saved is None):
+                        recovery = {"mode": "context_changed", "target_page": page_index + 1,
+                            "position_verified": False, "continuity_verified": False,
+                            "message": "Scholar断点的年份、排序或每页数量与本次配置不一致，已有结果保留，请核对后继续。"}
+                        return response("attention", reason="results_unrecognized")
+                    if (scholar_saved is not None and _official_result_page(page, source_key)
+                            and (current.get("results") or current.get("noResults")) and observed_position is None):
+                        recovery = {"mode": "context_changed", "target_page": page_index + 1,
+                            "position_verified": False, "continuity_verified": False,
+                            "message": "Scholar当前检索词、年份、排序或每页数量已变化，未沿用旧页码；请核对原批次后继续。"}
+                        return response("attention", reason="results_unrecognized")
+                    if observed_position is not None and same_query and not created:
+                        observed_index = observed_position["start"] // 10
+                        same_saved_page = observed_index == binding.get("page_index")
+                        fingerprint_matches = binding.get("result_fingerprint") == _row_fingerprint(current)
+                        if same_saved_page and binding.get("result_fingerprint") and not fingerprint_matches:
+                            recovery = {"mode": "rows_changed", "target_page": page_index + 1,
+                                "position_verified": True, "continuity_verified": False,
+                                "message": "Scholar保存页的题录已变化，可能发生重新排序；已有结果保留，核对连续性后再继续，不能直接跳过。"}
+                            return response("attention", reason="results_unrecognized")
+                        allowed = (page_index, page_index - 1) if page_index else (0,)
+                        if observed_index in allowed:
+                            if not (current.get("results") or current.get("noResults")):
+                                recovery = {"mode": "awaiting_page", "target_page": page_index + 1,
+                                    "position_verified": True, "continuity_verified": False,
+                                    "message": "Scholar已位于待恢复页，但文献列表尚未加载；保留页面，加载后检查并继续。"}
+                                return response("attention", reason="results_unrecognized")
+                            proven_index = observed_index
+                            scholar_modern_position = True
+                            scholar_anchor = observed_position
+                            recovery = {"mode": "resume_current" if observed_index == page_index else "resume_previous",
+                                "target_page": page_index + 1, "position_verified": True,
+                                "continuity_verified": bool(same_saved_page and fingerprint_matches),
+                                "message": f"Scholar已核对原批次页位，正从第{observed_index + 1}页续接至第{page_index + 1}页；已有题录复用。"}
+                if source_key == "scopus" and not recheck_auth:
+                    scopus_context_checks = _scopus_context_checks(page)
+                scopus_binding_valid = source_key != "scopus" or (
+                    not scopus_context_checks.get("visible_context_conflict") and
+                    (binding.get("document_context_proof") == _SCOPUS_CONTEXT_PROOF
+                     or scopus_context_checks.get("visible_document_context_valid")))
                 if (not recheck_auth and not current.get("service_error") and not created and binding.get("query_hash") == query_hash
                         and isinstance(binding.get("page_index"), int)
                         and binding.get("result_fingerprint") == _row_fingerprint(current)
                         and _official_result_page(page, source_key)
-                        and _query_consistent(current, page, source_key, query, trusted=True)):
+                        and _query_consistent(current, page, source_key, query, trusted=True)
+                        and scopus_binding_valid
+                        and (source_key != "google-scholar" or scholar_saved is None)):
                     proven_index = binding["page_index"]
+                    if source_key == "scopus":
+                        scopus_context_proven = True
+                    if source_key == "google-scholar" and recovery is None:
+                        recovery = {"mode": "legacy_binding", "target_page": page_index + 1,
+                            "position_verified": False, "continuity_verified": True,
+                            "message": "Scholar沿旧断点题录指纹继续；旧记录缺少完整页位元数据，未声称年份和排序已独立核对。"}
                 if inspect_bound_wos and not recheck_auth and not current.get("service_error") and _wos_result_context(page, current):
                     observed_index = _wos_summary_index(page)
                     if observed_index is not None:
@@ -842,7 +1248,7 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             use_bound = proven_index in (page_index, page_index - 1) if page_index else proven_index == 0
             verified = bool(current and _matches_query(current, page.url, source_key, query))
             if source_key == "scopus" and verified:
-                verified = extra_sources.query_context_valid(page, source_key)
+                verified = scopus_context_checks.get("visible_document_context_valid", False)
             # Keep the legacy manual first-batch behavior. Formal runs without
             # proof re-submit from page one: an identical query can be on page N.
             # A homepage search box can still contain the frozen query after a
@@ -852,36 +1258,70 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                                       and _official_result_page(page, source_key))
             manual_first = (scrape_current and not full_page and not created and page_index == 0
                             and not recheck_auth and manual_result_page and verified
-                            and binding.get("page_index", 0) == 0)
+                            and binding.get("page_index", 0) == 0 and source_key != "scopus")
             if use_bound:
                 current_index = proven_index
             elif manual_first:
                 current_index = 0
             else:
-                if (source_key == "web-of-science" and not created and current is not None
+                scholar_restore = bool(source_key == "google-scholar" and scholar_saved is not None
+                    and binding.get("page_index") in ((page_index, page_index - 1) if page_index else (0,)))
+                if scholar_restore:
+                    recovery = {"mode": "checkpoint_url", "target_page": page_index + 1,
+                        "position_verified": False, "continuity_verified": False,
+                        "message": f"Scholar正在恢复到已保存的第{binding['page_index'] + 1}页，并核对题录锚点后续接第{page_index + 1}页。"}
+                    submitted = _navigate_scholar_checkpoint(page, query, scholar_saved)
+                elif (source_key == "web-of-science" and not created and current is not None
                         and not recheck_auth and not current.get("service_error") and _official_result_page(page, source_key)
                         and _wos_form_ready(page)):
                     # A regional official form already reached in this task is
                     # preferable to restarting its failing global transfer.
                     submitted = _submit_wos(page, query)
                 else:
+                    if source_key == "google-scholar" and page_index:
+                        recovery = {"mode": "replay_from_first", "target_page": page_index + 1,
+                            "position_verified": False, "continuity_verified": False,
+                            "message": f"Scholar旧断点缺少可核对页位，正在从首页重新定位至第{page_index + 1}页；已有候选保留并去重，连续性仍需核对。"}
                     submitted = _navigate_search(page, source_key, query, year_from, year_to)
                 current = _snapshot(page, source_key, read_limit)
                 if source_key == "web-of-science" and _wos_result_context(page, current):
                     current = _wait_wos_records(page, current, read_limit, full_page=full_page)
+                elif source_key != "web-of-science":
+                    current = _wait_source_records(page, source_key, current, read_limit, full_page=full_page)
                 if source_key == "web-of-science" and current.get("service_error"):
                     return response("attention", reason="results_unrecognized")
                 reason = _auth_reason(page, current)
                 if reason:
                     return response("attention", reason=reason)
-                if current.get("_wos_loading_pending"):
+                if current.get("_wos_loading_pending") or current.get("_source_loading_pending"):
                     return response("attention", reason="results_unrecognized")
                 verified = _matches_query(current, page.url, source_key, query)
                 if source_key == "scopus":
-                    verified = verified and extra_sources.query_context_valid(page, source_key)
-                if not verified and not (source_key in ("web-of-science", "scopus") and submitted and not current.get("queries")):
+                    scopus_context_checks = _scopus_context_checks(page)
+                    # navigate() only returns a Scopus submit proof after the
+                    # actual Documents/field/input checks. Do not demand those
+                    # homepage controls again on the resulting document page.
+                    scopus_context_proven = bool(submitted and verified and _official_result_page(page, source_key)
+                        and not scopus_context_checks.get("visible_context_conflict")
+                        and (current.get("results") or current.get("noResults")))
+                    if not scopus_context_proven:
+                        return response("attention", reason="results_unrecognized")
+                if not verified and not (source_key == "web-of-science" and submitted and not current.get("queries")):
                     return response("attention", reason="results_unrecognized")
-                current_index = 0
+                current_index = binding["page_index"] if scholar_restore else 0
+                if source_key == "google-scholar":
+                    restored_position = _scholar_position(page, current, query, year_from, year_to,
+                        anchor_position=scholar_anchor)
+                    if scholar_restore:
+                        if (restored_position != scholar_saved
+                                or binding.get("result_fingerprint") != _row_fingerprint(current)):
+                            recovery.update(mode="rows_changed", position_verified=restored_position == scholar_saved,
+                                message="Scholar恢复页的题录与原断点不一致，可能重新排序；已保留旧结果，请核对连续性后继续。")
+                            return response("attention", reason="results_unrecognized")
+                        recovery.update(position_verified=True, continuity_verified=True)
+                    scholar_modern_position = restored_position is not None
+                    if scholar_modern_position:
+                        scholar_anchor = restored_position
             while current_index < page_index:
                 if not _official_result_page(page, source_key):
                     return response("attention", reason="results_unrecognized")
@@ -891,11 +1331,15 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                     result["message"] = pagination["source_limit_message"]
                     return result
                 if pagination["has_next"] is False:
-                    return response("ok", pagination={**pagination, "has_next": False})
+                    result = response("attention", reason="results_unrecognized")
+                    result["message"] = "尚未恢复到原待处理页，当前页面已显示末页。已有题录与断点保留，请核对结果数量和页序变化；不能据此认定原批次检索完成。"
+                    return result
                 advanced = _advance_page(page, source_key, current, read_limit)
                 if advanced is None:
                     return response("attention", reason="results_unrecognized", pagination=pagination)
                 current = advanced
+                if current.get("_source_loading_pending"):
+                    return response("attention", reason="results_unrecognized")
                 if source_key == "web-of-science" and (current.get("service_error") or current.get("_wos_loading_pending")):
                     return response("attention", reason="results_unrecognized")
                 reason = _auth_reason(page, current)
@@ -903,10 +1347,27 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                     return response("attention", reason=reason)
                 if not _official_result_page(page, source_key) or not _query_consistent(current, page, source_key, query, trusted=True):
                     return response("attention", reason="results_unrecognized")
+                if source_key == "google-scholar" and scholar_modern_position:
+                    advanced_position = _scholar_position(page, current, query, year_from, year_to,
+                        anchor_position=scholar_anchor)
+                    if advanced_position is None or advanced_position["start"] // 10 != current_index + 1:
+                        recovery = {"mode": "context_changed", "target_page": page_index + 1,
+                            "position_verified": False, "continuity_verified": False,
+                            "message": "Scholar翻页后的原生页位或检索条件无法核对，未跳过该页；请在原页面检查并继续。"}
+                        return response("attention", reason="results_unrecognized")
+                    scholar_anchor = advanced_position
+                if source_key == "scopus":
+                    scopus_context_checks = _scopus_context_checks(page)
+                    if scopus_context_checks.get("visible_context_conflict"):
+                        return response("attention", reason="results_unrecognized")
                 current_index += 1
                 # Only bibliographic fingerprints and page numbers are persisted.
                 _save_binding(job_dir, source_key, _target_id(context, page), query_hash,
-                              page_index=current_index, result_fingerprint=_row_fingerprint(current))
+                              page_index=current_index, result_fingerprint=_row_fingerprint(current),
+                              scopus_context_proven=scopus_context_proven if source_key == "scopus" else None,
+                              scholar_position=_scholar_position(page, current, query, year_from, year_to,
+                                  anchor_position=scholar_anchor)
+                              if source_key == "google-scholar" else None)
             if (full_page or page_index) and not _official_result_page(page, source_key):
                 return response("attention", reason="results_unrecognized")
             if full_page and current.get("visible_result_count", 0) > read_limit:
@@ -922,12 +1383,20 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             pagination = _source_pagination(page, source_key, current, _pagination(page, source_key))
             if rows:
                 _save_binding(job_dir, source_key, _target_id(context, page), query_hash,
-                              page_index=page_index, result_fingerprint=_row_fingerprint(current))
+                              page_index=page_index, result_fingerprint=_row_fingerprint(current),
+                              scopus_context_proven=scopus_context_proven if source_key == "scopus" else None,
+                              scholar_position=_scholar_position(page, current, query, year_from, year_to,
+                                  anchor_position=scholar_anchor)
+                              if source_key == "google-scholar" else None)
                 result = response("ok", results=rows, pagination=pagination)
                 if api_failed:
                     result["deferred_rules"].append("公开 API 暂不可用，已改用同一 PubMed 官方网页；结果范围以网页实际返回为准。")
                 return result
             if current.get("noResults"):
+                if source_key == "scopus":
+                    _save_binding(job_dir, source_key, _target_id(context, page), query_hash,
+                                  page_index=page_index, result_fingerprint=_row_fingerprint(current),
+                                  scopus_context_proven=scopus_context_proven)
                 return response("no_results" if page_index == 0 else "ok", pagination={**pagination, "has_next": False})
             return response("attention", reason="results_unrecognized", pagination=pagination)
     except _WosRecovery as paused:
@@ -958,18 +1427,20 @@ def _check_open_source(source, job_dir):
 def open_source(source_key, *, job_dir):
     """Foreground the waiting task tab, preserving its official login page."""
     _check_open_source(source_key, job_dir)
+    config = _load_json(Path(job_dir) / "run_config.json", {})
+    query = config.get("sourceQueries", {}).get(source_key) or config.get("query", "")
+    native_notice = extra_sources.native_query_notice(source_key, query)
     with _runtime() as context:
         page, created = _pick_page(context, source_key, job_dir)
         if created:
-            config = _load_json(Path(job_dir) / "run_config.json", {})
-            query = config.get("sourceQueries", {}).get(source_key) or config.get("query", "")
-            if source_key == "web-of-science":
+            if source_key == "web-of-science" or native_notice:
                 page.goto(SOURCES[source_key][1], wait_until="domcontentloaded", timeout=60_000)
             else:
                 _navigate_search(page, source_key, query, config.get("publicationYearFrom"), config.get("publicationYearTo"))
         page.bring_to_front()
     return {"opened": True, "source": source_key, "label": SOURCES[source_key][0],
-            "message": "已打开该任务的官方检索页面，请在页面中完成登录或验证。"}
+            "message": ("已打开该任务的官方入口；请进入高级／专业检索页，粘贴原式并核对后导出题录导入。当前未自动提交检索式。"
+                        if native_notice else "已打开该任务的官方检索页面，请在页面中完成登录或验证。")}
 
 
 def main():

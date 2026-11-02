@@ -165,6 +165,7 @@ class PrepareTests(unittest.TestCase):
         run_cli(extract.main, ["--config", str(self.job / "run_config.json"), "--output-dir", str(self.job), "--prepare"])
         bundle = json.loads((self.job / "extraction" / "inputs" / "GSC-002.json").read_text(encoding="utf-8"))
         self.assertIn("SOC 12.4", bundle["fulltext"]["text"])
+        self.assertTrue(bundle["fulltext"]["text"].startswith("[PDF page 1]\n"))
         self.assertNotIn("degraded", bundle)
 
     def test_prepare_degraded_on_unparsable_pdf(self):
@@ -190,6 +191,28 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(bundle["fulltext"]["chars"], 20)
         self.assertTrue(bundle["fulltext"]["truncated"])
         self.assertEqual(len(bundle["fulltext"]["text"]), 20)
+        self.assertGreater(bundle["fulltext"]["original_chars"], 500)
+        self.assertEqual(bundle["input_coverage"]["version"], extract.INPUT_COVERAGE_VERSION)
+        self.assertIn("正文输入已截断", bundle["input_coverage"]["limitations"][0])
+
+    def test_actual_material_reader_cap_is_explicit_but_main_excerpt_is_not_body_loss(self):
+        from literature_materials import read_material
+        blob = b"name,value\n" + b"group_a,12.4\n" * 20
+        relative = "fulltext/files/Table_S1.csv"
+        (self.job / relative).write_bytes(blob)
+        material = {"role": "supplement", "filename": "Table_S1.csv", "format": "csv", "path": relative,
+                    "size": len(blob), "sha256": hashlib.sha256(blob).hexdigest(), "download_status": "downloaded"}
+        read = read_material(self.job, material, max_chars=16)
+        self.assertEqual(read["read_status"], "partial")
+        entry = dict(material, read_status=read["read_status"], read_reason=read["read_reason"], content={"text": read["text"]})
+        bundle = {"fulltext": {"truncated": False}, "materials": [entry]}
+        extract.mark_input_coverage(bundle)
+        self.assertTrue(entry["content"]["truncated"])
+        self.assertEqual(entry["content"]["chars"], len(read["text"]))
+        self.assertIn("Table_S1.csv", bundle["input_coverage"]["limitations"][0])
+        entry["content_ref"] = "fulltext"
+        extract.mark_input_coverage(bundle)
+        self.assertEqual(bundle["input_coverage"]["limitations"], [])
 
     def test_prepare_reuse_then_force(self):
         argv = ["--config", str(self.job / "run_config.json"), "--output-dir", str(self.job), "--prepare"]
@@ -275,6 +298,27 @@ class CheckTests(unittest.TestCase):
         report = json.loads((self.job / "extraction" / "check_report.json").read_text(encoding="utf-8"))
         self.assertEqual((report["bundles"], report["ok"], report["failed"]), (3, 3, 0))
         self.assertEqual(report["degraded"][0]["paper_id"], "GSC-003")
+
+    def test_new_truncation_requires_partial_and_warning_but_legacy_stays_readable(self):
+        self.write_all_valid()
+        input_path = self.job / "extraction" / "inputs" / "GSC-001.json"
+        bundle = json.loads(input_path.read_text(encoding="utf-8"))
+        bundle["fulltext"]["truncated"] = True
+        bundle["input_coverage"]["limitations"] = ["正文输入已截断。"]
+        input_path.write_text(json.dumps(bundle), encoding="utf-8")
+        report = extract.check_results(self.job, {})
+        self.assertEqual(report["failed"], 1)
+        self.assertIn("必须标为 partial", " ".join(report["failures"][0]["reasons"]))
+        result = valid_result("GSC-001", status="partial")
+        self.write_result("GSC-001", result)
+        self.assertEqual(extract.check_results(self.job, {})["failed"], 1)
+        result["warnings"] = ["[input-coverage] 正文输入已截断，未提供部分尚未提取。"]
+        self.write_result("GSC-001", result)
+        self.assertEqual(extract.check_results(self.job, {})["failed"], 0)
+        bundle.pop("input_coverage")
+        input_path.write_text(json.dumps(bundle), encoding="utf-8")
+        self.write_result("GSC-001", valid_result("GSC-001"))
+        self.assertEqual(extract.check_results(self.job, {})["failed"], 0)
 
     def test_check_requires_bundles(self):
         for path in (self.job / "extraction" / "inputs").glob("*.json"):

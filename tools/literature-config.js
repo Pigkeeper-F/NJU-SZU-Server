@@ -7,6 +7,11 @@ const DEFAULT_LIMITS = { discover: 180, dedupe: 120, fulltext: 3600, extract: 18
 // A grouped legacy draft may expand to many individual variables. Keep the
 // same bound across configuration, discussion and the confirmation checkpoint.
 const MAX_FIELD_DEFINITIONS = 200;
+const MAX_RULES = 200;
+const MAX_RULE_CHARS = 2000;
+// Search expressions are deliberately larger than individual prose rules.
+// Keep this contract aligned with the visible input and Python entry points.
+const MAX_QUERY_CHARS = 32768;
 
 function string(value, name, max = 500) {
   if (value == null) return '';
@@ -14,10 +19,15 @@ function string(value, name, max = 500) {
   return value.trim();
 }
 
-function list(value, name, maxItems = 30) {
+function list(value, name, maxItems = 30, maxChars = 500) {
   if (value == null) return [];
-  if (!Array.isArray(value) || value.length > maxItems) throw new Error(`${name}必须是列表`);
-  return value.map(item => string(item, name, 500)).filter(Boolean);
+  if (!Array.isArray(value)) throw new Error(`${name}必须是列表；请保留原内容并在检索设置中按条目整理`);
+  if (value.length > maxItems) throw new Error(`${name}共有${value.length}项，超过${maxItems}项上限；内容未删除，请整理后重试`);
+  return value.map((item, index) => {
+    const label = `${name}第${index + 1}项`;
+    if (typeof item === 'string' && item.length > maxChars) throw new Error(`${label}共${item.length}字，超过${maxChars}字上限；原内容保留，未自动截断`);
+    return string(item, label, maxChars);
+  }).filter(Boolean);
 }
 
 function year(value, name) {
@@ -53,11 +63,58 @@ function sourceQueries(raw) {
   const result = {};
   for (const [key, entry] of Object.entries(value)) {
     if (!isKnown(key)) throw new Error(`分来源检索式包含未知来源：${key}`);
-    const query = string(entry, `${key} 检索式`, 2000);
+    const query = queryText(entry, `${key} 检索式`);
     if (!query) throw new Error(`${key} 检索式不能为空`);
     result[key] = query;
   }
   return result;
+}
+
+function queryText(value, name) {
+  if (typeof value === 'string' && value.length > MAX_QUERY_CHARS) {
+    throw new Error(`${name}共${value.length}字，超过${MAX_QUERY_CHARS}字上限；原检索式保留，未自动截断`);
+  }
+  return string(value, name, MAX_QUERY_CHARS);
+}
+
+// Optional so legacy frozen configurations retain exactly their old shape.
+function scholarPlanConfig(raw, sources) {
+  if (raw == null) return undefined;
+  const value = object(raw, '谷歌学术分批计划');
+  if (Object.keys(value).some(key => !['version', 'topics', 'yearSpan', 'sort', 'trialMaxPages'].includes(key))) throw new Error('谷歌学术分批计划包含未知字段');
+  if (!sources.includes('google-scholar')) throw new Error('谷歌学术分批计划需要选择谷歌学术来源');
+  // Frozen v1 plans retain their five-year windows; v2 explicitly starts each
+  // topic over the full configured period and splits only on a result cap.
+  if (!((value.version === 1 && value.yearSpan === 5) || (value.version === 2 && value.yearSpan === 0)) || value.sort !== 'relevance') throw new Error('谷歌学术计划须为版本1/yearSpan=5或版本2/yearSpan=0（整段优先），并按相关性排序');
+  if (!Array.isArray(value.topics) || value.topics.length < 1 || value.topics.length > 256) throw new Error('谷歌学术主题须为1–256项');
+  const seen = new Set();
+  const topics = value.topics.map(rawTopic => {
+    const topic = object(rawTopic, '谷歌学术主题');
+    if (Object.keys(topic).some(key => !['id', 'label', 'query', 'refinementQueries'].includes(key))) throw new Error('谷歌学术主题包含未知字段');
+    const id = string(topic.id, '谷歌学术主题编号', 80), label = string(topic.label, '谷歌学术主题名称', 200) || id;
+    const query = queryText(topic.query, '谷歌学术主题检索式');
+    if (!id || !label || !query || seen.has(id)) throw new Error('谷歌学术主题编号、名称和检索式不能为空，编号不能重复');
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(id)) throw new Error('谷歌学术主题编号仅可包含英文字母、数字、下划线和短横线，并以字母或数字开头');
+    seen.add(id);
+    let refinementQueries;
+    if (topic.refinementQueries != null) {
+      if (!Array.isArray(topic.refinementQueries) || topic.refinementQueries.length > 32) throw new Error('谷歌学术预定细分检索式最多32项');
+      refinementQueries = topic.refinementQueries.map(entry => {
+        const text = queryText(entry, '谷歌学术细分检索式');
+        if (!text) throw new Error('谷歌学术细分检索式不能为空');
+        return text;
+      });
+      if (new Set(refinementQueries).size !== refinementQueries.length || refinementQueries.includes(query)) throw new Error('谷歌学术细分检索式不能重复或与主查询相同');
+    }
+    return { id, label, query, ...(refinementQueries ? { refinementQueries } : {}) };
+  });
+  let trialMaxPages;
+  if (value.trialMaxPages != null) {
+    if (typeof value.trialMaxPages === 'boolean') throw new Error('谷歌学术预试页数必须为1–100的整数');
+    trialMaxPages = integer(value.trialMaxPages, '谷歌学术预试页数', 1, 100);
+    if (sources.length !== 1) throw new Error('谷歌学术预试只能使用谷歌学术来源');
+  }
+  return { version: value.version, topics, yearSpan: value.yearSpan, sort: 'relevance', ...(trialMaxPages == null ? {} : { trialMaxPages }) };
 }
 
 function fieldDefinitions(raw) {
@@ -142,7 +199,7 @@ function limitsConfig(raw, config) {
 function normalizeConfig(raw, options = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('运行配置必须是对象');
   const topic = string(raw.topic, '研究主题');
-  const query = string(raw.query, '检索式');
+  const query = queryText(raw.query, '检索式');
   if (!topic || !query) throw new Error('请填写研究主题和默认检索式');
   const sources = list(raw.sources, '检索来源', 10).map(value => value.toLowerCase());
   if (!sources.length || sources.some(value => !isKnown(value)) || new Set(sources).size !== sources.length) throw new Error('检索来源为空、重复或不受识别');
@@ -165,18 +222,40 @@ function normalizeConfig(raw, options = {}) {
   const limit = searchMode ? 10 : raw.limit == null ? 10 : Number(raw.limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 10) throw new Error('首批检索数量必须为 1–10');
   const templates = object(raw.templates, '模板配置');
+  const scholarPlan = scholarPlanConfig(raw.scholarPlan, sources);
+  let screeningPolicy, researchPlan;
+  if (raw.screeningPolicy != null) {
+    const value = object(raw.screeningPolicy, '篇关摘规则');
+    screeningPolicy = { id: string(value.id, '规则编号', 160), line: string(value.line, '研究线', 30), text: string(value.text, '规则内容', 200000) };
+    if (!screeningPolicy.id || !screeningPolicy.text || !['production', 'emission'].includes(screeningPolicy.line)) throw new Error('篇关摘规则须有编号、完整内容及 production/emission 研究线');
+  }
+  if (raw.researchPlan != null) {
+    const value = object(raw.researchPlan, '已确认方案');
+    researchPlan = { id: string(value.id, '方案编号', 160), presetId: string(value.presetId, '来源方案编号', 160),
+      boundDate: string(value.boundDate, '执行配置日期', 10), bundleHash: string(value.bundleHash, '方案指纹', 64) };
+    if (!screeningPolicy || !researchPlan.id || !researchPlan.presetId || !/^\d{4}-\d{2}-\d{2}$/.test(researchPlan.boundDate) || !/^[a-f0-9]{64}$/.test(researchPlan.bundleHash)) throw new Error('已确认方案缺少规则或版本依据');
+    if (value.role != null) {
+      if (!['primary', 'supplement'].includes(value.role)) throw new Error('检索任务类型无效');
+      researchPlan.role = value.role;
+    }
+    if (value.parentPresetId != null) researchPlan.parentPresetId = string(value.parentPresetId, '主检索方案编号', 160);
+  }
+  if (scholarPlan && (searchMode !== 'formal' || stopMode !== 'end')) throw new Error('谷歌学术分批计划须使用 formal/end 分页模式；预试仍由独立页数上限停止');
   return {
     version: 2, topic, query, sources,
     publicationYearFrom, publicationYearTo,
     geography: string(raw.geography, '地域', 200),
     language: string(raw.language, '语言', 100),
     studyTypes: list(raw.studyTypes, '研究类型'),
-    inclusion: list(raw.inclusion, '纳入规则'),
-    exclusion: list(raw.exclusion, '排除规则'),
+    inclusion: list(raw.inclusion, '纳入规则', MAX_RULES, MAX_RULE_CHARS),
+    exclusion: list(raw.exclusion, '排除规则', MAX_RULES, MAX_RULE_CHARS),
     targetFields: list(raw.targetFields, '目标字段', MAX_FIELD_DEFINITIONS),
     limit,
     ...(searchMode ? { searchMode, perSourceLimit, ...(stopMode ? { stopMode } : {}) } : {}),
     sourceQueries: sourceQueries(raw.sourceQueries),
+    ...(screeningPolicy ? { screeningPolicy } : {}),
+    ...(researchPlan ? { researchPlan } : {}),
+    ...(scholarPlan ? { scholarPlan } : {}),
     batch: batchConfig(raw.batch, limit, !!searchMode),
     fieldDefinitions: fieldDefinitions(raw.fieldDefinitions),
     templates: { literature: templatePath(templates.literature, '文献模板'), parameters: templatePath(templates.parameters, '参数模板') },
@@ -186,4 +265,4 @@ function normalizeConfig(raw, options = {}) {
   };
 }
 
-module.exports = { normalizeConfig, DEFAULT_LIMITS, MAX_FIELD_DEFINITIONS, discoverBudget };
+module.exports = { normalizeConfig, DEFAULT_LIMITS, MAX_FIELD_DEFINITIONS, MAX_RULES, MAX_RULE_CHARS, MAX_QUERY_CHARS, discoverBudget };

@@ -28,9 +28,15 @@ async function main(){
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../js/store.js'),'utf8'),{window:browser});
   const store=browser.Store, mod=store.addModule('下载数据');
   const task={busy:false}; const files=[{name:'fixture-TM_2024.csv',group:'input',size:42}];
-  const auto=[];
+  const auto=[], verifications=[];
   const context=vm.createContext({URL,startSourceDownload:(...args)=>auto.push(args),root:{TaskManager:{rulesForModule:()=>({text:'历史规则',version:1})}},Store:store,
     task:()=>task, saved,document:{getElementById:get},render(){},persist(){},ModuleSpace:{render(){}},
+    loadDownloadAcceptance:async(current,verify)=>{
+      assert.equal(task.busy,false,'本地核验须在下载 busy 释放后开始');
+      assert.equal(verify,true);assert.equal(saved[current.id].sourceJobId,undefined,'新批不能沿用旧任务 ID');
+      assert.equal(saved[current.id].download.files.length,1);
+      verifications.push({id:current.id,verify});return {id:'local-verification-fixture',status:'ready'};
+    },
     session:async id=>{saved[id]=saved[id]||{};return 'fixture-session';},
     request:async(url,options)=>{calls.push({url,body:options?JSON.parse(options.body):null});return url.includes('fetch-source')
       ?{download:{storedName:'fixture-TM_2024.csv',name:'TM_2024.csv',size:42},files}:{files};}
@@ -83,6 +89,8 @@ async function main(){
   assert.equal(calls.some(call=>call.url.includes('literature')),false);
   assert.equal(store.getState().modules[0].run.status,'ran');
   assert.equal(saved[mod.id].download.files.length,1);
+  assert.deepEqual(verifications,[{id:mod.id,verify:true}],'旧弹窗成功后仅自动核验该批本地文件，尚未统一确认');
+  assert.equal(saved[mod.id].download.confirmed,false);
   assert.equal(context.subject.openDownload({id:'literature',type:'literature-mining'}),false);
   const prompt=workflowPrompt({type:'download-data'},'codex');
   assert.match(prompt,/无需|不要求用户查找FAO下载链接/);

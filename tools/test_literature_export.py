@@ -292,6 +292,193 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("用户模板不可用", events[-1]["message"])
 
+    @unittest.skipUnless(HAS_OPENPYXL, "openpyxl 未安装")
+    def test_chinese_aliases_map_all_existing_columns_without_changing_default_columns(self):
+        import openpyxl
+        for columns in (export.LITERATURE_COLUMNS, export.PARAMETER_COLUMNS):
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.append([export.HEADER_ALIASES[column][0] for column in columns])
+            layout = export.map_sheet(sheet, columns)
+            self.assertEqual(list(layout["mapping"].values()), columns)
+            self.assertEqual(layout["unmapped_template"], [])
+            self.assertFalse(layout["formal_parameter"])
+
+    def _formal_template(self):
+        import openpyxl
+        path = self.root / "formal-parameters.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "参数明细"
+        sheet.append(export.FORMAL_PARAMETER_HEADERS + ["动物类别", "处理/暴露条件"])
+        original = workbook.create_sheet("原始记录")
+        original.append(["结果记录键", "文献编号", "指标名称", "原始值", "原始单位", "原统计类型", "原变异",
+                         "材料类型及出处", "原文证据", "换算记录", "数据来源"])
+        workbook.create_sheet("研究与条件").append(["研究编号", "动物类别"])
+        workbook.create_sheet("比较与派生").append(["比较编号", "计算公式"])
+        workbook.create_sheet("字段说明").append(["字段", "说明"])
+        workbook.save(path)
+        return path
+
+    @unittest.skipUnless(HAS_OPENPYXL, "openpyxl 未安装")
+    def test_formal_parameter_template_copies_exact_conditions_and_aligned_originals(self):
+        import openpyxl
+        docs = base_docs()
+        conditions = docs["GSC-001"]["rows"][0]["conditions"]
+        conditions.update({"study_id": "S-fixture", "组别": "低温组", "result_time": "第7天",
+                           "variation": "SD=0", "n": 6, "statistical_unit": "栏", "animal_category": "鸡",
+                           "exposure_conditions": "20°C（虚构）", "statistic_type_raw": "SE",
+                           "variation_raw": "SE=0（虚构）"})
+        job = self.build_job("formal-copy", docs=docs)
+        config = json.loads((job / "run_config.json").read_text(encoding="utf-8"))
+        config["templates"] = {"parameters": str(self._formal_template())}
+        (job / "run_config.json").write_text(json.dumps(config), encoding="utf-8")
+        code, events = self.export(job)
+        self.assertEqual(code, 0, events)
+        workbook = openpyxl.load_workbook(job / "export/parameters.xlsx")
+        sheet = workbook["参数明细"]
+        header = [cell.value for cell in sheet[1]]
+        actual = dict(zip(header, [cell.value for cell in sheet[2]]))
+        self.assertEqual(actual["结果记录键"], "GSC-001-R001")
+        self.assertEqual(actual["研究编号"], "S-fixture")
+        self.assertEqual(actual["组别"], "低温组")
+        self.assertEqual(actual["结果对应时间"], "第7天")
+        self.assertEqual(actual["变异"], "SD=0")
+        self.assertEqual(actual["样本量"], 6)
+        self.assertEqual(actual["统计单位"], "栏")
+        self.assertEqual(actual["动物类别"], "鸡")
+        self.assertEqual(actual["处理/暴露条件"], "20°C（虚构）")
+        self.assertEqual(actual["统一值"], 12.4)
+        raw = workbook["原始记录"]
+        self.assertEqual([sheet.cell(i, 1).value for i in range(2, sheet.max_row + 1)],
+                         [raw.cell(i, 1).value for i in range(2, raw.max_row + 1)])
+        self.assertEqual(raw.cell(2, 4).value, "12.4")
+        self.assertEqual(raw.cell(2, 6).value, "SE")
+        self.assertEqual(raw.cell(2, 7).value, "SE=0（虚构）")
+        self.assertEqual(raw.cell(2, 9).value, "SOC was 12.4 g/kg")
+        # Missing inputs stay blank and do not remove any otherwise valid row.
+        self.assertEqual(sheet.max_row, 4)
+        self.assertIsNone(sheet.cell(3, header.index("研究编号") + 1).value)
+        self.assertEqual(workbook["研究与条件"].max_row, 1)
+        self.assertEqual(workbook["比较与派生"].max_row, 1)
+        report = (job / "export/export_report.md").read_text(encoding="utf-8")
+        self.assertIn("缺少输入的列（留空，不作为科学排除）", report)
+        self.assertIn("研究编号 2/3行", report)
+        self.assertIn("未自动填写的辅助页", report)
+        self.assertIn("研究与条件、比较与派生、字段说明", report)
+        self.assertIn("未进行单位/SD换算", report)
+        with (job / "export/parameters.csv").open(encoding="utf-8-sig", newline="") as stream:
+            self.assertEqual(csv.DictReader(stream).fieldnames, export.PARAMETER_COLUMNS)
+
+    @unittest.skipUnless(HAS_OPENPYXL, "openpyxl 未安装")
+    def test_incomplete_formal_header_does_not_enable_condition_mapping(self):
+        import openpyxl
+        path = self.root / "old-template.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "参数明细"
+        sheet.append(["结果记录键", "文献编号", "研究编号"])
+        workbook.save(path)
+        layout = export.map_sheet(sheet, export.PARAMETER_COLUMNS)
+        self.assertFalse(layout["formal_parameter"])
+        self.assertIn("研究编号", layout["unmapped_template"])
+        export.write_xlsx(self.root / "old-output.xlsx", [{"row_id": "r1", "paper_id": "p1",
+                          "conditions_json": '{"study_id":"must-not-be-filled"}'}],
+                          export.PARAMETER_COLUMNS, "参数明细", path)
+        result = openpyxl.load_workbook(self.root / "old-output.xlsx")["参数明细"]
+        self.assertIsNone(result.cell(2, 3).value)
+
+    @unittest.skipUnless(HAS_OPENPYXL, "openpyxl 未安装")
+    def test_chinese_bibliography_template_copies_explicit_metadata_without_guessing(self):
+        import openpyxl
+        path = self.root / "bibliography.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "文献表"
+        sheet.append(["文献编号", "题名", "作者", "发表年份", "文献类型", "期刊名称", "学位授予单位", "DOI"])
+        workbook.create_sheet("命中记录").append(["来源", "题名"])
+        workbook.save(path)
+        records = base_records()
+        records[0].update({"document_type": "期刊论文", "journal_name": "虚构期刊", "affiliation": "不能当学位单位"})
+        records[2].update({"文献类型": "博士论文", "degree_awarding_institution": "虚构授予单位"})
+        job = self.build_job("bibliography-copy", records=records, groups=None)
+        config = json.loads((job / "run_config.json").read_text(encoding="utf-8"))
+        config["templates"] = {"literature": str(path)}
+        (job / "run_config.json").write_text(json.dumps(config), encoding="utf-8")
+        code, events = self.export(job)
+        self.assertEqual(code, 0, events)
+        workbook = openpyxl.load_workbook(job / "export/literature.xlsx")
+        sheet = workbook["文献表"]
+        self.assertEqual(sheet.cell(2, 5).value, "期刊论文")
+        self.assertEqual(sheet.cell(2, 6).value, "虚构期刊")
+        self.assertIsNone(sheet.cell(2, 7).value)
+        self.assertEqual(sheet.cell(4, 7).value, "虚构授予单位")
+        self.assertEqual(workbook["命中记录"].max_row, 1)
+        report = (job / "export/export_report.md").read_text(encoding="utf-8")
+        self.assertIn("学位授予单位 2/3行", report)
+        self.assertIn("命中记录", report)
+        with (job / "export/literature.csv").open(encoding="utf-8-sig", newline="") as stream:
+            self.assertEqual(csv.DictReader(stream).fieldnames, export.LITERATURE_COLUMNS)
+
+    @unittest.skipUnless(HAS_OPENPYXL, "openpyxl 未安装")
+    def test_empty_formal_export_is_reported_as_empty_structure_not_exclusion(self):
+        job = self.build_job("formal-empty", docs={})
+        config = json.loads((job / "run_config.json").read_text(encoding="utf-8"))
+        config["templates"] = {"parameters": str(self._formal_template())}
+        (job / "run_config.json").write_text(json.dumps(config), encoding="utf-8")
+        code, events = self.export(job)
+        self.assertEqual(code, 0, events)
+        report = (job / "export/export_report.md").read_text(encoding="utf-8")
+        self.assertIn("空模板或空字段不代表科学排除或文献无数据", report)
+
+    @unittest.skipUnless(HAS_OPENPYXL, "openpyxl 未安装")
+    def test_installed_climate_templates_end_to_end_with_fixture_data_only(self):
+        import openpyxl
+        for name in ("literature_v1.xlsx", "parameters_v1.xlsx"):
+            self.assertTrue((export.ROOT / "templates/climate" / name).is_file())
+        docs = base_docs()
+        docs["GSC-001"]["rows"][0]["conditions"].update({
+            "研究编号": "S-fixture-only", "group": "虚构对照组", "measurement_time": "第14天（虚构）",
+            "sample_size": 8, "statistical_unit": "缸", "variation": "SD=1（虚构）",
+            "statistic_type_raw": "SD", "variation_raw": "SD=1（虚构）"})
+        records = base_records()
+        records[0].update({"document_type": "期刊论文", "journal_name": "离线测试虚构期刊"})
+        job = self.build_job("installed-climate-templates", docs=docs, records=records, groups=None)
+        config = json.loads((job / "run_config.json").read_text(encoding="utf-8"))
+        config["templates"] = {"literature": "templates/climate/literature_v1.xlsx",
+                               "parameters": "templates/climate/parameters_v1.xlsx"}
+        (job / "run_config.json").write_text(json.dumps(config), encoding="utf-8")
+        code, events = self.export(job)
+        self.assertEqual(code, 0, events)
+        parameters = openpyxl.load_workbook(job / "export/parameters.xlsx")
+        main = parameters["参数明细"]
+        self.assertEqual([cell.value for cell in main[1]], export.FORMAL_PARAMETER_HEADERS)
+        data = dict(zip(export.FORMAL_PARAMETER_HEADERS, [cell.value for cell in main[2]]))
+        self.assertEqual(data["研究编号"], "S-fixture-only")
+        self.assertEqual(data["组别"], "虚构对照组")
+        self.assertEqual(data["结果对应时间"], "第14天（虚构）")
+        self.assertEqual(data["样本量"], 8)
+        self.assertEqual(data["统计单位"], "缸")
+        self.assertEqual(data["统一值"], 12.4)
+        raw = parameters["原始记录"]
+        self.assertEqual(main.cell(2, 1).value, raw.cell(2, 1).value)
+        self.assertEqual(raw.cell(2, 4).value, "12.4")
+        self.assertEqual(raw.cell(2, 9).value, "SOC was 12.4 g/kg")
+        self.assertIsNone(main.cell(3, 3).value)
+        for name in ("研究与条件", "比较与派生"):
+            self.assertFalse(any(cell.value is not None for row in parameters[name].iter_rows(min_row=2) for cell in row))
+        literature = openpyxl.load_workbook(job / "export/literature.xlsx")["文献表"]
+        self.assertEqual([cell.value for cell in literature[1]],
+                         ["文献编号", "题名", "作者", "发表年份", "文献类型", "期刊名称", "学位授予单位", "DOI"])
+        self.assertEqual(literature.cell(2, 5).value, "期刊论文")
+        self.assertEqual(literature.cell(2, 6).value, "离线测试虚构期刊")
+        self.assertIsNone(literature.cell(2, 7).value)
+        report = (job / "export/export_report.md").read_text(encoding="utf-8")
+        self.assertIn("研究编号 2/3行", report)
+        self.assertIn("学位授予单位 3/3行", report)
+        self.assertIn("研究与条件、比较与派生、字段说明", report)
+        self.assertIn("命中记录、检索批次、使用说明", report)
+
     # ------------------------------------------------------------------ errors
 
     def test_literature_rows_fall_back_to_candidates_without_dedupe(self):

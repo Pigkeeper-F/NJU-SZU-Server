@@ -8,7 +8,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
-const { buildExtractPrompt, parseExtractionJson, runExtractStage } = require('./literature-extract');
+const { buildExtractPrompt, parseExtractionJson, applyInputCoverage, runExtractStage } = require('./literature-extract');
+const { loadInputs, policyIdentity, digest, VERSION: SCREENING_VERSION } = require('./literature-screening');
 
 const python = process.env.WORKBENCH_PYTHON || 'python';
 const FIELDS = [
@@ -86,6 +87,38 @@ function mockBridge(reply) {
 
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
 
+function approveScreening(jobDir, config, decision = 'include') {
+  fs.writeFileSync(path.join(jobDir, 'run_config.json'), JSON.stringify(config));
+  fs.mkdirSync(path.join(jobDir, 'screening'), { recursive: true });
+  const records = {};
+  for (const bundle of loadInputs(jobDir)) {
+    const source = bundle.documents[0];
+    records[bundle.paper_id] = { paper_id: bundle.paper_id, decision, reason: 'Direct fixture evidence',
+      exclusionRule: decision === 'exclude' ? 'outside scope' : '',
+      ...policyIdentity(config.screeningPolicy), inputHash: digest(bundle),
+      evidence: [{ source_id: source.source_id, field: 'title', quote: source.title }],
+      reviewer: { type: 'codex', runId: 'offline-fixture' } };
+  }
+  fs.writeFileSync(path.join(jobDir, 'screening', 'status.json'), JSON.stringify({ version: SCREENING_VERSION, records, history: {} }));
+}
+
+function makeScreenedJob(jobDir) {
+  makeJob(jobDir);
+  const status = readJson(path.join(jobDir, 'fulltext', 'status.json'));
+  status.items = status.items.slice(0, 1);
+  status.counts.total = 1;
+  fs.writeFileSync(path.join(jobDir, 'fulltext', 'status.json'), JSON.stringify(status));
+  fs.writeFileSync(path.join(jobDir, 'candidates.json'), JSON.stringify({ records: [{
+    candidate_id: 'GSC-001', source_key: 'scopus', title: 'A study',
+    abstract: 'An original environmental trial measured the target outcome.', keywords: ['environment'],
+    result_url: 'https://example.org/a',
+  }] }));
+  const config = readJson(path.join(jobDir, 'run_config.json'));
+  config.screeningPolicy = { id: 'fixture-v1', line: 'production', text: 'Original target environmental comparisons.' };
+  approveScreening(jobDir, config);
+  return config;
+}
+
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 
@@ -130,6 +163,49 @@ test('buildExtractPrompt includes native supplementary tables and explicit parti
   assert.match(prompt, /"read_status": "partial"/);
   assert.match(prompt, /正文 degraded 但补充表格有真实报告值时可从该材料提取/);
   assert.match(prompt, /evidence.where 必须写出材料文件名/);
+});
+
+test('new truncated coverage forces partial without changing legacy or inventing values', () => {
+  const result = cannedResult('P1');
+  const coverage = { version: 'extract-input-coverage-v1', limitations: ['正文提供80字符，后续文本尚未提取。'] };
+  const applied = applyInputCoverage({ input_coverage: coverage, fulltext: { truncated: true } }, result);
+  assert.equal(applied.status, 'partial');
+  assert.deepEqual(applied.rows, result.rows);
+  assert.match(applied.warnings[0], /^\[input-coverage\]/);
+  assert.equal(result.status, 'ok');
+  assert.equal(applyInputCoverage({ fulltext: { truncated: true } }, result), result);
+  const attachment = applyInputCoverage({ input_coverage: { version: coverage.version, limitations: [] },
+    materials: [{ filename: 'S1.xlsx', content: { truncated: true } }] }, result);
+  assert.equal(attachment.status, 'partial');
+  assert.match(attachment.warnings[0], /S1\.xlsx/);
+  const skipped = applyInputCoverage({ input_coverage: coverage }, { ...result, status: 'skipped' });
+  assert.equal(skipped.status, 'skipped');
+});
+
+test('mock model ok result with truncated input is stored partial and resumes without a model call', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lit-i4-js-coverage-'));
+  try {
+    const jobDir = path.join(root, 'job');
+    makeJob(jobDir, { maxChars: 80 });
+    const config = readJson(path.join(jobDir, 'run_config.json'));
+    const bridge = mockBridge(JSON.stringify(cannedResult('GSC-001')));
+    const first = await runExtractStage({ bridge, jobDir, config, python });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    const input = readJson(path.join(jobDir, 'extraction', 'inputs', 'GSC-001.json'));
+    assert.equal(input.input_coverage.version, 'extract-input-coverage-v1');
+    assert.ok(input.fulltext.original_chars > input.fulltext.chars);
+    const output = path.join(jobDir, 'extraction', 'GSC-001.json');
+    assert.equal(readJson(output).status, 'partial');
+    assert.match(readJson(output).warnings[0], /^\[input-coverage\]/);
+    // Also protect resumption if a new-format truncated result predates this safeguard.
+    fs.writeFileSync(output, JSON.stringify(cannedResult('GSC-001')));
+    const noModel = mockBridge('must not be used');
+    assert.equal((await runExtractStage({ bridge: noModel, jobDir, config, python })).ok, true);
+    assert.equal(noModel.calls.length, 0);
+    assert.equal(readJson(output).status, 'partial');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('missing confirmations pauses at awaiting_confirmation', async () => {
@@ -267,6 +343,62 @@ test('schema change forces bundle rebuild and re-extraction', async () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('screened outputs carry trusted bindings, resume, and rerun old unbound results', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lit-screen-extract-'));
+  try {
+    const jobDir = path.join(root, 'job'), config = makeScreenedJob(jobDir);
+    const reply = { ...cannedResult('GSC-001'), screening: { inputHash: 'untrusted model value' } };
+    const first = mockBridge(JSON.stringify(reply));
+    const firstResult = await runExtractStage({ bridge: first, jobDir, config, python });
+    assert.equal(firstResult.ok, true, JSON.stringify(firstResult));
+    assert.equal(first.calls.length, 1);
+    const output = path.join(jobDir, 'extraction', 'GSC-001.json');
+    const bundle = readJson(path.join(jobDir, 'extraction', 'inputs', 'GSC-001.json'));
+    assert.deepEqual(readJson(output).screening, bundle.screening);
+    const resume = mockBridge('must not run');
+    assert.equal((await runExtractStage({ bridge: resume, jobDir, config, python })).ok, true);
+    assert.equal(resume.calls.length, 0);
+    const unbound = cannedResult('GSC-001');
+    fs.writeFileSync(output, JSON.stringify(unbound));
+    const repeat = mockBridge(JSON.stringify(reply));
+    assert.equal((await runExtractStage({ bridge: repeat, jobDir, config, python })).ok, true);
+    assert.equal(repeat.calls.length, 1, 'old unbound output must not be silently relabelled');
+    assert.deepEqual(readJson(output).screening, bundle.screening);
+    assert.deepEqual(readJson(path.join(jobDir, 'extraction', 'history', `GSC-001.${digest(unbound)}.json`)), unbound);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('changed screening policy rebuilds inputs, but pending or missing reviews block old outputs', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lit-screen-rebind-'));
+  try {
+    const jobDir = path.join(root, 'job'), config = makeScreenedJob(jobDir);
+    const output = path.join(jobDir, 'extraction', 'GSC-001.json');
+    const run = async () => {
+      const bridge = mockBridge(JSON.stringify(cannedResult('GSC-001')));
+      const result = await runExtractStage({ bridge, jobDir, config, python });
+      return { result, bridge };
+    };
+    assert.equal((await run()).result.ok, true);
+    const original = readJson(output);
+    config.screeningPolicy.text += ' Updated eligibility definition.';
+    fs.writeFileSync(path.join(jobDir, 'run_config.json'), JSON.stringify(config));
+    const missing = await run();
+    assert.equal(missing.result.ok, false);
+    assert.equal(missing.bridge.calls.length, 0, 'no extraction from stale screening');
+    assert.deepEqual(readJson(output), original);
+    approveScreening(jobDir, config);
+    const revised = await run();
+    assert.equal(revised.result.ok, true, JSON.stringify(revised.result));
+    assert.equal(revised.bridge.calls.length, 1);
+    assert.notEqual(readJson(output).screening.policyHash, original.screening.policyHash);
+    assert.deepEqual(readJson(path.join(jobDir, 'extraction', 'history', `GSC-001.${digest(original)}.json`)), original);
+    approveScreening(jobDir, config, 'pending');
+    const pending = await run();
+    assert.equal(pending.result.ok, false);
+    assert.equal(pending.bridge.calls.length, 0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('missing python or bridge reports a single error event', async () => {
