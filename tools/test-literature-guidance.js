@@ -10,7 +10,7 @@ const prompt = workflowPrompt({ type: 'literature-mining' }, 'codex');
 assert.ok(prompt.includes('首批候选检索只需研究主题'), '应使用已确认的最小启动规则');
 assert.ok(prompt.includes('互不依赖且真正必需的问题一次性提出'), '互不依赖的关键问题应合并提问');
 assert.ok(prompt.includes('不要求年份、地区、语言、来源、文献类型、目标数量或停止条件逐项确认'), '目标数量不能成为首批检索前的额外关口');
-assert.ok(prompt.includes('研究者核对后点击后者才会真正检索'), '应明确检索由按钮启动，不由对话自动触发');
+assert.ok(prompt.includes('所有项确认并应用后，研究者点击检索才执行') && prompt.includes('AI解释或普通对话的同意不能替代弹窗确认'), '应明确按逐项确认后的配置，由研究者按钮启动，AI说明不能代替确认');
 assert.ok(!prompt.includes('不要一次性要求回答全部待对齐项'), '文献挖掘不能同时收到相反的提问指令');
 
 const codexUi = fs.readFileSync(path.join(__dirname, '..', 'js', 'codex.js'), 'utf8');

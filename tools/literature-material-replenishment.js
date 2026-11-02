@@ -107,8 +107,8 @@ function sourceSnapshot(root, id, live, { verifyMaterials = true } = {}) {
     const paper = manifest?.papers?.find(item => item.paper_id === id);
     return !paper || paper.main_pdf_status !== 'downloaded'
       || !(paper.materials || []).some(item => item.role === 'main_pdf' && item.download_status === 'downloaded' && copies.has(item.path))
-      || !['checked', 'none_declared'].includes(paper.supplement_check?.status)
-      || (paper.materials || []).some(item => item.role === 'supplement' && item.download_status !== 'downloaded');
+      || !['checked', 'none_declared', 'none_found'].includes(paper.supplement_check?.status)
+      || (paper.materials || []).some(item => item.role === 'supplement' && item.excluded_from_supplement_counts !== true && item.download_status !== 'downloaded');
   });
   if (!gap) throw new Error('已登记正文 PDF 与补充材料均已取得，无需重复补齐');
   return { ...snapshot, parentJobId: id, statusFile, manifestFile, copies: [...copies.values()] };
@@ -146,7 +146,7 @@ function createSnapshot(root, id, snapshot) {
 // Manual reports are a read-only projection of this child's frozen papers.
 // URLs are displayed to the researcher; page opening uses a saved browser
 // binding and the paper ID, never a URL received from the HTTP request.
-const AUTH_REASONS = new Set(['login', 'verification', 'access_required']);
+const MANUAL_REASONS = new Set(['login', 'verification', 'access_required', 'page_not_ready']);
 function actionReport(dir, name, status, accepts) {
   try {
     const report = document(dir, 'fulltext/' + name + '.json', false)?.json;
@@ -164,13 +164,17 @@ function actionReport(dir, name, status, accepts) {
       seen.add(paperId);
       return [{ paperId, title: string(item.title || titles.get(paperId), 1000), status,
         reason: string(item.reason, 100), message: string(item.message, 3000), officialUrl: officialUrl(item.official_url),
-        mainPdfMissing: item.main_pdf_missing === true,
+        mainPdfMissing: typeof item.main_pdf_missing === 'boolean' ? item.main_pdf_missing : null,
+        mainPdfStatus: string(item.main_pdf_status, 100), pageReadiness: string(item.page_readiness, 100),
         supplements: { status: string(item.supplements?.status, 100), checkStatus: string(item.supplements?.check_status, 100),
+          existingCheckStatus: string(item.supplements?.existing_check_status, 100),
+          pending: (Array.isArray(item.supplements?.pending) ? item.supplements.pending : []).slice(0, 200)
+            .map(value => string(typeof value === 'string' ? value : value?.label || value?.name || value?.title || value?.path || value?.material_id, 500)).filter(Boolean),
           missing: (Array.isArray(item.supplements?.missing) ? item.supplements.missing : []).slice(0, 200)
             .map(value => string(typeof value === 'string' ? value : value?.label || value?.name || value?.title || value?.path || value?.material_id, 500)).filter(Boolean) } }];
     });
   } catch (_) { return []; }
 }
-function manualActions(dir) { return actionReport(dir, 'manual-actions', 'needs_attention', reason => AUTH_REASONS.has(reason)); }
-function skippedActions(dir) { return actionReport(dir, 'skipped-materials', 'skipped', reason => typeof reason === 'string' && !!reason && !AUTH_REASONS.has(reason)); }
+function manualActions(dir) { return actionReport(dir, 'manual-actions', 'needs_attention', reason => MANUAL_REASONS.has(reason)); }
+function skippedActions(dir) { return actionReport(dir, 'skipped-materials', 'skipped', reason => typeof reason === 'string' && !!reason && !MANUAL_REASONS.has(reason)); }
 module.exports = { MARKER, sourceSnapshot, readBasis, eligible, createSnapshot, manualActions, skippedActions };

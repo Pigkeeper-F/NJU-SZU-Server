@@ -123,6 +123,16 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 .codex-panel { position:relative; flex-shrink:0; margin:0 32px; padding:10px 0; border-top:1px solid #f0f2ed; border-bottom:1px solid #edf0e9; font-size:11px; }
 .codex-panel>.codex-toolbar+.codex-toolbar { margin-top:8px; }
 .codex-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.download-acceptance-card{margin:14px 0;padding:16px;border:1px solid #ccdcd2;border-radius:10px;background:#fafcfb;max-height:52dvh;overflow:auto;font-size:15px;line-height:1.65;overscroll-behavior:contain}
+.download-acceptance-card h3{font-size:17px;margin:0 0 8px}
+.download-acceptance-card .codex-status{font-size:14px;line-height:1.6}
+.download-acceptance-card details{margin-top:10px}
+.download-acceptance-card summary{cursor:pointer;font-size:14px}
+.download-acceptance-issue{margin-top:12px;padding:14px;border-left:3px solid #c28c32;background:#fff8ec;border-radius:7px}
+.download-acceptance-issue h4{font-size:16px;margin:0 0 7px}
+.download-acceptance-issue p{margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.download-acceptance-issue textarea{box-sizing:border-box;width:100%;min-height:64px;padding:9px;font:inherit;border:1px solid #d8d8c8;border-radius:6px;margin:8px 0}
+.download-acceptance-issue button{margin-right:8px}
 .codex-toolbar>label { display:inline-flex; align-items:center; gap:5px; color:#64755c; font-size:11px; }
 .codex-toolbar select { max-width:100%; padding:6px 7px; border:1px solid #e3e8df; border-radius:6px; background:#fafbf8; color:#62705b; font-size:11px; }
 .codex-status { font-size:10px; color:#829478; }
@@ -598,6 +608,13 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 }
 .doc-editor:focus{border-color:var(--accent-line);background:#fff}
 .doc-editor::placeholder{color:#a6afbc}
+/* Give the same proposal room during verification discussion; download controls
+   return when the researcher saves or cancels this unsaved editor. */
+.work-area:has(.doc-card[data-verification-discussion="true"])>.codex-panel{display:none}
+.doc-card[data-verification-discussion="true"]{max-width:1100px}
+.doc-card[data-verification-discussion="true"] .doc-card-title{font-size:16px}
+.doc-card[data-verification-discussion="true"] .doc-notice{font-size:14px;margin-bottom:10px}
+.doc-card[data-verification-discussion="true"] .doc-editor{min-height:260px;height:40dvh;font-size:16px;line-height:1.75}
 .doc-reject-box{
   margin-top:10px;
   padding:10px 12px;
@@ -954,6 +971,20 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 .literature-help-dialog::backdrop{background:rgba(20,30,45,.28)}
 .literature-help-head{display:flex;align-items:center;justify-content:space-between;gap:16px}
 .literature-help-head h2{margin:0;font-size:19px}
+.literature-history-details-dialog{width:min(1080px,94vw)}
+.literature-history-details-dialog h3{margin:20px 0 10px;font-size:16px}
+.literature-history-details-meta{display:grid;grid-template-columns:100px minmax(0,1fr);gap:7px 14px;padding:14px;background:var(--surface,#f6f8fa);border-radius:8px;font-size:14px}
+.literature-history-details-meta dt{color:var(--muted)}
+.literature-history-details-meta dd{margin:0;overflow-wrap:anywhere}
+.literature-history-details-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
+.literature-history-details-dialog .literature-deliverable-title,.literature-history-details-dialog .literature-deliverable-list a{font-size:14px}
+.literature-history-details-queries pre{max-height:250px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;padding:12px;background:#f6f8fa;border-radius:8px}
+.literature-discussions-dialog{width:min(1160px,94vw);max-height:90vh}
+.literature-discussion-row{display:flex;gap:14px;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border);font-size:14px}
+.literature-discussion-row button{flex-shrink:0}
+.literature-discussion-actions{display:flex;flex-wrap:wrap;gap:10px;margin:15px 0}
+.literature-discussion-message{padding:15px 0;border-top:1px solid var(--border)}
+.literature-discussions-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:14px;line-height:1.7}
 .literature-help-dialog .literature-workflow{box-sizing:border-box;max-width:none;margin:0;padding:0;border:0;background:transparent}
 .literature-help-dialog .literature-workflow-grid{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:18px}
 .literature-help-dialog .literature-workflow p{font-size:13px}
@@ -1012,3 +1043,69 @@ dialog label { display:block; font-size:12px; margin:12px 0 8px; } dialog input 
 .source-download-progress progress{display:block;width:100%;height:12px;margin:10px 0;accent-color:var(--accent)}
 .source-download-progress .codex-toolbar{margin-top:12px;flex-wrap:wrap}
 .source-download-progress a{text-decoration:none;display:inline-block}
+
+/* Human/AI configuration review uses a full reading surface, independent of chat. */
+.literature-rule-review-dialog{box-sizing:border-box;width:min(1180px,calc(100vw - 40px));max-width:none;max-height:92vh;margin:auto;padding:26px 32px;overflow-y:auto;border:1px solid var(--border);border-radius:18px;color:var(--text,#243d36);font-size:16px;line-height:1.65}
+.literature-rule-review-dialog::backdrop{background:rgba(25,43,52,.36);backdrop-filter:blur(3px)}
+.literature-rule-review-dialog h2{font-size:25px;margin:6px 0 10px}
+.literature-rule-review-dialog h3{font-size:18px;margin:0}
+.literature-rule-review-dialog>p{margin:8px 0 16px;color:#61746c}
+.literature-rule-review-dialog button{font:inherit;line-height:1.35}
+.literature-rule-review-dialog button:disabled{opacity:.5;cursor:not-allowed}
+.rule-review-progress{display:flex;justify-content:space-between;gap:16px;padding:13px 16px;background:#edf4ef;border-radius:10px;margin:16px 0}
+.rule-review-progress span{font-size:13px;color:#60736b}
+.rule-review-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 22px}
+.rule-review-tabs button{font-size:14px;padding:10px 12px}
+.rule-review-tabs button[aria-current=step]{background:#e8eff6;border-color:#8298af;color:#24476d}
+.rule-review-group-heading,.rule-review-item-heading{display:flex;align-items:center;justify-content:space-between;gap:14px}
+.rule-review-group-heading{margin:16px 0}
+.rule-review-item{border:1px solid #dce4df;border-left:4px solid #becdc4;border-radius:12px;background:#fff;margin:14px 0;padding:20px 22px}
+.rule-review-item.is-confirmed{border-left-color:#3c7862}
+.rule-review-badge{white-space:nowrap;border-radius:20px;padding:3px 11px;font-size:13px;color:#64786b;background:#f0f3ef}
+.is-confirmed .rule-review-badge{color:#236248;background:#e9f6ec}
+.rule-review-values{display:grid;grid-template-columns:minmax(115px,180px) minmax(0,1fr);gap:8px 18px;margin:17px 0}
+.rule-review-values dt{font-weight:600;color:#586d63}
+.rule-review-values dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;max-height:230px;overflow:auto;background:#f6f8f7;padding:8px 12px;border-radius:6px}
+.rule-review-ai{background:#f0f4f9;border:1px solid #e4ebf3;border-radius:9px;padding:14px 18px;margin:14px 0}
+.rule-review-ai strong{font-size:14px;color:#4a6483}
+.rule-review-ai p{white-space:pre-wrap;overflow-wrap:anywhere;margin:3px 0 10px}
+.rule-review-ai p:last-child{margin-bottom:0}
+.rule-review-actions,.rule-review-question,.rule-review-group-nav{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
+.rule-review-question{padding-top:12px;border-top:1px solid #edf0ee}
+.rule-review-question input{box-sizing:border-box;flex:1;min-width:220px;border:1px solid var(--border);border-radius:8px;padding:10px 12px;font:inherit;background:#fff}
+.rule-review-editor{border:1px solid #a9b9cc;border-radius:10px;background:#f7f9fc;padding:16px;margin-top:16px}
+.rule-review-editor>label{display:block;margin:12px 0;font-weight:600}
+.rule-review-editor small{display:block;color:#6e7a83;font-size:12px;font-weight:400;margin:4px 0}
+.rule-review-editor textarea,.rule-review-editor input:not([type=checkbox]),.rule-review-editor select{display:block;box-sizing:border-box;width:100%;padding:10px 12px;margin-top:6px;font:inherit;line-height:1.6;border:1px solid #c7d1dd;border-radius:7px;background:#fff}
+.rule-review-editor textarea{resize:vertical;min-height:80px}
+.rule-review-source-options{display:flex;gap:8px 18px;flex-wrap:wrap;margin-top:10px}
+.rule-review-source-options label{font-size:14px;font-weight:400}
+.rule-review-source-options input{margin-right:7px}
+.rule-review-group-nav{justify-content:space-between;margin:22px 0}
+.rule-review-footer{display:flex;align-items:center;justify-content:space-between;gap:18px;position:sticky;bottom:-26px;background:#fff;border-top:1px solid var(--border);padding:17px 0 12px;margin-top:24px;box-shadow:0 -8px 12px #ffffffdb}
+.rule-review-footer p{font-size:14px;color:#60716b;margin:0}
+.rule-review-footer button{flex-shrink:0}
+.rule-review-overview{margin:14px 0;padding:16px;background:#f6f8f7;border-radius:10px}
+.rule-review-overview button{display:block;width:100%;text-align:left;margin-top:8px;background:#fff}
+.rule-review-item details{font-size:13px;color:#60746a;margin-top:12px}
+.rule-review-item details pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;max-height:200px;overflow:auto}
+@media(max-width:680px){.literature-rule-review-dialog{width:calc(100vw - 16px);padding:18px 14px;max-height:96vh}.rule-review-item{padding:15px 12px}.rule-review-values{grid-template-columns:1fr;gap:4px}.rule-review-progress,.rule-review-footer{align-items:flex-start;flex-direction:column}.rule-review-progress{gap:4px}.rule-review-footer{bottom:-18px}.rule-review-question input{min-width:0;width:100%;flex-basis:100%}}
+
+/* The cleaning acceptance step stays readable beside its original results. */
+.clean-verification-discussion { padding: 12px 0; font-size: 15px; }
+.clean-verification-discussion > details { margin-top: 8px; }
+.clean-acceptance-card > label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.clean-acceptance-card > label select { max-width: 100%; font-size: 15px; padding: 6px; }
+.clean-acceptance-card > .primary-button { margin-top: 12px; }
+.clean-standard-attachments { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin: 10px 0; }
+.clean-standard-attachments input[type="file"] { display: block; max-width: 100%; margin: 10px 0; }
+.clean-standard-file { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.clean-standard-file a { overflow-wrap: anywhere; }
+.clean-manual-checks { margin: 16px 0; }
+.clean-manual-check { padding: 12px; margin: 10px 0; border: 1px solid #d3ddd7; border-left: 3px solid #be995b; border-radius: 8px; background: #fffdf8; }
+.clean-manual-check > summary { font-weight: 600; line-height: 1.6; cursor: pointer; }
+.clean-manual-check p { overflow-wrap: anywhere; line-height: 1.6; }
+.clean-manual-fields { display: grid; gap: 10px; margin: 12px 0; }
+.clean-manual-fields label { display: grid; gap: 5px; font-size: 14px; }
+.clean-manual-fields textarea, .clean-manual-fields input { box-sizing: border-box; width: 100%; font: inherit; line-height: 1.5; padding: 9px; border: 1px solid var(--border); border-radius: 6px; }
+.clean-manual-fields textarea { resize: vertical; min-height: 70px; }

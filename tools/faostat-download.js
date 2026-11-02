@@ -7,6 +7,7 @@ const readline = require('node:readline');
 const { createHash, randomUUID } = require('node:crypto');
 const { fetchSource } = require('./source-download');
 const { transferArchive, transferFile, hashFile, officialUrl, readJson, writeJson, MAX_ARCHIVE_BYTES } = require('./source-transfer');
+const { DownloadAcceptance } = require('./download-acceptance');
 const ID = /^[0-9a-f-]{36}$/;
 const CATALOG = 'https://bulks-faostat.fao.org/production/datasets_E.json';
 const FILTERS = ['reporterCodes', 'partnerCodes', 'itemCodes', 'elementCodes', 'elementNames', 'itemNames', 'reporterNames', 'partnerNames'];
@@ -76,6 +77,7 @@ function safeName(name) {
 class SourceDownloads {
   constructor(root, bridge, options = {}) {
     this.root = root; this.bridge = bridge; this.options = options; this.running = new Map();
+    this.verification = new DownloadAcceptance(this);
     if (options.recover === true) this.recoverInterrupted();
   }
   recoverInterrupted() {
@@ -87,7 +89,11 @@ class SourceDownloads {
       for (const id of fs.readdirSync(output).filter(id => ID.test(id))) {
         const file = path.join(output, id, 'run-state.json');
         const job = readJson(file);
-        if (job?.sourceJob === true && job.status === 'running') { job.status = 'interrupted'; job.message = '服务重启，已有文件和断点保留，请继续原任务'; job.updatedAt = new Date().toISOString(); writeJson(file, job); }
+        if (job?.sourceJob === true && job.status === 'running') {
+          const downloaded = job.stage === 'verification' && job.deliverables?.length;
+          job.status = downloaded ? 'completed' : 'interrupted'; job.message = downloaded ? '下载已完成；本地核验中断，请核验已有文件，不必重新下载' : '服务重启，已有文件和断点保留，请继续原任务';
+          job.updatedAt = new Date().toISOString(); writeJson(file, job);
+        }
       }
     }
   }
@@ -126,16 +132,21 @@ class SourceDownloads {
   }
   cancel(sessionId, id) {
     const job = this.load(sessionId, id), run = this.running.get(id);
+    this.verification.cancel(id);
     if (run) { run.cancelled = true; run.controller.abort(new Error('用户停止下载')); run.child?.kill(); }
     return this.snapshot(sessionId, id);
   }
   launch(job, generate) {
     const run = { controller: new AbortController(), cancelled: false, child: null };
     this.running.set(job.id, run); this.bridge.sourceBusy.add(job.sessionId);
-    Promise.resolve().then(() => this.execute(job, run, generate)).then(() => {
-      job.status = 'completed'; job.stage = 'completed'; job.message = '下载与筛选完成，结果待人工检查后交接';
-    }).catch(error => {
+    Promise.resolve().then(() => this.execute(job, run, generate)).then(async () => {
+      this.update(job, 'verification', '下载文件已保存，正在本地核对完整性与更新差异');
+      const report = await this.verification.verify(job.sessionId, job.id, { internal: true, job });
+      if (run.cancelled) throw new Error('用户停止下载后的本地核验，原文件保留');
+      job.status = 'completed'; job.stage = 'completed'; job.message = report.status === 'ready' ? '自动核验已完成，无未决问题；等待统一确认后交接' : '下载文件已保存；请处理核验问题清单后交接';
+    }).catch(async error => {
       job.status = run.cancelled ? 'cancelled' : 'failed'; job.error = error.message; job.message = run.cancelled ? '已停止，完整文件与下载断点保留' : '任务未完成：' + error.message;
+      if (!run.cancelled) { try { await this.verification.verify(job.sessionId, job.id, { internal: true, job }); } catch (_) { /* Original failure and files remain available. */ } }
     }).finally(() => { try { this.save(job); } finally { this.running.delete(job.id); this.bridge.sourceBusy.delete(job.sessionId); } }).catch(() => {});
   }
   update(job, stage, message, progress) {
@@ -237,6 +248,6 @@ class SourceDownloads {
       child.once('error', reject); child.once('exit', code => { run.child = null; code === 0 ? resolve() : reject(new Error(errorText || '筛选进程未完成')); });
     });
   }
-  close() { for (const run of this.running.values()) { run.cancelled = true; run.controller.abort(); run.child?.kill(); } }
+  close() { this.verification.close(); for (const run of this.running.values()) { run.cancelled = true; run.controller.abort(); run.child?.kill(); } }
 }
 module.exports = { SourceDownloads, interpretPlan, validatePlan, structuredPlan, isFaostatPlan, fileSources, CATALOG, MAX_ARCHIVE_BYTES };

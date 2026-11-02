@@ -37,6 +37,8 @@ function csvInfo(file, size) {
 }
 
 function presentation(name) {
+  if (name.includes('/clean-verification/')) return { category: /\/report\.json$/.test(name) ? 'reports' : 'auxiliary', label: /\/report\.json$/.test(name) ? '独立清洗核验报告' : '独立核验依据' };
+  if (/(?:^|\/)(?:approved-clean-plan|cleaning-manifest)\.json$/.test(name)) return { category: 'auxiliary', label: '清洗方案与材料对应记录' };
   const base = path.basename(name).replace(/^[a-f0-9]{8}-/, '');
   if (/\.(?:py|r|jl|m|ipynb|js|sh|bat|ps1)$/i.test(base)) return { category: 'auxiliary', label: '处理代码' };
   if (/field[_ -]?dictionary|字段|字典/i.test(base)) return { category: 'auxiliary', label: '字段说明' };

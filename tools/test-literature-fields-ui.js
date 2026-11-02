@@ -67,7 +67,7 @@ function createHarness(storage = new Map()) {
     root: { LiteratureUI: { isBusy: () => false } }, task: () => current, localStorage,
     document: { body, createElement: tag => new Element(tag), getElementById: () => null, dispatchEvent() {} },
     node: (tag, text, className) => new Element(tag, text, className),
-    render() {}, persist() {}, saved: {},
+    render() {}, persist() {}, saved: {}, literatureStageLabel: stage => stage,
     request: async (url, options) => {
       calls.push({ url, body: JSON.parse(options.body) });
       if (failRequest) throw failRequest;
@@ -173,6 +173,14 @@ async function main() {
   const validated = subject.validatedLiteratureFields(harness.current);
   assert.equal(validated[0].label, '温度表头'); assert.equal(validated[0].meaning, '温度含义'); assert.equal(validated[0].unit, '°C');
   for (const key of ['conditionKeys', 'allowedRange', 'allowedValues']) assert.deepEqual(plain(validated[0][key]), advanced[key]);
+  setFields(harness, [field({ conditionKeys: ' outcome,group_id，time ,outcome ' })]);
+  assert.deepEqual(plain(subject.validatedLiteratureFields(harness.current)[0].conditionKeys), ['outcome', 'group_id', 'time']);
+  const previewKeys = subject.parseLiteratureFieldsPreview(JSON.stringify({ fields: [field({ conditionKeys: [' group_id ', 'time', 'group_id'] })], unresolved: [] }));
+  assert.deepEqual(plain(previewKeys.fields[0].conditionKeys), ['group_id', 'time'], 'Preview normalization must preserve and normalize condition keys');
+  for (const conditionKeys of [42, {}, [42], Array.from({ length: 33 }, (_, index) => 'condition_' + index)]) {
+    setFields(harness, [field({ conditionKeys })]);
+    assert.throws(() => subject.validatedLiteratureFields(harness.current), /关联条件/);
+  }
   assert.equal(JSON.stringify(advancedJob), advancedBytes, 'Validation must not edit config or candidate files');
   setFields(harness, [advanced]);
   harness.current.literatureConfig.query = 'changed query';
@@ -244,6 +252,9 @@ async function main() {
   const autoSaved = JSON.parse(harness.storage.get(STORAGE_KEY))[beforeGateJob.id].fields[0];
   assert.equal(autoSaved.label, '编辑后的温度表头'); assert.equal(autoSaved.meaning, '编辑后的温度含义');
   assert.equal(autoSaved.unit, '原文单位'); assert.equal(autoSaved.valueType, 'text'); assert.equal(autoSaved.required, false);
+  const conditionInput = elements(dialog).find(item => item['aria-label'] === '第1个字段关联条件键');
+  conditionInput.value = 'group_id， time'; conditionInput.oninput();
+  assert.deepEqual(JSON.parse(harness.storage.get(STORAGE_KEY))[beforeGateJob.id].fields[0].conditionKeys, ['group_id', 'time']);
   const save = button(dialog, /保存草稿并关闭/);
   assert.ok(save, 'Modal must offer save-and-close');
   await (save.onclick ? save.onclick() : save.listeners.click());
@@ -286,6 +297,28 @@ async function main() {
   fallback.current.literatureUntil = '';
   await fallback.subject.confirmLiteratureFields(mod);
   assert.equal(fallback.calls[0].body.until, 'extract', 'A missing local boundary cannot broaden the table next step beyond extraction');
+
+  // A new segment uses its frozen end stage only after fresh field confirmation.
+  const segment = createHarness(), segmentJob = makeJob('extract-segment', { fieldDefinitions: [advanced] });
+  segmentJob.segmentTask = { sourceJobId: 'original', paperIds: ['P2', 'P5'], fromStage: 'extract', until: 'export', schemaLocked: false };
+  segment.setCurrent(makeTask(segmentJob)); setFields(segment, [advanced]); segment.current.literatureUntil = 'fulltext';
+  await segment.subject.confirmLiteratureFields(mod);
+  assert.equal(segment.calls[0].url, '/api/literature/advance');
+  assert.equal(segment.calls[0].body.until, 'export', 'Explicit schema confirmation follows the selected segment end, not the outer selector');
+  assert.deepEqual(segment.calls[0].body.confirmations.fields, [advanced]);
+  segmentJob.status = 'cancelled'; segmentJob.stage = 'cancelled'; segmentJob.segmentTask.fieldsConfirmed = false;
+  const cancelled = createHarness(); cancelled.setCurrent(makeTask(segmentJob)); setFields(cancelled, [advanced]);
+  const cancelledForm = cancelled.subject.literatureConfirmForm(mod, cancelled.current, segmentJob);
+  assert.ok(button(cancelledForm, /核对表格并开始提取/), 'An unconfirmed cancelled segment still exposes the fresh field gate');
+  await cancelled.subject.confirmLiteratureFields(mod);
+  assert.equal(cancelled.calls[0].body.until, 'export'); assert.deepEqual(cancelled.calls[0].body.confirmations.fields, [advanced]);
+  const lockedJob = makeJob('locked-segment', { fieldDefinitions: [advanced] });
+  lockedJob.segmentTask = { ...segmentJob.segmentTask, fromStage: 'validate', schemaLocked: true };
+  const locked = createHarness(); locked.setCurrent(makeTask(lockedJob)); setFields(locked, [field()]);
+  locked.subject.openLiteratureFields(mod); await locked.subject.confirmLiteratureFields(mod);
+  await locked.subject.requestLiteratureFieldsAssist(mod, 'summarize');
+  assert.equal(locked.calls.length, 0, 'Validate/export segments cannot edit or reconfirm schemas through field actions');
+  assert.equal(elements(locked.body).filter(item => item.tag === 'dialog').length, 0);
 
   harness.setCurrent(makeTask(makeJob('storage-failure'))); setFields(harness, [field()]); harness.setStorageError(true);
   assert.equal(subject.saveLiteratureFieldDrafts(harness.current, harness.current.literatureJob), false, 'Storage failure must be reported');

@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import literature_browser as adapter
 
@@ -98,6 +98,9 @@ class Page:
         self.filled = ""
         self.clicked = 0
         self.after_search = snapshot(results=[ROW], resultContainer=True)
+        self.scopus_field = ""
+        self.scopus_document_mode = False
+        self.scopus_mode_conflict = False
 
     def bring_to_front(self):
         self.front += 1
@@ -111,7 +114,13 @@ class Page:
     def wait_for_selector(self, *args, **kwargs):
         pass
 
-    def evaluate(self, javascript, arguments):
+    def evaluate(self, javascript, arguments=None):
+        if "scopus_visible_mode_conflict" in javascript:
+            return self.scopus_mode_conflict
+        if "scopus_search_field" in javascript:
+            return self.scopus_field
+        if "scopus_document_mode" in javascript:
+            return self.scopus_document_mode
         assert "literature_snapshot" in javascript
         assert "source" in arguments and "limit" in arguments
         return copy.deepcopy(self.dom)
@@ -186,6 +195,52 @@ class PagedPage(Page):
     def evaluate(self, javascript, arguments):
         if "literature_pagination" in javascript:
             return {"total_count": 41, "explicit_end": False}
+        return super().evaluate(javascript, arguments)
+
+
+class ScholarPagerControl(PagerControl):
+    def click(self, **kwargs):
+        super().click(**kwargs)
+        if getattr(self.page, "omit_default_num_on_next", False):
+            self.page.params.pop("num", None)
+        self.page.set_position(self.page.position)
+
+
+class ScholarPage(Page):
+    """Scholar's native URL cursor, without browser/network activity."""
+    def __init__(self, count=4):
+        pages = [snapshot(results=[{**ROW, "title": f"Scholar page {n} row {i}",
+                 "result_url": f"https://example.org/scholar/{n}/{i}"} for i in range(10)],
+                 resultContainer=True, visible_result_count=10) for n in range(count)]
+        super().__init__("scholar-paged-target", pages[0])
+        self.result_pages = pages
+        self.position = self.next_clicks = 0
+        self.params = {"q": QUERY, "hl": "en", "num": "10", "as_ylo": "2020", "as_yhi": "2024"}
+        self.set_position(0)
+
+    def set_position(self, index):
+        self.position = index
+        self.params["start"] = str(index * int(self.params.get("num", "10")))
+        self.url = "https://scholar.google.com/scholar?" + urlencode(self.params)
+        self.dom = copy.deepcopy(self.result_pages[index])
+        self.dom["queries"] = [self.params.get("q", QUERY)]
+
+    def goto(self, url, **kwargs):
+        self.navigations.append(url)
+        self.url = url
+        parsed = urlsplit(url)
+        if parsed.hostname == "scholar.google.com" and parsed.path == "/scholar":
+            self.params = {key: value[0] for key, value in parse_qs(parsed.query).items()}
+            self.position = int(self.params.get("start", "0")) // int(self.params.get("num", "10"))
+            self.dom = copy.deepcopy(self.result_pages[self.position])
+            self.dom["queries"] = [self.params.get("q", QUERY)]
+
+    def locator(self, selector):
+        return ScholarPagerControl(self) if selector == '#gs_n a:has(.gs_ico_nav_next)' else EmptyControl()
+
+    def evaluate(self, javascript, arguments=None):
+        if "literature_pagination" in javascript:
+            return {"total_count": 10 * len(self.result_pages), "explicit_end": False}
         return super().evaluate(javascript, arguments)
 
 
@@ -355,7 +410,7 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
         self.assertEqual(result["results"], [])
 
-    def test_manual_official_result_page_and_explicit_zero_can_still_be_read(self):
+    def test_verified_official_result_page_and_explicit_zero_can_still_be_read(self):
         for source in ("wanfang", "scopus"):
             for zero in (False, True):
                 with self.subTest(source=source, zero=zero):
@@ -365,6 +420,10 @@ class BrowserAdapterTests(unittest.TestCase):
                     row = {**ROW, "result_url": "https://d.wanfangdata.com.cn/periodical/example202401"}
                     page.dom = snapshot(results=[] if zero else [row], resultContainer=True, noResults=zero)
                     adapter._save_binding(self.job, source, page.target)
+                    if source == "scopus":
+                        adapter._save_binding(self.job, source, page.target,
+                            adapter.hashlib.sha256(QUERY.encode("utf-8")).hexdigest(), page_index=0,
+                            result_fingerprint=adapter._row_fingerprint(page.dom), scopus_context_proven=True)
                     with patch.object(adapter.extra_sources, "snapshot", side_effect=lambda bound, *args: copy.deepcopy(bound.dom)), \
                             patch.object(adapter.extra_sources, "query_context_valid", return_value=True), \
                             patch.object(adapter, "_navigate_search", side_effect=AssertionError("manual actual result should be read")):
@@ -871,6 +930,207 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertEqual(query["as_yhi"], ["2024"])
         self.assertEqual(result["applied_filters"], {"publicationYearFrom": 2010, "publicationYearTo": 2024})
 
+    def scholar_page(self):
+        page = ScholarPage()
+        self.context.pages.append(page)
+        adapter._save_binding(self.job, "google-scholar", page.target)
+        return page
+
+    def scholar_call(self, **kwargs):
+        return self.call("google-scholar", full_page=True, year_from=2020, year_to=2024, **kwargs)
+
+    def test_scholar_submits_explicit_page_size_for_recoverable_offsets(self):
+        page = self.scholar_page()
+        result = self.scholar_call()
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(parse_qs(urlsplit(page.url).query).get("num"), ["10"])
+        binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["google-scholar"]
+        self.assertEqual(binding.get("scholar_position", {}).get("page_size"), 10)
+        self.assertEqual(binding["scholar_position"]["year_from"], 2020)
+        self.assertNotIn("url", binding)
+
+    def test_scholar_native_pending_page_after_refresh_does_not_replay(self):
+        page = self.scholar_page()
+        self.scholar_call()
+        page.set_position(1)  # The Next navigation completed before the old call paused.
+        page.navigations.clear()
+        result = self.scholar_call(resume=True, page_index=1)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("page 1", result["results"][0]["title"])
+        self.assertEqual(page.navigations, [])
+        self.assertEqual(page.next_clicks, 0)
+        self.assertIsNotNone(result.get("recovery"))
+        self.assertEqual(result["recovery"]["mode"], "resume_current")
+        self.assertTrue(result["recovery"]["position_verified"])
+
+    def test_scholar_native_next_omits_default_num_but_preserves_verified_scope(self):
+        page = self.scholar_page()
+        self.scholar_call()
+        page.omit_default_num_on_next = True
+        page.navigations.clear()
+        result = self.scholar_call(page_index=1)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("page 1", result["results"][0]["title"])
+        self.assertNotIn("num", parse_qs(urlsplit(page.url).query))
+        self.assertEqual(page.navigations, [])
+        self.assertEqual(page.next_clicks, 1)
+        binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["google-scholar"]
+        self.assertEqual(binding["scholar_position"]["start"], 10)
+
+    def test_scholar_pending_native_default_size_page_resumes_from_saved_previous_anchor(self):
+        page = self.scholar_page()
+        self.scholar_call()
+        page.params.pop("num")
+        page.set_position(1)
+        page.navigations.clear()
+        result = self.scholar_call(resume=True, page_index=1)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("page 1", result["results"][0]["title"])
+        self.assertEqual(page.navigations, [])
+        self.assertEqual(page.next_clicks, 0)
+        self.assertEqual(result["recovery"]["mode"], "resume_current")
+        self.assertTrue(result["recovery"]["position_verified"])
+
+    def test_scholar_missing_default_size_does_not_relax_scope_offset_or_visible_count(self):
+        for problem in ("missing_year", "wrong_start", "explicit_num20", "visible20"):
+            with self.subTest(problem=problem):
+                self.context.pages.clear()
+                page = self.scholar_page()
+                self.scholar_call()
+                page.params.pop("num")
+                if problem == "missing_year":
+                    page.params.pop("as_ylo")
+                elif problem == "explicit_num20":
+                    page.params["num"] = "20"
+                page.set_position(2 if problem == "wrong_start" else 1)
+                if problem == "visible20":
+                    page.dom["visible_result_count"] = 20
+                page.navigations.clear()
+                result = self.scholar_call(resume=True, page_index=1)
+                self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+                self.assertEqual(result["results"], [])
+                self.assertEqual(page.navigations, [])
+                self.assertEqual(page.next_clicks, 0)
+
+    def test_scholar_lost_tab_position_restores_saved_anchor_once(self):
+        page = self.scholar_page()
+        self.scholar_call()
+        self.scholar_call(page_index=1)
+        page.url, page.dom = "about:blank", snapshot(queries=[])
+        page.navigations.clear()
+        page.next_clicks = 0
+        result = self.scholar_call(resume=True, page_index=2)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("page 2", result["results"][0]["title"])
+        self.assertEqual(len(page.navigations), 1)
+        self.assertEqual(parse_qs(urlsplit(page.navigations[0]).query).get("start"), ["10"])
+        self.assertEqual(page.next_clicks, 1)
+        self.assertIsNotNone(result.get("recovery"))
+        self.assertEqual(result["recovery"]["mode"], "checkpoint_url")
+        self.assertTrue(result["recovery"]["continuity_verified"])
+
+    def test_scholar_refresh_changed_saved_anchor_rows_requires_review(self):
+        page = self.scholar_page()
+        self.scholar_call()
+        page.dom["results"][0]["title"] = "Ranking changed after refresh"
+        page.navigations.clear()
+        result = self.scholar_call(resume=True, page_index=1)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+        self.assertEqual(result["results"], [])
+        self.assertEqual(page.navigations, [])
+        self.assertEqual(page.next_clicks, 0)
+        self.assertIsNotNone(result.get("recovery"))
+        self.assertEqual(result["recovery"]["mode"], "rows_changed")
+        self.assertFalse(result["recovery"]["continuity_verified"])
+
+    def test_scholar_year_sort_page_size_or_query_conflict_cannot_inherit_proof(self):
+        for key, value in (("as_ylo", "2021"), ("scisbd", "1"), ("num", "20"),
+                           ("q", QUERY + " OR pig"), ("as_occt", "title"),
+                           ("as_sauthors", "Smith"), ("as_publication", "Nature")):
+            with self.subTest(key=key):
+                self.context.pages.clear()
+                page = self.scholar_page()
+                self.scholar_call()
+                page.params[key] = value
+                page.set_position(0)
+                # Preserve the old rows to prove fingerprint equality is insufficient.
+                page.dom["queries"] = [QUERY]
+                page.navigations.clear()
+                result = self.scholar_call(resume=True, page_index=1)
+                self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+                self.assertEqual(page.navigations, [])
+                self.assertEqual(page.next_clicks, 0)
+                self.assertIsNotNone(result.get("recovery"))
+                self.assertEqual(result["recovery"]["mode"], "context_changed")
+
+    def test_scholar_position_metadata_requires_integer_types_and_matching_index(self):
+        good = {"version": 1, "start": 10, "page_size": 10,
+                "year_from": 2020, "year_to": 2024, "sort": "relevance"}
+        self.assertIsNotNone(adapter._clean_scholar_position(good))
+        for key, value in (("version", True), ("page_size", 10.0), ("start", True),
+                           ("year_from", True), ("start", 11), ("sort", "date")):
+            with self.subTest(key=key, value=value):
+                self.assertIsNone(adapter._clean_scholar_position({**good, key: value}))
+        binding = {"query_hash": "known", "page_index": 1.0, "scholar_position": good}
+        self.assertIsNone(adapter._scholar_saved_position(binding, "known", 2020, 2024))
+
+    def test_scholar_recreated_target_drops_position_metadata(self):
+        page = self.scholar_page()
+        self.scholar_call()
+        adapter._save_binding(self.job, "google-scholar", "replacement-target")
+        saved = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["google-scholar"]
+        self.assertNotIn("scholar_position", saved)
+        self.assertNotIn("page_index", saved)
+
+    def test_scholar_captcha_is_not_navigated_during_checkpoint_recovery(self):
+        page = self.scholar_page()
+        self.scholar_call()
+        before = (self.job / "browser-tabs.json").read_bytes()
+        page.dom = snapshot(captcha=True, queries=[])
+        page.url = "https://scholar.google.com/sorry/index?continue=secret-token"
+        page.navigations.clear()
+        result = self.scholar_call(resume=True, page_index=1)
+        self.assertEqual((result["status"], result["reason"]), ("attention", "verification"))
+        self.assertEqual(page.navigations, [])
+        self.assertEqual((self.job / "browser-tabs.json").read_bytes(), before)
+        self.assertNotIn("secret-token", json.dumps(result))
+
+    def test_scholar_legacy_unproven_page_replay_has_explicit_recovery_message(self):
+        page = self.scholar_page()
+        query_hash = adapter.hashlib.sha256(QUERY.encode("utf-8")).hexdigest()
+        adapter._save_binding(self.job, "google-scholar", page.target, query_hash,
+            page_index=0, result_fingerprint="old-unproven-fingerprint")
+        page.params.pop("num")
+        page.set_position(0)
+        result = self.scholar_call(resume=True, page_index=1)
+        self.assertEqual(result["status"], "ok")
+        self.assertIsNotNone(result.get("recovery"))
+        self.assertEqual(result["recovery"]["mode"], "replay_from_first")
+        self.assertEqual(result["recovery"]["target_page"], 2)
+        self.assertFalse(result["recovery"]["continuity_verified"])
+        self.assertTrue(result["recovery"]["message"])
+
+    def test_scholar_legacy_binding_cannot_override_explicit_url_scope_conflict(self):
+        for key, value in (("as_ylo", "2021"), ("as_yhi", "2023"), ("scisbd", "1"),
+                           ("num", "20"), ("as_occt", "title"), ("as_publication", "Nature")):
+            with self.subTest(key=key):
+                self.context.pages.clear()
+                page = self.scholar_page()
+                query_hash = adapter.hashlib.sha256(QUERY.encode("utf-8")).hexdigest()
+                adapter._save_binding(self.job, "google-scholar", page.target, query_hash,
+                    page_index=0, result_fingerprint=adapter._row_fingerprint(page.dom))
+                page.params[key] = value
+                page.set_position(0)
+                before = (self.job / "browser-tabs.json").read_bytes()
+                result = self.scholar_call(resume=True, page_index=1)
+                self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+                self.assertEqual(page.navigations, [])
+                self.assertEqual(page.next_clicks, 0)
+                self.assertEqual((self.job / "browser-tabs.json").read_bytes(), before)
+                self.assertIsNotNone(result.get("recovery"))
+                self.assertEqual(result["recovery"]["mode"], "context_changed")
+                self.assertFalse(result["recovery"]["position_verified"])
+
     def test_errors_never_disclose_redirect_url(self):
         with patch.object(adapter, "_snapshot", side_effect=RuntimeError("https://sso.example/login?ticket=secret-token")):
             result = self.call()
@@ -954,6 +1214,51 @@ class BrowserAdapterTests(unittest.TestCase):
         self.assertTrue(adapter._matches_query(snapshot(), "https://www.scopus.com", "scopus", f"TITLE-ABS-KEY({QUERY})"))
         self.assertFalse(adapter._matches_query(snapshot(queries=[QUERY + " OR more"]), "https://www.scopus.com", "scopus", f"TITLE-ABS-KEY({QUERY})"))
 
+    def test_scopus_full_query_tolerates_only_displayed_parenthesis_spacing(self):
+        inner = ('(cattle OR buffalo OR pig OR sheep OR goat OR chicken OR duck OR goose OR turkey OR fish OR shrimp) '
+                 'AND (temperature OR "heat stress" OR "cold stress" OR "relative humidity" OR THI)')
+        displayed = inner.replace("(", "( ").replace(")", " )").replace(" OR ", "  OR\t")
+        self.assertTrue(adapter._matches_query(snapshot(queries=[displayed]), "https://www.scopus.com/pages/results",
+            "scopus", "TITLE-ABS-KEY(" + inner + ")"))
+        # A wrapper must enclose the whole expression before it can be removed.
+        self.assertFalse(adapter._matches_query(snapshot(queries=[inner]), "https://www.scopus.com", "scopus",
+            'TITLE-ABS-KEY(cattle) AND TITLE-ABS-KEY("heat stress")'))
+
+    def test_scopus_spacing_does_not_change_terms_operators_structure_or_protected_phrases(self):
+        frozen = '((cattle OR buffalo) AND ("heat stress" OR {daily heat load}))'
+        mutations = [
+            frozen.replace("cattle", "catt le"),
+            frozen.replace(" OR buffalo", " AND buffalo"),
+            frozen.replace("cattle OR buffalo", "buffalo OR cattle"),
+            frozen.replace("((cattle OR buffalo)", "(cattle OR buffalo"),
+            frozen.replace('("heat stress" OR {daily heat load})', '"heat stress" OR {daily heat load}'),
+            frozen.replace('"heat stress"', '"heat  stress"'),
+            frozen.replace("{daily heat load}", "{daily  heat load}"),
+            frozen.replace('"heat stress"', '" heat stress"'),
+            frozen.replace("{daily heat load}", "{daily heat load }"),
+            frozen.replace('"heat stress"', "{heat stress}"),
+            frozen[:-1] + " OR temperature)",
+        ]
+        for displayed in mutations:
+            with self.subTest(displayed=displayed):
+                self.assertFalse(adapter._matches_query(snapshot(queries=[displayed]), "https://www.scopus.com", "scopus", frozen))
+
+    def test_scopus_query_scanner_preserves_escaped_quotes_and_phrase_parentheses(self):
+        frozen = r'((cattle OR buffalo) AND ("heat \"load\" stress" OR {daily (heat) load}))'
+        displayed = r'( ( cattle OR buffalo ) AND ( "heat \"load\" stress" OR {daily (heat) load} ) )'
+        self.assertTrue(adapter._matches_query(snapshot(queries=[displayed]), "https://www.scopus.com", "scopus", frozen))
+        for changed in (displayed.replace('load\\" stress', 'load\\"  stress'),
+                        displayed.replace("{daily (heat) load}", "{daily ( heat ) load}")):
+            self.assertFalse(adapter._matches_query(snapshot(queries=[changed]), "https://www.scopus.com", "scopus", frozen))
+
+    def test_scopus_malformed_delimiters_are_never_query_proof(self):
+        invalid = ['(cattle OR buffalo', 'cattle OR buffalo)', '"heat stress',
+                   '{daily heat load', 'daily heat load}', '("heat stress" OR {daily heat load}) AND (',
+                   '"heat stress\\"']
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertFalse(adapter._matches_query(snapshot(queries=[value]), "https://www.scopus.com", "scopus", value))
+
     def test_scopus_unverified_manual_field_requires_form_resubmission(self):
         with patch.object(adapter.extra_sources, "snapshot", return_value=snapshot(results=[ROW])), \
                 patch.object(adapter.extra_sources, "navigate", return_value=False) as navigate, \
@@ -961,6 +1266,128 @@ class BrowserAdapterTests(unittest.TestCase):
             result = self.call("scopus", resume=True)
         self.assertEqual(result["reason"], "results_unrecognized")
         self.assertGreaterEqual(navigate.call_count, 1)
+
+    @contextmanager
+    def scopus_fixture(self, dom=None, *, submitted=True, official=True):
+        page = self.context.new_page()
+        page.dom = copy.deepcopy(dom if dom is not None else snapshot(results=[ROW], resultContainer=True))
+        page.url = "https://www.scopus.com/pages/results" if official else "https://example.org/results"
+        adapter._save_binding(self.job, "scopus", page.target)
+
+        def navigate(current_page, source, query, year_from, year_to):
+            self.assertIs(current_page, page)
+            self.assertEqual((source, query), ("scopus", QUERY))
+            return submitted  # The real adapter proves mode, field and filled input before returning True.
+
+        with patch.object(adapter.extra_sources, "snapshot", side_effect=lambda current, *_: copy.deepcopy(current.dom)), \
+                patch.object(adapter.extra_sources, "navigate", side_effect=navigate) as submit, \
+                patch.object(adapter, "_pagination", return_value={"has_next": False, "total_count": 1}):
+            yield page, submit
+
+    def test_scopus_actual_submit_accepts_matching_document_results_without_home_controls(self):
+        with self.scopus_fixture() as (page, submit):
+            result = self.call("scopus", full_page=True)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(submit.call_count, 1)
+        binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["scopus"]
+        self.assertEqual(binding["document_context_proof"], adapter._SCOPUS_CONTEXT_PROOF)
+        self.assertNotIn(QUERY, json.dumps(binding))
+
+    def test_scopus_actual_submit_accepts_explicit_zero_results_without_home_controls(self):
+        with self.scopus_fixture(snapshot(noResults=True, resultContainer=True)):
+            result = self.call("scopus", full_page=True)
+        self.assertEqual(result["status"], "no_results")
+        self.assertFalse(result["has_next"])
+
+    def test_scopus_actual_submit_never_accepts_different_or_unobserved_query(self):
+        for observed in ([QUERY + " OR another topic"], [QUERY.replace("broiler", "bro iler")], []):
+            with self.subTest(observed=observed), self.scopus_fixture(snapshot(queries=observed, results=[ROW])):
+                result = self.call("scopus", full_page=True)
+                self.assertEqual((result["status"], result["reason"]), ("attention", "results_unrecognized"))
+                self.assertFalse(result["diagnostics"]["query_matches"])
+                self.assertTrue(result["diagnostics"]["submitted_document_context_proven"])
+                self.assertTrue(all(isinstance(value, bool) for value in result["diagnostics"].values()))
+                self.assertNotIn(QUERY, json.dumps(result["diagnostics"]))
+
+    def test_scopus_attention_distinguishes_missing_records_and_missing_submit_proof(self):
+        with self.scopus_fixture(snapshot(resultContainer=True)):
+            result = self.call("scopus", full_page=True)
+            self.assertEqual(result["status"], "attention")
+            self.assertIn("记录尚未加载", result["message"])
+            self.assertFalse(result["diagnostics"]["bibliographic_records_loaded"])
+        with self.scopus_fixture(submitted=False):
+            result = self.call("scopus", resume=True, full_page=True)
+            self.assertEqual(result["status"], "attention")
+            self.assertIn("提交或页面绑定证明", result["message"])
+            self.assertFalse(result["diagnostics"]["submitted_document_context_proven"])
+        with self.scopus_fixture(submitted=False) as (page, _):
+            page.scopus_document_mode = True
+            page.scopus_field = "Article title, Abstract, Keywords"
+            result = self.call("scopus", resume=True)
+            self.assertEqual(result["status"], "attention")
+            self.assertTrue(result["diagnostics"]["visible_document_context_valid"])
+            self.assertFalse(result["diagnostics"]["bound_document_context_proven"])
+
+    def test_scopus_submit_proof_does_not_override_author_mode_wrong_field_or_nonofficial_page(self):
+        for mode_conflict, field, official in ((True, "", True), (False, "Author", True), (False, "", False)):
+            with self.subTest(mode=mode_conflict, field=field, official=official), self.scopus_fixture(official=official) as (page, _):
+                page.scopus_mode_conflict = mode_conflict
+                page.scopus_field = field
+                result = self.call("scopus", full_page=True)
+                self.assertEqual(result["status"], "attention")
+                self.assertEqual(result["diagnostics"]["official_page"], official)
+                self.assertEqual(result["diagnostics"]["visible_context_conflict"], mode_conflict or bool(field))
+
+    def test_scopus_authentication_gates_still_precede_submit_proof(self):
+        for marker, reason in (("captcha", "verification"), ("password", "login"), ("accessRequired", "access_required")):
+            with self.subTest(marker=marker), self.scopus_fixture(snapshot(results=[ROW], **{marker: True})):
+                result = self.call("scopus", full_page=True)
+                self.assertEqual((result["status"], result["reason"]), ("attention", reason))
+                self.assertNotIn("diagnostics", result)
+
+    def test_scopus_bound_submit_proof_survives_missing_controls_but_not_current_conflicts(self):
+        for conflict in ("none", "query", "author", "field"):
+            with self.subTest(conflict=conflict), self.scopus_fixture(submitted=False) as (page, submit):
+                query_hash = adapter.hashlib.sha256(QUERY.encode("utf-8")).hexdigest()
+                adapter._save_binding(self.job, "scopus", page.target, query_hash, page_index=0,
+                    result_fingerprint=adapter._row_fingerprint(page.dom), scopus_context_proven=True)
+                if conflict == "query":
+                    page.dom["queries"] = [QUERY + " AND extra"]
+                elif conflict == "author":
+                    page.scopus_mode_conflict = True
+                elif conflict == "field":
+                    page.scopus_field = "Author"
+                result = self.call("scopus", resume=True, full_page=True)
+                if conflict == "none":
+                    self.assertEqual(result["status"], "ok")
+                    self.assertEqual(submit.call_count, 0)
+                else:
+                    self.assertEqual(result["status"], "attention")
+                    self.assertFalse(result["diagnostics"]["bound_document_context_proven"])
+
+    def test_scopus_legacy_binding_requires_visible_context_and_upgrades_only_when_valid(self):
+        for visible in (False, True):
+            with self.subTest(visible=visible), self.scopus_fixture(submitted=False) as (page, submit):
+                query_hash = adapter.hashlib.sha256(QUERY.encode("utf-8")).hexdigest()
+                adapter._save_binding(self.job, "scopus", page.target, query_hash, page_index=0,
+                    result_fingerprint=adapter._row_fingerprint(page.dom), scopus_context_proven=False)
+                if visible:
+                    page.scopus_document_mode = True
+                    page.scopus_field = "Article title, Abstract, Keywords"
+                result = self.call("scopus", resume=True, full_page=True)
+                self.assertEqual(result["status"], "ok" if visible else "attention")
+                binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["scopus"]
+                self.assertEqual("document_context_proof" in binding, visible)
+                self.assertEqual(submit.call_count, 0 if visible else 1)
+
+    def test_scopus_new_target_drops_prior_document_context_proof(self):
+        adapter._save_binding(self.job, "scopus", "old-target", "frozen-hash", page_index=0,
+            result_fingerprint="page-fingerprint", scopus_context_proven=True)
+        adapter._save_binding(self.job, "scopus", "new-target")
+        binding = json.loads((self.job / "browser-tabs.json").read_text(encoding="utf-8"))["scopus"]
+        self.assertNotIn("document_context_proof", binding)
+        self.assertNotIn("page_index", binding)
 
     def paged(self, count=3, rows=20):
         pages = [snapshot(results=[{**ROW, "title": f"Page {number} paper {index}",

@@ -125,6 +125,56 @@ EXPORT_FILES = [
     "export/export_report.md",
 ]
 
+# User-facing headers are explicit aliases, never inferred from arbitrary text.
+# The default machine-column CSV/XLSX contracts above remain unchanged.
+HEADER_ALIASES = {
+    "paper_id": ["文献编号", "论文编号"], "title": ["题名", "标题"],
+    "authors": ["作者"], "year": ["发表年份"], "doi": ["DOI"],
+    "source": ["检索来源"], "source_url": ["来源链接"], "fulltext_url": ["全文链接"],
+    "fulltext_status": ["全文状态"], "evidence_level": ["证据层级"],
+    "retrieved_at": ["获取时间"], "screening_status": ["筛选状态"],
+    "screening_reason": ["筛选原因"], "review_status": ["审核状态"], "notes": ["备注"],
+    "row_id": ["结果记录键", "结果编号"], "field": ["指标名称"],
+    "value_raw": ["原始值", "原值"], "unit_raw": ["原始单位", "原单位"],
+    "value_normalized": ["统一值"], "unit_normalized": ["统一单位"],
+    "conversion": ["换算记录", "计算与换算记录"],
+    "evidence_where": ["材料类型及出处"], "evidence_quote": ["原文证据"],
+    "provenance": ["数据来源"], "conditions_json": ["研究条件JSON", "条件JSON"],
+    "validation_status": ["校验状态"], "validation_notes": ["校验说明"],
+}
+LITERATURE_EXTRA_KEYS = {
+    "document_type": ("文献类型", ["文献类型", "document_type", "publication_type", "literature_type"]),
+    "journal_name": ("期刊名称", ["期刊名称", "journal_name", "journal", "publication_title"]),
+    "degree_institution": ("学位授予单位", ["学位授予单位", "degree_institution", "degree_awarding_institution"]),
+}
+FORMAL_PARAMETER_HEADERS = [
+    "结果记录键", "文献编号", "研究编号", "组别", "指标名称", "结果对应时间", "统一值", "统一单位",
+    "变异", "样本量", "统计单位", "材料类型及出处",
+]
+# Existing conditions are copied only through the exact keys listed here. No
+# calculations, inference from nearby values, unit conversion or SD relabeling.
+CONDITION_KEYS = {
+    "study_id": ("研究编号", ["研究编号", "study_id", "studyId"]),
+    "group": ("组别", ["组别", "group", "group_name", "treatment_group"]),
+    "result_time": ("结果对应时间", ["结果对应时间", "result_time", "measurement_time", "measurement_period", "outcome_time"]),
+    "variation": ("变异", ["变异", "variation", "variation_normalized", "variability"]),
+    "sample_size": ("样本量", ["样本量", "sample_size", "n"]),
+    "statistical_unit": ("统计单位", ["统计单位", "statistical_unit", "experimental_unit"]),
+    "animal_category": ("动物类别", ["动物类别", "animal_category"]),
+    "species": ("物种名称", ["物种名称", "species", "species_name"]),
+    "sex": ("性别", ["性别", "sex"]),
+    "production_stage": ("生产类型/阶段", ["生产类型/阶段", "生产类型／阶段", "production_stage"]),
+    "initial_age": ("入组年龄/日龄", ["入组年龄/日龄", "入组年龄／日龄", "initial_age"]),
+    "initial_size": ("初始体重/规格", ["初始体重/规格", "初始体重／规格", "initial_size", "initial_weight"]),
+    "rearing_system": ("饲养/养殖方式", ["饲养/养殖方式", "饲养／养殖方式", "rearing_system", "culture_system"]),
+    "climate_indicator": ("气候/热环境指标", ["气候/热环境指标", "气候／热环境指标", "climate_indicator", "thermal_indicator"]),
+    "exposure_conditions": ("处理/暴露条件", ["处理/暴露条件", "处理／暴露条件", "exposure_conditions"]),
+    "reference_conditions": ("对照/参考条件", ["对照/参考条件", "对照／参考条件", "reference_conditions"]),
+    "exposure_schedule": ("暴露时间与方式", ["暴露时间与方式", "exposure_schedule"]),
+    "statistic_type_raw": ("原统计类型", ["原统计类型", "statistic_type_raw", "original_statistic_type", "statistic_type"]),
+    "variation_raw": ("原变异", ["原变异", "variation_raw", "original_variation"]),
+}
+
 
 class ExportError(StageError):
     """Export-stage failure (alias of StageError for readability at call sites)."""
@@ -194,6 +244,14 @@ def _fulltext_items(inputs: dict) -> list[dict]:
 
 def _int_or_blank(value: object) -> object:
     return value if isinstance(value, int) and not isinstance(value, bool) else ""
+
+
+def _explicit_value(values: dict, names: list[str]) -> object:
+    """Copy the first explicitly present nonblank value; retain numeric zero."""
+    for name in names:
+        if name in values and values[name] is not None and values[name] != "":
+            return values[name]
+    return ""
 
 
 def literature_entries(inputs: dict) -> list[dict]:
@@ -319,6 +377,9 @@ def literature_rows(inputs: dict) -> list[dict]:
             "screening_reason": screening_reason,
             "review_status": str(record.get("review_status") or "unreviewed"),
             "notes": "；".join(note for note in notes if note)[:1000],
+            # Template-only metadata: never infer a thesis institution from an
+            # author affiliation or a journal from arbitrary surrounding text.
+            **{key: _explicit_value(record, names) for key, (_, names) in LITERATURE_EXTRA_KEYS.items()},
         })
     return rows
 
@@ -432,11 +493,26 @@ def normalize_header(value: object) -> str:
     return re.sub(r"[\s_\-（）()]+", "", text).casefold()
 
 
-def map_sheet(worksheet, columns: list[str]) -> dict:
+def map_sheet(worksheet, columns: list[str], extra_aliases: dict[str, str] | None = None) -> dict:
     """Map template columns to table columns (单行表头按列名 / 双行表头走 group.field 机制)."""
     merged_row1 = [entry for entry in getattr(worksheet, "merged_cells", None).ranges if entry.min_row == 1 and entry.max_row == 1] if getattr(worksheet, "merged_cells", None) else []
     header_rows = 2 if merged_row1 else 1
     by_normalized = {normalize_header(column): column for column in columns}
+    aliases = {key: names for key, names in HEADER_ALIASES.items() if key in columns}
+    if columns == LITERATURE_COLUMNS:
+        aliases.update({key: [label] for key, (label, _) in LITERATURE_EXTRA_KEYS.items()})
+    header_names = {normalize_header(cell.value) for cell in worksheet[1]}
+    formal_parameter = (columns == PARAMETER_COLUMNS and worksheet.title == PARAMETER_SHEET
+                        and header_rows == 1
+                        and {normalize_header(name) for name in FORMAL_PARAMETER_HEADERS}.issubset(header_names))
+    if formal_parameter:
+        aliases.update({key: [label] for key, (label, _) in CONDITION_KEYS.items()})
+    for key, label in (extra_aliases or {}).items():
+        aliases[key] = [label]
+    for key, names in aliases.items():
+        by_normalized[normalize_header(key)] = key
+        for name in names:
+            by_normalized[normalize_header(name)] = key
     mapping: dict[int, str] = {}
     unmatched: list[str] = []
     row1_group: dict[int, str] = {}
@@ -481,7 +557,63 @@ def map_sheet(worksheet, columns: list[str]) -> dict:
         "mapping": {int(index): name for index, name in sorted(mapping.items())},
         "unmapped_columns": [column for column in columns if column not in used],
         "unmapped_template": unmatched,
+        "formal_parameter": formal_parameter,
     }
+
+
+def _template_rows(rows: list[dict], columns: list[str]) -> list[dict]:
+    if columns != PARAMETER_COLUMNS:
+        return rows
+    result = []
+    for row in rows:
+        try:
+            conditions = json.loads(row.get("conditions_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            conditions = {}
+        conditions = conditions if isinstance(conditions, dict) else {}
+        result.append({**row, **{key: _explicit_value(conditions, names)
+                                for key, (_, names) in CONDITION_KEYS.items()}})
+    return result
+
+
+def _missing_template_fields(worksheet, layout: dict, rows: list[dict]) -> list[dict]:
+    missing = []
+    for index, key in layout["mapping"].items():
+        count = sum(1 for row in rows if row.get(key) is None or row.get(key) == "")
+        if count:
+            missing.append({"label": str(worksheet.cell(layout["header_rows"], index).value or key),
+                            "field": key, "missing": count, "total": len(rows)})
+    return missing
+
+
+def _template_plan(workbook, worksheet, rows: list[dict], columns: list[str]) -> dict:
+    layout = map_sheet(worksheet, columns)
+    values = _template_rows(rows, columns) if layout["formal_parameter"] else rows
+    layout["missing_fields"] = _missing_template_fields(worksheet, layout, values)
+    layout["empty_data"] = not rows
+    filled = {worksheet.title}
+    if layout["formal_parameter"]:
+        if "原始记录" in workbook.sheetnames:
+            original = workbook["原始记录"]
+            raw_aliases = {key: CONDITION_KEYS[key][0] for key in ("statistic_type_raw", "variation_raw")}
+            raw_layout = map_sheet(original, columns, raw_aliases)
+            raw_layout["missing_fields"] = _missing_template_fields(original, raw_layout, values)
+            layout["original_records"] = raw_layout
+            filled.add("原始记录")
+        else:
+            layout["original_records_missing"] = True
+    layout["unfilled_sheets"] = [name for name in workbook.sheetnames if name not in filled]
+    return layout
+
+
+def _fill_template_sheet(worksheet, layout: dict, rows: list[dict]) -> None:
+    header_rows = int(layout["header_rows"])
+    if worksheet.max_row > header_rows:
+        worksheet.delete_rows(header_rows + 1, worksheet.max_row - header_rows)
+    for offset, row in enumerate(rows):
+        target = header_rows + 1 + offset
+        for column_index, name in layout["mapping"].items():
+            worksheet.cell(row=target, column=int(column_index), value=_cell(row.get(name)))
 
 
 def _import_openpyxl():
@@ -503,14 +635,11 @@ def write_xlsx(path: Path, rows: list[dict], columns: list[str], sheet: str, tem
             worksheet = workbook[sheet]
         else:
             worksheet = workbook[workbook.sheetnames[0]]
-        layout = map_sheet(worksheet, columns)
-        header_rows = int(layout["header_rows"])
-        if worksheet.max_row > header_rows:
-            worksheet.delete_rows(header_rows + 1, worksheet.max_row - header_rows)
-        for offset, row in enumerate(rows):
-            target = header_rows + 1 + offset
-            for column_index, name in layout["mapping"].items():
-                worksheet.cell(row=target, column=int(column_index), value=_cell(row.get(name)))
+        layout = _template_plan(workbook, worksheet, rows, columns)
+        values = _template_rows(rows, columns) if layout["formal_parameter"] else rows
+        _fill_template_sheet(worksheet, layout, values)
+        if layout.get("original_records"):
+            _fill_template_sheet(workbook["原始记录"], layout["original_records"], values)
     else:
         workbook = openpyxl.Workbook()
         worksheet = workbook.active
@@ -661,6 +790,25 @@ def build_report(inputs: dict, literature: list[dict], parameters: list[dict], a
                 lines.append("- 模板未覆盖的表列：" + "、".join(layout["unmapped_columns"]))
             if layout.get("unmapped_template"):
                 lines.append("- 未识别的模板表头：" + "、".join(layout["unmapped_template"]))
+            if layout.get("formal_parameter"):
+                lines.append("- 中文正式表仅复制已有明确字段及 conditions_json 中约定键；未推断组别、时间、样本量或变异，未进行单位/SD换算。")
+            if layout.get("missing_fields"):
+                lines.append("- 已识别但缺少输入的列（留空，不作为科学排除）：" + "；".join(
+                    f"{item['label']} {item['missing']}/{item['total']}行" for item in layout["missing_fields"]))
+            if layout.get("original_records"):
+                raw = layout["original_records"]
+                lines.append("- 原始记录页：按同一结果记录键逐行写入原值、原单位、证据及已有换算记录；不生成额外研究结果。")
+                if raw.get("missing_fields"):
+                    lines.append("- 原始记录缺少输入（留空）：" + "；".join(
+                        f"{item['label']} {item['missing']}/{item['total']}行" for item in raw["missing_fields"]))
+                if raw.get("unmapped_template"):
+                    lines.append("- 原始记录未识别的表头：" + "、".join(raw["unmapped_template"]))
+            elif layout.get("original_records_missing"):
+                lines.append("- 模板未提供原始记录页；关联原值、单位与证据仍保留在 parameters.csv 中。")
+            if layout.get("unfilled_sheets"):
+                lines.append("- 未自动填写的辅助页（按模板原样保留，不代表已有研究数据）：" + "、".join(layout["unfilled_sheets"]))
+            if layout.get("empty_data"):
+                lines.append("- 本次没有可写入记录，仅保留空表结构；空模板或空字段不代表科学排除或文献无数据。")
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -687,7 +835,9 @@ def run(config: dict, job_dir: Path) -> dict:
         openpyxl = _import_openpyxl()
         workbook = openpyxl.load_workbook(str(template))
         worksheet = workbook[sheet] if sheet in workbook.sheetnames else workbook[workbook.sheetnames[0]]
-        template_layouts[table_name] = map_sheet(worksheet, LITERATURE_COLUMNS if table_name == "文献表" else PARAMETER_COLUMNS)
+        columns = LITERATURE_COLUMNS if table_name == "文献表" else PARAMETER_COLUMNS
+        rows = literature if table_name == "文献表" else parameters
+        template_layouts[table_name] = _template_plan(workbook, worksheet, rows, columns)
 
     write_csv(export_dir / "literature.csv", literature, LITERATURE_COLUMNS)
     write_xlsx(export_dir / "literature.xlsx", literature, LITERATURE_COLUMNS, LITERATURE_SHEET, literature_template)

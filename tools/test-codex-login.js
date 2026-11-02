@@ -37,6 +37,36 @@ async function main() {
   await assert.rejects(compose.compose('test-prompt', 'test-model'), /upstream-unavailable/);
   compose.snapshot = () => ({ status: 'completed', text: ' ' });
   await assert.rejects(compose.compose('test-prompt', 'test-model'), /没有返回文本/);
+  // The generic discovery failure gets exactly one read-only retry. It must
+  // never create a thread/turn, change models or infer login from local state.
+  const routingFailure = 'workspace routing discovery failed';
+  const accountRead = (replies) => {
+    const reader = new CodexBridge(process.cwd()), calls = [];
+    reader.localLogin = async () => { throw new Error('Unexpected local login fallback'); };
+    reader.rpc = async (method, params) => {
+      calls.push({ method, params });
+      assert.equal(method, 'account/read'); assert.deepEqual(params, { refreshToken: false });
+      const reply = replies[calls.length - 1];
+      if (reply instanceof Error) throw reply;
+      assert.ok(reply, 'Unexpected additional account read'); return reply;
+    };
+    return { reader, calls };
+  };
+  const success = { account: { type: 'chatgpt' } };
+  let fixture = accountRead([new Error(routingFailure), success]);
+  assert.deepEqual(await fixture.reader.readAccount(), success); assert.equal(fixture.calls.length, 2);
+  fixture = accountRead([new Error(routingFailure), { account: null }]);
+  assert.deepEqual(await fixture.reader.readAccount(), { account: null }); assert.equal(fixture.calls.length, 2);
+  for (const message of [routingFailure, 'workspace routing discovery unauthorized (401)', 'workspace routing discovery timed out', 'second read rejected']) {
+    const secondError = new Error(message); fixture = accountRead([new Error(routingFailure), secondError]);
+    await assert.rejects(fixture.reader.readAccount({ routingTimeoutFallback: true }), error => error === secondError);
+    assert.equal(fixture.calls.length, 2, 'A second error must propagate without auth refresh, fallback or a third call');
+  }
+  for (const message of ['workspace routing discovery failed (503)', 'prefix workspace routing discovery failed', 'unrelated failure']) {
+    const firstError = new Error(message); fixture = accountRead([firstError]);
+    await assert.rejects(fixture.reader.readAccount({ routingTimeoutFallback: true }), error => error === firstError);
+    assert.equal(fixture.calls.length, 1, 'Only the exact discovery error qualifies for retry');
+  }
   console.log('CODEX_LOGIN_TESTS_PASS');
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

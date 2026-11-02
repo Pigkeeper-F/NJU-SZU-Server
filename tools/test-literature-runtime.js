@@ -112,9 +112,13 @@ function unitCases(root) {
 
 async function httpCases(root) {
   sourceFixture(root);
-  for (const name of ['server.js', 'tools/literature-runtime.js', 'tools/source-download.js', 'tools/scholar-flow.js', 'tools/plotting.js',
+  for (const name of ['server.js', 'js/clean-verification-rules.js', 'js/download-professional-rules.js',
+    'tools/literature-runtime.js', 'tools/source-download.js', 'tools/scholar-flow.js', 'tools/plotting.js',
     'tools/clean-results-view.js', 'tools/clean-results-archive.js', 'tools/faostat-download.js', 'tools/source-transfer.js',
-    'tools/literature-fields-assist.js', 'tools/literature-auxiliary.js', 'tools/literature-config.js']) {
+    'tools/download-acceptance.js',
+    'tools/literature-fields-assist.js', 'tools/literature-auxiliary.js', 'tools/literature-config.js',
+    'tools/literature-rule-review.js', 'tools/literature-rule-review-assist.js',
+    'tools/literature-discussions.js', 'tools/literature-discussion-recovery.js', 'tools/literature-prepare.js']) {
     write(path.join(root, name), fs.readFileSync(path.join(ROOT, name)));
   }
   // The real server's busy predicate sees fake job holders. Any actual model/login access fails the fixture.

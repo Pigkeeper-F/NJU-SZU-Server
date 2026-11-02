@@ -64,6 +64,61 @@ async function main() {
     bridge.localLogin = async () => null;
     await assert.rejects(bridge.status(), /workspace routing discovery timed out/);
 
+    const routing401 = 'workspace routing discovery unauthorized (401)';
+    for (const entry of ['status', 'login']) {
+      const calls = [];
+      bridge.rpc = async (method, params) => {
+        calls.push({ method, params });
+        if (method === 'model/list') return { data: [{ model: 'gpt-6.1-sol', isDefault: true }] };
+        assert.equal(method, 'account/read');
+        if (!params.refreshToken) throw new Error(routing401);
+        return { account: { type: 'chatgpt' } };
+      };
+      assert.equal((await bridge[entry]()).loggedIn, true);
+      assert.deepEqual(calls.filter(call => call.method === 'account/read').map(call => call.params.refreshToken), [false, true]);
+
+      for (const failure of [routing401, 'workspace routing discovery timed out', 'refresh rejected']) {
+        const refreshError = new Error(failure);
+        let reads = 0;
+        bridge.localLogin = async () => { throw new Error('refresh failure must not use local login fallback'); };
+        bridge.rpc = async (method, params) => {
+          assert.equal(method, 'account/read');
+          reads++;
+          if (!params.refreshToken) throw new Error(routing401);
+          throw refreshError;
+        };
+        await assert.rejects(bridge[entry](), error => error === refreshError);
+        assert.equal(reads, 2, 'routing auth refresh is attempted only once');
+      }
+
+      for (const message of ['unauthorized (401)', 'HTTP 401', routing401 + ' extra detail']) {
+        const original = new Error(message);
+        let reads = 0;
+        bridge.rpc = async (method, params) => {
+          assert.equal(method, 'account/read');
+          assert.equal(params.refreshToken, false);
+          reads++;
+          throw original;
+        };
+        await assert.rejects(bridge[entry](), error => error === original);
+        assert.equal(reads, 1, 'unrelated authorization errors are not retried');
+      }
+    }
+
+    const unauthenticated = [];
+    bridge.rpc = async (method, params) => {
+      unauthenticated.push(method);
+      if (method === 'account/read') {
+        if (!params.refreshToken) throw new Error(routing401);
+        return { account: null };
+      }
+      assert.equal(method, 'account/login/start');
+      return { authUrl: 'https://auth.openai.com/authorize?test=1' };
+    };
+    assert.equal((await bridge.status()).loggedIn, false, 'refresh does not imply login');
+    assert.equal((await bridge.login()).loggedIn, false, 'null account still requires normal login');
+    assert.equal(unauthenticated.filter(method => method === 'account/login/start').length, 1);
+
     bridge.rpc = async method => {
       assert.equal(method, 'account/read');
       return { account: null };
@@ -73,7 +128,7 @@ async function main() {
     await assert.rejects(bridge.status(), /分页重复/);
     bridge.rpc = async method => method === 'account/read' ? { account: {} } : { data: null };
     await assert.rejects(bridge.status(), /目录格式无效/);
-    console.log('CODEX_MODELS_TESTS_PASS: desktop discovery, fallback, full catalog, exact IDs, account defaults and pagination guards');
+    console.log('CODEX_MODELS_TESTS_PASS: desktop discovery, fallback, bounded routing auth refresh, full catalog, exact IDs, account defaults and pagination guards');
   } finally {
     if (path.dirname(directory) !== parent || !path.basename(directory).startsWith('model-catalog-test-')) throw new Error('Unexpected test directory');
     fs.rmSync(directory, { recursive: true, force: true });

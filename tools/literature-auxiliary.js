@@ -25,14 +25,23 @@ class LiteratureAuxiliary {
     catch (_) { throw failure('检索任务不存在。', 404); }
     if (!saved || saved.id !== id || !fs.existsSync(path.join(dir, 'run_config.json'))) throw failure('检索任务记录不完整。', 404);
     if (saved.materialReplenishment || saved.replenishmentInvalid || fs.existsSync(path.join(dir, 'materials-basis.json'))) throw failure('材料补齐记录仅用于获取 PDF 和补充材料，不能导入候选或生成新的调研结果。');
+    if (saved.segmentTask || saved.segmentInvalid || fs.existsSync(path.join(dir, 'segment-basis.json'))) throw failure('分段任务的文献和材料已冻结，不能导入候选或生成新的调研结果。');
     const live = this.scholar.jobs.get(id);
     if (saved.deletedAt || live?.deletedAt) throw failure('检索任务已删除，请先恢复。');
     if (saved.status === 'running' || live?.status === 'running' || live?.child || live?.browserOpening) {
       throw failure('检索任务正在运行，请完成或停止后再操作。');
     }
-    if (!fs.existsSync(path.join(dir, 'candidates.json'))) throw failure('当前任务没有候选清单。');
+    const state = live || saved;
+    if (importing && (state.processingBasis || fs.existsSync(path.join(dir, 'processing-basis.json')))) {
+      throw failure('已有候选的后续处理快照已冻结；请回原检索任务补检或导入，再建立新的后续处理。');
+    }
+    const confirmedImport = importing && state.config?.researchPlan && fs.existsSync(path.join(dir, 'research-basis.json'));
+    if (!confirmedImport && !fs.existsSync(path.join(dir, 'candidates.json'))) throw failure('当前任务没有候选清单。');
     if (importing) {
-      const state = live || saved;
+      if (confirmedImport) {
+        if (['extraction', 'validation', 'export'].some(name => fs.existsSync(path.join(dir, name)))) throw failure('该任务已有提取或分析产物，请另建同库任务导入，保留原结果。');
+        return live || this.scholar.loadPersisted(id);
+      }
       const frozen = ['dedupe', 'fulltext', 'extraction', 'validation', 'export', 'research', 'confirmations.json']
         .some(name => fs.existsSync(path.join(dir, name)));
       if (state.status !== 'completed' || state.resumeStage !== 'dedupe' || state.stages?.discover !== 'done' || frozen) {

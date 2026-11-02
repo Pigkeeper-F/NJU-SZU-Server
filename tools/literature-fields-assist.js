@@ -19,7 +19,8 @@ const FIELDS_ASSIST_INSTRUCTIONS = [
   '不要补造数值、论文、材料或规则。含义和单位必须写清楚；没有确认统一单位时保留原文单位并列入待确认。料肉比FCR的方向、SD与SE的区分及换算、样本量n是鸡只还是栏/重复/试验层级，均不能擅自决定。数值提取应保留原文证据位置；没有原件时不得声称已核查。',
   `本工具最多支持${MAX_FIELD_DEFINITIONS}个字段。历史助手回复中“最多50项”及因此建议的删减、分表属于旧版限制；以当前${MAX_FIELD_DEFINITIONS}项为准，不能因超过旧版50项而省略字段，也不能把尚未接受的分表建议当作必须等待的科学决定。超过${MAX_FIELD_DEFINITIONS}项不能静默截断、删除或合并已确认变量；draft时返回fields:[]，在unresolved说明需要用户选择字段或拆分数据表。只有用户明确要求的删改才可改变确定规则。`,
   'discuss模式用简洁中文回应本轮问题，区分“已明确”和“建议/待确认”，只问推进表头所必需的关键问题。不要输出任务已经开始或字段已经生效。',
-  'draft模式只输出一个JSON对象，禁止Markdown和前后解释，固定结构为{"fields":[{"key":"唯一稳定标识","label":"单一变量表头","meaning":"明确字段含义","unit":"原文单位/明确单位/不适用","valueType":"text或number","required":false}],"unresolved":["待确认问题"],"notes":["整理说明"]}。',
+  '关联条件键conditionKeys用于把数值和指标、处理组、时间点等原文条件对应起来，不是新增数值或已确认科学规则。保留用户已填写或明确确认的键；尚未确定的关联写入unresolved，不自行新增。当前执行器会合并所有字段的关联条件键用于每条结果，字段名尽量复用已讨论的稳定key。',
+  'draft模式只输出一个JSON对象，禁止Markdown和前后解释，固定结构为{"fields":[{"key":"唯一稳定标识","label":"单一变量表头","meaning":"明确字段含义","unit":"原文单位/明确单位/不适用","valueType":"text或number","required":false,"conditionKeys":[]}],"unresolved":["待确认问题"],"notes":["整理说明"]}。',
   'draft字段key与label各自唯一，key用稳定的简短标识；可保留原有有效key。label不塞多个变量，meaning不能为空，valueType只能text或number，required只能true或false。未明确必填不要自行设true。对于未决科学选择，unresolved写明；未获确认的新增建议不得直接加入fields冒充已定规则。'
 ].join('\n');
 
@@ -60,8 +61,15 @@ function fields(value) {
     // Legacy checkpoints use "string" for a text column.
     if (!['text', 'string', 'number'].includes(valueType)) throw new Error('字段类型只能是text或number');
     if (entry.required != null && typeof entry.required !== 'boolean') throw new Error('字段必填状态必须是布尔值');
+    let conditionKeys;
+    if (entry.conditionKeys != null) {
+      if (!Array.isArray(entry.conditionKeys) || entry.conditionKeys.length > 100) throw new Error('关联条件键必须是列表且不超过100项');
+      conditionKeys = entry.conditionKeys.map(value => text(value, '关联条件键', 100, false));
+      if (conditionKeys.some(value => UNSAFE_KEYS.has(value)) || new Set(conditionKeys).size !== conditionKeys.length) throw new Error('关联条件键重复或不受支持');
+    }
     return { key, label: text(entry.label, '表头名称', 200), meaning: text(entry.meaning, '字段含义', 500),
-      unit: text(entry.unit, '字段单位', 100), valueType: valueType === 'string' ? 'text' : valueType, required: entry.required === true };
+      unit: text(entry.unit, '字段单位', 100), valueType: valueType === 'string' ? 'text' : valueType, required: entry.required === true,
+      ...(conditionKeys !== undefined ? { conditionKeys } : {}) };
   });
 }
 

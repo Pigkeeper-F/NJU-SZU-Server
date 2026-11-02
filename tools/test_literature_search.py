@@ -43,18 +43,18 @@ class LiteratureSearchTest(unittest.TestCase):
         self.assertEqual(safe_csv_cell('=HYPERLINK("x")'), "'=HYPERLINK(\"x\")")
         self.assertEqual(safe_csv_cell('ordinary title'), 'ordinary title')
 
-    def test_normalize_keeps_candidates_unreviewed_and_deduplicates_title(self) -> None:
+    def test_normalize_keeps_candidates_unreviewed_and_retains_ambiguous_same_titles(self) -> None:
         records = normalize_candidates([
             {"title": " Climate effects on aquaculture ", "snippet": "a result snippet", "result_url": "https://example.org/a",
              "fulltext_links": [{"label": "PDF", "url": "https://example.org/a.pdf"}]},
             {"title": "Climate effects on aquaculture", "result_url": "https://example.org/duplicate"},
             {"title": "Other paper", "result_url": "javascript:alert(1)"},
         ], "climate aquaculture", "2026-10-15T00:00:00+00:00")
-        self.assertEqual(len(records), 2)
+        self.assertEqual(len(records), 3)
         self.assertEqual(records[0]["screening_status"], "pending_review")
         self.assertEqual(records[0]["evidence_level"], "search_result_snippet")
         self.assertEqual(records[0]["fulltext_links"][0]["url"], "https://example.org/a.pdf")
-        self.assertEqual(records[1]["result_url"], "")
+        self.assertEqual(records[2]["result_url"], "")
 
     def test_writes_json_and_excel_friendly_csv_without_fulltext_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -202,7 +202,7 @@ class LiteratureSearchTest(unittest.TestCase):
         validate_config({**CONFIG, "sources": ["cnki", "web-of-science"], "sourceQueries": {"cnki": "肉鸡 高温"}})
         self.assertEqual(config_fingerprint(CONFIG), config_fingerprint({**CONFIG, "sourceQueries": {}}))
         self.assertNotEqual(config_fingerprint(CONFIG), config_fingerprint({**CONFIG, "sourceQueries": {"google-scholar": "new query"}}))
-        for queries in ([], {"arxiv": "q"}, {"cnki": " "}, {"cnki": "a" * 2001}, {"cnki": 5}):
+        for queries in ([], {"arxiv": "q"}, {"cnki": " "}, {"cnki": "a" * 32769}, {"cnki": 5}):
             with self.subTest(queries=queries), self.assertRaises(ValueError):
                 validate_config({**CONFIG, "sourceQueries": queries})
         with self.assertRaisesRegex(ValueError, "不能晚于"):
@@ -215,7 +215,7 @@ class LiteratureSearchTest(unittest.TestCase):
             {"title": "Same paper", "source_key": "web-of-science", "year": "JAN 2020"},
             {"title": "Same paper", "source_key": "cnki"},
         ], "q", "now", batch_index=2)
-        self.assertEqual([item["candidate_id"] for item in records], ["GSC-B2-001", "CNKI-B2-001", "WOS-B2-001"])
+        self.assertEqual([item["candidate_id"] for item in records], ["GSC-B2-001", "CNKI-B2-001", "WOS-B2-001", "CNKI-B2-002"])
         self.assertEqual(records[1]["year"], 2021)
         self.assertEqual(records[1]["authors"], "张三; 李四")
         self.assertEqual(records[1]["venue"], "真实期刊")

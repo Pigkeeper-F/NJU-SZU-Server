@@ -15,6 +15,7 @@ const { executableSources } = require('./literature-sources');
 const { proxyFor } = require('./source-download');
 const { readMaterials, registeredMaterialFile, safeFile } = require('./literature-materials');
 const materialReplenishment = require('./literature-material-replenishment');
+const segmentTasks = require('./literature-segment');
 
 function childEnv() {
   const proxy = proxyFor('https:');
@@ -22,9 +23,63 @@ function childEnv() {
 }
 
 const ID = /^[a-f0-9-]{36}$/;
+const CANDIDATE_FILES = ['candidates.json', 'candidates.csv'];
+function availableCandidateFiles(dir, files) {
+  // Read-only recovery for a discovery cancelled before its final result event.
+  // Only these two fixed deliverables may be discovered; safeFile enforces the
+  // same regular-file and no-symlink boundary as downloading an existing entry.
+  const available = CANDIDATE_FILES.filter(name => safeFile(dir, name));
+  return [...new Set([...(Array.isArray(files) ? files : []).filter(name => !CANDIDATE_FILES.includes(name) || available.includes(name)), ...available])];
+}
+function reviewLineage(value) {
+  if (!value?.parentJobId) return {};
+  if (!ID.test(value.parentJobId) || !ID.test(value.parentReviewId || '') || !Number.isSafeInteger(value.parentRevision) || value.parentRevision < 1) throw new Error('修改配置的原任务核查关联无效');
+  return { parentJobId: value.parentJobId, parentReviewId: value.parentReviewId, parentRevision: value.parentRevision };
+}
 
 //: 六阶段冻结顺序（设计 §2；与 tools/literature-common.py STAGES 一致）
 const STAGES = ['discover', 'dedupe', 'fulltext', 'extract', 'validate', 'export'];
+
+function isScholarTrial(config) {
+  return Number.isSafeInteger(config?.scholarPlan?.trialMaxPages) && config.scholarPlan.trialMaxPages > 0;
+}
+
+function assertScholarTrialScope(config, from, until) {
+  if (isScholarTrial(config) && (from !== 'discover' || until !== 'discover'
+      || config.sources?.length !== 1 || config.sources[0] !== 'google-scholar')) {
+    throw new Error('谷歌学术预试只能获取候选（discover），不能启动其他来源或后续阶段');
+  }
+}
+
+function safeDiscoveryProgress(raw) {
+  if (!raw || raw.source !== 'google-scholar') return null;
+  const value = { source: 'google-scholar' };
+  for (const key of ['batchLabel', 'batchId', 'recoveryMessage']) {
+    value[key] = typeof raw[key] === 'string' ? raw[key].slice(0, 1000) : null;
+  }
+  for (const key of ['yearFrom', 'yearTo', 'pagesSaved', 'nextPage', 'processedBatches', 'pendingBatches', 'coverageGaps', 'trialMaxPages']) {
+    value[key] = Number.isSafeInteger(raw[key]) && raw[key] >= 0 && raw[key] <= 1000000 ? raw[key] : null;
+  }
+  value.status = ['pending', 'processed', 'coverage_limited', 'trial_complete'].includes(raw.status) ? raw.status : 'pending';
+  return value;
+}
+
+function checkpointDiscoveryProgress(dir, config) {
+  const state = loadJsonFile(path.join(dir, 'discovery-state.json'));
+  const entry = state?.sources?.['google-scholar'];
+  if (!entry) return null;
+  const summary = entry.scholar_summary || {};
+  const active = entry.scholar_schedule?.batches?.find(batch => batch.id === summary.current_batch_id)
+    || entry.scholar_schedule?.batches?.find(batch => ['pending', 'running', 'attention'].includes(batch.status));
+  return safeDiscoveryProgress({ source: 'google-scholar', batchLabel: active?.label || '原检索式', batchId: active?.id,
+    yearFrom: active?.year_from ?? config?.publicationYearFrom, yearTo: active?.year_to ?? config?.publicationYearTo,
+    pagesSaved: Array.isArray(entry.pages) ? entry.pages.length : null,
+    nextPage: active ? active.next_page + 1 : Number.isSafeInteger(entry.next_page) ? entry.next_page + 1 : null,
+    processedBatches: summary.processed_batches, pendingBatches: summary.pending_batches,
+    coverageGaps: summary.coverage_limited_batches, trialMaxPages: config?.scholarPlan?.trialMaxPages,
+    status: entry.trial_complete ? 'trial_complete' : summary.status || (entry.status === 'ok' ? 'processed' : 'pending'),
+    recoveryMessage: entry.recovery?.message });
+}
 
 //: 阶段 → 脚本文件名（§2.4 冻结 CLI）
 const STAGE_SCRIPTS = {
@@ -45,9 +100,14 @@ const STAGE_LABELS = { discover: '候选检索', dedupe: '跨来源去重', full
 //: extraction/<id>.json 覆盖逐篇结果与 check_report.json（§4.1 目录树）。
 const DELIVERABLE_PATTERNS = [
   /^run_config\.json$/,
+  /^rule-review-confirmed\.json$/,
+  /^research-basis\.json$/,
+  /^screening\/status\.json$/,
+  /^metadata\/status\.json$/,
   /^candidates\.(?:json|csv)$/,
   /^processing-basis\.json$/,
   /^materials-basis\.json$/,
+  /^segment-basis\.json$/,
   /^dedupe\/dedupe\.(?:json|csv)$/,
   /^fulltext\/status\.json$/,
   /^fulltext\/review\.json$/,
@@ -87,7 +147,34 @@ function resolveLimits(config) {
 
 function timeoutText(stage, seconds) {
   if (stage === 'discover' && seconds === 180) return '检索超过 3 分钟，已停止；如遇验证请手动完成后重试。';
+  if (stage === 'fulltext') return `全文获取连续 ${seconds} 秒没有新的有效进展，已停止获取进程；已有材料和浏览器页面保留，请显式检查后再继续。`;
   return `阶段执行超过 ${seconds} 秒，已停止；已完成的产物保留。`;
+}
+
+function stageActivitySeconds(job, stage) {
+  const configured = job.limits?.[stage] || STAGE_TIMEOUTS[stage] || 180;
+  const basis = stage === 'fulltext' ? materialBasisFor(job.dir) : null;
+  // Runtime allowance only: do not rewrite the parent's or child's frozen
+  // configuration. Large batches retain the existing one-day process guard.
+  return basis ? Math.max(configured, Math.min(86400, basis.candidateCount * 720)) : configured;
+}
+
+function fulltextActivity(event) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return null;
+  if ((Object.hasOwn(event, 'message') && typeof event.message !== 'string')
+      || (Object.hasOwn(event, 'count') && (!Number.isSafeInteger(event.count) || event.count < 0))
+      || (Object.hasOwn(event, 'counts') && (!event.counts || typeof event.counts !== 'object' || Array.isArray(event.counts)
+        || !Object.values(event.counts).every(value => Number.isSafeInteger(value) && value >= 0)))) return null;
+  const message = typeof event.message === 'string' ? event.message.trim() : '';
+  if (event.type === 'attention' && ['fulltext', 'verification'].includes(event.stage)
+      && typeof event.reason === 'string' && event.reason && message) return { terminal: true };
+  if (event.type === 'result' && event.stage === 'fulltext' && Number.isSafeInteger(event.count) && event.count >= 0) return { terminal: true };
+  if (!['stage', 'progress'].includes(event.type) || event.stage !== 'fulltext') return null;
+  const hasCount = Number.isSafeInteger(event.count) && event.count >= 0;
+  const counts = event.counts && typeof event.counts === 'object' && !Array.isArray(event.counts) ? event.counts : null;
+  const hasCounts = counts && Object.keys(counts).length && Object.values(counts).every(value => Number.isSafeInteger(value) && value >= 0);
+  if (!message && !hasCount && !hasCounts) return null;
+  return { signature: JSON.stringify([event.type, event.stage, event.paper_id || '', message, hasCount ? event.count : null, hasCounts ? counts : null]) };
 }
 
 function loadJsonFile(file) {
@@ -100,9 +187,9 @@ function loadJsonFile(file) {
 
 function sourceAttention(value) {
   if (!value || typeof value !== 'object') return null;
-  if (value.reason === 'deferred_materials') return { reason: 'deferred_materials' };
+  if (['deferred_materials', 'page_not_ready'].includes(value.reason) || String(value.reason || '').startsWith('screening_')) return { reason: value.reason };
   if (!executableSources().some(source => source.key === value.source)) return null;
-  if (!['login', 'verification', 'access_required', 'results_unrecognized'].includes(value.reason)) return null;
+  if (!['login', 'verification', 'access_required', 'results_unrecognized', 'rate_limited', 'access_blocked', 'native_query_required'].includes(value.reason)) return null;
   return { source: value.source, reason: value.reason };
 }
 
@@ -139,6 +226,42 @@ function candidateRecords(document) {
 
 function sha256(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 
+function frozenExecutionEvidence(dir, config) {
+  const files = new Map(), same = (a, b) => JSON.stringify(canonicalJson(a)) === JSON.stringify(canonicalJson(b));
+  for (const name of ['research-basis.json', 'rule-review-confirmed.json']) {
+    const location = path.join(dir, name);
+    if (!fs.existsSync(location)) {
+      if (name === 'research-basis.json' && config.researchPlan) throw new Error('原任务缺少已确认研究依据，不能建立后续处理');
+      continue; // Prepared research plans do not manufacture a 14-item review.
+    }
+    const entry = safeFile(dir, name);
+    if (!entry || entry.size > 32 * 1024 * 1024) throw new Error('冻结执行依据文件无法安全核验：' + name);
+    const bytes = fs.readFileSync(entry.file);
+    let value;
+    try { value = JSON.parse(bytes.toString('utf8')); } catch (_) { throw new Error('冻结执行依据无法解析：' + name); }
+    if (name === 'research-basis.json') {
+      const plan = config.researchPlan;
+      if (!plan || value?.schemaVersion !== 1 || value.presetId !== plan.presetId
+          || value.boundDate !== plan.boundDate || value.bundleHash !== plan.bundleHash
+          || !same(value.entry?.screeningPolicy, config.screeningPolicy)) throw new Error('研究依据与冻结配置不一致，未建立后续处理');
+    } else {
+      const { ITEMS } = require('./literature-rule-review');
+      const all = { ...config, until: value?.until };
+      if (!same(value?.config, config) || !STAGES.includes(value?.until)
+          || !ID.test(value?.reviewId || '') || !Number.isSafeInteger(value?.revision) || value.revision < 1
+          || value.fingerprint !== sha256(JSON.stringify(canonicalJson({ config, until: value.until })))
+          || !Array.isArray(value.items) || value.items.length !== ITEMS.length
+          || ITEMS.some(spec => {
+            const matches = value.items.filter(item => item?.id === spec.id), item = matches[0];
+            return matches.length !== 1 || item.status !== 'confirmed' || item.groupId !== spec.groupId
+              || !same(item.value, Object.fromEntries(spec.keys.filter(key => Object.hasOwn(all, key)).map(key => [key, all[key]])));
+          })) throw new Error('逐项核查依据与冻结配置不一致，未建立后续处理');
+    }
+    files.set(name, bytes);
+  }
+  return files;
+}
+
 function processingBasisFor(dir, config) {
   const basis = loadJsonFile(path.join(dir, 'processing-basis.json'));
   if (!basis || basis.version !== 1 || !ID.test(basis.parentJobId || '')
@@ -152,6 +275,11 @@ function processingBasisFor(dir, config) {
     if (!records || records.length !== basis.candidateCount || sha256(candidates) !== basis.candidateSnapshotSha256
         || sha256(fs.readFileSync(path.join(dir, 'run_config.json'))) !== basis.configSnapshotSha256
         || sha256(fs.readFileSync(path.join(dir, 'candidates.csv'))) !== basis.candidateCsvSnapshotSha256) return null;
+    if (basis.executionBasisSha256 !== undefined || config?.researchPlan) {
+      const evidence = frozenExecutionEvidence(dir, config);
+      const hashes = Object.fromEntries([...evidence].map(([name, bytes]) => [name, sha256(bytes)]));
+      if (JSON.stringify(canonicalJson(hashes)) !== JSON.stringify(canonicalJson(basis.executionBasisSha256))) return null;
+    }
   } catch (_) { return null; }
   return { parentJobId: basis.parentJobId, candidateCount: basis.candidateCount,
     deferredSources: [...basis.deferredSources], candidateSnapshotSha256: basis.candidateSnapshotSha256, createdAt: basis.createdAt };
@@ -163,6 +291,25 @@ function materialBasisFor(dir) {
 
 function isMaterialRecord(job, dir) {
   return !!job?.materialReplenishment || job?.replenishmentInvalid === true || fs.existsSync(path.join(dir, materialReplenishment.MARKER));
+}
+
+function segmentBasisFor(dir) { try { return { ...segmentTasks.readBasis(dir), fieldsConfirmed: !!segmentTasks.fields(dir) }; } catch (_) { return null; } }
+function isSegmentRecord(job, dir) { return !!job?.segmentTask || job?.segmentInvalid === true || fs.existsSync(path.join(dir, segmentTasks.MARKER)); }
+function restoreSegmentScope(job, dir, interrupted = false) {
+  const basis = segmentBasisFor(dir);
+  if (!basis && !isSegmentRecord(job, dir)) { job.segmentTask = null; return; }
+  job.segmentTask = basis || job.segmentTask || { invalid: true }; job.segmentInvalid = !basis;
+  if (!basis) return;
+  const first = STAGES.indexOf(basis.fromStage), last = STAGES.indexOf(basis.until), scope = STAGES.slice(first, last + 1);
+  job.stages = { ...(job.stages || {}) };
+  for (const stage of STAGES.slice(0, first)) job.stages[stage] = 'done';
+  if (STAGES.indexOf(job.until) < first || STAGES.indexOf(job.until) > last) job.until = basis.until;
+  const next = scope.find(stage => job.stages[stage] !== 'done') || null;
+  if (interrupted) {
+    job.status = 'failed'; job.stage = 'interrupted'; job.activeStage = null; job.attention = null;
+    job.resumeStage = next; if (next) job.stages[next] = 'pending';
+    job.error = '分段任务已中断；冻结材料与已有产物保留，请显式继续原范围。'; job.message = job.error;
+  } else job.resumeStage = next;
 }
 
 function restoreMaterialScope(job, dir, interrupted = false) {
@@ -384,7 +531,7 @@ async function runStageProcess(root, job, python, scriptName, extraArgs, onEvent
   if (job.status !== 'running') throw new Error('任务已停止，阶段未启动');
   return new Promise((resolve, reject) => {
     const stage = job.activeStage || 'discover';
-    const seconds = job.limits?.[stage] || STAGE_TIMEOUTS[stage] || 180;
+    const seconds = stageActivitySeconds(job, stage);
     const script = path.join(root, 'tools', scriptName);
     const configPath = path.join(job.dir, 'run_config.json');
     if (!fs.existsSync(configPath)) {
@@ -397,22 +544,36 @@ async function runStageProcess(root, job, python, scriptName, extraArgs, onEvent
     let buffer = '';
     let stderr = '';
     let settled = false;
-    const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch (_) {}
-      const error = new Error(timeoutText(stage, seconds));
-      error.code = 'LITERATURE_STAGE_TIMEOUT';
-      finish(error);
-    }, seconds * 1000);
+    let timer = null, terminal = false, lastProgress = '';
+    function disarm() { if (timer !== null) clearTimeout(timer); timer = null; }
+    function arm() {
+      disarm();
+      timer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch (_) {}
+        const error = new Error(timeoutText(stage, seconds));
+        error.code = 'LITERATURE_STAGE_TIMEOUT';
+        finish(error);
+      }, seconds * 1000);
+    }
+    arm();
     function finish(error) {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      disarm();
       if (job.child === child) job.child = null;
       if (error) reject(error); else resolve();
     }
     function consume(line) {
       if (!line.trim()) return;
-      try { onEvent(JSON.parse(line)); } catch (_) { stderr = '检索脚本返回了无效状态'; }
+      try {
+        const event = JSON.parse(line);
+        onEvent(event);
+        if (stage === 'fulltext' && !settled && !terminal) {
+          const activity = fulltextActivity(event);
+          if (activity?.terminal) { terminal = true; disarm(); }
+          else if (activity?.signature && activity.signature !== lastProgress) { lastProgress = activity.signature; arm(); }
+        }
+      } catch (_) { stderr = '检索脚本返回了无效状态'; }
     }
     child.stdout.on('data', chunk => {
       buffer += chunk.toString('utf8');
@@ -568,10 +729,17 @@ class LiteratureConnector {
     this.root = root;
     this.base = path.join(root, '.workbench', 'literature');
     this.jobs = new Map();
+    this.segmentPreparing = false;
     this.prepare = options.prepare || ((job, progress) => preparePython(root, job, progress));
     this.search = options.search || null;
     this.extract = options.extract || null;
+    this.screen = options.screen || null;
     this.prepareOffline = options.prepareOffline || (async job => existingPython(this.root, job));
+    this.segmentPreflight = options.segmentPreflight || (async (source, ids) => {
+      const python = await this.prepareOffline({ dir: source.dir, config: source.config });
+      const spec = await stagePythonProcessSpec(this.root, python);
+      return segmentTasks.preflight(this.root, source, ids, spec);
+    });
     this.openFulltext = options.openFulltext || (async (job, python) => {
       const spec = await stagePythonProcessSpec(this.root, python);
       if (job.status !== 'needs_attention' || job.resumeStage !== 'fulltext') throw new Error('任务状态已变化，请刷新后再操作');
@@ -612,10 +780,12 @@ class LiteratureConnector {
   public(job) {
     const queue = checkpointDeferredSources(job.dir, job.config, job.deferredSources);
     const materialBasis = materialBasisFor(job.dir), materialsOnly = isMaterialRecord(job, job.dir);
+    const segment = segmentBasisFor(job.dir), segmentOnly = isSegmentRecord(job, job.dir);
     const materialManualActions = materialsOnly ? materialReplenishment.manualActions(job.dir) : [];
     const materialSkippedActions = materialsOnly ? materialReplenishment.skippedActions(job.dir) : [];
-    return { id: job.id, status: job.status, stage: job.stage, message: job.message,
-      count: job.count, config: job.config, files: job.files, events: job.events, error: job.error,
+    return { id: job.id, ...reviewLineage(job), status: job.status, stage: job.stage, message: job.message,
+      discoveryProgress: checkpointDiscoveryProgress(job.dir, job.config) || safeDiscoveryProgress(job.discoveryProgress),
+      count: job.count, config: job.config, files: availableCandidateFiles(job.dir, job.files), events: job.events, error: job.error,
       stages: job.stages, resumeStage: job.resumeStage, until: job.until, counters: job.counters, activeStage: job.activeStage || null,
       fulltextFailurePolicy: job.fulltextFailurePolicy === 'skip' ? 'skip' : 'pause',
       attention: sourceAttention(job.attention), deferredSources: queue, deferredOnly: checkpointDeferredOnly(job.dir, job.config),
@@ -625,9 +795,10 @@ class LiteratureConnector {
       materialAccessPolicy: materialsOnly ? (job.materialAccessPolicy === 'defer' ? 'defer' : 'pause') : null,
       materialManualActions, materialManualCount: materialManualActions.length,
       materialSkippedActions, materialSkippedCount: materialSkippedActions.length,
-      canReplenishMaterials: materialReplenishment.eligible(this.root, job.id, job),
-      canReviewFulltext: !materialsOnly && fulltextReviewEligible(job, job.dir),
-      cnkiRetryItems: materialsOnly ? [] : cnkiRetryItems(job, job.dir),
+      segmentTask: segment || job.segmentTask || (segmentOnly ? { invalid: true } : null), segmentInvalid: segmentOnly && !segment,
+      canReplenishMaterials: !segmentOnly && materialReplenishment.eligible(this.root, job.id, job),
+      canReviewFulltext: !segmentOnly && !materialsOnly && fulltextReviewEligible(job, job.dir),
+      cnkiRetryItems: materialsOnly || segmentOnly ? [] : cnkiRetryItems(job, job.dir),
       cnkiRetryPaperId: typeof job.cnkiRetryPaperId === 'string' && PAPER_ID.test(job.cnkiRetryPaperId) ? job.cnkiRetryPaperId : null };
   }
 
@@ -736,10 +907,14 @@ class LiteratureConnector {
     this.appendEventLog(job, event);
     if (Number.isInteger(runId) && job.runId !== runId) return; // 旧一代 run：只审计不改状态
     if (job.status === 'cancelled') return;
+    if (stageKey === 'discover' && event.discoveryProgress) {
+      job.discoveryProgress = safeDiscoveryProgress(event.discoveryProgress);
+    }
     if (stageKey === 'discover' && Object.hasOwn(event, 'deferred_sources')) {
       job.deferredSources = deferredSources(event.deferred_sources, job.config);
     }
     if (event.type === 'stage') {
+      if (stageKey === 'discover') job.files = availableCandidateFiles(job.dir, job.files);
       if (stageKey === 'discover' && Number.isSafeInteger(event.count) && event.count >= 0) {
         job.count = event.count;
         this.mergeCounters(job, stageKey, event);
@@ -780,7 +955,9 @@ class LiteratureConnector {
       if (stageKey === 'discover') {
         const queue = checkpointDeferredSources(job.dir, job.config, job.deferredSources);
         const candidates = loadJsonFile(path.join(job.dir, 'candidates.json'));
-        if (queue.length || event.discovery_complete === false || candidates?.discovery_complete === false) {
+        const trialComplete = isScholarTrial(job.config) && event.trial_complete === true
+          && (job.discoveryProgress?.status === 'trial_complete' || checkpointDiscoveryProgress(job.dir, job.config)?.status === 'trial_complete');
+        if (!trialComplete && (queue.length || event.discovery_complete === false || candidates?.discovery_complete === false)) {
           const state = loadJsonFile(path.join(job.dir, 'discovery-state.json'));
           this.onStageEvent(job, runId, stageKey, { type: 'attention', stage: 'verification',
             source: state?.pending_source || queue[0], reason: state?.pending_reason || 'results_unrecognized',
@@ -804,11 +981,88 @@ class LiteratureConnector {
     return runStageProcess(this.root, job, job.python, scriptName, extraArgs, onEvent);
   }
 
+  async runScreenedFulltextBatches(job, python, runId, bundles, controller) {
+    const stopped = () => job.runId !== runId || job.status !== 'running' || controller.signal.aborted;
+    const ids = bundles.map(bundle => bundle.paper_id), total = Math.ceil(ids.length / 10);
+    let finalResult;
+    for (let offset = 0; offset < ids.length; offset += 10) {
+      if (stopped()) return;
+      const paperIds = ids.slice(offset, offset + 10), batch = offset / 10 + 1;
+      this.update(job, 'screening', `第 ${batch}/${total} 批：先核对 ${paperIds.length} 篇的摘要和篇关摘规则，再获取本批全文。`);
+      const screened = await this.screen(job, python, event => {
+        if (stopped()) return;
+        if (event.type === 'result') {
+          this.appendEventLog(job, event); this.registerFiles(job, event.files);
+          job.counters.screening = event.counts; this.update(job, 'screening', event.message);
+        } else this.onStageEvent(job, runId, 'fulltext', event);
+      }, controller.signal, { paperIds });
+      if (stopped()) return;
+      if (screened?.ok !== true || JSON.stringify(screened.selectedPaperIds) !== JSON.stringify(paperIds)) {
+        throw Object.assign(new Error('篇关摘批次未按所选文献完成，未开始本批下载。'), { code: 'SCREENING_ATTENTION', reason: 'screening_scope_invalid' });
+      }
+      let result;
+      const args = ['--resume', '--screening-batch', '--only', paperIds.join(',')];
+      if (job.fulltextFailurePolicy === 'skip') args.push('--skip-unavailable');
+      // Only an explicitly selected skip policy permits unavailable material
+      // to be skipped; advancing a batch never changes that policy.
+      await this.runStage(STAGE_SCRIPTS.fulltext, args, job, event => {
+        if (stopped()) return;
+        if (event.type === 'result') {
+          result = event;
+          this.registerFiles(job, event.files); this.registerFulltextFiles(job);
+          this.onStageEvent(job, runId, 'fulltext', { ...event, type: 'stage', stage: 'fulltext',
+            message: `第 ${batch}/${total} 批全文处理已保存；其余文献继续按批处理。` });
+        } else this.onStageEvent(job, runId, 'fulltext', event);
+      });
+      if (stopped()) return;
+      if (!result || JSON.stringify(result.selected_paper_ids) !== JSON.stringify(paperIds)
+          || (result.batch_complete !== true && result.quota_reached !== true)) {
+        this.onStageEvent(job, runId, 'fulltext', { type: 'attention', stage: 'fulltext', reason: 'fulltext_batch_incomplete',
+          message: '本批全文处理未明确结束；已完成项保留，请核查后继续。', files: ['fulltext/status.json'] });
+        return;
+      }
+      finalResult = result;
+      if (result.quota_reached === true) break;
+    }
+    if (stopped()) return;
+    if (!finalResult || (finalResult.scope_complete !== true && finalResult.quota_reached !== true)) {
+      this.onStageEvent(job, runId, 'fulltext', { type: 'attention', stage: 'fulltext', reason: 'fulltext_scope_incomplete',
+        message: '仍有未筛或未处理文献，未标记全文阶段完成。', files: ['fulltext/status.json'] });
+      return;
+    }
+    this.onStageEvent(job, runId, 'fulltext', { ...finalResult,
+      completion_scope: finalResult.quota_reached ? 'configured_max_papers' : 'all_candidate_batches',
+      message: finalResult.quota_reached ? '已达到本任务全文获取篇数上限，其余文献保持待处理。'
+        : '所有候选批次已完成篇关摘与全文获取处理；缺失材料仍待补充，尚未开始提取。' });
+  }
+
   async runSingleStage(job, python, stage, runId) {
     job.python = python;
     const onEvent = event => this.onStageEvent(job, runId, stage, event);
     const materialsOnly = isMaterialRecord(job, job.dir);
+    if (isSegmentRecord(job, job.dir)) segmentTasks.assertStage(job.dir, stage);
     if (materialsOnly && (stage !== 'fulltext' || !materialBasisFor(job.dir))) throw new Error('材料补齐记录只能运行原候选的全文材料获取');
+    if (stage === 'fulltext' && job.config.screeningPolicy && !materialsOnly) {
+      const controller = new AbortController(); job.screeningAbort = controller;
+      try {
+        if (!this.screen) throw Object.assign(new Error('篇关摘筛选服务尚未连接，未开始下载。'), { code: 'SCREENING_ATTENTION', reason: 'screening_model_unavailable' });
+        const bundles = require('./literature-screening').loadInputs(job.dir);
+        if (bundles.length > 10) return await this.runScreenedFulltextBatches(job, python, runId, bundles, controller);
+        const screened = await this.screen(job, python, event => {
+          if (job.runId !== runId || job.status !== 'running') return;
+          this.appendEventLog(job, event); this.registerFiles(job, event.files);
+          if (event.type === 'result') {
+            job.counters.screening = event.counts; this.update(job, 'screening', event.message);
+          } else this.onStageEvent(job, runId, stage, event);
+        }, controller.signal);
+        if (job.runId !== runId || job.status !== 'running') return;
+        if (screened?.ok !== true) throw Object.assign(new Error('篇关摘筛选未返回完成状态，未开始下载。'), { code: 'SCREENING_ATTENTION', reason: 'screening_output_invalid' });
+      } catch (error) {
+        if (error.code !== 'SCREENING_ATTENTION') throw error;
+        if (job.status === 'running') this.onStageEvent(job, runId, stage, { type: 'attention', stage: 'screening', reason: error.reason, message: error.message, files: ['screening/status.json'] });
+        return;
+      } finally { job.screeningAbort = null; }
+    }
     if (stage === 'discover' && this.search) {
       try { return await this.search(job, python, onEvent); }
       finally { job.deferSource = null; }
@@ -820,6 +1074,8 @@ class LiteratureConnector {
       extraArgs.push('--replenish-materials');
       if (job.materialAccessPolicy === 'defer') extraArgs.push('--defer-access');
       if (job.retryDeferred === true) extraArgs.push('--retry-deferred');
+      if (job.retrySkipped === true) extraArgs.push('--retry-skipped');
+      if (job.materialFirstPaperId) extraArgs.push('--first-paper', job.materialFirstPaperId);
     }
     if (stage === 'discover') {
       if (job.resumeCurrent) extraArgs.push('--scrape-current');
@@ -832,12 +1088,18 @@ class LiteratureConnector {
     try { return await this.runStage(STAGE_SCRIPTS[stage], extraArgs, job, onEvent); }
     finally {
       if (stage === 'discover') job.deferSource = null;
-      if (stage === 'fulltext') job.retryDeferred = false;
+      if (stage === 'fulltext') { job.retryDeferred = false; job.retrySkipped = false; job.materialFirstPaperId = null; }
     }
   }
 
   async run(job, fromStage = 'discover', until = 'discover') {
+    assertScholarTrialScope(job.config, fromStage, until);
     if (job.deletedAt) throw new Error('该任务已删除，请先恢复后再执行');
+    if (isSegmentRecord(job, job.dir)) {
+      const segment = segmentTasks.readBasis(job.dir, { verifyFiles: true });
+      if (STAGES.indexOf(fromStage) < STAGES.indexOf(segment.fromStage) || STAGES.indexOf(until) > STAGES.indexOf(segment.until)
+          || STAGES.indexOf(until) < STAGES.indexOf(fromStage)) throw new Error('执行阶段超出已确认的分段范围');
+    }
     if (isMaterialRecord(job, job.dir)) {
       if (!materialBasisFor(job.dir)) throw new Error('材料补齐冻结输入无法核对，未开始运行');
       fromStage = 'fulltext'; until = 'fulltext'; job.until = 'fulltext'; job.resumeRun = true;
@@ -848,6 +1110,8 @@ class LiteratureConnector {
     job.activeStage = fromStage;
     job.resumeStage = null;
     try {
+      if ((job.processingBasis || fs.existsSync(path.join(job.dir, 'processing-basis.json')))
+          && !processingBasisFor(job.dir, job.config)) throw new Error('后续处理的冻结候选或执行依据无法核验，未继续运行');
       const python = await this.prepare(job, (stage, message) => this.update(job, stage, message));
       if (job.runId !== runId || job.status !== 'running') return;
       for (let index = STAGES.indexOf(fromStage); index <= STAGES.indexOf(until); index += 1) {
@@ -889,6 +1153,7 @@ class LiteratureConnector {
       job.status = 'completed';
       job.activeStage = null;
       job.resumeStage = job.materialReplenishment ? null : next;
+      if (isSegmentRecord(job, job.dir)) restoreSegmentScope(job, job.dir);
       this.update(job, 'completed', job.message || '阶段完成');
     } catch (error) {
       if (job.runId !== runId) return;
@@ -908,29 +1173,53 @@ class LiteratureConnector {
       job.status = 'failed';
       job.error = error.message;
       this.update(job, 'failed', job.error);
+    } finally {
+      if (job.runId === runId && job.status === 'cancelled' && job.config?.researchPlan) {
+        job.resumeStage ||= job.activeStage || fromStage;
+        job.activeStage = null;
+        this.persist(job);
+      }
     }
   }
 
-  start(rawConfig, resumeCurrent = false, until = null) {
+  start(rawConfig, resumeCurrent = false, until = null, reviewSnapshot = null, preparation = null) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     const config = normalizeConfig(rawConfig, { executable: true });
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening)) throw new Error('已有文献检索正在运行，请等待或停止后重试');
     const boundary = until == null || until === '' ? 'discover' : String(until);
     if (!STAGES.includes(boundary)) throw new Error('阶段边界必须是 discover–export 的有效阶段名');
-    const id = randomUUID();
-    const job = { id, dir: path.join(this.base, id), config, resumeCurrent: resumeCurrent === true, status: 'running', stage: 'queued',
+    assertScholarTrialScope(config, 'discover', boundary);
+    if (reviewSnapshot && (reviewSnapshot.until !== boundary
+      || JSON.stringify(normalizeConfig(reviewSnapshot.config)) !== JSON.stringify(config))) {
+      throw new Error('核查快照与本次执行配置不一致，未开始检索');
+    }
+    const id = randomUUID(), lineage = reviewLineage(reviewSnapshot);
+    const job = { id, ...lineage, dir: path.join(this.base, id), config, resumeCurrent: !lineage.parentJobId && resumeCurrent === true, status: 'running', stage: 'queued',
       message: '任务已排队', count: 0, files: ['run_config.json'], events: [], error: null, child: null,
       stages: Object.fromEntries(STAGES.map(stage => [stage, 'pending'])), resumeStage: null, until: boundary,
       counters: {}, limits: resolveLimits(config), activeStage: null, python: null, resumeRun: false, attention: null,
       deferredSources: [], deferSource: null };
-    this.jobs.set(id, job);
     fs.mkdirSync(job.dir, { recursive: true });
     fs.writeFileSync(path.join(job.dir, 'run_config.json'), JSON.stringify(config, null, 2) + '\n', { flag: 'wx', mode: 0o444 });
+    if (reviewSnapshot) {
+      fs.writeFileSync(path.join(job.dir, 'rule-review-confirmed.json'), JSON.stringify(reviewSnapshot, null, 2) + '\n', { flag: 'wx', mode: 0o444 });
+      job.files.push('rule-review-confirmed.json');
+    }
+    this.jobs.set(id, job);
+    if (preparation?.basis) {
+      fs.writeFileSync(path.join(job.dir, 'research-basis.json'), JSON.stringify(preparation.basis, null, 2) + '\n', { flag: 'wx', mode: 0o444 });
+      job.files.push('research-basis.json');
+      job.status = 'needs_attention'; job.resumeStage = 'discover';
+      this.update(job, 'prepared', '已载入已确认方案，尚未执行检索。选好本次阶段后点击“开始检索”，或导入该式导出的完整题录；遇到登录或验证时再按提示处理。');
+      return this.public(job);
+    }
     this.update(job, 'queued', '准备首批候选检索');
     void this.run(job, 'discover', boundary);
     return this.public(job);
   }
 
   continueAvailable(id, options = {}) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const until = options?.until;
     if (!STAGES.slice(1).includes(until)) throw new Error('后续处理阶段必须为 dedupe–export');
@@ -940,6 +1229,7 @@ class LiteratureConnector {
     const parentDir = path.join(this.base, id);
     const parent = this.jobs.get(id) || loadJsonFile(path.join(parentDir, 'job.json'));
     if (!parent) throw new Error('检索任务不存在');
+    if (isScholarTrial(parent.config)) throw new Error('谷歌学术预试只获取候选，不能直接进入后续阶段');
     if (parent.deletedAt) throw new Error('该任务已删除，请先恢复后再处理');
     if (!['needs_attention', 'failed', 'cancelled'].includes(parent.status) || parent.resumeStage !== 'discover'
         || parent.child || parent.browserOpening) throw new Error('只能从已暂停的检索任务建立后续处理');
@@ -956,6 +1246,7 @@ class LiteratureConnector {
     if (!records?.length || (Object.hasOwn(candidates, 'count') && candidates.count !== records.length)) {
       throw new Error('没有可用的已保存候选，或候选数量与文件不一致');
     }
+    const executionEvidence = frozenExecutionEvidence(parentDir, config);
     const basis = { parentJobId: id, candidateCount: records.length,
       deferredSources: checkpointDeferredSources(parentDir, config), candidateSnapshotSha256: sha256(candidateBytes),
       createdAt: new Date().toISOString() };
@@ -964,11 +1255,13 @@ class LiteratureConnector {
     for (const [name, bytes] of [['run_config.json', configBytes], ['candidates.json', candidateBytes], ['candidates.csv', csvBytes]]) {
       fs.writeFileSync(path.join(dir, name), bytes, { flag: 'wx' });
     }
+    for (const [name, bytes] of executionEvidence) fs.writeFileSync(path.join(dir, name), bytes, { flag: 'wx', mode: 0o444 });
     fs.writeFileSync(path.join(dir, 'processing-basis.json'), JSON.stringify({ version: 1, ...basis,
-      configSnapshotSha256: sha256(configBytes), candidateCsvSnapshotSha256: sha256(csvBytes) }, null, 2) + '\n', { flag: 'wx' });
+      configSnapshotSha256: sha256(configBytes), candidateCsvSnapshotSha256: sha256(csvBytes),
+      executionBasisSha256: Object.fromEntries([...executionEvidence].map(([name, bytes]) => [name, sha256(bytes)])) }, null, 2) + '\n', { flag: 'wx' });
     const job = { id: newId, dir, config, resumeCurrent: false, status: 'running', stage: 'queued',
       message: `基于现有 ${records.length} 条候选建立后续处理；部分来源仍待补检`, count: records.length,
-      files: ['run_config.json', 'candidates.json', 'candidates.csv', 'processing-basis.json'], events: [], error: null, child: null,
+      files: ['run_config.json', 'candidates.json', 'candidates.csv', 'processing-basis.json', ...executionEvidence.keys()], events: [], error: null, child: null,
       stages: Object.fromEntries(STAGES.map(stage => [stage, stage === 'discover' ? 'done' : 'pending'])),
       resumeStage: 'dedupe', until, counters: { candidates: records.length }, limits: resolveLimits(config),
       activeStage: null, python: null, resumeRun: false, attention: null, deferredSources: [], deferSource: null,
@@ -979,8 +1272,61 @@ class LiteratureConnector {
     return this.public(job);
   }
 
+  segmentPreview(id) {
+    return segmentTasks.preview(segmentTasks.loadSource(this.root, id, this.jobs.get(id)));
+  }
+
+  async createSegmentTask(raw) {
+    const data = segmentTasks.request(raw);
+    for (const name of fs.readdirSync(this.base)) {
+      if (!ID.test(name)) continue;
+      const dir = path.join(this.base, name), saved = this.jobs.get(name) || loadJsonFile(path.join(dir, 'job.json'));
+      const marker = loadJsonFile(path.join(dir, segmentTasks.MARKER));
+      const link = marker?.requestId === data.requestId ? marker : saved?.segmentTask?.requestId === data.requestId ? saved.segmentTask : null;
+      if (!link) continue;
+      if (link.sourceJobId !== data.sourceJobId || link.fromStage !== data.fromStage || link.until !== data.until
+          || JSON.stringify(link.paperIds) !== JSON.stringify(data.paperIds)) throw new Error('同一请求标识不能用于不同分段输入');
+      if (!saved || saved.id !== name || saved.deletedAt) throw new Error('已有分段任务不完整或已删除，请先核对');
+      segmentTasks.readBasis(dir);
+      return this.snapshot(name);
+    }
+    if (this.segmentPreparing || [...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) throw new Error('文献任务正在处理，请稍后创建分段任务');
+    this.segmentPreparing = true;
+    try {
+      const source = segmentTasks.loadSource(this.root, data.sourceJobId, this.jobs.get(data.sourceJobId));
+      const initial = segmentTasks.plan(source, data);
+      const checked = await this.segmentPreflight(source, data.paperIds);
+      if (!Array.isArray(checked) || checked.length !== data.paperIds.length || new Set(checked.map(item => item?.paperId)).size !== checked.length) throw new Error('本地 PDF 预检范围无法核对');
+      for (const id of data.paperIds) {
+        const item = checked.find(item => item?.paperId === id);
+        if (item?.allowed !== true) throw new Error(id + '：' + String(item?.reason || 'PDF 身份或可读性未通过本地核对'));
+      }
+      const fresh = segmentTasks.loadSource(this.root, data.sourceJobId, this.jobs.get(data.sourceJobId));
+      const prepared = segmentTasks.plan(fresh, data);
+      const signature = plan => JSON.stringify([...plan.files].map(([name, bytes]) => [name, sha256(bytes)]))
+        + JSON.stringify([...plan.originals].map(([name, file]) => [name, file.sha256, file.size]));
+      if (signature(initial) !== signature(prepared)) throw new Error('预检期间原材料或字段已变化，未创建分段任务');
+      const id = randomUUID(), created = segmentTasks.create(this.root, id, prepared);
+      const first = STAGES.indexOf(data.fromStage);
+      const job = { id, dir: created.dir, config: prepared.config, status: 'needs_attention',
+        stage: data.fromStage === 'extract' ? 'awaiting_confirmation' : 'awaiting_segment_confirmation',
+        message: data.fromStage === 'extract' ? '所选材料已冻结；请在表头中讨论并确认字段，再显式开始提取。' : '已复用所选文献同版本的前序成果；请确认本次起止范围后执行。',
+        count: data.fromStage === 'extract' ? data.paperIds.length : prepared.counters.parameterRows, files: [], events: [], error: null, child: null, activeStage: null, python: null,
+        resumeStage: data.fromStage, until: data.until, resumeRun: true, resumeCurrent: false, attention: null,
+        stages: Object.fromEntries(STAGES.map((stage, index) => [stage, index < first ? 'done' : 'pending'])),
+        counters: prepared.counters,
+        limits: resolveLimits(prepared.config), deferredSources: [], deferSource: null, segmentTask: created.basis };
+      this.jobs.set(id, job);
+      this.registerFiles(job, [...prepared.files.keys(), ...prepared.originals.keys(), segmentTasks.MARKER]);
+      this.update(job, job.stage, job.message);
+      return this.public(job);
+    } finally { this.segmentPreparing = false; }
+  }
+
   replenishMaterials(id) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    if (isSegmentRecord(this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json')), path.join(this.base, id))) throw new Error('分段任务只运行已选后续阶段；材料获取请回原任务');
     const snapshot = materialReplenishment.sourceSnapshot(this.root, id, this.jobs.get(id));
     // A repeated click returns its existing acquisition record without
     // resuming it or launching another browser/worker.
@@ -1025,7 +1371,9 @@ class LiteratureConnector {
   }
 
   reviewFulltext(id) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    if (isSegmentRecord(this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json')), path.join(this.base, id))) throw new Error('分段任务不能改写已冻结材料，请回原任务核查');
     if (isMaterialRecord(this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json')), path.join(this.base, id))) throw new Error('请在材料补齐记录中继续获取材料；复核不替代补齐');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) {
       throw new Error('已有文献任务正在运行，请先停止或等待结束后复核');
@@ -1084,7 +1432,9 @@ class LiteratureConnector {
   restartCnki(id, paperId) { return this.retryCnki(id, paperId, true); }
 
   retryCnki(id, paperId, restart = false) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
+    if (isSegmentRecord(this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json')), path.join(this.base, id))) throw new Error('分段任务不能下载或改写冻结材料');
     if (isMaterialRecord(this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json')), path.join(this.base, id))) throw new Error('材料补齐记录请使用普通继续，不能改为单篇下载范围');
     if (typeof paperId !== 'string' || !PAPER_ID.test(paperId)) throw new Error('无效的单篇文献标识');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) {
@@ -1152,7 +1502,7 @@ class LiteratureConnector {
     const diskConfig = loadJsonFile(path.join(dir, 'run_config.json'));
     const config = saved.config || diskConfig || null;
     const job = {
-      id, dir, config, resumeCurrent: false, status: saved.status, stage: saved.stage, message: saved.message,
+      id, ...reviewLineage(saved), dir, config, resumeCurrent: false, status: saved.status, stage: saved.stage, message: saved.message,
       count: Number.isInteger(saved.count) ? saved.count : 0,
       files: Array.isArray(saved.files) ? saved.files.filter(isDeliverable) : ['run_config.json'],
       events: Array.isArray(saved.events) ? saved.events.slice(-30) : [],
@@ -1167,7 +1517,8 @@ class LiteratureConnector {
       deferredSources: checkpointDeferredSources(dir, config), deferSource: null, deletedAt: saved.deletedAt || null,
       processingBasis: processingBasisFor(dir, config),
       materialReplenishment: saved.materialReplenishment || null, replenishmentInvalid: saved.replenishmentInvalid === true,
-      materialAccessPolicy: saved.materialAccessPolicy === 'defer' ? 'defer' : 'pause', retryDeferred: false
+      materialAccessPolicy: saved.materialAccessPolicy === 'defer' ? 'defer' : 'pause', retryDeferred: false,
+      segmentTask: saved.segmentTask || null, segmentInvalid: saved.segmentInvalid === true
     };
     job.cnkiRetryPaperId = typeof saved.cnkiRetryPaperId === 'string' && PAPER_ID.test(saved.cnkiRetryPaperId) ? saved.cnkiRetryPaperId : null;
     const detected = detectStagedArtifacts(dir);
@@ -1192,32 +1543,82 @@ class LiteratureConnector {
     }
     restoreCnkiRetryScope(job, saved.status === 'running');
     restoreMaterialScope(job, dir, saved.status === 'running');
+    restoreSegmentScope(job, dir, saved.status === 'running');
     this.jobs.set(id, job);
     return job;
   }
 
   //: POST /api/literature/advance（§21.2.2）：从 resumeStage 续跑，缺省 until=export。
   advance(id, options = {}) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     const requested = options && typeof options === 'object' ? options : {};
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const stored = this.jobs.get(id) || loadJsonFile(path.join(this.base, id, 'job.json'));
     if (stored?.deletedAt) throw new Error('该任务已删除，请先恢复后再执行');
+    if (isScholarTrial(stored?.config)) {
+      if (stored.status === 'completed') throw new Error('谷歌学术预试已结束；扩大范围须另建并核查新任务');
+      if (options?.until && options.until !== 'discover') throw new Error('谷歌学术预试只能继续候选阶段（discover）');
+    }
     const materialsOnly = isMaterialRecord(stored, path.join(this.base, id));
+    const segmentOnly = isSegmentRecord(stored, path.join(this.base, id));
+    const segment = segmentOnly ? segmentTasks.readBasis(path.join(this.base, id), { verifyFiles: true }) : null;
+    if (!segment && Object.hasOwn(requested, 'confirmSegment')) throw new Error('仅分段任务可确认执行范围');
+    if (segment) {
+      const boundary = requested.until == null || requested.until === '' ? segment.until : requested.until;
+      if (!segmentTasks.STAGES.includes(boundary) || STAGES.indexOf(boundary) < STAGES.indexOf(segment.fromStage)
+          || STAGES.indexOf(boundary) > STAGES.indexOf(segment.until)) throw new Error('不能回退或越过已冻结的分段范围');
+      if (['skipUnavailable', 'deferSource', 'deferAccess', 'retryDeferred', 'retrySkipped', 'firstPaperId'].some(key => Object.hasOwn(requested, key))) throw new Error('分段任务不能重新检索、下载或改写冻结材料');
+      if (Object.hasOwn(requested, 'confirmSegment') && requested.confirmSegment !== true) throw new Error('请显式确认分段执行范围');
+      if (segment.schemaLocked && requested.confirmations != null) throw new Error('复用提取或校验成果的字段版本已冻结，不能修改');
+      if ((stored?.stage === 'awaiting_segment_confirmation' || (stored?.status === 'cancelled' && segment.schemaLocked)) && requested.confirmSegment !== true) throw new Error('请先确认分段执行范围；创建任务不会自动运行');
+      if (segment.fromStage === 'extract' && !segmentTasks.fields(path.join(this.base, id)) && requested.confirmations == null) throw new Error('请先核对并确认本次字段表头，才会开始提取');
+    }
     if (materialsOnly && !materialBasisFor(path.join(this.base, id))) throw new Error('材料补齐冻结输入无法核对，不能继续');
     const hasDeferAccess = Object.hasOwn(requested, 'deferAccess'), hasRetryDeferred = Object.hasOwn(requested, 'retryDeferred');
-    if (hasDeferAccess || hasRetryDeferred) {
+    const hasRetrySkipped = Object.hasOwn(requested, 'retrySkipped'), hasFirstPaper = Object.hasOwn(requested, 'firstPaperId');
+    // A completed materials-only record may still contain explicitly skipped
+    // gaps. Reopen only those recorded gaps, never a generic completed task.
+    const completedSkippedPapers = new Set();
+    if (materialsOnly && requested.retrySkipped === true && stored?.id === id
+        && stored.status === 'completed' && stored.stages?.fulltext === 'done') {
+      const entry = safeFile(path.join(this.base, id), 'fulltext/status.json');
+      const progress = entry && entry.size <= 20 * 1024 * 1024 ? loadJsonFile(entry.file) : null;
+      const items = Array.isArray(progress?.items) ? progress.items : [];
+      for (const action of materialReplenishment.skippedActions(path.join(this.base, id))) {
+        const item = items.find(value => value?.paper_id === action.paperId);
+        if (item?.material_skipped?.reason === action.reason && (action.mainPdfMissing === true
+            || action.supplements.missing.length || action.supplements.status !== 'complete'
+            || !['checked', 'none_declared', 'none_found'].includes(action.supplements.checkStatus))) completedSkippedPapers.add(action.paperId);
+      }
+    }
+    const retryCompletedMaterials = completedSkippedPapers.size > 0;
+    if (hasDeferAccess || hasRetryDeferred || hasRetrySkipped || hasFirstPaper) {
       if (!materialsOnly) throw new Error('暂留登录与人工补齐清单仅用于材料补齐记录');
-      if ((hasDeferAccess && requested.deferAccess !== true) || (hasRetryDeferred && requested.retryDeferred !== true)) {
+      if ((hasDeferAccess && requested.deferAccess !== true) || (hasRetryDeferred && requested.retryDeferred !== true)
+          || (hasRetrySkipped && requested.retrySkipped !== true)) {
         throw new Error('材料暂留与显式重试必须为 true');
       }
-      if (!stored || !['needs_attention', 'failed', 'cancelled'].includes(stored.status) || stored.resumeStage !== 'fulltext') {
+      if (!retryCompletedMaterials && (!stored || !['needs_attention', 'failed', 'cancelled'].includes(stored.status) || stored.resumeStage !== 'fulltext')) {
         throw new Error('只能在材料补齐暂停后继续，范围保持全文获取');
       }
-      if (hasRetryDeferred && stored.materialAccessPolicy !== 'defer' && requested.deferAccess !== true) {
+      if ((hasRetryDeferred || hasRetrySkipped || hasFirstPaper) && stored.materialAccessPolicy !== 'defer' && requested.deferAccess !== true) {
         throw new Error('请先启用暂留人工问题策略后再显式重试清单');
       }
       if (hasRetryDeferred && !materialReplenishment.manualActions(path.join(this.base, id)).length) {
         throw new Error('没有可重试的人工材料清单，请先继续处理其余文献');
+      }
+      if (hasRetrySkipped && !materialReplenishment.skippedActions(path.join(this.base, id)).length) {
+        throw new Error('没有可显式重试的已跳过材料');
+      }
+      if (hasFirstPaper) {
+        const status = loadJsonFile(path.join(this.base, id, 'fulltext', 'status.json'));
+        const first = typeof requested.firstPaperId === 'string' && PAPER_ID.test(requested.firstPaperId)
+          ? status?.items?.find(item => item?.paper_id === requested.firstPaperId) : null;
+        if (!first) throw new Error('优先文献必须属于本材料补齐任务');
+        if (retryCompletedMaterials && !completedSkippedPapers.has(requested.firstPaperId)) throw new Error('已完成材料记录只能优先重试尚未解决的已跳过材料');
+        if ((first.material_deferred && !hasRetryDeferred) || (first.material_skipped && !hasRetrySkipped)) {
+          throw new Error('优先文献仍在待处理或已跳过清单，请同时明确重试对应清单');
+        }
       }
     }
     if (materialsOnly && ((requested.until && requested.until !== 'fulltext') || requested.confirmations != null
@@ -1235,11 +1636,12 @@ class LiteratureConnector {
       if (requested.deferSource !== undefined || requested.confirmations != null) throw new Error('跳过全文不能同时修改检索来源或提取字段');
       if (requested.until != null && requested.until !== '' && requested.until !== 'fulltext') throw new Error('跳过文献只继续全文获取，不进入提取');
     }
-    let until = requested.until == null || requested.until === '' ? 'export' : String(requested.until);
+    let until = requested.until == null || requested.until === '' ? segment?.until || 'export' : String(requested.until);
+    if (isScholarTrial(stored?.config)) until = 'discover';
     if (materialsOnly) until = 'fulltext';
     if (hasSkip) until = 'fulltext';
     if (!STAGES.includes(until)) throw new Error('阶段边界必须是 discover–export 的有效阶段名');
-    if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening)) throw new Error('已有文献检索正在运行，请等待或停止后重试');
+    if ([...this.jobs.values()].some(job => job.status === 'running' || job.browserOpening || ((retryCompletedMaterials || segmentOnly) && job.child))) throw new Error('已有文献检索正在运行，请等待或停止后重试');
     const hasDefer = Object.hasOwn(requested, 'deferSource') && requested.deferSource !== undefined;
     if (hasDefer) {
       // Validate before loading/mutating a persisted job or appending any field
@@ -1264,23 +1666,37 @@ class LiteratureConnector {
       }
     }
     const job = this.jobs.get(id) || this.loadPersisted(id);
+    if ((job.processingBasis || fs.existsSync(path.join(job.dir, 'processing-basis.json')))
+        && !processingBasisFor(job.dir, job.config)) throw new Error('后续处理的冻结候选或执行依据无法核验，未继续运行');
     if (materialsOnly) restoreMaterialScope(job, job.dir);
+    if (segmentOnly) restoreSegmentScope(job, job.dir);
     if ((requested.until == null || requested.until === '') && job.status === 'needs_attention' && job.resumeStage === 'discover') until = job.until || 'discover';
     const resumeStoppedFulltext = job.status === 'cancelled' && (materialsOnly || (hasSkip && requested.skipUnavailable === true)) && job.resumeStage === 'fulltext';
-    if (job.status === 'cancelled' && !resumeStoppedFulltext) throw new Error('任务已停止，不能继续；请发起新检索');
+    const resumeConfirmed = job.status === 'cancelled' && requested.resumeConfirmed === true
+      && job.config?.researchPlan && job.config?.screeningPolicy
+      && fs.existsSync(path.join(job.dir, 'research-basis.json')) && STAGES.includes(job.resumeStage)
+      && !materialsOnly && !segmentOnly;
+    const resumeStoppedSegment = job.status === 'cancelled' && segmentOnly && segmentTasks.STAGES.includes(job.resumeStage)
+      && STAGES.indexOf(job.resumeStage) >= STAGES.indexOf(segment.fromStage) && STAGES.indexOf(job.resumeStage) <= STAGES.indexOf(segment.until);
+    if (job.status === 'cancelled' && !resumeStoppedFulltext && !resumeStoppedSegment && !resumeConfirmed) throw new Error('任务已停止，不能继续；请发起新检索');
+    if (resumeConfirmed && (job.child || job.screeningAbort || job.activeStage)) throw new Error('原任务正在保存停止状态，请稍后再继续');
+    if (resumeStoppedSegment && job.child) throw new Error('原分段进程正在退出，请稍后再继续');
     if (resumeStoppedFulltext && (job.child || !Array.isArray(loadJsonFile(path.join(job.dir, 'fulltext', 'status.json'))?.items))) {
       throw new Error(job.child ? '原任务进程正在退出，请稍后再继续' : '原全文进度无法核对，请先核查历史任务');
     }
     if (job.status === 'running') throw new Error('已有文献检索正在运行，请等待或停止后重试');
-    const stage = job.resumeStage || null;
+    const stage = retryCompletedMaterials ? 'fulltext' : job.resumeStage || null;
     if (!stage) throw new Error('该任务已完成全部阶段');
-    if (!['completed', 'needs_attention', 'failed'].includes(job.status) && !resumeStoppedFulltext) throw new Error('该任务已完成全部阶段');
+    if (!['completed', 'needs_attention', 'failed'].includes(job.status) && !resumeStoppedFulltext && !resumeStoppedSegment && !resumeConfirmed) throw new Error('该任务已完成全部阶段');
     if (job.browserOpening) throw new Error('正在打开检索页面，请稍后继续');
     if (STAGES.indexOf(until) < STAGES.indexOf(stage)) throw new Error('请选择当前待运行阶段或之后的阶段');
+    if (segmentOnly) segmentTasks.assertStage(job.dir, stage);
     if (requested.confirmations != null) this.appendConfirmations(job, requested.confirmations);
     if (hasSkip) job.fulltextFailurePolicy = requested.skipUnavailable ? 'skip' : 'pause';
     if (hasDeferAccess) job.materialAccessPolicy = 'defer';
     job.retryDeferred = hasRetryDeferred;
+    job.retrySkipped = hasRetrySkipped;
+    job.materialFirstPaperId = hasFirstPaper ? requested.firstPaperId : null;
     job.resumeRun = true;
     job.deferSource = hasDefer ? requested.deferSource : null;
     if (hasDefer) job.resumeCurrent = false;
@@ -1300,13 +1716,14 @@ class LiteratureConnector {
   }
 
   async openMaterialAction(id, paperId) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     if (!ID.test(id || '') || !PAPER_ID.test(paperId || '')) throw new Error('无效文献任务或文献标识');
     const dir = path.join(this.base, id), saved = this.jobs.get(id) || loadJsonFile(path.join(dir, 'job.json'));
     if (!saved || saved.deletedAt) throw new Error(saved?.deletedAt ? '该任务已删除，请先恢复' : '文献任务不存在');
     if (!isMaterialRecord(saved, dir) || !materialBasisFor(dir)) throw new Error('仅能打开有效材料补齐记录的人工问题页');
     if (saved.status !== 'needs_attention' || saved.resumeStage !== 'fulltext') throw new Error('请等待本轮材料处理暂停后再打开人工问题页');
     if ([...this.jobs.values()].some(job => job.status === 'running' || job.child || job.browserOpening)) throw new Error('任务浏览器仍在使用，请稍后再打开');
-    if (!materialReplenishment.manualActions(dir).some(item => item.paperId === paperId)) throw new Error('文献不在本任务人工材料清单中');
+    if (!materialReplenishment.manualActions(dir).some(item => item.paperId === paperId)) throw new Error('文献不在本任务待处理与待重查清单中');
     const browserFile = safeFile(dir, 'fulltext-browser.json');
     const browser = browserFile && browserFile.size <= 20 * 1024 * 1024 ? loadJsonFile(browserFile.file) : null;
     const deferred = browser?.deferred_papers?.[paperId];
@@ -1325,6 +1742,7 @@ class LiteratureConnector {
   }
 
   async openLogin(id) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const job = this.jobs.get(id) || this.loadPersisted(id);
     if (job.deletedAt) throw new Error('该任务已删除，请先恢复后再打开检索页面');
@@ -1401,13 +1819,15 @@ class LiteratureConnector {
     }
     restoreCnkiRetryScope(saved, interrupted);
     restoreMaterialScope(saved, dir, interrupted);
+    restoreSegmentScope(saved, dir, interrupted);
     saved.materialManualActions = saved.materialReplenishment ? materialReplenishment.manualActions(dir) : [];
     saved.materialManualCount = saved.materialManualActions.length;
     saved.materialSkippedActions = saved.materialReplenishment ? materialReplenishment.skippedActions(dir) : [];
     saved.materialSkippedCount = saved.materialSkippedActions.length;
-    saved.canReplenishMaterials = materialReplenishment.eligible(this.root, id, saved);
-    saved.canReviewFulltext = !saved.materialReplenishment && fulltextReviewEligible(saved, dir);
-    saved.cnkiRetryItems = saved.materialReplenishment ? [] : cnkiRetryItems(saved, dir);
+    saved.canReplenishMaterials = !saved.segmentTask && materialReplenishment.eligible(this.root, id, saved);
+    saved.canReviewFulltext = !saved.segmentTask && !saved.materialReplenishment && fulltextReviewEligible(saved, dir);
+    saved.cnkiRetryItems = saved.materialReplenishment || saved.segmentTask ? [] : cnkiRetryItems(saved, dir);
+    saved.files = availableCandidateFiles(dir, saved.files);
     return saved;
   }
 
@@ -1427,20 +1847,22 @@ class LiteratureConnector {
       saved.deletedAt = saved.deletedAt || null;
       if (saved.deletedAt && options.includeDeleted !== true) continue;
       if (!this.jobs.has(name) && saved.status === 'running' && (hasCnkiRetryScope(saved)
-          || isMaterialRecord(saved, path.join(this.base, name)))) saved = this.snapshot(name);
+          || isMaterialRecord(saved, path.join(this.base, name)) || isSegmentRecord(saved, path.join(this.base, name)))) saved = this.snapshot(name);
       const config = saved.config || loadJsonFile(path.join(this.base, name, 'run_config.json'));
       saved.deferredSources = checkpointDeferredSources(path.join(this.base, name), config);
       saved.deferredOnly = checkpointDeferredOnly(path.join(this.base, name), config);
       saved.processingBasis = processingBasisFor(path.join(this.base, name), config);
       restoreMaterialScope(saved, path.join(this.base, name));
+      restoreSegmentScope(saved, path.join(this.base, name));
       saved.materialManualActions = saved.materialReplenishment ? materialReplenishment.manualActions(path.join(this.base, name)) : [];
       saved.materialManualCount = saved.materialManualActions.length;
       saved.materialSkippedActions = saved.materialReplenishment ? materialReplenishment.skippedActions(path.join(this.base, name)) : [];
       saved.materialSkippedCount = saved.materialSkippedActions.length;
-      saved.canReplenishMaterials = materialReplenishment.eligible(this.root, name, saved);
+      saved.canReplenishMaterials = !saved.segmentTask && materialReplenishment.eligible(this.root, name, saved);
       saved.executionOrder = executionOrder(config, saved.deferredSources);
-      saved.canReviewFulltext = !saved.materialReplenishment && fulltextReviewEligible(saved, path.join(this.base, name));
-      saved.cnkiRetryItems = saved.materialReplenishment ? [] : cnkiRetryItems(saved, path.join(this.base, name));
+      saved.canReviewFulltext = !saved.segmentTask && !saved.materialReplenishment && fulltextReviewEligible(saved, path.join(this.base, name));
+      saved.cnkiRetryItems = saved.materialReplenishment || saved.segmentTask ? [] : cnkiRetryItems(saved, path.join(this.base, name));
+      saved.files = availableCandidateFiles(path.join(this.base, name), saved.files);
       entries.push({ mtime: stat.mtimeMs, job: saved });
     }
     entries.sort((a, b) => b.mtime - a.mtime);
@@ -1448,6 +1870,7 @@ class LiteratureConnector {
   }
 
   setDeleted(id, deleted) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const dir = path.join(this.base, id), file = path.join(dir, 'job.json');
     let saved = loadJsonFile(file);
@@ -1503,12 +1926,20 @@ class LiteratureConnector {
   }
 
   cancel(id) {
+    if (this.segmentPreparing) throw new Error('正在冻结分段材料，请稍后再操作');
     if (!ID.test(id || '')) throw new Error('无效检索任务标识');
     const job = this.jobs.get(id) || this.loadPersisted(id);
     if (job.deletedAt) throw new Error('该任务已删除，请先恢复后再操作');
     if (!job || !['running', 'needs_attention'].includes(job.status)) throw new Error('检索任务未在运行');
     job.status = 'cancelled';
+    if (job.config?.researchPlan && STAGES.includes(job.activeStage)) job.resumeStage = job.activeStage;
+    job.screeningAbort?.abort();
     if (job.child) { try { job.child.kill('SIGTERM'); } catch (_) {} }
+    if (isSegmentRecord(job, job.dir)) {
+      restoreSegmentScope(job, job.dir);
+      this.update(job, 'cancelled', '分段任务已停止；逐篇完成的成果保留，可在原范围内显式继续。');
+      return this.public(job);
+    }
     const discover = !job.activeStage || job.activeStage === 'discover';
     this.update(job, 'cancelled', discover ? '检索已停止；持久浏览器保持打开' : '任务已停止；已完成的阶段产物保留');
     return this.public(job);

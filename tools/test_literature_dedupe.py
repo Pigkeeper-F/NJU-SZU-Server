@@ -95,7 +95,7 @@ class DedupeMergeTest(unittest.TestCase):
             self.assertEqual(set(member) - set(second), {"screening_reason"})
             self.assertEqual(member["candidate_id"], "GSC-B2-003")
 
-    def test_normalized_title_substring_hit_is_exact_merge(self) -> None:
+    def test_title_substring_is_only_probable_and_never_auto_excluded(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             _write_candidates(root, [
@@ -107,11 +107,11 @@ class DedupeMergeTest(unittest.TestCase):
             self.assertEqual(code, 0)
             group = json.loads((root / "dedupe" / "dedupe.json").read_text(encoding="utf-8"))["groups"][0]
             self.assertEqual(group["candidate_ids"], ["GSC-001", "GSC-B2-001"])
-            self.assertEqual(group["merge_confidence"], "exact")
-            self.assertEqual(group["merge_reason"], "title_substring")
-            self.assertEqual(group["max_score"], 0.95)
-            self.assertFalse(group["needs_review"])
-            self.assertEqual(group["records"][1]["screening_status"], "auto_excluded_duplicate")
+            self.assertEqual(group["merge_confidence"], "probable")
+            self.assertEqual(group["merge_reason"], "title_jaccard")
+            self.assertGreaterEqual(group["max_score"], 0.55)
+            self.assertTrue(group["needs_review"])
+            self.assertEqual(group["records"][1]["screening_status"], "pending_review")
 
     def test_cjk_bigram_jaccard_hit_is_probable_and_never_silent(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

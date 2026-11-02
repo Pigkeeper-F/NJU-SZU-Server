@@ -15,12 +15,15 @@ import json
 import re
 from urllib.parse import urlencode, urlsplit
 
+from literature_source_access import submission_allowed
+
 
 SOURCE_INFO = {
     "wanfang": ("万方", "https://g.wanfangdata.com.cn/"),
     "scopus": ("Scopus", "https://www.scopus.com/pages/home?display=basic#basic"),
     "pubmed": ("PubMed", "https://pubmed.ncbi.nlm.nih.gov/"),
 }
+MAX_QUERY_CHARS = 32768  # Same search-expression bound as literature-config.js.
 
 # The observed homepage and results search box vary in placeholder punctuation
 # and spacing. Use the same visible input selectors for waiting, filling and
@@ -275,7 +278,9 @@ def _named_button(page, selectors, names):
     return None
 
 
-def _submit(page, field, query, buttons, *, button_names=()):
+def _submit(page, field, query, buttons, *, button_names=(), source=None):
+    if source and not submission_allowed(page, source):
+        return False
     if field is None:
         return False
     button = _named_button(page, buttons, button_names) if button_names else _first_visible(page, buttons)
@@ -283,6 +288,8 @@ def _submit(page, field, query, buttons, *, button_names=()):
         return False
     field.fill(query)
     if _normalized(field.input_value()) != _normalized(query):
+        return False
+    if source and not submission_allowed(page, source):
         return False
     button.click()
     return True
@@ -350,7 +357,71 @@ def _balanced_expression(value):
     return depth == 0 and not quoted
 
 
+def _unquoted_expression(value):
+    """Hide phrase/exact-phrase contents before identifying executable fields."""
+    output, quoted, braces, escaped = [], False, 0, False
+    for character in value:
+        if escaped:
+            output.append(" ")
+            escaped = False
+        elif character == "\\":
+            output.append(" ")
+            escaped = True
+        elif character == '"' and not braces:
+            quoted = not quoted
+            output.append(" ")
+        elif character == "{" and not quoted:
+            braces += 1
+            output.append(" ")
+        elif character == "}" and braces and not quoted:
+            braces -= 1
+            output.append(" ")
+        else:
+            output.append(" " if quoted or braces else character)
+    return "".join(output)
+
+
+def native_query_notice(source, query):
+    """Fail closed until the actual advanced/professional editor is verified.
+
+    A single Scopus TITLE-ABS-KEY or WOS TS wrapper can be represented by the
+    verified basic field picker. Other field expressions cannot, even if their
+    text matches a search box or an old result-page binding.
+    """
+    value = str(query or "").strip()
+    if source == "scopus":
+        wrapped = re.fullmatch(r"TITLE-ABS-KEY\s*\((.*)\)", value, re.I | re.S)
+        if wrapped and wrapped.group(1).strip() and _balanced_expression(wrapped.group(1)):
+            value = wrapped.group(1)
+        outside = _unquoted_expression(value)
+        native = (re.search(r"\b(?!(?:AND|OR|NOT)\b)[A-Z][A-Z0-9_-]*\s*\(", outside, re.I)
+                  or re.search(r"\b(?:PUBYEAR|DOCTYPE|LANGUAGE)\s*(?:[=<>]|\b(?:AFT|BEF|IS)\b)", outside, re.I))
+        if native:
+            return "该完整 Scopus 字段式需要 Advanced search。当前自动适配器尚未验证实际高级编辑器，已暂停且未把检索式提交到普通字段。请在官方高级检索页粘贴原式、核对条件并导出题录后导入；不会把普通检索命中当作本式结果。"
+    elif source == "web-of-science":
+        wrapped = re.fullmatch(r"TS\s*=\s*\((.*)\)", value, re.I | re.S)
+        if wrapped and wrapped.group(1).strip() and _balanced_expression(wrapped.group(1)):
+            value = wrapped.group(1)
+        outside = _unquoted_expression(value)
+        if (re.search(r"\b[A-Z][A-Z0-9_-]*\s*=", outside, re.I)
+                or re.search(r"(?:^|[\s(])#[0-9]+\b", outside)):
+            return "该完整 Web of Science 字段式需要 Advanced Search / Query Builder。当前自动适配器仅验证普通 Topic 检索，未验证高级编辑器，已暂停且未将字段式提交到 Topic。请在官方高级检索页粘贴原式、核对条件并导出题录后导入；不会把普通主题检索当作本式成功。"
+    elif source == "cnki":
+        outside = _unquoted_expression(value)
+        if (re.search(r"\b(?:TKA|SU|TI|KY|AB|FT|AU|FI|FU|AF|JN|YE|LY|SN|CN|DOI?|RT|CLC)\s*(?:=|%|>=?|<=?|[:：])", outside, re.I)
+                or re.search(r"(?:篇关摘|主题|题名|关键词|摘要|全文|作者|作者单位|来源|发表时间)\s*[:：=]", outside)):
+            return "该知网字段式需要专业检索。当前自动适配器仅验证普通主题入口，未验证专业编辑器，已暂停且未将 TKA/TI/KY 等字段式作为普通主题关键词执行。请在知网专业检索页粘贴原式、核对条件并导出题录后导入；不会把普通主题结果算作专业式成功。"
+    elif source == "wanfang":
+        outside = _unquoted_expression(value)
+        if (re.search(r"(?:主题|题名或关键词|题名|关键词|摘要|全部|作者|第一作者|作者单位|刊名|机构|DOI|发表时间|文献类型)\s*[:：=]", outside, re.I)
+                or re.search(r"[\w\u4e00-\u9fff]+\s*[:：=]\s*\(", outside)):
+            return "该万方字段式需要专业检索。当前自动适配器尚未验证实际专业编辑器，已暂停且未将原式输入首页普通检索框。请在万方专业检索页粘贴原式、核对条件并导出题录后导入；不能将普通检索结果算作专业式成功。"
+    return None
+
+
 def _submit_scopus(page, query):
+    if native_query_notice("scopus", query) or not submission_allowed(page, "scopus"):
+        return False
     if not _scopus_document_mode(page):
         return False
     if not _is_title_abstract_keywords(_scopus_fields(page)):
@@ -383,7 +454,7 @@ def _submit_scopus(page, query):
         query = wrapped.group(1).strip()
         if not query or not _balanced_expression(query):
             return False
-    if re.search(r"\b(?:TITLE-ABS-KEY|TITLE_ABS_KEY|TITLE|AUTH(?:LASTNAME|FIRST)?|AFFIL|ABS|KEY|DOCTYPE|PUBYEAR|SRCTITLE|SUBJAREA|INDEXTERMS|EXACTKEYWORD)[\s(=]", query, re.I):
+    if native_query_notice("scopus", query):
         # Advanced field expressions must not be silently treated as free text
         # in the basic Title/Abstract/Keywords form.
         return False
@@ -398,7 +469,7 @@ def _submit_scopus(page, query):
         'button#search', 'button#search-button', 'button[data-testid="search-button"]',
         'button[type="submit"]:has-text("Search")', 'button:text-is("Search")',
         'button:text-is("检索")',
-    ])
+    ], source="scopus")
     if submitted:
         _wait(page, 'a[href*="/pages/publications/"],a.ddmDocTitle,a.docTitle,[data-testid="document-title"],[data-testid="no-results"],.no-results,input[type="password"]')
     return submitted
@@ -407,13 +478,17 @@ def _submit_scopus(page, query):
 def navigate(page, source, query, year_from=None, year_to=None):
     """Submit the frozen query on a fixed official page; never bypass auth."""
     del year_from, year_to  # Existing workflow performs documented year post-filtering.
-    if source not in SOURCE_INFO or not isinstance(query, str) or not query.strip() or len(query) > 2000:
+    if source not in SOURCE_INFO or not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY_CHARS:
+        return False
+    if native_query_notice(source, query):
         return False
     url = SOURCE_INFO[source][1]
     if source == "pubmed":
         # NLM documents term= as its public, bookmarkable search parameter.
         url += "?" + urlencode({"term": query})
     page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    if not submission_allowed(page, source):
+        return False
     if source == "pubmed":
         _wait(page, 'article.full-docsum,.no-results,#id_term,input[type="password"]')
         return True
@@ -421,12 +496,14 @@ def navigate(page, source, query, year_from=None, year_to=None):
         _wait(page, '#basic-panel input[id^="autosuggest-"],#searchterm1,[data-testid="search-input"],input[type="password"]')
         return _submit_scopus(page, query)
     _wait(page, ','.join((*WANFANG_SEARCH_FIELDS, 'input[type="password"]')))
+    if not submission_allowed(page, source):
+        return False
     field = _first_visible(page, WANFANG_SEARCH_FIELDS)
     submitted = _submit(page, field, query, [
         'button.search-btn', 'button.search-button', '.search-box button[type="submit"]',
         'button:text-is("检索")', 'button:text-is("搜索")', '.search-btn:text-is("检索")',
         '.search-btn:text-is("搜索")',
-    ], button_names=("检索", "搜索"))
+    ], button_names=("检索", "搜索"), source="wanfang")
     if submitted:
         # Generic homepage recommendation containers are not search results.
         # Wait for the same visible paper cards used by snapshot(), or an

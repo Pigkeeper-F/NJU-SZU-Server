@@ -182,6 +182,95 @@ class DeferAccessTests(unittest.TestCase):
                 self.run_defer(job, config, retry, retry_deferred=True)
                 self.assertEqual((retry.calls, retry.resumed), ([], []))
 
+    def test_page_not_ready_keeps_original_pending_then_other_papers_finish_without_touching_six_pdfs_or_old_skip(self):
+        with tempfile.TemporaryDirectory() as root:
+            job, config, records, targets, store = self.fixture(root, count=10, pdf_count=6, html_count=1, checked="none_declared")
+            items = read_status(job)["items"]
+            items[6]["material_skipped"] = {"reason": "pdf_unavailable", "message": "Earlier confirmed no PDF"}
+            store.paper(targets[6])["material_skipped"] = dict(items[6]["material_skipped"])
+            store.record_discovery(targets[7], {"status": "checked", "links": [descriptor("dataset.xlsx", label="Supplementary measurements")]})
+            store.flush(); lf._write_status(job, items)
+            originals = {p: p.read_bytes() for p in (job / "fulltext/files").iterdir()}
+            first = DeferredFetcher(records, {"PMID-008": ("page_not_ready", "页面仍在加载或生成文件，活动等待上限已到；原页保留。")})
+            _, events = self.run_defer(job, config, first)
+            self.assertEqual(events[-1]["reason"], "deferred_materials")
+            self.assertEqual(events[-1]["counts"]["deferred_materials"], 1)
+            self.assertEqual(events[-1]["counts"]["material_skipped"], 1)
+            self.assertEqual(read_status(job)["counts"]["fetched_pdf"], 8)
+            self.assertEqual([entry["paper_id"] for entry in first.deferred], ["PMID-008"])
+            self.assertFalse(any(url in {records[6]["result_url"], records[6]["fulltext_links"][0]["url"]} for kind, url in first.calls))
+            self.assertEqual([url for kind, url in first.calls if kind == "fetch_pdf"], [records[8]["fulltext_links"][0]["url"], records[9]["fulltext_links"][0]["url"]])
+            report = json.loads((job / lf.MANUAL_ACTION_FILES[0]).read_text(encoding="utf-8"))["items"]
+            self.assertEqual(len(report), 1)
+            self.assertEqual(report[0]["reason"], "page_not_ready")
+            self.assertIsNone(report[0]["main_pdf_missing"])
+            self.assertEqual(report[0]["main_pdf_status"], "page_not_ready")
+            self.assertEqual(report[0]["page_readiness"], "not_ready")
+            self.assertEqual(report[0]["supplements"]["missing"], [])
+            self.assertEqual(report[0]["supplements"]["pending"][0]["label"], "Supplementary measurements")
+            self.assertNotIn("尚缺", (job / lf.MANUAL_ACTION_FILES[2]).read_text(encoding="utf-8"))
+            for path, blob in originals.items():
+                self.assertEqual(path.read_bytes(), blob)
+
+    def test_page_not_ready_requires_explicit_retry_and_old_skip_is_never_retried(self):
+        with tempfile.TemporaryDirectory() as root:
+            job, config, records, _, _ = self.fixture(root, count=3, html_count=0)
+            items = read_status(job)["items"]
+            items[1]["material_skipped"] = {"reason": "page_error", "message": "Confirmed 404"}
+            lf._write_status(job, items)
+            first = DeferredFetcher(records, {"PMID-001": ("page_not_ready", "File is still generating; inspect later")})
+            self.run_defer(job, config, first)
+            second = DeferredFetcher(records)
+            self.run_defer(job, config, second)
+            self.assertEqual(second.calls, [])
+            retry = DeferredFetcher(records)
+            _, events = self.run_defer(job, config, retry, retry_deferred=True)
+            self.assertEqual(retry.resumed, ["PMID-001"])
+            self.assertEqual([url for kind, url in retry.calls if kind == "fetch_pdf"], [records[0]["fulltext_links"][0]["url"]])
+            self.assertEqual(events[-1]["type"], "result")
+            self.assertIn("material_skipped", read_status(job)["items"][1])
+
+    def test_pending_supplement_preserves_existing_pdf_and_does_not_claim_missing_body(self):
+        with tempfile.TemporaryDirectory() as root:
+            job, config, records, _, _ = self.fixture(root, pdf_count=1, html_count=0, checked="unknown")
+            saved = (job / "fulltext/files/PMID-001.pdf").read_bytes()
+            first = DeferredFetcher(records, inspections={"PMID-001": {"status": "attention", "reason": "page_not_ready", "message": "Publisher page is still loading"}})
+            self.run_defer(job, config, first)
+            action = json.loads((job / lf.MANUAL_ACTION_FILES[0]).read_text(encoding="utf-8"))["items"][0]
+            self.assertFalse(action["main_pdf_missing"])
+            self.assertEqual(action["main_pdf_status"], "downloaded")
+            self.assertEqual(action["supplements"]["check_status"], "page_not_ready")
+            self.assertEqual(first.completed, 0)
+            retry = DeferredFetcher(records)
+            self.run_defer(job, config, retry, retry_deferred=True)
+            self.assertFalse(any(kind == "fetch_pdf" for kind, _ in retry.calls))
+            self.assertEqual((job / "fulltext/files/PMID-001.pdf").read_bytes(), saved)
+
+    def test_legacy_active_loading_timeout_is_pending_but_existing_skip_is_not_reopened(self):
+        for state in ("pause", "deferred", "skipped"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as root:
+                job, config, records, _, _ = self.fixture(root, html_count=0)
+                items = read_status(job)["items"]
+                item = items[0]
+                item.pop("acquisition_skip")
+                item.update(status="needs_attention", pause_reason="load_timeout", reason="文件正在生成，页面仍在加载；等待后再检查。")
+                if state != "pause":
+                    item["material_" + state] = {"reason": "load_timeout", "message": item["reason"]}
+                lf._write_status(job, items)
+                fetcher = DeferredFetcher(records)
+                _, events = self.run_defer(job, config, fetcher)
+                self.assertEqual(fetcher.calls, [])
+                self.assertEqual(fetcher.completed, 0)
+                self.assertEqual(fetcher.closed_deferred, [])
+                current = read_status(job)["items"][0]
+                if state == "skipped":
+                    self.assertEqual(events[-1]["type"], "result")
+                    self.assertNotIn("material_deferred", current)
+                else:
+                    self.assertEqual(events[-1]["reason"], "deferred_materials")
+                    self.assertEqual(current["material_deferred"]["reason"], "page_not_ready")
+                    self.assertNotIn("material_skipped", current)
+
     def test_old_non_auth_manual_entries_migrate_without_requests_and_only_close_their_held_pages(self):
         with tempfile.TemporaryDirectory() as root:
             job, config, records, targets, store = self.fixture(root, count=3, html_count=1, pdf_count=1, checked="unknown")

@@ -40,6 +40,40 @@ def docx_blob():
 
 
 class StoreTests(unittest.TestCase):
+    def test_atomic_replace_retries_transient_windows_locks_then_succeeds(self):
+        for code in (5, 32):
+            with self.subTest(winerror=code), tempfile.TemporaryDirectory() as root:
+                target = Path(root) / "materials.json"
+                target.write_bytes(b"old manifest")
+                actual_replace = materials.os.replace
+                calls = []
+                def replace(source, destination):
+                    calls.append(True)
+                    if len(calls) <= 2:
+                        error = PermissionError("synthetic Windows sharing conflict")
+                        error.winerror = code
+                        raise error
+                    return actual_replace(source, destination)
+                with patch.object(materials.os, "replace", side_effect=replace), patch.object(materials.time, "sleep") as pause:
+                    materials._atomic_bytes(target, b"new manifest")
+                self.assertEqual(len(calls), 3)
+                self.assertEqual([call.args[0] for call in pause.call_args_list], [0.05, 0.1])
+                self.assertEqual(target.read_bytes(), b"new manifest")
+
+    def test_atomic_replace_permanent_or_other_errors_preserve_original_and_raise(self):
+        for code, attempts in ((5, 7), (32, 7), (183, 1)):
+            with self.subTest(winerror=code), tempfile.TemporaryDirectory() as root:
+                target = Path(root) / "materials.json"
+                target.write_bytes(b"original manifest")
+                error = PermissionError("synthetic permanent denial")
+                error.winerror = code
+                with patch.object(materials.os, "replace", side_effect=error) as replace, patch.object(materials.time, "sleep") as pause:
+                    with self.assertRaises(PermissionError):
+                        materials._atomic_bytes(target, b"new manifest")
+                self.assertEqual(replace.call_count, attempts)
+                self.assertLess(sum(call.args[0] for call in pause.call_args_list), 2)
+                self.assertEqual(target.read_bytes(), b"original manifest")
+
     def make_store(self, root, job_id=NEW, record=None):
         record = record or row("CURRENT")
         job = make_job(root, job_id, [record])
@@ -117,6 +151,25 @@ class StoreTests(unittest.TestCase):
                 store.record_discovery(target, {"status": prior, "reason": "Verified article page"})
                 store.record_discovery(target, {"status": "unknown", "reason": "PDF viewer has no links"})
                 self.assertEqual(store.paper(target)["supplement_check"]["status"], prior)
+
+    def test_empty_none_declared_cannot_hide_previously_observed_supplement(self):
+        with tempfile.TemporaryDirectory() as root:
+            _, target, store = self.make_store(root)
+            store.record_discovery(target, {"status": "unknown", "links": [descriptor("missing.xlsx")]})
+            store.record_discovery(target, {"status": "none_declared", "links": []})
+            paper = store.paper(target)
+            self.assertEqual(paper["supplement_check"]["status"], "checked")
+            self.assertEqual(len(store.pending_supplements(target)), 1)
+            self.assertEqual(store.completeness(target)["status"], "partial")
+
+    def test_new_link_invalidates_prior_none_declared_even_when_inspection_is_unknown(self):
+        with tempfile.TemporaryDirectory() as root:
+            _, target, store = self.make_store(root)
+            store.record_discovery(target, {"status": "none_declared", "links": []})
+            store.record_discovery(target, {"status": "unknown", "links": [descriptor()]})
+            self.assertEqual(store.paper(target)["supplement_check"]["status"], "unknown")
+            self.assertEqual(len(store.pending_supplements(target)), 1)
+            self.assertFalse(store.paper_ready(target))
 
     def test_problem_state_and_message_are_sanitized_without_claiming_download_success(self):
         with tempfile.TemporaryDirectory() as root:

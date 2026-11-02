@@ -27,6 +27,7 @@ BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_REQUEST_INTERVAL = 0.35  # NCBI: at most 3 requests/second without an API key.
 MAX_ESEARCH_RECORDS = 10_000  # Official PubMed ESearch per-query retrieval cap.
+MAX_QUERY_CHARS = 32768  # Same search-expression bound as literature-config.js.
 _request_lock = threading.Lock()
 _last_request: float | None = None
 
@@ -234,8 +235,8 @@ def run(query: str, limit: int = 10, year_from: int | None = None,
                             "transport": "ncbi_eutilities", "page_index": page_index,
                             "has_next": None, "total_count": None}
     try:
-        if not isinstance(query, str) or not query.strip() or len(query) > 2000:
-            raise PubMedError("PubMed 检索式必须为 1 到 2000 字的非空文本。")
+        if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY_CHARS:
+            raise PubMedError(f"PubMed 检索式必须为1到{MAX_QUERY_CHARS}字符的非空文本；原式未自动截断。")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
             raise PubMedError("PubMed 每批返回数量必须为 1 到 10。")
         if isinstance(page_index, bool) or not isinstance(page_index, int) or page_index < 0:

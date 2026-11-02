@@ -139,6 +139,7 @@ class ReuseTests(unittest.TestCase):
         right = reuse.identity(row(source_key="cnki", result_url="https://kns.cnki.net/kcms2/article/abstract?dbcode=CJFQ&dbname=CJFD2024&filename=ARTICLE02"))
         self.assertEqual(reuse.match_identity(left, right), "")
         right["cnki_id"] = left["cnki_id"]
+        right["source_ids"] = left["source_ids"]
         right["doi"] = ""
         self.assertEqual(reuse.match_identity(left, right), "cnki_document_exact")
 
@@ -318,6 +319,37 @@ class ReuseTests(unittest.TestCase):
             self.assertEqual(len(items), 2)
             self.assertEqual(items[1]["reused_from"]["paper_id"], "FIRST")
             self.assertEqual(items[1]["reused_from"]["job_id"], NEW)
+
+    def test_metadata_cache_reuses_unchanged_jobs_and_invalidates_changed_status(self):
+        with tempfile.TemporaryDirectory() as root:
+            old, new, target, _ = self.fixture(root, proof=True)
+            calls = []
+            def load(folder, config):
+                calls.append(folder.name)
+                return fulltext.load_targets(folder, config)
+            reuse.ReuseCatalog(new, [target], load)
+            self.assertEqual(calls, [OLD])
+            calls.clear()
+            catalog = reuse.ReuseCatalog(new, [target], load)
+            self.assertEqual(calls, [])
+            self.assertEqual(catalog.try_reuse(target, {})["status"], "reused")
+            metadata = json.loads((old / "job.json").read_text(encoding="utf-8"))
+            metadata["status"] = "running"
+            (old / "job.json").write_text(json.dumps(metadata), encoding="utf-8")
+            catalog = reuse.ReuseCatalog(new, [target], load)
+            self.assertFalse(any(entry[0] == old for entry in catalog.entries))
+
+    def test_indexed_lookup_checks_only_matching_identity_without_weakening_file_checks(self):
+        with tempfile.TemporaryDirectory() as root:
+            old, new, target, item = self.fixture(root, proof=True)
+            catalog = reuse.ReuseCatalog(new, [target], fulltext.load_targets)
+            for index in range(1000):
+                other = {**target, "paper_id": f"OTHER-{index}", "doi": f"10.1234/other{index}", "title": f"Unrelated distinct title {index}"}
+                catalog._register_entry(old, other, item)
+            with patch.object(reuse, "inspect_saved", wraps=reuse.inspect_saved) as checked:
+                result = catalog.try_reuse(target, {})
+            self.assertEqual(result["status"], "reused")
+            self.assertEqual(checked.call_count, 1)
 
 
 if __name__ == "__main__":

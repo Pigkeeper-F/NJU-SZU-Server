@@ -45,6 +45,8 @@ from literature_fulltext_browser import FulltextBrowserFetcher
 from literature_fulltext_reuse import ReuseCatalog, inspect_saved, pdf_proof, artifact_destination, contained_file
 from literature_materials import MaterialsStore, MaterialsError
 from literature_material_collection import MaterialCollection
+from literature_screening import gate_targets, policy_identity, select_inputs, ScreeningAttention
+from literature_identity import source_ids
 
 ROOT = Path(__file__).resolve().parents[1]
 SOC_FETCH = ROOT / "SOC-database-pipeline-clean" / ".codex" / "skills" / "soc-paper-fetch" / "scripts"
@@ -377,6 +379,10 @@ def candidate_urls(record: dict) -> list[tuple[str, str]]:
     for link in links:
         if not _url_looks_pdf(link["url"]):
             add("html", link["url"])
+    if not out:
+        doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi\s*:\s*)", "", str(record.get("doi") or "").strip(), flags=re.I)
+        if re.fullmatch(r"10\.\d{4,9}/[^\s\x00-\x1f\x7f]+", doi):
+            add("html", "https://doi.org/" + quote(doi, safe="/"))
     return out
 
 
@@ -457,6 +463,7 @@ def _target_from_candidate(record: dict) -> dict | None:
                   source_candidate_id=str(record.get("candidate_id") or ""),
                   year=record.get("year"), authors=record.get("authors") or "",
                   reuse_disabled=bool(record.get("reuse_disabled")))
+    target.update(source_identifiers=source_ids(record), document_type=record.get("document_type") or "")
     return target
 
 
@@ -491,6 +498,10 @@ def _target_from_group(group: dict) -> dict | None:
                   source_candidate_id=str(source.get("candidate_id") or ""),
                   year=group.get("year") or source.get("year"), authors=source.get("authors") or "",
                   reuse_disabled=bool(group.get("needs_review") or group.get("merge_confidence") == "probable"))
+    identifiers = {}
+    for record in records:
+        identifiers.update(source_ids(record))
+    target.update(source_identifiers=identifiers, document_type=source.get("document_type") or "")
     return target
 
 
@@ -557,8 +568,12 @@ def load_targets(job_dir: Path, config: dict) -> list[dict]:
 # Single-paper fetch
 # ---------------------------------------------------------------------------
 
+SCREENING_FIELDS = ("screening_decision", "screening_policy_id", "screening_line", "screening_input_hash",
+                    "screening_policy_hash", "extraction_allowed", "requires_fulltext_eligibility")
+
+
 def _item_skeleton(record: dict) -> dict:
-    return {
+    item = {
         "paper_id": str(record.get("paper_id") or ""),
         "title": str(record.get("title") or ""),
         "doi": str(record.get("doi") or ""),
@@ -572,6 +587,8 @@ def _item_skeleton(record: dict) -> dict:
         "evidence_level": "",
         "reason": "",
     }
+    item.update({key: record[key] for key in SCREENING_FIELDS if key in record})
+    return item
 
 
 def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int, record=None, *, cnki_navigation=False) -> dict:
@@ -824,6 +841,21 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     opts = {**opts, "record": record}
     cached = opts.get("cached_main")
     html_main = dict(cached) if isinstance(cached, dict) and cached.get("status") == "fetched_html" else None
+    observed_pdf_urls = []
+    if opts.get("replenish_materials") and opts.get("main_pdf_first"):
+        for link in opts.get("main_pdf_links") or []:
+            if not isinstance(link, dict) or _supplement_link(link):
+                continue
+            linked = safe_url(link.get("url"))
+            if (linked and (_url_looks_pdf(linked) or link.get("kind") == "pdf")
+                    and not _cnki_transfer_url(linked) and linked not in observed_pdf_urls):
+                observed_pdf_urls.append(linked)
+    current_pdf_first = bool(observed_pdf_urls and opts.get("prefer_pmc_pdf") is False)
+    if current_pdf_first:
+        # Some article pages list an ePDF reader before their real download
+        # control. Prefer the observed file/download entry while preserving
+        # order among entries of the same kind; never derive a PDF URL.
+        observed_pdf_urls.sort(key=lambda linked: bool(re.search(r"/epdf(?:/|$)", urlparse(linked).path, re.I)))
     xml_fallback = None
     if record.get("source_key") == "cnki" and callable(getattr(fetcher, "fetch_cnki", None)):
         result = fetcher.fetch_cnki(record, opts)
@@ -873,7 +905,8 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     # Only the real browser fetcher opts into the stdlib Europe PMC call; the
     # offline fixtures keep their injected fetcher and never touch the network.
     pmc_xml = (_pmc_xml_item(record, job_dir, opts)
-               if isinstance(fetcher, FulltextBrowserFetcher) and not (html_main and opts.get("replenish_materials")) else None)
+               if (isinstance(fetcher, FulltextBrowserFetcher) and not current_pdf_first
+                   and not (html_main and opts.get("replenish_materials"))) else None)
     if pmc_xml is not None and pmc_xml.get("status") in FETCHED_STATUSES:
         return pmc_xml
     xml_fallback = pmc_xml if pmc_xml is not None else None
@@ -881,7 +914,7 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
     attempts = candidate_urls(record)
     if html_main is not None and opts.get("replenish_materials"):
         # The verified body is already on disk. Only seek its missing PDF;
-        # article-page inspection and supplement retrieval ran separately.
+        # article-page discovery ran separately; supplements follow the PDF.
         links = list(opts.get("main_pdf_links") or [])
         links += (html_main.get("html_evidence") or {}).get("links") or []
         attempts = [entry for entry in attempts if entry[0] == "pdf"]
@@ -903,6 +936,12 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
             and not _url_looks_pdf(source)
             and not (_pubmed_article_url(source) and attempts and _pmc_article_url(attempts[0][1]))):
         attempts = [("html", source), *[entry for entry in attempts if entry[1] != source]]
+    if current_pdf_first:
+        # A ready, identified current article is also useful when this task
+        # has no saved HTML. Do not leave its real PDF control for PubMed/DOI
+        # metadata or another gateway before trying that observed control.
+        attempts = [("pdf", linked) for linked in observed_pdf_urls] + [
+            entry for entry in attempts if entry[1] not in observed_pdf_urls]
     if not attempts:
         if html_main is not None:
             return html_main
@@ -1150,7 +1189,7 @@ def _ensure_item_completeness(job_dir: Path, item: dict, record: dict | None = N
         # item past the existing local-verification/attention gate.
 
 
-def _write_status(job_dir: Path, items: list[dict], *, materials=None) -> dict:
+def _write_status(job_dir: Path, items: list[dict], *, materials=None, retained_items=None) -> dict:
     for item in items:
         if isinstance(item, dict):
             _ensure_item_completeness(job_dir, item)
@@ -1180,9 +1219,11 @@ def _write_status(job_dir: Path, items: list[dict], *, materials=None) -> dict:
         "version": 1,
         "generated_at": now_iso(),
         "policy": POLICY_TEXT,
-        "items": items,
+        "items": items + list(retained_items or []),
         "counts": counts,
     }
+    if retained_items:
+        counts["screening_excluded"] = len(retained_items)
     atomic_write_json(job_dir / "fulltext" / "status.json", doc)
     return counts
 
@@ -1330,6 +1371,7 @@ def _previous_remote_pause(item: dict, paper: dict) -> FulltextPause | None:
 MANUAL_ACTION_FILES = ["fulltext/manual-actions.json", "fulltext/manual-actions.csv", "fulltext/manual-actions.md"]
 SKIPPED_MATERIAL_FILES = ["fulltext/skipped-materials.json", "fulltext/skipped-materials.csv", "fulltext/skipped-materials.md"]
 MANUAL_ACCESS_REASONS = {"login", "verification", "access_required"}
+MANUAL_WAIT_REASONS = MANUAL_ACCESS_REASONS | {"page_not_ready"}
 
 
 def _manual_entry_url(record):
@@ -1343,7 +1385,19 @@ def _manual_entry_url(record):
 
 
 def _defer_access_pause(pause):
-    return pause.reason in MANUAL_ACCESS_REASONS and _safe_material_failure(pause)
+    return pause.reason in MANUAL_WAIT_REASONS and _safe_material_failure(pause)
+
+
+def _normalize_material_pause(pause):
+    """Legacy timeouts with active loading are unresolved, never missing files."""
+    if pause.reason == "load_timeout" and re.search(
+            r"仍(?:然)?(?:在)?(?:加载|生成|处理|下载)|(?:正在|尚在)(?:加载|生成|下载|传输)|"
+            r"(?:加载|生成|下载)(?:中|尚未完成|暂未完成|未完成|未就绪)|"
+            r"(?:页面|文件|全文|材料)(?:尚|暂|还|仍).*?(?:未就绪|未完成)|"
+            r"(?:still|currently)\s+(?:loading|generating|processing|downloading)|"
+            r"(?:page|file|download).*(?:not ready|being generated|in progress)", str(pause.message), re.I):
+        return FulltextPause(pause.paper_id, pause.url, reason="page_not_ready", message=pause.message)
+    return pause
 
 
 def _safe_material_failure(pause):
@@ -1352,7 +1406,7 @@ def _safe_material_failure(pause):
 
 
 def _skip_material_pause(pause):
-    return pause.reason in {"rate_limited", "load_timeout", "page_error", "results_unrecognized",
+    return _normalize_material_pause(pause).reason in {"rate_limited", "load_timeout", "page_error", "results_unrecognized",
                             "pdf_unavailable", "supplements_incomplete", "materials_incomplete",
                             "material_discovery", "material_download"} and _safe_material_failure(pause)
 
@@ -1361,41 +1415,74 @@ def _manual_message(value, official_url):
     return re.sub(r"https?://[^\s，；）)]+", official_url or "[官方入口]", str(value or ""))[:2000]
 
 
+def _record_material_retry(job_dir, target, marker):
+    """Keep the prior skip before an explicitly authorized material retry."""
+    relative = "fulltext/material-retries.json"
+    path = Path(job_dir) / relative
+    existing = contained_file(job_dir, relative)
+    if existing is None and (path.exists() or path.is_symlink()):
+        raise MaterialsError("材料重试审计文件路径无法核验，未清除旧跳过记录。")
+    if existing is not None:
+        if existing.stat().st_size > 20 * 1024 * 1024:
+            raise MaterialsError("材料重试审计文件过大，未清除旧跳过记录。")
+        document = json.loads(existing.read_text(encoding="utf-8"))
+        if not isinstance(document, dict) or document.get("version") != 1 or not isinstance(document.get("items"), list):
+            raise MaterialsError("材料重试审计无法核验，未清除旧跳过记录。")
+    else:
+        document = {"version": 1, "items": []}
+    official = _manual_entry_url(target)
+    document["items"].append({"paper_id": target["paper_id"], "retried_at": now_iso(),
+        "authorization": "explicit_retry_skipped", "previous_skip": {
+            "reason": str(marker.get("reason") or "")[:200],
+            "message": _manual_message(marker.get("message"), official),
+            "official_url": official, "skipped_at": str(marker.get("skipped_at") or "")[:100],
+            "policy": str(marker.get("policy") or "")[:100]}})
+    atomic_write_json(path, document)
+
+
 def _write_manual_actions(job_dir, items, targets, materials):
     by_id = {target["paper_id"]: target for target in targets}
     actions = []
     for item in items:
         deferred = item.get("material_deferred")
-        if not isinstance(deferred, dict) or deferred.get("reason") not in MANUAL_ACCESS_REASONS:
+        if not isinstance(deferred, dict) or deferred.get("reason") not in MANUAL_WAIT_REASONS:
             continue
         target = by_id[item["paper_id"]]
         paper = materials.paper(target)
         supplement = materials.completeness(target)
         official = _manual_entry_url(target)
         message = deferred.get("message")
+        waiting = deferred.get("reason") == "page_not_ready"
+        pdf_saved = paper.get("main_pdf_status") == "downloaded"
         if deferred.get("reason") == "pdf_unavailable":
             message = "尚未取得正文PDF；已有材料保留。"
         actions.append({"paper_id": item["paper_id"], "title": str(target.get("title") or "")[:500],
             "status": "needs_attention", "reason": str(deferred.get("reason") or "materials_incomplete"),
             "message": _manual_message(message, official), "official_url": official,
-            "main_pdf_missing": paper.get("main_pdf_status") != "downloaded",
-            "supplements": {"status": supplement["status"], "check_status": supplement["check_status"], "missing": supplement["missing"]},
+            "main_pdf_missing": (None if waiting and not pdf_saved else not pdf_saved),
+            "main_pdf_status": "downloaded" if pdf_saved else ("page_not_ready" if waiting else str(paper.get("main_pdf_status") or "pending")),
+            "page_readiness": "not_ready" if waiting else "needs_access",
+            "supplements": ({"status": "unverified", "check_status": "page_not_ready", "missing": [],
+                             "pending": supplement["missing"], "existing_check_status": supplement["check_status"]} if waiting else
+                            {"status": supplement["status"], "check_status": supplement["check_status"], "missing": supplement["missing"]}),
             "deferred_at": deferred.get("deferred_at") or "", "waiting_policy": "until_explicit_retry"})
     document = {"version": 1, "generated_at": now_iso(), "items": actions,
-        "note": "待人工操作的原窗口不限时保留；完成登录、验证或权限处理后显式重试，不自动重试、不倒计时关闭。"}
+        "note": "原窗口不限时保留；登录、验证、权限问题处理后，或页面完成加载、文件生成后，显式重查。页面未就绪不代表材料缺失，不自动重试、不倒计时关闭。"}
     atomic_write_json(Path(job_dir) / MANUAL_ACTION_FILES[0], document)
     output = io.StringIO()
-    fields = ["paper_id", "title", "status", "reason", "message", "official_url", "main_pdf_missing", "supplement_status", "supplement_missing", "deferred_at", "waiting_policy"]
+    fields = ["paper_id", "title", "status", "reason", "message", "official_url", "main_pdf_missing", "main_pdf_status", "page_readiness", "supplement_status", "supplement_missing", "supplement_pending", "deferred_at", "waiting_policy"]
     writer = csv.DictWriter(output, fieldnames=fields); writer.writeheader()
     lines = ["# 待人工处理的材料", "", document["note"], "", f"共 {len(actions)} 篇；原件与已有正文保留，未进入提取。", ""]
     for action in actions:
         writer.writerow({**{key: action[key] for key in fields if key in action},
             "supplement_status": action["supplements"]["check_status"],
-            "supplement_missing": "; ".join(str(entry.get("label") or entry.get("material_id") or "") for entry in action["supplements"]["missing"])})
+            "supplement_missing": "; ".join(str(entry.get("label") or entry.get("material_id") or "") for entry in action["supplements"]["missing"]),
+            "supplement_pending": "; ".join(str(entry.get("label") or entry.get("material_id") or "") for entry in action["supplements"].get("pending", []))})
         clean = lambda value: str(value).replace("\n", " ").replace("\r", " ")
-        lines += [f"## {action['paper_id']} · {clean(action['title'])}", "", f"- 状态：待人工处理；原因：{clean(action['reason'])}",
-            "- 正文 PDF：" + ("尚缺" if action["main_pdf_missing"] else "已保存"),
-            "- 补充材料：" + clean(action["supplements"]["check_status"]) + "；未取得项 " + str(len(action["supplements"]["missing"])),
+        waiting = action["reason"] == "page_not_ready"
+        lines += [f"## {action['paper_id']} · {clean(action['title'])}", "", f"- 状态：{'页面未就绪，待显式重查' if waiting else '待人工处理'}；原因：{clean(action['reason'])}",
+            "- 正文 PDF：" + ("待页面就绪后核对" if action["main_pdf_missing"] is None else ("尚缺" if action["main_pdf_missing"] else "已保存")),
+            "- 补充材料：" + ("页面未就绪；已观察到待核对项 " + str(len(action["supplements"].get("pending", []))) if waiting else clean(action["supplements"]["check_status"]) + "；未取得项 " + str(len(action["supplements"]["missing"]))),
             "- 说明：" + clean(action["message"]), "- 官方入口：" + action["official_url"], ""]
     atomic_write_bytes(Path(job_dir) / MANUAL_ACTION_FILES[1], b"\xef\xbb\xbf" + output.getvalue().encode("utf-8"))
     atomic_write_text(Path(job_dir) / MANUAL_ACTION_FILES[2], "\n".join(lines))
@@ -1438,6 +1525,31 @@ def _write_skipped_materials(job_dir, items, targets, materials):
     return actions
 
 
+def _download_gate(job_dir, config, paper_ids=None):
+    targets = load_targets(job_dir, config)
+    selected = select_inputs(targets, paper_ids) if paper_ids is not None else targets
+    selected_ids = {target["paper_id"] for target in selected}
+    result = gate_targets(job_dir, targets, config.get("screeningPolicy"))
+    required = [key for key in result["unscreened"] if key in selected_ids]
+    if required:
+        shown = "、".join(required[:5])
+        raise ScreeningAttention("篇关摘筛选尚未完成或记录已过期，请先完成当前规则下的筛选：" + shown)
+    context = policy_identity(config.get("screeningPolicy"))
+    excluded_ids = set(result["excluded"])
+    result["excluded_targets"] = [dict(target, screening_decision="exclude", extraction_allowed=False,
+                                         screening_policy_id=context["policyId"], screening_line=context["line"])
+                                  for target in targets if target["paper_id"] in excluded_ids]
+    if paper_ids is not None:
+        reviewed = {target["paper_id"]: target for target in result["targets"]}
+        # Keep the entire ledger, including unscreened papers. Only the explicit
+        # selected batch may enter acquisition; pending is never permission.
+        result["targets"] = [reviewed.get(target["paper_id"], dict(target,
+            screening_decision="unscreened", extraction_allowed=False))
+            for target in targets if target["paper_id"] not in excluded_ids]
+        result["selected_paper_ids"] = [target["paper_id"] for target in selected]
+    return result
+
+
 def _run_fulltext(
     config: dict,
     job_dir: Path,
@@ -1451,7 +1563,11 @@ def _run_fulltext(
     replenish_materials: bool = False,
     defer_access: bool = False,
     retry_deferred: bool = False,
+    first_paper_id: str | None = None,
+    retry_skipped: bool = False,
     fetcher=None,
+    _screening_result=None,
+    screening_batch=False,
 ) -> int:
     """Execute the fulltext stage; returns the process exit code (0/1)."""
     job_dir = Path(job_dir)
@@ -1466,22 +1582,42 @@ def _run_fulltext(
         return 1
 
     try:
-        targets = load_targets(job_dir, config)
+        screened = _screening_result if _screening_result is not None else _download_gate(job_dir, config, only_ids if screening_batch else None)
+        targets = screened["targets"]
+    except ScreeningAttention as error:
+        emit("attention", stage="screening", reason="screening_required", message=str(error))
+        return 0
     except Exception as error:
         emit("error", stage="fulltext", message=f"全文获取失败：{error}")
         return 1
 
     status_path = job_dir / "fulltext" / "status.json"
     previous = _load_previous_items(status_path)
+    excluded_items = []
+    for target in screened["excluded_targets"]:
+        retained = dict(previous.get(target["paper_id"]) or _item_skeleton(target))
+        retained.update({key: target[key] for key in SCREENING_FIELDS if key in target})
+        retained.pop("screening_input_hash", None)
+        excluded_items.append(retained)
+
+    def persist_status():
+        return _write_status(job_dir, items, materials=materials, retained_items=excluded_items)
+
     only_set = set(only_ids) if only_ids is not None else None
     items = [dict(previous[target["paper_id"]])
              if only_set is not None and target["paper_id"] not in only_set and target["paper_id"] in previous
              else _carry_previous(target, previous.get(target["paper_id"]), job_dir) for target in targets]
+    target_by_id = {target["paper_id"]: target for target in targets}
     for item in items:
+        target = target_by_id.get(item["paper_id"])
+        if target is not None:
+            for key in SCREENING_FIELDS:
+                item.pop(key, None)
+                if key in target:
+                    item[key] = target[key]
         if item.get("status") in {"needs_attention", "unavailable"}:
             # --only preserves unrelated statuses, but not unverified URLs.
             item["fulltext_url"] = ""
-    target_by_id = {target["paper_id"]: target for target in targets}
     position = {item["paper_id"]: index for index, item in enumerate(items)}
     try:
         materials = MaterialsStore(job_dir, targets)
@@ -1501,19 +1637,25 @@ def _run_fulltext(
 
     # --only filter
     if only_ids is not None:
-        unknown = [key for key in only_ids if key not in position]
+        excluded_ids = set(screened["excluded"]) if screening_batch else set()
+        unknown = [key for key in only_ids if key not in position and key not in excluded_ids]
         if unknown:
             emit("stage", stage="fulltext", message=f"忽略未识别的论文标识：{','.join(unknown)}")
         matched = [key for key in only_ids if key in position]
-        if not matched:
+        if not matched and not (screening_batch and set(only_ids) <= excluded_ids):
             emit("error", stage="fulltext", message="全文获取失败：指定的论文标识均不在候选清单中")
             return 1
         allowed = set(matched)
     else:
         allowed = set(position)
 
-    if retry_deferred:
-        allowed = {item["paper_id"] for item in items if isinstance(item.get("material_deferred"), dict)}
+    if retry_deferred or retry_skipped:
+        allowed = {item["paper_id"] for item in items
+                   if (retry_deferred and isinstance(item.get("material_deferred"), dict))
+                   or (retry_skipped and isinstance(item.get("material_skipped"), dict))}
+    if first_paper_id is not None and first_paper_id not in allowed:
+        emit("error", stage="fulltext", message="优先文献不在本次材料待补或显式重试范围内。")
+        return 1
 
     explicit_retry = retry_unavailable and only_ids is not None and len(only_ids) == 1
 
@@ -1527,7 +1669,7 @@ def _run_fulltext(
         if saved.get("status") not in FETCHED_STATUSES:
             saved.update(status="needs_attention", reason=marker["message"], fulltext_url="")
         materials.paper(target)["material_deferred"] = dict(marker)
-        materials.flush(); _write_status(job_dir, items, materials=materials)
+        materials.flush(); persist_status()
         _write_manual_actions(job_dir, items, targets, materials)
         if fetcher is None:
             fetcher = make_fetcher(config, job_dir)
@@ -1535,7 +1677,7 @@ def _run_fulltext(
         if callable(retain):
             retain(reason=reason, url=url or str(target.get("source_url") or ""), paper_id=item["paper_id"])
         emit("stage", stage="fulltext", reason=reason, paper_id=item["paper_id"],
-             message=f"{item['paper_id']} 留待人工处理，原窗口不限时保留；继续其余文献。")
+             message=f"{item['paper_id']} {'页面尚未就绪，待显式重查' if reason == 'page_not_ready' else '留待人工处理'}，原窗口不限时保留；继续其余文献。")
 
     def close_skipped(paper_id, *, held=False):
         nonlocal fetcher
@@ -1568,7 +1710,7 @@ def _run_fulltext(
             if material.get("download_status") == "needs_attention":
                 material.update(download_status="missing", download_reason=marker["message"])
         materials.flush()
-        _write_status(job_dir, items, materials=materials)
+        persist_status()
         _write_manual_actions(job_dir, items, targets, materials)
         _write_skipped_materials(job_dir, items, targets, materials)
         # Durability precedes cleanup. Never touch an unrelated current page
@@ -1580,10 +1722,19 @@ def _run_fulltext(
     if defer_access:
         for item in items:
             target = target_by_id[item["paper_id"]]
+            if item.get("material_skipped"):
+                continue
             deferred = item.get("material_deferred")
-            if isinstance(deferred, dict) and deferred.get("reason") not in MANUAL_ACCESS_REASONS:
-                pause = FulltextPause(item["paper_id"], reason=str(deferred.get("reason") or "materials_incomplete"),
-                                      message=str(deferred.get("message") or "未取得所需材料。"))
+            if isinstance(deferred, dict):
+                pause = _normalize_material_pause(FulltextPause(item["paper_id"], reason=str(deferred.get("reason") or "materials_incomplete"),
+                                      message=str(deferred.get("message") or "未取得所需材料。")))
+                if _defer_access_pause(pause):
+                    if pause.reason != deferred.get("reason"):
+                        deferred["reason"] = pause.reason
+                        item["pause_reason"] = pause.reason
+                        materials.paper(target)["material_deferred"] = dict(deferred)
+                        materials.flush(); persist_status()
+                    continue
                 if _skip_material_pause(pause):
                     skip_material(item, target, pause.reason, pause.message, held=True)
                     continue
@@ -1594,6 +1745,8 @@ def _run_fulltext(
             if item.get("material_skipped") or item.get("material_deferred") or item.get("acquisition_skip") or retry_deferred:
                 continue
             pause = _previous_remote_pause(item, materials.paper(target))
+            if pause is not None:
+                pause = _normalize_material_pause(pause)
             if pause is not None and _defer_access_pause(pause):
                 defer_manual(item, target, pause.reason, pause.message, pause.url)
             elif pause is not None and _skip_material_pause(pause):
@@ -1618,7 +1771,7 @@ def _run_fulltext(
             if material.get("download_status") != "downloaded":
                 material.update(download_status="missing", download_reason=pause.message + "（本轮已跳过，待补充）")
         materials.flush()
-        _write_status(job_dir, items, materials=materials)
+        persist_status()
         if fetcher is None:
             fetcher = make_fetcher(config, job_dir)
         defer = getattr(fetcher, "defer_paper", None)
@@ -1639,7 +1792,7 @@ def _run_fulltext(
     def eligible(item: dict) -> bool:
         status = str(item.get("status") or "pending")
         if item.get("material_skipped"):
-            return False
+            return retry_skipped
         if item.get("material_deferred"):
             return retry_deferred
         if item.get("acquisition_skip") and not explicit_retry and not replenish_materials and not item.get("local_verification"):
@@ -1658,7 +1811,7 @@ def _run_fulltext(
         for item in items:
             if item["paper_id"] not in allowed or item.get("status") not in FETCHED_STATUSES:
                 continue
-            if item.get("material_skipped"):
+            if item.get("material_skipped") and not retry_skipped:
                 continue
             if item.get("material_deferred") and not retry_deferred:
                 continue
@@ -1687,6 +1840,12 @@ def _run_fulltext(
     eligible_items += [item for item in backfill if item["paper_id"] not in included]
     if limit is not None:
         eligible_items = eligible_items[:limit]
+    if first_paper_id is not None:
+        if not any(item["paper_id"] == first_paper_id for item in eligible_items):
+            emit("error", stage="fulltext", message="优先文献没有本轮待补材料，未开始获取。")
+            return 1
+        # Queue ordering is runtime-only; frozen candidates and status order stay intact.
+        eligible_items.sort(key=lambda item: item["paper_id"] != first_paper_id)
 
     gated = [
         item for item in items
@@ -1709,9 +1868,20 @@ def _run_fulltext(
             result["material_incomplete"] = sum(
                 materials.paper(target).get("main_pdf_status") != "downloaded" or not materials.paper_ready(target) for target in targets)
         if defer_access:
-            result["deferred_materials"] = sum(isinstance(item.get("material_deferred"), dict) and item["material_deferred"].get("reason") in MANUAL_ACCESS_REASONS for item in items)
+            result["deferred_materials"] = sum(isinstance(item.get("material_deferred"), dict) and item["material_deferred"].get("reason") in MANUAL_WAIT_REASONS for item in items)
             result["material_skipped"] = sum(isinstance(item.get("material_skipped"), dict) for item in items)
         return result
+
+    def batch_summary():
+        if not screening_batch:
+            return {}
+        pending = [item["paper_id"] for item in items if item.get("status") == "pending"]
+        fetched = sum(item.get("status") in FETCHED_STATUSES for item in items)
+        return {"selected_paper_ids": screened["selected_paper_ids"],
+                "batch_complete": not any(key in allowed for key in pending),
+                "scope_complete": not screened["unscreened"] and not pending,
+                "quota_reached": options["max_papers"] > 0 and fetched >= options["max_papers"],
+                "batch_counts": _counts([item for item in items if item["paper_id"] in allowed])}
 
     if not eligible_items:
         for target in targets:
@@ -1719,14 +1889,14 @@ def _run_fulltext(
             if target["paper_id"] in allowed and saved.get("status") in FETCHED_STATUSES:
                 materials.register_main(target, saved)
         materials.flush()
-        counts = _write_status(job_dir, items, materials=materials)
+        counts = persist_status()
         fetched = counts["fetched_pdf"] + counts["fetched_html"]
         if defer_access:
             actions = _write_manual_actions(job_dir, items, targets, materials)
             _write_skipped_materials(job_dir, items, targets, materials)
             if actions:
                 emit("attention", stage="fulltext", reason="deferred_materials", count=fetched,
-                     counts={**counts, **incomplete_counts()}, message=f"可自动获取的材料已处理；{len(actions)} 篇待人工操作，原窗口不限时保留。完成后显式重试待处理项。",
+                     counts={**counts, **incomplete_counts()}, message=f"自动处理已结束；{len(actions)} 篇有访问问题或页面尚未就绪，原窗口不限时保留。页面就绪或人工处理后显式重查。",
                      files=["fulltext/status.json", "fulltext/materials.json", *MANUAL_ACTION_FILES, *SKIPPED_MATERIAL_FILES])
                 return 0
         emit(
@@ -1734,6 +1904,7 @@ def _run_fulltext(
             stage="fulltext",
             message=f"材料获取阶段已结束：本轮无新增获取（{counts['total']} 篇目标中 {fetched} 篇已获取）；缺失材料仍待补充。",
             count=fetched,
+            **batch_summary(),
             counts={
                 "fetched": fetched,
                 "fetched_pdf": counts["fetched_pdf"],
@@ -1767,7 +1938,17 @@ def _run_fulltext(
 
     for index, item in enumerate(eligible_items, start=1):
         target = target_by_id[item["paper_id"]]
-        if retry_deferred and callable(getattr(fetcher, "resume_deferred", None)):
+        if retry_skipped and isinstance(item.get("material_skipped"), dict):
+            try:
+                _record_material_retry(job_dir, target, item["material_skipped"])
+            except (MaterialsError, OSError, ValueError) as error:
+                emit("attention", stage="verification", reason="local_material_verification", paper_id=item["paper_id"], message=str(error))
+                return 0
+            item.pop("material_skipped", None)
+            materials.paper(target).pop("material_skipped", None)
+            materials.flush()
+            persist_status()
+        if retry_deferred and isinstance(item.get("material_deferred"), dict) and callable(getattr(fetcher, "resume_deferred", None)):
             fetcher.resume_deferred(item["paper_id"])
         if replenish_materials and item.get("status") in FETCHED_STATUSES:
             target["materials_url"] = _materials_page_url(target, item)
@@ -1792,9 +1973,10 @@ def _run_fulltext(
             except Exception:
                 saved["materials_completeness"] = {"status": "unverified", "check_status": "error",
                                                    "expected": 0, "downloaded": 0, "pending": 0, "missing": []}
-            _write_status(job_dir, items, materials=materials)
+            persist_status()
 
-        paper_opts = {**opts, "record": target, "on_material_discovery": collector.observe, "on_main_saved": checkpoint}
+        paper_opts = {**opts, "record": target, "on_material_discovery": collector.observe, "on_main_saved": checkpoint,
+                      "refresh_expired_pdf": bool(retry_deferred or retry_skipped or explicit_retry)}
         emit(
             "stage",
             stage="fulltext",
@@ -1812,7 +1994,7 @@ def _run_fulltext(
         if reused["status"] == "blocked" or (reused["status"] != "reused" and isinstance(local_check, dict) and local_check.get("status") != "valid"):
             message = reused.get("reason") or local_check.get("reason") or "已保存全文需先人工核查，未重新下载。"
             item.update(status="needs_attention", reason=message, pause_reason="local_fulltext_verification")
-            _write_status(job_dir, items, materials=materials)
+            persist_status()
             emit("attention", stage="fulltext", reason="local_fulltext_verification", paper_id=item["paper_id"], message=message)
             return 0
         if reused["status"] != "reused":
@@ -1826,12 +2008,13 @@ def _run_fulltext(
                 return 1
         try:
             def inspect_materials_safely():
-                if (updated.get("materials_completeness") or {}).get("status") == "complete":
+                if not collector.main_pdf_preflight_only and (updated.get("materials_completeness") or {}).get("status") == "complete":
                     return
                 attention = collector.inspect_existing(paper_opts)
                 if not attention:
                     return
-                if replenish_materials:
+                if replenish_materials or (screening_batch and attention.get("reason") in {
+                        "verification", "login", "access_required", "rate_limited", "access_blocked"}):
                     raise FulltextPause(item["paper_id"], reason=str(attention.get("reason") or "material_download"),
                                         message=str(attention.get("message") or "材料补齐需要人工处理，原页面已保留。"))
                 # A supplement page that needs login/verification, 404s or
@@ -1854,20 +2037,27 @@ def _run_fulltext(
             else:
                 if current.get("status") == "fetched_html":
                     paper_opts["cached_main"] = current
+                if replenish_materials or current.get("status") == "fetched_html":
                     ready = ensure_browser()
                     if ready.get("status") != "ok":
                         raise FulltextPause(item["paper_id"], reason="page_error", message=str(ready.get("message") or "PDF检查浏览器尚未就绪。"))
-                    if replenish_materials:
-                        attention = collector.inspect_existing(paper_opts)
-                        if attention:
-                            raise FulltextPause(item["paper_id"], reason=str(attention.get("reason") or "material_download"),
-                                                message=str(attention.get("message") or "材料补齐需要人工处理，原页面已保留。"))
-                        paper_opts["main_pdf_links"] = collector.main_pdf_links
+                if replenish_materials:
+                    paper_opts["main_pdf_first"] = True
+                    attention = collector.inspect_existing(paper_opts)
+                    if attention:
+                        raise FulltextPause(item["paper_id"], reason=str(attention.get("reason") or "material_download"),
+                                            message=str(attention.get("message") or "材料补齐需要人工处理，原页面已保留。"))
+                    paper_opts["main_pdf_links"] = collector.main_pdf_links
+                    if collector.main_pdf_preflight_only and collector.main_pdf_links:
+                        # Keep the current identified article/download
+                        # context before trying another PMC gateway.
+                        paper_opts["prefer_pmc_pdf"] = False
                 updated = fetch_one(target, job_dir, paper_opts)
             target["materials_url"] = _materials_page_url(target, updated)
             checkpoint(updated)
+            paper_opts.pop("main_pdf_first", None)
             if updated.get("status") in FETCHED_STATUSES:
-                if not collector.checked and not collector.inspected:
+                if collector.main_pdf_preflight_only or (not collector.checked and not collector.inspected):
                     inspect_materials_safely()
                 paper = materials.paper(target)
                 if paper.get("main_pdf_status") != "downloaded":
@@ -1880,13 +2070,16 @@ def _run_fulltext(
                              main_pdf_reason=str(updated.get("reason") or "本次未取得正文PDF。"))
                 materials.flush()
         except FulltextPause as pause:
+            if defer_access:
+                pause = _normalize_material_pause(pause)
             if defer_access and _defer_access_pause(pause):
                 defer_manual(item, target, pause.reason, pause.message, pause.url)
                 continue
             if defer_access and _skip_material_pause(pause):
                 skip_material(item, target, pause.reason, pause.message)
                 continue
-            if skip_unavailable and _remote_pause(pause.reason):
+            if skip_unavailable and _remote_pause(pause.reason) and not (screening_batch and pause.reason in {
+                    "verification", "login", "access_required", "rate_limited", "access_blocked"}):
                 skip_remote(item, target, pause)
                 continue
             saved = items[position[item["paper_id"]]]
@@ -1909,13 +2102,13 @@ def _run_fulltext(
             if paper.get("main_pdf_status") != "downloaded":
                 paper.update(main_pdf_status="needs_attention", main_pdf_reason=pause.message)
             materials.flush()
-            _write_status(job_dir, items, materials=materials)
+            persist_status()
             emit("attention", stage="verification", reason=pause.reason, paper_id=pause.paper_id, message=pause.message)
             return 0
         except MaterialsError as error:
             items[position[item["paper_id"]]]["pause_reason"] = "local_material_verification"
             materials.flush()
-            _write_status(job_dir, items, materials=materials)
+            persist_status()
             emit("attention", stage="verification", reason="local_material_verification", paper_id=item["paper_id"], message=str(error))
             return 0
         try:
@@ -1936,7 +2129,7 @@ def _run_fulltext(
             updated.pop("pause_reason", None)
             materials.paper(target).pop("material_deferred", None)
             materials.flush()
-        _write_status(job_dir, items, materials=materials)
+        persist_status()
         catalog.register(target, updated)
         if updated.get("status") in FETCHED_STATUSES and (
                 reused["status"] != "reused" or
@@ -1950,14 +2143,14 @@ def _run_fulltext(
                         clear(item["paper_id"])
 
     materials.flush()
-    counts = _write_status(job_dir, items, materials=materials)
+    counts = persist_status()
     fetched = counts["fetched_pdf"] + counts["fetched_html"]
     if defer_access:
         actions = _write_manual_actions(job_dir, items, targets, materials)
         _write_skipped_materials(job_dir, items, targets, materials)
         if actions:
             emit("attention", stage="fulltext", reason="deferred_materials", count=fetched,
-                 counts={**counts, **incomplete_counts()}, message=f"可自动获取的材料已处理；{len(actions)} 篇待人工操作，原窗口不限时保留。完成后显式重试待处理项。",
+                 counts={**counts, **incomplete_counts()}, message=f"自动处理已结束；{len(actions)} 篇有访问问题或页面尚未就绪，原窗口不限时保留。页面就绪或人工处理后显式重查。",
                  files=["fulltext/status.json", "fulltext/materials.json", *MANUAL_ACTION_FILES, *SKIPPED_MATERIAL_FILES])
             return 0
     emit(
@@ -1965,10 +2158,11 @@ def _run_fulltext(
         stage="fulltext",
         message=(
             f"材料获取阶段已结束：正文完整 {counts['complete_main']} 篇（PDF {counts['fetched_pdf']} / HTML {counts['fetched_html']}）；"
-            f"结构不完整 {counts['partial']} 篇；补充材料完整 {counts['materials_complete']} 篇、部分 {counts['materials_partial']} 篇；"
+            f"结构不完整 {counts['partial']} 篇；补材核查无已知缺口 {counts['materials_complete']} 篇、部分取得 {counts['materials_partial']} 篇、仍待核查 {counts['materials_unverified']} 篇；"
             f"题录/摘要 {counts['abstract_only']} 篇，待补充 {counts['unavailable']} 篇"
         ),
         count=fetched,
+        **batch_summary(),
         counts={
             "fetched": fetched,
             "fetched_pdf": counts["fetched_pdf"],
@@ -2021,7 +2215,8 @@ def _verify_material_replenishment(config, job_dir):
         raise ValueError("材料补齐的配置或候选数量与原任务快照不一致")
     if any((job_dir / name).exists() and any((job_dir / name).rglob("*")) for name in ("extraction", "validation", "export")):
         raise ValueError("材料补齐子任务不能已有提取、校验或导出成果；请保留原结果")
-    targets = load_targets(job_dir, config)
+    targets = (_download_gate(job_dir, config)["targets"] if config.get("screeningPolicy") is not None
+               else load_targets(job_dir, config))
     previous = _load_previous_items(job_dir / "fulltext" / "status.json")
     materials = MaterialsStore(job_dir, targets)
     for target in targets:
@@ -2033,8 +2228,29 @@ def _verify_material_replenishment(config, job_dir):
         materials.verify_saved(target)
 
 
-def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, skip_unavailable=False, replenish_materials=False, defer_access=False, retry_deferred=False, fetcher=None):
+def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, skip_unavailable=False, replenish_materials=False, defer_access=False, retry_deferred=False, first_paper_id=None, retry_skipped=False, fetcher=None, screening_batch=False):
     job_dir = Path(job_dir)
+    if screening_batch and (only is None or not config.get("screeningPolicy") or replenish_materials
+            or restart_cnki or retry_unavailable or skip_unavailable or limit is not None):
+        emit("error", stage="screening", message="逐批全文获取须指定已筛选文献，不能混用材料补齐、跳过访问问题、单篇重试或临时限量。")
+        return 1
+    screened = None
+    if config.get("screeningPolicy") is not None:
+        try:
+            screened = _download_gate(job_dir, config, _parse_only(only) if screening_batch else None)
+        except ScreeningAttention as error:
+            emit("attention", stage="screening", reason="screening_required", message=str(error))
+            return 0
+        except (OSError, ValueError, TypeError) as error:
+            emit("error", stage="screening", message=f"篇关摘筛选输入无法核验：{error}")
+            return 1
+    if (first_paper_id is not None or retry_skipped) and not (resume and replenish_materials and defer_access):
+        emit("error", stage="fulltext", message="材料优先顺序与重试旧跳过项仅适用于 --resume --replenish-materials --defer-access。")
+        return 1
+    if type(retry_skipped) is not bool or (first_paper_id is not None and
+            (not isinstance(first_paper_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", first_paper_id))):
+        emit("error", stage="fulltext", message="材料优先文献标识或显式重试参数无效。")
+        return 1
     if (defer_access and not (resume and replenish_materials)) or (retry_deferred and not defer_access):
         emit("error", stage="fulltext", message="暂缓人工访问仅适用于 --resume --replenish-materials；重试待处理项还须 --defer-access。")
         return 1
@@ -2081,7 +2297,9 @@ def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailab
         return _run_fulltext(config, job_dir, resume=resume, limit=limit, only=only,
                              retry_unavailable=retry_unavailable, restart_cnki=restart_cnki,
                              skip_unavailable=skip_unavailable, replenish_materials=replenish_materials,
-                             defer_access=defer_access, retry_deferred=retry_deferred, fetcher=actual)
+                             defer_access=defer_access, retry_deferred=retry_deferred,
+                             first_paper_id=first_paper_id, retry_skipped=retry_skipped, fetcher=actual,
+                             _screening_result=screened, screening_batch=screening_batch)
     finally:
         close = getattr(actual, "close", None)
         if callable(close):
@@ -2095,11 +2313,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", action="store_true", help="续跑：跳过已获取项，处理未完成项")
     parser.add_argument("--limit", type=int, help="本次最多获取的篇数")
     parser.add_argument("--only", help="仅处理指定论文标识，逗号分隔（如 GSC-001,GSC-002）")
+    parser.add_argument("--screening-batch", action="store_true", help="按已核验篇关摘批次获取全文，保留批外待处理项")
     parser.add_argument("--retry-unavailable", action="store_true", help="重试此前标为待补充（unavailable/abstract_only）的项")
     parser.add_argument("--skip-unavailable", action="store_true", help="远程登录、权限、验证或超时项登记待补充并继续；本地材料核验异常仍暂停")
     parser.add_argument("--replenish-materials", action="store_true", help="仅在关联子任务内重试缺失PDF和补充材料，保留已有原件，不继续提取")
     parser.add_argument("--defer-access", action="store_true", help="材料补齐时保留人工处理页，继续其余文献；待处理项仅显式重试")
     parser.add_argument("--retry-deferred", action="store_true", help="人工处理后仅重试已登记的待处理文献，须 --defer-access")
+    parser.add_argument("--first-paper", dest="first_paper_id", metavar="PAPER_ID", help="材料补齐时优先处理此篇，不改变冻结候选顺序，须 --defer-access")
+    parser.add_argument("--retry-skipped", action="store_true", help="显式重查旧材料跳过项，保留原记录审计和已存文件，须 --defer-access")
     parser.add_argument("--restart-cnki", action="store_true", help="显式重新定位已选知网单篇，从正常检索页开始一次")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review-only", action="store_true", help="仅离线复核缓存，不访问网站")
@@ -2114,7 +2335,7 @@ def main(argv: list[str] | None = None) -> int:
         view_mode = args.review_only or args.open_current or args.open_deferred is not None
         if args.restart_cnki and view_mode:
             raise ValueError("重新定位不能与离线复核或仅查看原页面同时使用")
-        if (args.replenish_materials or args.defer_access or args.retry_deferred) and view_mode:
+        if (args.replenish_materials or args.defer_access or args.retry_deferred or args.first_paper_id is not None or args.retry_skipped) and view_mode:
             raise ValueError("材料补齐不能与离线复核或仅查看原页面同时使用")
         if args.review_only:
             review_saved_fulltext(args.output_dir)
@@ -2139,12 +2360,15 @@ def main(argv: list[str] | None = None) -> int:
             resume=args.resume,
             limit=args.limit,
             only=args.only,
+            screening_batch=args.screening_batch,
             retry_unavailable=args.retry_unavailable,
             restart_cnki=args.restart_cnki,
             skip_unavailable=args.skip_unavailable,
             replenish_materials=args.replenish_materials,
             defer_access=args.defer_access,
             retry_deferred=args.retry_deferred,
+            first_paper_id=args.first_paper_id,
+            retry_skipped=args.retry_skipped,
         )
     except Exception as error:
         emit("error", stage="fulltext", message=f"全文获取失败：{error}")

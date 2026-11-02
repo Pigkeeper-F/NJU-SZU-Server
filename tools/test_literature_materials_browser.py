@@ -48,7 +48,14 @@ class Anchor:
     def __init__(self, page, descriptor):
         self.page, self.descriptor = page, descriptor
 
-    def evaluate(self, script):
+    def evaluate(self, script, previous=None):
+        if "e.setAttribute('target','_blank')" in script:
+            old = getattr(self, "target", None)
+            self.target = "_blank"
+            return old
+        if script.startswith("(e, previous)"):
+            self.target = previous
+            return
         return {"url": self.descriptor["url"], "label": self.descriptor["label"]}
 
     def is_visible(self):
@@ -58,7 +65,7 @@ class Anchor:
         pass
 
     def click(self, **options):
-        assert options["modifiers"] == ["Control"]
+        assert options["modifiers"] == [] and self.target == "_blank"
         self.page.material_clicks += 1
         self.page.on_material(self.page, self.descriptor)
 
@@ -167,7 +174,7 @@ class MaterialsTests(unittest.TestCase):
         self.assertEqual(self.fetcher.complete_paper(), {"closed": False})
         self.assertTrue(self.fetcher.open_current()["opened"])
         self.assertEqual(child.fronts, 1)
-        self.assertEqual(self.parent.fronts, 0)
+        self.assertEqual(self.parent.fronts, 1)  # Original link is activated in its owned article tab.
         self.assertEqual(self.fetcher.complete_material(), {"closed": True})
         self.assertTrue(child.closed)
         self.assertFalse(self.parent.closed)
@@ -327,6 +334,41 @@ class MaterialsTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_verified_body_none_found_survives_later_pdf_reader_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock = generic.Clock()
+            body = article(ready_state="complete", container_verified=True, article_text="Real full article body. " * 100)
+            reader = article(ready_state="complete", reader_ready=True, container_verified=False,
+                links=[{"url": "https://publisher.test/main.pdf", "text": "PDF"}])
+            context = generic.Context([{"snapshot": body}, {"snapshot": reader}])
+            fetcher = mod.FulltextBrowserFetcher({}, directory, runtime_factory=context.runtime,
+                clock=clock.time, sleep=clock.sleep)
+            record = dict(RECORD, fulltext_links=[{"url": "https://publisher.test/reader"}])
+            result = fetcher.inspect_materials(record, {"replenish_materials": True})
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["material_discovery"]["status"], "none_found")
+            self.assertEqual(result["material_discovery"]["source_url"], RECORD["source_url"])
+            self.assertEqual(len(context.pages[-1].gotos), 2)
+
+    def test_verified_body_none_found_yields_to_attachment_or_auth_gate(self):
+        for mode in ("attachment", "auth"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                clock = generic.Clock()
+                body = article(ready_state="complete", container_verified=True, article_text="Real full article body. " * 100)
+                next_step = ({"snapshot": article(link(), ready_state="complete", container_verified=True)}
+                    if mode == "attachment" else {"response": generic.Response(403), "snapshot": article(access_required=True)})
+                context = generic.Context([{"snapshot": body}, next_step])
+                fetcher = mod.FulltextBrowserFetcher({}, directory, runtime_factory=context.runtime,
+                    clock=clock.time, sleep=clock.sleep)
+                record = dict(RECORD, fulltext_links=[{"url": "https://publisher.test/other-entry"}])
+                result = fetcher.inspect_materials(record, {"replenish_materials": True})
+                if mode == "attachment":
+                    self.assertEqual(result["material_discovery"]["status"], "checked")
+                    self.assertEqual(result["material_discovery"]["links"][0]["filename"], "supplement.xlsx")
+                else:
+                    self.assertEqual((result["status"], result["reason"]), ("attention", "access_required"))
+                    self.assertFalse(context.pages[-1].closed)
+
     def test_generic_discovery_callback_runs_before_pdf_navigation_and_carries_links(self):
         with tempfile.TemporaryDirectory() as directory:
             clock = generic.Clock()

@@ -4,7 +4,7 @@
 
 const assert = require('node:assert/strict');
 const { SOURCES, listSources, isKnown, stateOf, executableSources, assertExecutable } = require('./literature-sources');
-const { normalizeConfig, DEFAULT_LIMITS, MAX_FIELD_DEFINITIONS } = require('./literature-config');
+const { normalizeConfig, DEFAULT_LIMITS, MAX_FIELD_DEFINITIONS, MAX_QUERY_CHARS } = require('./literature-config');
 
 const base = { topic: '气候变化与养殖', query: 'climate change aquaculture China', sources: ['google-scholar'], publicationYearFrom: 2000, publicationYearTo: 2026,
   geography: '中国', language: '', studyTypes: ['原始研究'], inclusion: [], exclusion: [], targetFields: ['产量'], limit: 10 };
@@ -80,7 +80,7 @@ function main() {
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: [] }), /分来源检索式必须是对象/);
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: { arxiv: 'test' } }), /未知来源/);
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: ' ' } }), /不能为空/);
-  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: 'a'.repeat(2001) } }), /过长/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: 'a'.repeat(MAX_QUERY_CHARS + 1) } }), /32768.*未自动截断/);
   assert.deepEqual(Object.keys(normalized).slice(0, 13),
     ['version', 'topic', 'query', 'sources', 'publicationYearFrom', 'publicationYearTo', 'geography', 'language', 'studyTypes', 'inclusion', 'exclusion', 'targetFields', 'limit']);
   assert.deepEqual(normalized.sourceQueries, {});
@@ -92,7 +92,7 @@ function main() {
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: [] }), /分来源检索式必须是对象/);
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: { arxiv: 'test' } }), /未知来源/);
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: ' ' } }), /不能为空/);
-  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: 'a'.repeat(2001) } }), /过长/);
+  assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: 'a'.repeat(MAX_QUERY_CHARS + 1) } }), /32768.*未自动截断/);
 
   // v2 缺省值（设计 §3.1：缺省时行为与 v1 逐字一致）
   assert.deepEqual(normalized.batch, { size: 10, maxBatches: 1 });
@@ -132,7 +132,7 @@ function main() {
   assert.deepEqual(expanded.fieldDefinitions, expandedFields, 'Expanded columns remain complete and ordered');
   assert.equal(expanded.targetFields.length, MAX_FIELD_DEFINITIONS);
   assert.throws(() => normalizeConfig({ ...base, fieldDefinitions: [...expandedFields, { key: 'overflow' }] }), /不超过 200 项/);
-  assert.throws(() => normalizeConfig({ ...base, targetFields: [...expanded.targetFields, 'overflow'] }), /目标字段必须是列表/);
+  assert.throws(() => normalizeConfig({ ...base, targetFields: [...expanded.targetFields, 'overflow'] }), /目标字段共有\d+项，超过\d+项上限/);
 
   console.log('LITERATURE_SOURCES_TESTS_PASS');
 }

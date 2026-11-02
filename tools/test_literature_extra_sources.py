@@ -61,6 +61,7 @@ class Page:
         self.filled = None
         self.clicked = 0
         self.visited = []
+        self.access_state = {}
 
     def goto(self, url, **kwargs):
         self.visited.append(url)
@@ -69,6 +70,8 @@ class Page:
         pass
 
     def evaluate(self, script, arguments=None):
+        if "literature_snapshot_access_state" in script:
+            return dict(self.access_state)
         if "scopus_document_mode" in script:
             return self.document_mode
         if "scopus_search_field" in script:
@@ -164,6 +167,91 @@ def bibliographic_fixture(source):
 
 
 class SourceNavigationTests(unittest.TestCase):
+    def test_native_scopus_fields_never_reach_basic_form_or_navigation(self):
+        queries = (
+            '(TITLE-ABS(cattle) OR AUTHKEY(cattle)) AND PUBYEAR AFT 1999 AND PUBYEAR BEF 2027',
+            'AUTHKEY("heat stress")', 'TITLE-ABS(shrimp) AND LANGUAGE(english)',
+            'TITLE-ABS-KEY(broiler) AND LIMIT-TO(DOCTYPE,"ar")',
+            'TITLE-ABS-KEY(AUTHKEY(methane))', 'PUBYEAR BEF 2027',
+            'fund-sponsor(agriculture)',
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                page = Page("scopus")
+                self.assertIsNotNone(adapter.native_query_notice("scopus", query))
+                self.assertFalse(adapter.navigate(page, "scopus", query))
+                self.assertFalse(adapter._submit_scopus(page, query))
+                self.assertEqual(page.visited, [])
+                self.assertIsNone(page.filled)
+                self.assertEqual(page.clicked, 0)
+
+    def test_wanfang_professional_fields_never_enter_homepage_search(self):
+        for query in ('主题:(牛 OR 猪) AND 题名或关键词:(温度 OR 湿度)',
+                      '题名:(热应激) NOT 题名:(综述)', '摘要：甲烷', '关键词=生产性能', '基金:(国家自然科学)'):
+            with self.subTest(query=query):
+                page = Page("wanfang")
+                self.assertIn("专业检索", adapter.native_query_notice("wanfang", query))
+                self.assertFalse(adapter.navigate(page, "wanfang", query))
+                self.assertEqual(page.visited, [])
+                self.assertIsNone(page.filled)
+                self.assertEqual(page.clicked, 0)
+
+    def test_field_names_inside_literal_phrases_do_not_become_operators(self):
+        for source, query in (("scopus", '"TITLE(broiler)" OR "AUTHKEY"'),
+                              ("scopus", '{TITLE-ABS(cattle)}'),
+                              ("wanfang", '"主题:温度" OR 肉鸡')):
+            with self.subTest(source=source, query=query):
+                self.assertIsNone(adapter.native_query_notice(source, query))
+                page = Page(source)
+                self.assertTrue(adapter.navigate(page, source, query))
+                self.assertEqual(page.filled, query)
+
+    def test_initial_navigation_access_block_stops_before_form_fill(self):
+        for source in ("wanfang", "scopus", "pubmed"):
+            for flag in ("captcha", "rateLimited", "accessBlocked", "loginPrompt", "password", "accessRequired"):
+                with self.subTest(source=source, flag=flag):
+                    page = Page(source)
+                    page.access_state[flag] = True
+                    self.assertFalse(adapter.navigate(page, source, QUERY))
+                    self.assertEqual(len(page.visited), 1)
+                    self.assertIsNone(page.filled)
+                    self.assertEqual(page.clicked, 0)
+
+    def test_challenge_arriving_during_form_wait_stops_submission(self):
+        class DelayedChallenge(Page):
+            def wait_for_selector(self, *args, **kwargs):
+                self.access_state["rateLimited"] = True
+        for source in ("wanfang", "scopus"):
+            page = DelayedChallenge(source)
+            self.assertFalse(adapter.navigate(page, source, QUERY))
+            self.assertIsNone(page.filled)
+            self.assertEqual(page.clicked, 0)
+
+    def test_challenge_arriving_after_fill_stops_search_click(self):
+        class FillChallenge(Control):
+            def fill(self, value):
+                super().fill(value)
+                self.page.access_state["captcha"] = True
+        class DelayedChallenge(Page):
+            def locator(self, selector):
+                if selector in ('input#searchterm1', 'input#search-input'):
+                    return FillChallenge(self, "input")
+                return super().locator(selector)
+        for source in ("wanfang", "scopus"):
+            page = DelayedChallenge(source)
+            self.assertFalse(adapter.navigate(page, source, QUERY))
+            self.assertEqual(page.filled, QUERY)
+            self.assertEqual(page.clicked, 0)
+
+    def test_extended_query_preserved_and_oversize_never_navigates(self):
+        page = Page("pubmed")
+        query = "temperature OR " * 250
+        self.assertTrue(adapter.navigate(page, "pubmed", query))
+        self.assertEqual(parse_qs(urlsplit(page.visited[0]).query), {"term": [query]})
+        page = Page("pubmed")
+        self.assertFalse(adapter.navigate(page, "pubmed", "x" * (adapter.MAX_QUERY_CHARS + 1)))
+        self.assertEqual(page.visited, [])
+
     def test_fixed_source_pages_and_pubmed_exact_query(self):
         page = Page("pubmed")
         self.assertTrue(adapter.navigate(page, "pubmed", QUERY, 2000, 2026))

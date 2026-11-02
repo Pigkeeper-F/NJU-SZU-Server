@@ -171,6 +171,17 @@
   var DOC_STATUSES = ['draft', 'approved'];
   // 【能力节点 · 2026-10-14】执行记录状态（见契约 §18）：ran=已运行待人工确认；confirmed=已确认。
   var RUN_STATUSES = ['ran', 'confirmed'];
+  function cleanAcceptanceMarker(value) {
+    if (!value || !/^[a-f0-9-]{36}$/.test(value.runId || '') || !/^[a-f0-9-]{36}$/.test(value.reportId || '') || !/^[a-f0-9]{64}$/.test(value.planSha256 || '') || typeof value.planText !== 'string' || !value.planText.trim() || value.planText.length > 20000) return null;
+    return { runId: value.runId, reportId: value.reportId, planSha256: value.planSha256, planText: value.planText };
+  }
+  function cleanAcceptanceCurrent(mod) {
+    var marker = cleanAcceptanceMarker(mod && mod.run && mod.run.cleanAcceptance);
+    if (!marker) return false;
+    var rules = root.TaskManager && root.TaskManager.rulesForModule && root.TaskManager.rulesForModule(mod.id);
+    var text = rules && rules.text || (mod.doc && mod.doc.status === 'approved' ? mod.doc.content : '');
+    return text === marker.planText;
+  }
   // 结果复核打回的三级归因：数据 / 代码 / 标准（doc）。归因决定问题回溯到哪一环。
   var RUN_CAUSES = ['data', 'code', 'doc'];
   var RUN_CAUSE_LABELS = { data: '数据', code: '代码', doc: '标准' };
@@ -314,6 +325,8 @@
         dir: (typeof raw.run.dir === 'string') ? raw.run.dir : '',
         artifacts: artifacts
       };
+      var cleanMarker = cleanAcceptanceMarker(raw.run.cleanAcceptance);
+      if (cleanMarker) run.cleanAcceptance = cleanMarker;
     }
 
     var out = {
@@ -886,6 +899,7 @@
     var mod = findModule(id);
     if (!mod) return { ok: false, reason: '模块不存在' };
     if (mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed')) return { ok: false, reason: '下载文件尚未确认，不能跳过下载进入下游' };
+    if (mod.type === 'clean-data' && (!mod.run || mod.run.status !== 'confirmed' || !cleanAcceptanceCurrent(mod))) return { ok: false, reason: '清洗结果尚未按当前方案完成核验确认，请在清洗核验区处理问题后交接' };
     var idx = indexOfModule(id);
     var next = null;
     var targetType = PREPARATION_TYPES.indexOf(mod.type) >= 0 ? 'calculation'
@@ -1189,6 +1203,7 @@
       updatedAt: nowISO(),
       approvedAt: null
     };
+    if (mod.type === 'clean-data' && mod.run && mod.run.cleanAcceptance) { delete mod.run.cleanAcceptance; mod.run.status = 'ran'; }
     emit('doc:save', { moduleId: moduleId, doc: deepClone(mod.doc), created: created });
     return deepClone(mod.doc);
   }
@@ -1289,6 +1304,8 @@
       dir: (typeof src.dir === 'string') ? src.dir : '',
       artifacts: artifacts
     };
+    var marker = cleanAcceptanceMarker(src.cleanAcceptance);
+    if (marker) mod.run.cleanAcceptance = marker;
     emit('run:mark', { moduleId: moduleId, run: deepClone(mod.run) });
     return deepClone(mod.run);
   }
@@ -1297,8 +1314,23 @@
   function confirmRun(moduleId) {
     var mod = findModule(moduleId);
     if (!mod || !mod.run || mod.run.status !== 'ran') return false;
+    if (mod.type === 'clean-data' && !cleanAcceptanceCurrent(mod)) return false;
     mod.run.status = 'confirmed';
     emit('run:confirm', { moduleId: moduleId, run: deepClone(mod.run) });
+    return true;
+  }
+
+  /** Withdraw only a cleaning acceptance; keep the actual run and all artifacts. */
+  function invalidateCleanAcceptance(moduleId, runId, note) {
+    var mod = findModule(moduleId);
+    var marker = mod && mod.run && mod.run.cleanAcceptance;
+    if (!mod || mod.type !== 'clean-data' || !marker || (runId && marker.runId !== runId)) return false;
+    delete mod.run.cleanAcceptance;
+    mod.run.status = 'ran';
+    mod.status = 'doing';
+    var text = typeof note === 'string' ? note.trim() : '';
+    if (text) mod.messages.push({ id: uid('msg_'), role: 'system', text: '清洗验收需重新确认：' + text, at: nowISO() });
+    emit('run:invalidate', { moduleId: moduleId, runId: marker.runId, note: text });
     return true;
   }
 
@@ -1556,6 +1588,7 @@
     // —— 执行记录与结果确认门（跑完待确认 + 三级归因打回）
     markRun: markRun,
     confirmRun: confirmRun,
+    invalidateCleanAcceptance: invalidateCleanAcceptance,
     rejectRun: rejectRun,
     // —— 项目管理（本地多项目：归档 / 新建 / 打开）
     createProject: createProject,
@@ -1586,6 +1619,7 @@
       DOC_REJECT: 'doc:reject',
       RUN_MARK: 'run:mark',
       RUN_CONFIRM: 'run:confirm',
+      RUN_INVALIDATE: 'run:invalidate',
       RUN_REJECT: 'run:reject'
     },
     LIMITS: {

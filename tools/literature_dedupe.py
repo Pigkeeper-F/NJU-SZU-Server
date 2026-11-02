@@ -5,7 +5,7 @@ duplicate records that describe the same paper. Signal priority is frozen by
 ``docs/literature-mining-stage2-design.md`` §2.4.2 / §3.4 and reuses the SOC
 ``scripts/papers_index.py`` pure functions (A-tier reuse, D1a card 3):
 
-    DOI exact (1.0) > normalized title containment (0.95) > Jaccard >= threshold
+    DOI/native ID/full bibliography exact > title similarity (manual review only)
 
 Outputs ``dedupe/dedupe.json`` + ``dedupe/dedupe.csv`` (design §3.4) with an
 NDJSON event stream (``stage`` -> ``result``) on stdout.
@@ -21,15 +21,19 @@ Semantics frozen by the contract:
   duplicates are never silently dropped/merged.
 - Processing order is deterministic: batch index ascending, then original
   order inside the batch; running twice on the same input yields the same
-  groups (idempotent full recompute, covers D7 interrupted-rerun duplicates).
+  groups. Versioned indexes reuse unchanged prefixes; edits rebuild safely.
 """
 from __future__ import annotations
 
 import argparse
+import math
+from collections import Counter, defaultdict
+import literature_identity as _identity
 import copy
 import csv
 import importlib
 import io
+import hashlib
 import json
 import os
 import sys
@@ -50,7 +54,8 @@ CSV_COLUMNS = (
     "canonical_id", "title", "year", "doi", "sources", "merged_count",
     "merge_confidence", "merge_reason", "max_score", "needs_review",
 )
-_REASON_RANK = {"doi_exact": 2, "title_substring": 1, "title_jaccard": 0}
+_REASON_RANK = {"doi_exact": 4, "source_id_exact": 3, "title_year_authors_exact": 2, "title_substring": 1, "title_jaccard": 0}
+INDEX_VERSION = "strong-identity-index-v2"
 
 _CANDIDATES_FILE = "candidates.json"
 
@@ -246,17 +251,58 @@ def _record_id(record: dict, position: int) -> str:
 
 
 def _match(left: dict, right: dict, threshold: float):
-    """Pairwise signal: (reason, score, exact) or None. Priority is frozen."""
-    if left["doi"] and right["doi"] and left["doi"] == right["doi"]:
-        return ("doi_exact", 1.0, True)
-    if left["norm_title"] and right["norm_title"] and (
-        left["norm_title"] in right["norm_title"] or right["norm_title"] in left["norm_title"]
-    ):
-        return ("title_substring", 0.95, True)
+    """Strong identity merges; similar titles only nominate manual review."""
+    if _identity.conflicts(left["identity"], right["identity"]):
+        return None
+    reason = _identity.exact_match(left["identity"], right["identity"])
+    if reason:
+        return (reason, 1.0, True)
     score = jaccard(left["tokens"], right["tokens"])
+    if left["norm_title"] and left["norm_title"] == right["norm_title"]:
+        return ("title_substring", 0.95, False)
     if score >= threshold:
         return ("title_jaccard", round(score, 3), False)
     return None
+
+
+def _indexed_links(prepared, threshold, prior=None):
+    """Inverted token/identity lookup; unchanged prefixes reuse prior match edges."""
+    strong, titles, postings, unknown_postings = defaultdict(set), defaultdict(set), defaultdict(set), defaultdict(set)
+    prefix = len(prior.get("fingerprints", [])) if prior else 0
+    links = [tuple(link) for link in prior.get("links", [])] if prior else []
+    evaluated = 0
+    for right, current in enumerate(prepared):
+        keys = _identity.index_keys(current["identity"])
+        if right >= prefix:
+            possible = set()
+            for key in keys:
+                possible.update(strong.get(key, ()))
+            possible.update(titles.get(current["norm_title"], ()))
+            # Different known DOIs cannot match. Their title pairs need not even
+            # be enumerated; title-only records remain eligible for comparison.
+            applicable = unknown_postings if current["doi"] else postings
+            overlap = Counter(left for token in current["tokens"] for left in applicable.get(token, ()))
+            for left, shared in overlap.items():
+                # Exact necessary bound for Jaccard >= threshold. No high-frequency
+                # token or candidate cutoff silently discards a possible match.
+                needed = math.ceil(threshold * (len(current["tokens"]) + len(prepared[left]["tokens"])) / (1 + threshold) - 1e-12)
+                if shared >= needed:
+                    possible.add(left)
+            for left in sorted(possible):
+                evaluated += 1
+                match = _match(prepared[left], current, threshold)
+                if match:
+                    reason, score, exact = match
+                    links.append((left, right, reason, score, exact))
+        for key in keys:
+            strong[key].add(right)
+        if current["norm_title"]:
+            titles[current["norm_title"]].add(right)
+        for token in current["tokens"]:
+            postings[token].add(right)
+            if not current["doi"]:
+                unknown_postings[token].add(right)
+    return links, {"reused_prefix_records": prefix, "new_pair_checks": evaluated}
 
 
 def _first_non_empty(members: list[int], records: list[dict], key: str) -> str:
@@ -267,35 +313,57 @@ def _first_non_empty(members: list[int], records: list[dict], key: str) -> str:
     return ""
 
 
-def group_records(records: list[dict], *, threshold: float = DEFAULT_THRESHOLD) -> list[dict]:
+def group_records(records: list[dict], *, threshold: float = DEFAULT_THRESHOLD,
+                  cache: dict | None = None, cache_out: dict | None = None) -> list[dict]:
     """Group records into the §3.4 ``groups`` structure (deterministic order)."""
     if not records:
         return []
 
     order = sorted(range(len(records)), key=lambda i: (_batch_index(records[i]), i))
-    prepared = []
-    for record in records:
+    fingerprints = [_identity.digest([_record_id(r, i), _batch_index(r), _identity.identity(r)])
+                    for i, r in enumerate(records)]
+    usable = (isinstance(cache, dict) and cache.get("version") == INDEX_VERSION
+              and cache.get("threshold") == threshold and isinstance(cache.get("fingerprints"), list)
+              and fingerprints[:len(cache["fingerprints"])] == cache["fingerprints"]
+              and len(cache.get("prepared", [])) == len(cache["fingerprints"]))
+    prior = cache if usable else None
+    prepared = copy.deepcopy(prior["prepared"]) if prior else []
+    for value in prepared:
+        value["tokens"] = set(value["tokens"])
+    for record in records[len(prepared):]:
         title = str(record.get("title") or "")
-        prepared.append({
-            "doi": normalize_doi(record.get("doi")),
-            "norm_title": normalize(title) if title else "",
-            "tokens": tokens(title) if title else set(),
-        })
-
+        prepared.append({"doi": normalize_doi(record.get("doi")),
+                         "norm_title": normalize(title) if title else "",
+                         "tokens": tokens(title) if title else set(), "identity": _identity.identity(record)})
     total = len(records)
     union_all, union_exact = _UnionFind(total), _UnionFind(total)
-    links: list[tuple[int, int, str, float]] = []
-    for left in range(total):
-        for right in range(left + 1, total):
-            match = _match(prepared[left], prepared[right], threshold)
-            if match is None:
-                continue
-            reason, score, exact = match
-            union_all.union(left, right)
-            if exact:
+    matched_links, statistics = _indexed_links(prepared, threshold, prior)
+    links = []
+    # Prevent an incomplete-identity bridge from joining incompatible DOIs/IDs.
+    component_identity = [{"doi": {p["identity"]["doi"]} - {""},
+                           "ids": {k: {v} for k, v in p["identity"]["source_ids"].items()}}
+                          for p in prepared]
+    for left, right, reason, score, exact in matched_links:
+        a, b = union_exact.find(left), union_exact.find(right)
+        if exact and a != b:
+            first, second = component_identity[a], component_identity[b]
+            compatible = len(first["doi"] | second["doi"]) <= 1 and all(
+                len(first["ids"][key] | second["ids"][key]) <= 1 for key in first["ids"].keys() & second["ids"].keys())
+            if compatible:
                 union_exact.union(left, right)
-            links.append((left, right, reason, score))
+                component_identity[union_exact.find(left)] = {"doi": first["doi"] | second["doi"],
+                    "ids": {key: first["ids"].get(key, set()) | second["ids"].get(key, set())
+                            for key in first["ids"].keys() | second["ids"].keys()}}
+            else:
+                exact = False
+        union_all.union(left, right)
+        links.append((left, right, reason, score))
+    if cache_out is not None:
+        cache_out.update(version=INDEX_VERSION, threshold=threshold, fingerprints=fingerprints,
+                         prepared=[{**p, "tokens": sorted(p["tokens"])} for p in prepared],
+                         links=matched_links, statistics=statistics)
 
+    order_rank = {value: rank for rank, value in enumerate(order)}
     members_by_root: dict[int, list[int]] = {}
     for index in order:  # walk in canonical order -> canonical is members[0]
         members_by_root.setdefault(union_all.find(index), []).append(index)
@@ -305,7 +373,11 @@ def group_records(records: list[dict], *, threshold: float = DEFAULT_THRESHOLD) 
         links_by_root.setdefault(union_all.find(link[0]), []).append(link)
 
     groups: list[dict] = []
+    prior_ids = prior.get("canonical_ids", []) if prior else []
+    existing_canonicals = {value: rank for rank, value in enumerate(prior_ids)}
     for root, members in members_by_root.items():
+        members.sort(key=lambda i: (0, existing_canonicals[_record_id(records[i], i)])
+                     if _record_id(records[i], i) in existing_canonicals else (1, order_rank[i]))
         canonical = members[0]
         canonical_id = _record_id(records[canonical], canonical)
         exact_connected = all(
@@ -347,6 +419,8 @@ def group_records(records: list[dict], *, threshold: float = DEFAULT_THRESHOLD) 
             "needs_review": confidence == "probable",
             "records": group_records_list,
         })
+    if cache_out is not None:
+        cache_out["canonical_ids"] = [group["canonical_id"] for group in groups]
     return groups
 
 
@@ -405,6 +479,8 @@ def write_outputs(job_dir: Path, groups: list[dict], meta: dict) -> dict:
         "version": 1,
         "generated_at": now_iso(),
         "threshold": meta.get("threshold", DEFAULT_THRESHOLD),
+        "candidate_input_hash": meta.get("candidate_input_hash", ""),
+        "candidate_file_sha256": meta.get("candidate_file_sha256", ""),
         "counts": counts,
         "groups": groups,
     }
@@ -419,12 +495,20 @@ def write_outputs(job_dir: Path, groups: list[dict], meta: dict) -> dict:
 
 def run(config: dict, output_dir: Path, *, threshold: float = DEFAULT_THRESHOLD,
         resume: bool = False) -> int:
-    """Execute the dedupe stage; full recompute, ``resume`` is a no-op CLI symmetry."""
+    """Use a versioned identity index; only new records need pair comparisons."""
     _ = (config, resume)  # dedupe is source-agnostic; --resume keeps CLI symmetry (§2.4.2)
     _, records = load_candidates(output_dir)  # missing input -> error only, no stage event
     emit("stage", stage="dedupe", message="对累计候选执行跨来源归并去重")
-    groups = group_records(records, threshold=threshold)
-    counts = write_outputs(output_dir, groups, {"threshold": threshold})
+    index_path = Path(output_dir) / "dedupe" / "identity_index.json"
+    try:
+        cache = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = None
+    cache_out = {}
+    groups = group_records(records, threshold=threshold, cache=cache, cache_out=cache_out)
+    atomic_write_json(index_path, cache_out)
+    counts = write_outputs(output_dir, groups, {"threshold": threshold, "candidate_input_hash": _identity.digest(records),
+        "candidate_file_sha256": hashlib.sha256((Path(output_dir) / _CANDIDATES_FILE).read_bytes()).hexdigest()})
     emit(
         "result",
         stage="dedupe",
@@ -452,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="标题相似度 Jaccard 阈值（默认 0.55）")
-    parser.add_argument("--resume", action="store_true", help="保留以对齐统一 CLI；去重为全量重算，行为与普通运行相同")
+    parser.add_argument("--resume", action="store_true", help="复用未改变题录的身份索引；新题录增量匹配")
     args = parser.parse_args(argv)
     try:
         config = _validate_config(json.loads(args.config.read_text(encoding="utf-8")))

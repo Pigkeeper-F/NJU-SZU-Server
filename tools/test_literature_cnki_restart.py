@@ -193,6 +193,7 @@ class CnkiCleanupTests(unittest.TestCase):
             with patch.object(old, "close", side_effect=RuntimeError("sensitive exception text")):
                 result = fetcher.complete_paper()
             self.assertFalse(result["closed"])
+            self.assertTrue(result["close_failed"])
             self.assertTrue(current.closed)
             self.assertFalse(old.closed)
             self.assertFalse(unrelated_owned.closed)
@@ -204,6 +205,20 @@ class CnkiCleanupTests(unittest.TestCase):
             self.assertTrue(any("文件已保存" in message and "手动关闭" in message for message in progress))
             self.assertFalse(any("sensitive exception text" in message for message in progress))
             fetcher.close()
+
+    def test_cleanup_protective_refusal_does_not_request_manual_close(self):
+        for problem in ("verification", "loading_pending", "download_pending"):
+            with self.subTest(problem=problem), tempfile.TemporaryDirectory() as temporary:
+                job = Path(temporary)
+                fetcher, context, _, old, _, progress, hashes = self.setup_owned_pages(job)
+                old.snapshot[problem] = True
+                result = fetcher.complete_paper()
+                self.assertFalse(result["closed"])
+                self.assertNotIn("close_failed", result)
+                self.assertTrue(all(not page.closed for page in context.pages))
+                self.assertFalse(any("手动关闭" in message for message in progress))
+                self.assertEqual(snapshot_files(job, hashes), hashes)
+                fetcher.close()
 
     def test_blocked_operation_closes_no_pages_even_with_cleanup_record(self):
         with tempfile.TemporaryDirectory() as temporary:

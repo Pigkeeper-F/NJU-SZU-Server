@@ -23,7 +23,7 @@ function functionSource(name) {
   const end = source.indexOf('\n  }', start);
   return source.slice(start, end + 4);
 }
-const FUNCTIONS = ['checkLiteratureRuntime', 'autoOpenLiteratureBrowser', 'watchLiterature', 'startLiterature', 'literatureResumeStage',
+const FUNCTIONS = ['checkLiteratureRuntime', 'autoOpenLiteratureBrowser', 'watchLiterature', 'effectiveLiteratureReviewConfig', 'startLiterature', 'literatureResumeStage',
   'continueLiterature', 'continueAvailableLiterature', 'reviewLiteratureFulltext', 'openLiteratureBrowser', 'confirmLiteratureFields', 'literatureFieldsAssistState', 'literatureAttentionMessage', 'literatureCompletedMessage', 'literatureProcessingBasisMessage'];
 function job(overrides = {}) {
   return { id: 'original-job', status: 'needs_attention', stage: 'verification', resumeStage: 'discover', until: 'discover',
@@ -35,16 +35,19 @@ function job(overrides = {}) {
 function harness(savedSnapshot) {
   let activeJob = job();
   let runtime = copy(RUNTIME), runtimeError = null, browserError = null, availableError = null;
-  const calls = [], messages = [];
+  const calls = [], messages = [], reviewOpens = [];
   const saved = savedSnapshot ? copy(savedSnapshot) : { [MODULE]: { literatureSource: 'fixture-source' } };
   const current = { busy: false, literatureBusy: false, literatureError: '', literatureUntil: 'discover',
     literatureJob: activeJob, literatureConfig: copy(activeJob.config), literatureConfirmDrafts: [{ key: 'value', label: '值', meaning: '报告值', unit: '原文单位', valueType: 'number' }] };
   const context = vm.createContext({
-    task: () => current, saved, literatureFieldDrafts: {}, root: { LiteratureUI: { isBusy: () => false } }, account: { model: 'fixture-model' },
+    task: () => current, saved, literatureFieldDrafts: {}, root: { LiteratureUI: { isBusy: () => false }, LiteratureRuleReview: {
+      matches: (review, config, until, source) => !!review?.ready && JSON.stringify(review.config) === JSON.stringify(config) && review.until === until && review.source === source
+    } }, account: { model: 'fixture-model' },
     persist() {}, render() {}, renderLiteratureFieldsDialog() {}, closeLiteratureFields() {},
     ensureLiteratureFieldDrafts: () => current.literatureConfirmDrafts,
     validatedLiteratureFields: () => copy(current.literatureConfirmDrafts), saveLiteratureFieldDrafts: () => true,
     literatureSource: () => 'fixture-source', literatureStageLabel: stage => stage, literatureDeliverableSummary: () => '',
+    literatureWorkspaceManager: () => null, session: async () => 'fixture-session', openLiteratureRuleReview: async () => { reviewOpens.push(MODULE); },
     Store: { appendMessage: (...args) => messages.push(args) },
     applyLiteratureJob: (_mod, next) => { current.literatureJob = next; },
     request: async (url, options = {}) => {
@@ -83,7 +86,12 @@ function harness(savedSnapshot) {
   const labelsCode = source.slice(source.indexOf('  const LITERATURE_STAGE_ORDER'), source.indexOf('  function literatureFileLabel'));
   vm.runInContext(configCode + labelsCode + '\n' + FUNCTIONS.map(functionSource).join('\n')
     + '\nglobalThis.subject = { ' + FUNCTIONS.join(', ') + ' };', context);
-  return { subject: context.subject, current, saved, calls, messages,
+  // Runtime gating is exercised after a human-reviewed, applied configuration.
+  // The separate cases below verify that missing confirmation never reaches it.
+  current.literatureRuleReview = { id: 'fixture-review', revision: 1, ready: true, source: 'fixture-source', until: current.literatureUntil,
+    config: copy(context.subject.effectiveLiteratureReviewConfig(current)) };
+  saved[MODULE].literatureReviewAppliedRevision = 1;
+  return { subject: context.subject, current, saved, calls, messages, reviewOpens,
     setRuntime(value) { runtime = value; }, setRuntimeError(error) { runtimeError = error; }, setBrowserError(error) { browserError = error; }, setAvailableError(error) { availableError = error; },
     setJob(next) { activeJob = copy(next); current.literatureJob = copy(next); current.literatureConfig = copy(next.config); current.literatureUntil = next.until; },
     count(url) { return calls.filter(call => call.url === url).length; },
@@ -126,6 +134,18 @@ async function main() {
     assert.ok(source.includes(text), 'Runtime/login instructions should be visible: ' + text);
   }
   assert.ok(source.includes("'查看原页面' : '打开登录/检索页面'"), 'Manual open remains available after an automatic attempt');
+  for (const missing of ['review', 'confirmation', 'application', 'changed-query', 'changed-stage']) {
+    const unconfirmed = harness(); unconfirmed.current.literatureJob = null;
+    if (missing === 'review') unconfirmed.current.literatureRuleReview = null;
+    if (missing === 'confirmation') unconfirmed.current.literatureRuleReview.ready = false;
+    if (missing === 'application') delete unconfirmed.saved[MODULE].literatureReviewAppliedRevision;
+    if (missing === 'changed-query') unconfirmed.current.literatureConfig.query = 'Changed after approval';
+    if (missing === 'changed-stage') unconfirmed.current.literatureUntil = 'fulltext';
+    await unconfirmed.subject.startLiterature(mod);
+    assert.equal(unconfirmed.count('/api/literature/search'), 0, 'Unconfirmed or changed settings cannot start a job: ' + missing);
+    assert.equal(unconfirmed.calls.length, 0, 'Review gate precedes all execution preparation: ' + missing);
+    assert.equal(unconfirmed.reviewOpens.length, 1, 'The existing entry guides the user to item review: ' + missing);
+  }
   const old = harness(); old.setRuntimeError(new Error('404 route not found')); old.current.literatureJob = null;
   await old.subject.startLiterature(mod);
   assert.equal(old.posts().length, 0, 'Old server must not receive a new search');
@@ -156,6 +176,16 @@ async function main() {
   assert.ok(search); assert.equal(fresh.calls[0].url, '/api/literature/runtime');
   assert.equal(search.body.config.stopMode, 'end'); assert.equal(search.body.config.perSourceLimit, null);
   assert.equal(search.body.until, 'discover');
+  assert.equal(search.body.reviewId, 'fixture-review'); assert.equal(search.body.reviewRevision, 1);
+  assert.equal(search.body.sessionId, 'fixture-session'); assert.equal(search.body.workspaceId, MODULE);
+  const revisedStart = harness(); revisedStart.current.literatureJob = null;
+  revisedStart.saved[MODULE].literatureRevisionParentId = 'frozen-parent-job';
+  revisedStart.current.literatureRuleReview.parentJobId = 'frozen-parent-job';
+  await revisedStart.subject.startLiterature(mod);
+  const revisedRequest = revisedStart.calls.find(call => call.url === '/api/literature/search');
+  assert.ok(revisedRequest); assert.equal(revisedRequest.body.resumeCurrent, undefined, 'Changed configuration starts a new job rather than resuming an old browser checkpoint');
+  assert.equal(revisedStart.count('/api/literature/advance'), 0); assert.equal(revisedRequest.body.reviewId, 'fixture-review');
+  assert.equal(revisedRequest.body.parentJobId, undefined, 'Parent provenance comes from the validated server review, not an arbitrary client assertion');
   const resume = harness(); resume.current.literatureUntil = '';
   await resume.subject.continueLiterature(mod);
   const advance = resume.calls.find(call => call.url === '/api/literature/advance');

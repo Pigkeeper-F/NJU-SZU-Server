@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import copy
+import math
 import re
 import unicodedata
 from urllib.parse import quote, urlsplit
 
 import literature_browser
+from literature_fulltext_browser import _WaitBudget, _snapshot_signature, _page_loading
 
 
 ENTRY = "https://kns.cnki.net/kns8s/defaultresult/index"
@@ -20,7 +22,7 @@ ROWS = (".result-table-list tbody tr", "table.result-table-list tr", ".search-ta
 CONTROLS = "a,button,input[type=button],input[type=submit]"
 QUERY_CONTROLS = '#txt_SearchText,#txt_search,#txtSearchText,input[name="kw"],input[name="txt_SearchText"],input[name="txt_1_value1"],input.search-input,.search-input input,.search-box input[type="text"]'
 SEARCH_CONTROLS = 'button,input[type=button],input[type=submit],a[role="button"],a.search-btn,a.btn-search'
-WAIT_SECONDS = 60.0
+WAIT_SECONDS = 120.0
 _CONTROL_LABEL_JS = r"""e => {
   const supplement=/supplement|supporting\s+(?:information|material|data|file)|additional\s+(?:file|material|data)|补充(?:材料|数据|文件|信息)|附件/i;
   const area=e.closest('section,details,[id*="supp"],[class*="supp"],[id*="attachment"],[class*="attachment"]');
@@ -57,9 +59,22 @@ _CNKI_UI_JS = r"""/* literature_cnki_fulltext_ui */ () => {
     const queries = Array.from(document.querySelectorAll('#txt_SearchText,#txt_search,#txtSearchText,input[name="kw"],input[name="txt_SearchText"],input[name="txt_1_value1"],input.search-input,.search-input input,.search-box input[type="text"]'))
     .filter(visible).map(e=>String(e.value||'').trim()).filter(Boolean);
   let rowSelector='', rows=[];
+  const bibliography = row => {
+    const fields = selector => Array.from(row.querySelectorAll(selector)).filter(visible);
+    const authorFields=fields('td.author'), dateFields=fields('td.date');
+    const author=authorFields.length===1 ? authorFields[0] : null;
+    const authors=text(author), date=dateFields.length===1 ? text(dateFields[0]) : '';
+    const style=author ? getComputedStyle(author) : {};
+    const clipped=author && ((style.webkitLineClamp && !['none','0'].includes(style.webkitLineClamp))
+      || (['hidden','clip'].includes(style.overflowY) && author.scrollHeight>author.clientHeight+2)
+      || (['hidden','clip'].includes(style.overflowX) && author.scrollWidth>author.clientWidth+2));
+    const dateMatch=date.match(/^((?:19|20)\d{2})(?:[-/.]\d{1,2}[-/.]\d{1,2})?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
+    return {authors,authors_complete:!!authors&&!clipped&&!/(?:\.{2,}|…|等|\bet\s+al\b|更多)/i.test(authors),
+      year:dateMatch ? dateMatch[1] : ''};
+  };
   for (const sel of ['.result-table-list tbody tr','table.result-table-list tr','.search-table tr']) {
     const found=Array.from(document.querySelectorAll(sel));
-    if(found.length) {rowSelector=sel; rows=found.map((row,index)=>({index,visible:visible(row),anchors:Array.from(row.querySelectorAll('a')).map((a,index)=>({index,visible:visible(a),text:text(a)}))})); break;}
+    if(found.some(visible)) {rowSelector=sel; rows=found.map((row,index)=>({index,visible:visible(row),...bibliography(row),anchors:Array.from(row.querySelectorAll('a')).map((a,index)=>({index,visible:visible(a),text:text(a)}))})); break;}
   }
   const titles=Array.from(document.querySelectorAll('h1,.wx-tit h1,.brief h1,.title h1')).filter(visible).map(text).filter(Boolean);
   const label = __CONTROL_LABEL__;
@@ -186,11 +201,47 @@ def _title_matches(ui, title):
     return matches
 
 
-def _exact_result(ui, title):
-    return _title_matches(ui, title) if _query_matches(ui, title) else []
+def _authors_key(value):
+    if isinstance(value, list):
+        names = [str(item.get("name") or "") if isinstance(item, dict) else str(item or "") for item in value]
+    elif isinstance(value, str):
+        names = re.split(r"[;；、\r\n]+", value)
+    else:
+        return ()
+    names = tuple(_norm(name) for name in names if str(name).strip())
+    return () if not names or any(re.search(r"\.{2,}|…|等|\bet\s+al\b|更多", name) for name in names) else names
 
 
-def _lookup_diagnosis(url, ui, title):
+def _row_bibliography(ui, index):
+    rows = [row for row in ui.get("rows", []) if row.get("index") == index and row.get("visible") is True]
+    if len(rows) != 1 or rows[0].get("authors_complete") is not True:
+        return None
+    row = rows[0]
+    authors, year = _authors_key(row.get("authors")), str(row.get("year") or "")
+    return (authors, year) if authors and re.fullmatch(r"(?:19|20)\d{2}", year) else None
+
+
+def _selected_title_matches(ui, title, record=None):
+    matches = _title_matches(ui, title)
+    if len(matches) <= 1 or not isinstance(record, dict):
+        return matches
+    authors, year = _authors_key(record.get("authors")), str(record.get("year") or "")
+    if not authors or not re.fullmatch(r"(?:19|20)\d{2}", year):
+        return matches
+    evidence = [_row_bibliography(ui, index) for index, _ in matches]
+    # An incomplete competing row is unknown, never evidence of a different
+    # version. Every title competitor must expose a complete bibliography.
+    if any(value is None for value in evidence):
+        return matches
+    selected = [match for match, value in zip(matches, evidence) if value == (authors, year)]
+    return selected if len(selected) == 1 else matches
+
+
+def _exact_result(ui, title, record=None):
+    return _selected_title_matches(ui, title, record) if _query_matches(ui, title) else []
+
+
+def _lookup_diagnosis(url, ui, title, record=None):
     if not _lookup_page(url):
         return "page_unrecognized"
     if not any(str(value).strip() for value in ui.get("queries", [])):
@@ -199,7 +250,7 @@ def _lookup_diagnosis(url, ui, title):
         return "query_rewritten"
     if ui.get("rowSelector") not in ROWS or not any(row.get("visible") for row in ui.get("rows", [])):
         return "rows_loading"
-    found = _title_matches(ui, title)
+    found = _selected_title_matches(ui, title, record)
     return "ambiguous" if len(found) > 1 else "title_mismatch" if not found else "ready"
 
 
@@ -303,6 +354,17 @@ def run_cnki(fetcher, record, opts):
         return {"status": "fetch_error", "error": "知网单篇定位需要完整且有效的文献题名。", "url": ""}
     if fetcher._blocked:
         return dict(fetcher._blocked)
+    metadata_only = opts.get("metadata_only") is True
+    metadata_deadline = None
+    if metadata_only:
+        try:
+            seconds = float(opts.get("metadata_timeout_sec", 30))
+            if not math.isfinite(seconds) or seconds <= 0:
+                raise ValueError("Invalid metadata budget")
+        except (TypeError, ValueError):
+            return {"status": "attention", "reason": "page_not_ready", "url": "",
+                    "message": "摘要回源预算无效，未进行页面操作。"}
+        metadata_deadline = fetcher._clock() + seconds
     lookup = ENTRY + "?kw=" + quote(title, safe="") + "&korder=SU"
     fetcher._request_url = lookup
     paper_hash = _hash("\n".join(str(record.get(key) or "") for key in
@@ -320,8 +382,40 @@ def run_cnki(fetcher, record, opts):
     origin_wait_reported = set()
     material_discovery = None
     materials_observed_target = None
+    metadata_download_seen = False
+    last_page_diagnostic = {"snapshot_observed": False}
+
+    class MetadataBudgetExpired(Exception):
+        pass
+
+    def check_metadata_budget():
+        if metadata_only and fetcher._clock() >= metadata_deadline:
+            raise MetadataBudgetExpired()
+
+    def operation_timeout(default):
+        check_metadata_budget()
+        return min(default, max(1, int((metadata_deadline-fetcher._clock())*1000))) if metadata_only else default
+
+    def pace(url):
+        if metadata_only:
+            # Do not shorten the fixed site interval. If this call cannot fit,
+            # preserve the checkpoint without starting another site action.
+            from literature_fulltext_browser import CNKI_SITE_INTERVAL_SECONDS
+            check_metadata_budget()
+            delay = max([0.0] + [CNKI_SITE_INTERVAL_SECONDS-max(0, fetcher._clock()-value)
+                        for key in ("cnki.net", "*")
+                        if isinstance((value := fetcher._last_request.get(key)), (int, float)) and not isinstance(value, bool)])
+            if delay >= metadata_deadline-fetcher._clock():
+                raise MetadataBudgetExpired()
+        fetcher._pace(url)
+        check_metadata_budget()
 
     def pause(reason, message=None, snapshot=None):
+        flow = fetcher._binding.get("cnki_flow", {})
+        if reason == "page_not_ready" and flow.get("paper_hash") == paper_hash and flow.get("title_hash") == title_hash:
+            updated = copy.deepcopy(fetcher._binding)
+            updated["cnki_flow"]["page_diagnostic"] = dict(last_page_diagnostic)
+            commit_binding(updated)
         result = fetcher._attention(reason, getattr(fetcher._page, "url", lookup), snapshot=snapshot)
         if message:
             result["message"] = message
@@ -343,7 +437,7 @@ def run_cnki(fetcher, record, opts):
         flow = {"paper_hash": paper_hash, "title_hash": title_hash,
                 "target_id": updated.get("target_id"), "step": step}
         if preserve_popup and isinstance(previous, dict) and previous.get("paper_hash") == paper_hash and previous.get("title_hash") == title_hash:
-            for key in ("pending_popup", "cleanup_target_id", "diagnostic", "lookup_repair", "lookup_diagnostic", "title_click_target_id", "download_click_target_ids", "download_click_target_id", "download_click_count"):
+            for key in ("pending_popup", "cleanup_target_id", "cleanup_target_ids", "diagnostic", "lookup_repair", "lookup_diagnostic", "lookup_selection", "page_diagnostic", "title_click_target_id", "download_click_target_ids", "download_click_target_id", "download_click_count"):
                 if key in previous:
                     flow[key] = previous[key]
         if title_target is not None:
@@ -356,6 +450,20 @@ def run_cnki(fetcher, record, opts):
             flow.update(download_click_target_ids=clicked, download_click_target_id=download_target,
                         download_click_count=len(clicked))
         updated["cnki_flow"] = flow
+        if not preserve_popup:
+            # A fetcher is reused across papers. After a verified PDF the
+            # previous article popup may still be the visible page, while its
+            # target ID belongs to the prior paper. Bind the new lookup to the
+            # current owned page before any new title/download popup witness
+            # is registered; otherwise the next paper is falsely paused as an
+            # unverifiable window relationship.
+            try:
+                current_id = literature_browser._target_id(fetcher._context, page)
+            except Exception:
+                current_id = None
+            if isinstance(current_id, str) and current_id:
+                updated["target_id"] = current_id
+                flow["target_id"] = current_id
         commit_binding(updated)
 
     def diagnostic(code):
@@ -489,15 +597,28 @@ def run_cnki(fetcher, record, opts):
         attached.add(id(target))
         attached_targets[id(target)] = literature_browser._target_id(fetcher._context, target)
         def on_download(download):
+            nonlocal metadata_download_seen
+            if metadata_only:
+                metadata_download_seen = True
+                try:
+                    download.cancel()
+                except Exception:
+                    pass
+                return
             source = event_source(target)
             if source is not None and len(downloads) < 4:
                 downloads.append((download, source))
         def on_response(response):
+            nonlocal metadata_download_seen
             try:
                 main_navigation = response.request.is_navigation_request() and response.request.frame == target.main_frame
                 if not main_navigation:
                     return
                 response_status[id(target)] = int(response.status or 0)
+                if metadata_only:
+                    if "application/pdf" in str(response.headers.get("content-type", "")).lower():
+                        metadata_download_seen = True
+                    return
                 source = event_source(target)
                 if source is not None and "application/pdf" in str(response.headers.get("content-type", "")).lower():
                     if len(pdf_responses) < 4:
@@ -517,6 +638,7 @@ def run_cnki(fetcher, record, opts):
             listeners.append((target, event, callback))
 
     def context_response(response):
+        nonlocal metadata_download_seen
         # Popup's first navigation response may precede its Page popup event.
         # Inspect only a current owned click's direct main-frame child. Never
         # choose a context page by title/domain or inspect unrelated responses.
@@ -531,6 +653,10 @@ def run_cnki(fetcher, record, opts):
             if not register_popup(owner, child):
                 return
             response_status[id(child)] = int(response.status or 0)
+            if metadata_only:
+                if "application/pdf" in str(response.headers.get("content-type", "")).lower():
+                    metadata_download_seen = True
+                return
             source = event_source(child)
             if source is not None and "application/pdf" in str(response.headers.get("content-type", "")).lower() and len(pdf_responses) < 4:
                 pdf_responses.append((response, source))
@@ -559,28 +685,21 @@ def run_cnki(fetcher, record, opts):
             updated = copy.deepcopy(fetcher._binding)
             updated["target_id"] = popup_id
             flow = updated["cnki_flow"]
-            outstanding = flow.get("cleanup_target_id")
-            if outstanding and outstanding not in {witness.get("owner_target_id"), popup_id}:
+            cleanup = flow.get("cleanup_target_ids", [])
+            if not isinstance(cleanup, list) or len(cleanup) > 3 or any(not isinstance(value, str) or not value or len(value) > 200 for value in cleanup):
                 return diagnostic("handoff_error")
+            cleanup = list(dict.fromkeys([*cleanup, *([flow["cleanup_target_id"]] if flow.get("cleanup_target_id") else [])]))
             flow["target_id"] = popup_id
             flow["pending_popup"]["adopted"] = True
             flow.pop("diagnostic", None)
             flow.pop("origin_summary", None)
             if owner is not None and owner is not popup and not owner.is_closed():
                 flow["cleanup_target_id"] = witness["owner_target_id"]
+                flow["cleanup_target_ids"] = list(dict.fromkeys([*cleanup, witness["owner_target_id"]]))
             commit_binding(updated)
             fetcher._page = popup
             if owner is not None and owner is not popup and not owner.is_closed():
-                try:
-                    owner.close(run_before_unload=False)
-                    updated = copy.deepcopy(fetcher._binding)
-                    updated["cnki_flow"].pop("cleanup_target_id", None)
-                    commit_binding(updated)
-                except Exception:
-                    # Ownership is already committed. A cleanup failure is not
-                    # a failure to prove who opened the popup. The driver can
-                    # close this exact recorded owned target after status saves.
-                    fetcher._progress("全文获取：下载窗口已绑定；旧任务页稍后在文件保存后清理。")
+                fetcher._progress("全文获取：下载窗口已绑定；原详情页保留，文件与状态保存后再统一关闭。")
             return True
         except Exception:
             return diagnostic("handoff_error")
@@ -601,12 +720,24 @@ def run_cnki(fetcher, record, opts):
                     if popup.url != "about:blank" and not (str(popup.url).startswith("blob:") and _artifact_origin(popup.url)):
                         target_id = literature_browser._target_id(fetcher._context, popup)
                         if target_id not in origin_wait_started:
-                            origin_wait_started[target_id] = fetcher._clock()
+                            origin_wait_started[target_id] = _WaitBudget(fetcher._clock)
                         if target_id not in origin_wait_reported:
-                            fetcher._progress("全文获取：下载窗口正在跳转，等待就绪，最多1分钟；不会重新打开或重复点击。")
+                            fetcher._progress("全文获取：下载窗口正在跳转，随实际加载进展等待；未就绪窗口保留，不重复点击。")
                             origin_wait_reported.add(target_id)
-                        if fetcher._clock() - origin_wait_started[target_id] >= WAIT_SECONDS:
-                            return diagnostic("origin")
+                        progress = origin_wait_started[target_id]
+                        try:
+                            progress.observe(_snapshot_signature(popup.evaluate(_SNAPSHOT_JS), popup.url))
+                        except Exception:
+                            progress.observe((popup.url,))
+                        if progress.expired():
+                            diagnostic("origin")
+                            updated = copy.deepcopy(fetcher._binding)
+                            updated["cnki_flow"]["origin_summary"] = _origin_summary(popup.url)
+                            commit_binding(updated)
+                            result = pause("page_not_ready", "知网下载窗口仍未就绪，已保留原窗口；稍后可显式重新检查，不重复点击。")
+                            result["diagnostic"] = "origin"
+                            result["origin_summary"] = _origin_summary(popup.url)
+                            return "not_ready", result
                         waiting = True
                         continue
                     # Official blob / empty attachment windows are not
@@ -648,25 +779,44 @@ def run_cnki(fetcher, record, opts):
                     continue
                 if not promote(owner, popup, verified_artifact=True):
                     return popup_pause()
+        updated = copy.deepcopy(fetcher._binding)
+        updated.setdefault("cnki_flow", {})["file_verified"] = True
+        commit_binding(updated)
         fetcher._clear_pending()
         return {"status": "pdf_page", "bytes": blob, "size": len(blob),
                 "url": literature_browser.safe_url(fetcher._page.url) or ENTRY,
                 "material_discovery": material_discovery or {"status": "unknown", "reason": "article_materials_not_observed", "source_url": "", "links": []}}
 
     def read():
+        nonlocal last_page_diagnostic
         current = fetcher._page
         snap = current.evaluate(_SNAPSHOT_JS)
         ui = current.evaluate(_CNKI_UI_JS)
         if not isinstance(snap, dict) or not isinstance(ui, dict):
             raise ValueError("Unrecognized CNKI page")
+        # Only structural state is retained: never query strings, page text,
+        # signed URLs or credentials from the source page.
+        state = snap.get("ready_state")
+        last_page_diagnostic = {
+            "snapshot_observed": True,
+            "observed_step": step,
+            "ready_state": state if state in {"loading", "interactive", "complete"} else "unknown",
+            "loading_pending": bool(snap.get("loading_pending")),
+            "download_pending": bool(snap.get("download_pending")),
+            "query_count": len(ui.get("queries") or []),
+            "query_matches": _query_matches(ui, title),
+            "visible_row_count": sum(row.get("visible") is True for row in (ui.get("rows") or [])),
+            "exact_result_count": len(_exact_result(ui, title, record)),
+            "lookup_diagnosis": _lookup_diagnosis(current.url, ui, title, record),
+        }
         return snap, ui
 
     def lookup_pause(code, *, snapshot=None):
         messages = {
             "page_unrecognized": "知网当前任务页不是可核对的题名检索结果或目标详情页，已暂停；请在原任务页面核对。",
-            "query_missing": "知网单篇定位超过1分钟，但未识别到可见检索框中的完整目标题名，已暂停；请在原任务页面核对。",
+            "query_missing": "知网单篇定位仍未就绪，尚未识别到可见检索框中的完整目标题名；原任务页面保留待检查。",
             "query_rewritten": "知网显示的检索词与完整目标题名不一致，已暂停；不能删除或忽略L-等题名前缀后继续。请在原任务页面核对完整题名。",
-            "rows_loading": "知网单篇结果列表超过1分钟仍未加载出可核对题录，已暂停；已有成果保留。",
+            "rows_loading": "知网单篇结果列表仍未加载出可核对题录，原窗口和已有成果保留，稍后可显式检查。",
             "title_mismatch": "知网结果页未出现完全匹配的完整目标题名，已暂停；未点击相似文献。",
             "ambiguous": "知网检索到多个完全同名结果，已暂停；请人工确认目标文献。",
             "repair_editor_unrecognized": "知网显示的检索词已改变，但无法唯一核对可编辑的普通检索框，已暂停；请在原任务页面按完整题名检索后继续。",
@@ -677,7 +827,7 @@ def run_cnki(fetcher, record, opts):
         updated = copy.deepcopy(fetcher._binding)
         updated.setdefault("cnki_flow", {})["lookup_diagnostic"] = code
         commit_binding(updated)
-        result = pause("load_timeout" if code in {"query_missing", "rows_loading"} else "page_error", messages[code], snapshot=snapshot)
+        result = pause("page_not_ready" if code in {"query_missing", "rows_loading"} else "page_error", messages[code], snapshot=snapshot)
         result["lookup_diagnostic"] = code
         fetcher._blocked = dict(result)
         return result
@@ -694,7 +844,7 @@ def run_cnki(fetcher, record, opts):
         if problem:
             return lookup_pause(problem)
         try:
-            fetcher._pace(current.url)
+            pace(current.url)
             latest_snap, latest_ui = read()
             reason = fetcher._reason(latest_snap)
             if reason:
@@ -707,16 +857,18 @@ def run_cnki(fetcher, record, opts):
             updated = copy.deepcopy(fetcher._binding)
             updated["cnki_flow"]["lookup_repair"] = {"state": "prepared", "query_hash": _hash(_norm(literal)), "method": "visible-literal-title"}
             commit_binding(updated)
-            editor.fill(literal, timeout=10_000)
+            editor.fill(literal, timeout=operation_timeout(10_000))
             if _norm(editor.input_value()) != _norm(literal):
                 return lookup_pause("repair_incomplete")
             fetcher._progress("全文获取：官网显示的检索词与完整题名不一致，正在原任务页以加引号的完整题名重新检索一次；保留L-等前缀。")
-            button.click(timeout=15_000, no_wait_after=True)
+            button.click(timeout=operation_timeout(15_000), no_wait_after=True)
             updated = copy.deepcopy(fetcher._binding)
             updated["cnki_flow"]["lookup_repair"]["state"] = "submitted"
             updated["cnki_flow"].pop("lookup_diagnostic", None)
             commit_binding(updated)
             return None
+        except MetadataBudgetExpired:
+            raise
         except Exception:
             try:
                 snap, _ = read()
@@ -755,6 +907,8 @@ def run_cnki(fetcher, record, opts):
             return False
 
     def artifact():
+        if metadata_only:
+            return None
         if (downloads or pdf_responses) and not (_official(fetcher._page.url) or bound_blob_witness()):
             return pause("page_error", "知网下载跳转后的页面不是可核对的官方来源，已暂停；请核对原页面。")
         if downloads or pdf_responses:
@@ -838,6 +992,10 @@ def run_cnki(fetcher, record, opts):
             if not isinstance(cleanup, str) or not cleanup or len(cleanup) > 200 or cleanup == fetcher._binding.get("target_id"):
                 return popup_pause("owner")
             targets.append(("cleanup_target_id", cleanup))
+        for old in flow.get("cleanup_target_ids", []):
+            if not isinstance(old, str) or not old or len(old) > 200 or old == fetcher._binding.get("target_id"):
+                return popup_pause("owner")
+            targets.append(("cleanup_target_ids", old))
         try:
             context = fetcher._connect()
             for _, target_id in targets:
@@ -898,9 +1056,17 @@ def run_cnki(fetcher, record, opts):
         # Pumps the Playwright event loop; sleeping Python alone cannot receive
         # a delayed download or a popup.  The caller's stage budget is the
         # authority once the site explicitly reports file generation.
-        fetcher._page.wait_for_timeout(200)
+        fetcher._page.wait_for_timeout(operation_timeout(200))
 
     try:
+        check_metadata_budget()
+        if metadata_only:
+            old_flow = fetcher._binding.get("cnki_flow", {})
+            if (fetcher._binding.get("pdf_click_pending") or
+                    isinstance(old_flow, dict) and (old_flow.get("step") == "download_clicked"
+                    or old_flow.get("download_click_count") or old_flow.get("download_click_target_ids")
+                    or (old_flow.get("pending_popup") or {}).get("action") == "download")):
+                return pause("page_error", "摘要回源不能接续已有下载操作；原窗口和下载断点保持待核对。")
         restart_guard = guard_restart()
         if restart_guard:
             return restart_guard
@@ -919,14 +1085,15 @@ def run_cnki(fetcher, record, opts):
         fetcher._context.on("response", context_response)
         listeners.append((fetcher._context, "response", context_response))
         start = fetcher._clock()
+        budget = _WaitBudget(fetcher._clock)
         blob_wait_reported = False
         if not resuming:
             flow_write("lookup", preserve_popup=False)
-            fetcher._pace(lookup)
+            pace(lookup)
             start = fetcher._clock()
             fetcher._progress("全文获取：在知网官方页面按完整题名单篇定位，核对后进入详情。")
             try:
-                response = page.goto(lookup, wait_until="domcontentloaded", timeout=60_000)
+                response = page.goto(lookup, wait_until="domcontentloaded", timeout=operation_timeout(120_000))
                 status = int(getattr(response, "status", 0) or 0)
                 if status in {401, 403, 404, 429} or status >= 500:
                     snap, _ = read()
@@ -937,12 +1104,17 @@ def run_cnki(fetcher, record, opts):
                 # A goto deadline can fire although usable DOM has arrived.
             fetcher._record_destination(page.url)
         while True:
+            check_metadata_budget()
+            if metadata_only and metadata_download_seen:
+                return pause("page_error", "摘要定位返回了文件而非可核对详情页；未读取或保存文件。")
             # Captured official file evidence must not be lost because a side
             # window is still redirecting, blocked, or has already closed.
             saved = artifact()
             if saved:
                 return saved
             adoption = adopt_popup()
+            if isinstance(adoption, tuple) and adoption[0] == "not_ready":
+                return adoption[1]
             if not adoption:
                 return popup_pause()
             if adoption == "waiting":
@@ -965,11 +1137,41 @@ def run_cnki(fetcher, record, opts):
                     return popup_pause("origin")
                 return pause("page_error", "知网当前页面不是可核对的官方入口，已暂停；请核对原页面。")
             snap, ui = read()
+            if step == "lookup" and _lookup_page(current.url):
+                # Ads and unrelated navigation controls can change forever.
+                # Stability here concerns only the visible lookup evidence.
+                visible_rows = [(row.get("index"), _authors_key(row.get("authors")), row.get("year"), row.get("authors_complete"), tuple(
+                    (anchor.get("index"), anchor.get("text"))
+                    for anchor in (row.get("anchors") or []) if anchor.get("visible") is True))
+                    for row in (ui.get("rows") or []) if row.get("visible") is True]
+                budget.observe((step, fetcher._binding.get("target_id"),
+                                tuple(_norm(query) for query in (ui.get("queries") or [])),
+                                ui.get("rowSelector"), tuple(visible_rows),
+                                snap.get("ready_state"), bool(snap.get("loading_pending")),
+                                bool(snap.get("download_pending"))))
+            else:
+                budget.observe((_snapshot_signature(snap, current.url), step,
+                                repr(ui.get("rows")), repr(ui.get("controls")), repr(ui.get("titles"))))
+            last_page_diagnostic["stable"] = budget.stable()
             reason = fetcher._reason(snap, response_status.get(id(current), 0))
             if reason:
                 return pause(reason, snapshot=snap)
             if ui.get("purchase_required"):
                 return pause("access_required", "知网当前页面需要购买或付费，已暂停；不会确认购买或支付。")
+            lookup_ready = (step == "lookup" and _lookup_page(current.url)
+                            and snap.get("ready_state") == "interactive" and budget.stable()
+                            and not snap.get("loading_pending") and not snap.get("download_pending")
+                             and len(_exact_result(ui, title, record)) == 1)
+            if _page_loading(snap) and step != "download_clicked" and not lookup_ready:
+                if budget.expired():
+                    return pause("page_not_ready")
+                tick()
+                continue
+            if "ready_state" in snap and step in {"detail_pending", "detail"} and not budget.stable():
+                if budget.expired():
+                    return pause("page_not_ready")
+                tick()
+                continue
             if step == "download_clicked" and not ui.get("generating"):
                 # Some official downloads open one more same-paper detail or
                 # confirmation page. A different URL alone proves nothing:
@@ -993,7 +1195,7 @@ def run_cnki(fetcher, record, opts):
                     if repair is not None and (not isinstance(repair, dict) or repair.get("state") != "submitted"):
                         return lookup_pause("repair_incomplete")
                     titles_found = _title_matches(ui, title)
-                    if len(titles_found) > 1:
+                    if len(titles_found) > 1 and len(_exact_result(ui, title, record)) != 1:
                         return lookup_pause("ambiguous")
                     if not _query_matches(ui, title) and len(titles_found) == 1:
                         repaired = repair_lookup(current, ui)
@@ -1002,15 +1204,16 @@ def run_cnki(fetcher, record, opts):
                         start = fetcher._clock()
                         tick()
                         continue
-                    matches = _exact_result(ui, title)
+                    matches = _exact_result(ui, title, record)
                     if len(matches) > 1:
                         return lookup_pause("ambiguous")
                     if len(matches) == 1:
                         row_index, anchor_index = matches[0]
+                        bibliography = _row_bibliography(ui, row_index) if len(titles_found) > 1 else None
                         link = current.locator(ui["rowSelector"]).nth(row_index).locator("a").nth(anchor_index)
                         if not link.is_visible() or _norm(link.inner_text()) != _norm(title):
                             return pause("page_error", "知网题名结果已变化，已暂停；未点击相似文献。")
-                        fetcher._pace(current.url)
+                        pace(current.url)
                         # A dynamic table may change while waiting for the
                         # site's interval. Recheck the unique row immediately
                         # before the actual user-interface click.
@@ -1018,15 +1221,30 @@ def run_cnki(fetcher, record, opts):
                         latest_reason = fetcher._reason(latest_snap)
                         if latest_reason:
                             return pause(latest_reason, snapshot=latest_snap)
+                        if latest_ui.get("purchase_required"):
+                            return pause("access_required", "知网当前页面需要购买或付费，已暂停；不会确认购买或支付。")
+                        if latest_snap.get("loading_pending") or latest_snap.get("download_pending") or latest_snap.get("ready_state") == "loading":
+                            tick()
+                            continue
                         if not _query_matches(latest_ui, title):
                             return lookup_pause("repair_query_rewritten" if fetcher._binding.get("cnki_flow", {}).get("lookup_repair") else "query_rewritten")
-                        if not _lookup_page(current.url) or _exact_result(latest_ui, title) != matches or not link.is_visible() or _norm(link.inner_text()) != _norm(title):
+                        if (not _lookup_page(current.url) or _exact_result(latest_ui, title, record) != matches
+                                or bibliography is not None and _row_bibliography(latest_ui, row_index) != bibliography
+                                or not link.is_visible() or _norm(link.inner_text()) != _norm(title)):
                             return pause("page_error", "知网题名结果在等待期间发生变化，已暂停；未点击相似文献。")
+                        if bibliography is not None:
+                            updated = copy.deepcopy(fetcher._binding)
+                            updated["cnki_flow"]["lookup_selection"] = {
+                                "method": "exact_title_authors_year", "year": bibliography[1],
+                                "authors_hash": _hash("\n".join(bibliography[0])),
+                                "row_index": row_index, "anchor_index": anchor_index,
+                                "target_id": fetcher._binding.get("target_id")}
+                            commit_binding(updated)
                         flow_write("detail_pending", title_target=fetcher._binding.get("target_id"))
                         step = "detail_pending"
                         action = "title"
                         fetcher._progress("全文获取：已核对唯一完全同名结果，正在点击知网正常详情入口。")
-                        link.click(timeout=15_000, no_wait_after=True)
+                        link.click(timeout=operation_timeout(15_000), no_wait_after=True)
                         start = fetcher._clock()
                         tick()
                         continue
@@ -1048,6 +1266,13 @@ def run_cnki(fetcher, record, opts):
                     step = "detail"
                     if fetcher._binding.get("cnki_flow", {}).get("step") != step:
                         flow_write(step)
+                    if metadata_only:
+                        # Navigation identity is only a locator guard. The
+                        # metadata caller must still verify DOI/native ID or
+                        # full title/year/authors and the original abstract.
+                        fetcher._clear_pending()
+                        return {"status": "ok", "url": literature_browser.safe_url(current.url) or ENTRY,
+                                "metadata_only": True}
                     current_target = fetcher._binding.get("target_id")
                     if materials_observed_target != current_target:
                         # Supplementary-file events belong to the collector,
@@ -1083,8 +1308,6 @@ def run_cnki(fetcher, record, opts):
                         current_id = fetcher._binding.get("target_id")
                         if clicked is None or current_id in clicked or len(clicked) >= 2:
                             return pause("page_error", "知网当前页面已经点击过下载或已到两次确认上限，已暂停；不会在同页重复点击下载。")
-                        if flow.get("cleanup_target_id"):
-                            return popup_pause("handoff_error")
                         fetcher._pace(current.url)
                         latest_snap, latest_ui = read()
                         latest_reason = fetcher._reason(latest_snap)
@@ -1129,21 +1352,18 @@ def run_cnki(fetcher, record, opts):
                         continue
                     if caj_only:
                         return pause("access_required", "知网当前仅提供CAJ下载，尚未取得可核验PDF正文；请在原页面核对或补充PDF。")
-            elif step == "download_clicked":
-                if ui.get("generating"):
-                    # No 60s navigation cutoff during an explicit generation
-                    # phase. Stop/outer stage budget still controls the driver.
-                    start = fetcher._clock()
-            if fetcher._clock() - start >= WAIT_SECONDS:
+            if budget.expired():
                 if step == "lookup":
-                    code = _lookup_diagnosis(current.url, ui, title)
+                    code = _lookup_diagnosis(current.url, ui, title, record)
                     return lookup_pause("title_mismatch" if code == "ready" else code)
                 if step == "download_clicked":
                     if any(not child.is_closed() and child is not fetcher._page for _, child in popups):
                         return popup_pause("origin")
-                    return pause("load_timeout", "知网下载操作尚未返回可核验文件或生成状态，已暂停；请在原页面核对，不会重复点击下载。")
-                return pause("load_timeout", "知网详情超过1分钟未能核对目标文献或下载入口，已暂停；请在原页面核对。")
+                    return pause("page_not_ready", "知网下载尚未返回完整文件，原窗口和点击记录已保留；稍后显式重新检查，不重复点击。")
+                return pause("page_not_ready", "知网详情或下载入口仍未就绪，原窗口已保留；稍后可显式重新检查。")
             tick()
+    except MetadataBudgetExpired:
+        return pause("page_not_ready", "摘要原页面仍未就绪，回源预算已到；原任务页面和断点保留，可稍后继续核对。")
     except Exception:
         if fetcher._page is not None:
             return pause("page_error", "知网正常页面操作未完成，已暂停并保留任务页；请核对后继续。")

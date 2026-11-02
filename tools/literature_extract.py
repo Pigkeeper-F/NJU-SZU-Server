@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 from literature_fulltext_evidence import EVIDENCE_VERSION, verified_saved_html
 from literature_target_groups import expanded_target_groups
 from literature_materials import extraction_materials, materials_fingerprint, MaterialsError
+from literature_screening import gate_targets, policy_identity, ScreeningAttention
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -109,6 +110,8 @@ safe_url = _shared("safe_url", _fallback_safe_url)
 
 TOP_KEYS = ("paper_id", "source_pdf", "status", "classification_reason", "rows", "warnings", "skip_reason")
 INSTRUCTIONS_VERSION = "extract-contract-v1"
+INPUT_COVERAGE_VERSION = "extract-input-coverage-v1"
+INPUT_COVERAGE_WARNING = "[input-coverage]"
 DEFAULT_MAX_CHARS = 120000
 FULLTEXT_READY = {"fetched_pdf", "fetched_html"}
 FIGURE_PROVENANCE = re.compile(r"^figure-extracted from \S+( .+)?$")
@@ -236,12 +239,33 @@ def extract_pdf_text(path: Path) -> tuple[str, str]:
     try:
         reader = pypdf.PdfReader(str(path))
         pages = [page.extract_text() or "" for page in reader.pages]
-        text = "\n".join(pages).strip()
+        # Preserve actual PDF page positions even when a page has no text.
+        text = "\n\n".join(f"[PDF page {number}]\n{page.strip()}" for number, page in enumerate(pages, 1))
     except Exception as error:  # corrupt/encrypted/unsupported PDF
         return "", f"PDF 正文解析失败（{type(error).__name__}: {error}）（待补充）"
-    if not text:
+    if not any(page.strip() for page in pages):
         return "", "PDF 未解析出可读文本（可能为扫描件）（待补充）"
     return text, ""
+
+
+def mark_input_coverage(bundle: dict) -> None:
+    """Version only freshly prepared inputs; bounded main excerpts are not a second body."""
+    limitations = []
+    fulltext = bundle.get("fulltext") or {}
+    if fulltext.get("truncated") is True:
+        limitations.append(f"正文输入已截断：提供{fulltext.get('chars', 0)}字符，原解析文本{fulltext.get('original_chars', '未知')}字符；未覆盖部分尚未提取。")
+    for material in bundle.get("materials") or []:
+        content = material.get("content")
+        if not isinstance(content, dict):
+            continue
+        reason = str(material.get("read_reason") or "")
+        if content.get("truncated") is True or (material.get("read_status") == "partial" and re.search(r"达到.{0,40}(?:上限|限制)|超限|超过.{0,40}仅检查首批", reason)):
+            content.update(truncated=True, chars=len(str(content.get("text") or "")),
+                           truncation_reason=content.get("truncation_reason") or reason or "材料输入已截断。")
+            if material.get("content_ref") != "fulltext" and not material.get("excluded_from_supplement_counts"):
+                label = material.get("filename") or material.get("material_id") or "材料"
+                limitations.append(f"材料{label}输入已截断：{content['truncation_reason']}未覆盖部分尚未提取。")
+    bundle["input_coverage"] = {"version": INPUT_COVERAGE_VERSION, "limitations": limitations}
 
 
 def read_fulltext_text(job_dir: Path, item: dict) -> tuple[str, str]:
@@ -268,6 +292,29 @@ def read_fulltext_text(job_dir: Path, item: dict) -> tuple[str, str]:
     return text, ""
 
 
+def _screening_bindings(job_dir, config, paper_ids):
+    """Re-read current evidence/policy decisions; persisted fulltext flags are not authority."""
+    try:
+        if not policy_identity(config.get("screeningPolicy")):
+            return None, {}
+        gated = gate_targets(job_dir, [{"paper_id": key} for key in sorted(set(paper_ids))], config.get("screeningPolicy"))
+        if gated["unscreened"]:
+            raise StageError("篇关摘未筛选或证据/规则已过期，不能自动提取；请先完成当前筛选（" + "、".join(gated["unscreened"][:5]) + "）")
+    except ScreeningAttention as error:
+        raise StageError("当前篇关摘筛选无法核验，不能自动提取：" + str(error)) from error
+    blocked = {key: "篇关摘已明确排除" for key in gated["excluded"]}
+    blocked.update({key: "篇关摘未筛选或证据/规则已过期" for key in gated["unscreened"]})
+    bindings = {}
+    for target in gated["targets"]:
+        key = target["paper_id"]
+        if target.get("extraction_allowed") is not True:
+            blocked[key] = "仍为待定，或人工选择候选后尚需全文资格核验"
+            continue
+        bindings[key] = {"policyId": target["screening_policy_id"], "line": target["screening_line"],
+                         "policyHash": target["screening_policy_hash"], "inputHash": target["screening_input_hash"]}
+    return bindings, blocked
+
+
 def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
     """Write ``extraction/inputs/<paper_id>.json`` bundles; returns counts + files."""
     job_dir = Path(job_dir)
@@ -280,6 +327,15 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
     except json.JSONDecodeError as error:
         raise StageError(f"全文状态文件损坏：{error}") from None
     items = [item for item in (status.get("items") or []) if isinstance(item, dict)]
+    inputs_dir = job_dir / "extraction" / "inputs"
+    old_inputs = {file.stem for file in inputs_dir.glob("*.json") if file.is_file()} if inputs_dir.is_dir() else set()
+    bindings, blocked = _screening_bindings(job_dir, config, [str(item.get("paper_id") or "") for item in items] + list(old_inputs))
+    blocked_old = old_inputs & blocked.keys()
+    if blocked_old:
+        raise StageError("旧提取输入对应文献已待定、排除或筛选过期，不能自动继续；原输入保留（" + "、".join(sorted(blocked_old)[:5]) + "）")
+    screening_skipped = [{"paper_id": key, "reason": reason} for key, reason in blocked.items()]
+    if bindings is not None:
+        items = [dict(item, screening=bindings[item["paper_id"]]) for item in items if item.get("paper_id") in bindings]
     # Legacy fulltext lists used only a probable group's canonical paper and
     # could omit a different article with a similar title. Do not let that old
     # list silently define the extraction population or edit it here.
@@ -292,7 +348,8 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
             raise StageError("去重目标尚未核对，不能生成提取输入；原结果保留") from error
         listed = {str(item.get("paper_id") or "") for item in items}
         missing = [str(group.get("canonical_id") or "") for group in groups
-                   if group.get("target_group_expanded") is True and group.get("canonical_id") not in listed]
+                   if group.get("target_group_expanded") is True and group.get("canonical_id") not in listed
+                   and (bindings is None or group.get("canonical_id") in bindings)]
         if missing:
             shown = "、".join(missing[:5]) + ("…" if len(missing) > 5 else "")
             raise StageError("有待核对的相似文献未进入全文清单，请返回全文获取继续处理；原结果保留（" + shown + "）")
@@ -320,6 +377,7 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
     # 先整体扫描过期 bundle（schema 已变化）：不静默重建，要求 --force（§2.4.4 关口）。
     stale: list[str] = []
     stale_materials: list[str] = []
+    stale_screening: list[str] = []
     for item in items:
         paper_id = str(item.get("paper_id") or "").strip()
         if not safe_paper_id(paper_id):
@@ -334,6 +392,8 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
             existing = None
         if isinstance(existing, dict) and existing.get("schema_sha256") != schema["sha256"]:
             stale.append(paper_id)
+        if isinstance(existing, dict) and bindings is not None and existing.get("screening") != bindings[paper_id]:
+            stale_screening.append(paper_id)
         if isinstance(existing, dict):
             try:
                 current_materials = materials_fingerprint(job_dir, paper_id)
@@ -347,11 +407,13 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
     if stale_materials and not force:
         shown = "、".join(stale_materials[:5]) + ("…" if len(stale_materials) > 5 else "")
         raise StageError(f"材料清单已更新，旧提取输入未包含当前材料（{shown}）；请使用 --force 重建，不会静默继续正文单文件输入")
+    if stale_screening and not force:
+        raise StageError("提取输入未绑定当前篇关摘筛选版本，请使用 --force 重建（" + "、".join(stale_screening[:5]) + "）")
 
     created: list[str] = []
     reused: list[str] = []
     degraded: list[dict] = []
-    skipped: list[dict] = []
+    skipped: list[dict] = screening_skipped
     files: list[str] = []
 
     for item in items:
@@ -387,7 +449,8 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
             skipped.append({"paper_id": paper_id, "reason": f"全文状态为 {item_status or '未知'}，不生成提取输入包"})
             continue
         text, degraded_reason = read_fulltext_text(job_dir, item)
-        truncated = len(text) > max_chars
+        original_chars = len(text)
+        truncated = original_chars > max_chars
         if truncated:
             text = text[:max_chars]
         bundle = {
@@ -403,6 +466,7 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
                 "path": str(item.get("path") or ""),
                 "text": text,
                 "chars": len(text),
+                "original_chars": original_chars,
                 "truncated": truncated,
                 "evidence_version": item.get("evidence_version"),
                 "content_sha256": item.get("content_sha256"),
@@ -410,6 +474,8 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
             "field_definitions": schema["fields"],
             "condition_keys": conditions,
         }
+        if bindings is not None:
+            bundle["screening"] = bindings[paper_id]
         try:
             material_inputs = extraction_materials(job_dir, paper_id, max_chars=max_chars,
                                                    main_path=str(item.get("path") or ""))
@@ -420,6 +486,7 @@ def build_bundles(config: dict, job_dir: Path, *, force: bool = False) -> dict:
         if degraded_reason:
             bundle["degraded"] = {"reason": degraded_reason}
             degraded.append({"paper_id": paper_id, "reason": degraded_reason})
+        mark_input_coverage(bundle)
         atomic_write_json(bundle_path, bundle)
         created.append(paper_id)
         files.append(relative)
@@ -495,12 +562,16 @@ def check_results(job_dir: Path, config: dict) -> dict:
     bundles = sorted(path for path in inputs_dir.glob("*.json") if path.is_file()) if inputs_dir.is_dir() else []
     if not bundles:
         raise StageError("尚未生成提取输入包，请先运行 --prepare")
+    bindings, blocked = _screening_bindings(job_dir, config, [file.stem for file in bundles])
 
     ok_ids: list[str] = []
     failures: list[dict] = []
     degraded: list[dict] = []
     for bundle_path in bundles:
         paper_id = bundle_path.stem
+        if paper_id in blocked:
+            failures.append({"paper_id": paper_id, "reasons": [blocked[paper_id] + "，旧输入和结果不得继续采用"]})
+            continue
         result_path = job_dir / "extraction" / f"{paper_id}.json"
         if not result_path.is_file():
             failures.append({"paper_id": paper_id, "reasons": ["缺少提取结果文件"]})
@@ -511,6 +582,27 @@ def check_results(job_dir: Path, config: dict) -> dict:
             failures.append({"paper_id": paper_id, "reasons": [f"JSON 解析失败：{error}"]})
             continue
         reasons = check_skeleton(data, paper_id, allowed)
+        try:
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            reasons.append("提取输入包无法读取，不能核对覆盖范围")
+            bundle = {}
+        if bindings is not None and bundle.get("screening") != bindings.get(paper_id):
+            reasons.append("提取输入未绑定当前有效篇关摘筛选版本")
+        if bindings is not None and (not isinstance(data, dict) or data.get("screening") != bindings.get(paper_id)):
+            reasons.append("提取结果未绑定当前有效篇关摘筛选版本，旧结果不能自动复用")
+        coverage = bundle.get("input_coverage") or {}
+        has_truncation = bool(coverage.get("limitations")) or bundle.get("fulltext", {}).get("truncated") is True or any(
+            isinstance(material, dict) and material.get("content", {}).get("truncated") is True
+            and material.get("content_ref") != "fulltext" and not material.get("excluded_from_supplement_counts")
+            for material in bundle.get("materials") or [])
+        if (coverage.get("version") == INPUT_COVERAGE_VERSION and has_truncation
+                and isinstance(data, dict) and data.get("status") != "skipped"):
+            if data.get("status") != "partial":
+                reasons.append("提取输入已截断，结果必须标为 partial，不能宣称完整覆盖")
+            warnings = data.get("warnings")
+            if not isinstance(warnings, list) or not any(isinstance(warning, str) and warning.startswith(INPUT_COVERAGE_WARNING) for warning in warnings):
+                reasons.append("提取输入已截断，warnings 必须保留 [input-coverage] 覆盖不足说明")
         if reasons:
             failures.append({"paper_id": paper_id, "reasons": reasons})
         else:

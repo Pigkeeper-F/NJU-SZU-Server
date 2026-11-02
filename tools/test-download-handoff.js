@@ -91,6 +91,15 @@ function fixture(options = {}) {
     const body = settings.body ? JSON.parse(settings.body) : null;
     calls.push({ path: url.pathname, session: url.searchParams.get('session'), method: settings.method || 'GET', body });
     if (options.fetchHook) await options.fetchHook({ url, settings, body });
+    if (url.pathname === '/api/codex/source/verify' && settings.method === 'POST') {
+      assert.equal(body.sessionId, SOURCE); assert.equal(body.confirm, true);
+      if (!sessions.has(SOURCE)) return missing(SOURCE);
+      if (!sessions.get(SOURCE).some(file => file.group === 'input' && file.name === CSV_NAME)) return response(400, { error: '下载记录对应的原始文件未找到' });
+      if (!body.id) {
+        assert.equal(body.rules, plan); assert.deepEqual(body.names, [CSV_NAME], 'Legacy recovery must bind the same existing files');
+      } else assert.equal(body.id, 'fixture-source-job');
+      return response(200, options.verificationReport || { id: 'fixture-verification', jobId: 'fixture-source-job', status: 'ready', summary: { openDecisions: 0, blockingIssues: 0 }, checks: [], issues: [], artifacts: [] });
+    }
     if (url.pathname === '/api/codex/files') {
       const id = url.searchParams.get('session');
       if (id === TARGET && options.targetNetworkError) throw new TypeError('Failed to fetch');
@@ -115,6 +124,7 @@ function fixture(options = {}) {
       assert.equal(body.confirm, true, 'A handoff requires an explicit confirmed request');
       assert.equal(body.sourceSessionId, SOURCE, 'Never replace the successful download session');
       assert.deepEqual(body.names, [CSV_NAME], 'Only selected CSV is handed off, not the full archive');
+      assert.equal(body.sourceJobId, 'fixture-source-job'); assert.equal(body.verificationReportId, 'fixture-verification');
       imports++;
       const names = [];
       for (const name of body.names) {
@@ -140,7 +150,7 @@ function fixture(options = {}) {
     },
     basisForDownload(mod) { return mod.doc?.status === 'approved' ? { text: mod.doc.content, label: run.label, sourceType: 'doc' } : null; }
   });
-  vm.runInContext(['request', 'session', 'handoffDownload'].map(functionSource).join('\n') + '\nthis.subject = { request, session, handoffDownload };', context);
+  vm.runInContext(['request', 'session', 'downloadAcceptanceContext', 'downloadAcceptanceVerifyBody', 'applyDownloadAcceptanceReport', 'downloadAcceptanceReady', 'handoffDownload'].map(functionSource).join('\n') + '\nthis.subject = { request, session, handoffDownload };', context);
   return {
     Store, original, download, clean, saved, run, sessions, calls, context,
     handoff: () => context.subject.handoffDownload(Store.getState().modules.find(item => item.id === download.id)),
@@ -190,6 +200,8 @@ async function main() {
     assert.ok(f.sessions.get(TARGET).some(file => file.name === 'old-report.txt'));
     const targetCheck = f.calls.findIndex(call => call.path === '/api/codex/files' && call.session === TARGET);
     const importIndex = f.calls.findIndex(call => call.path === '/api/codex/import-input');
+    const verificationIndex = f.calls.findIndex(call => call.path === '/api/codex/source/verify');
+    assert.ok(verificationIndex >= 0 && verificationIndex < targetCheck, 'Verify the source before touching a receiving session');
     assert.ok(targetCheck >= 0 && targetCheck < importIndex, 'Validate the target before the file import');
     // Confirmed delivery still validates its destination; repeated clicks only navigate.
     f.Store.selectModule(f.download.id);
@@ -299,7 +311,7 @@ async function main() {
       }
     } });
     const first = f.handoff();
-    for (let turns = 0; turns < 10 && !targetRequested; turns++) await Promise.resolve();
+    for (let turns = 0; turns < 40 && !targetRequested; turns++) await Promise.resolve();
     assert.equal(targetRequested, true);
     const second = f.handoff();
     release();
@@ -312,6 +324,13 @@ async function main() {
     await f.handoff();
     assertDelivered(f);
     assert.equal(f.count().created, 1, 'A new cleaning module can establish its first session');
+  }
+  for (const status of ['needs_decision', 'blocked', 'rejected', 'checking']) {
+    const f = fixture({ missingTarget: true, verificationReport: { id: 'fixture-verification', jobId: 'fixture-source-job', status, summary: {}, checks: [], issues: [] } });
+    await f.handoff();
+    assert.equal(f.count().created, 0, status + ' must not create a replacement target'); assert.equal(f.count().imports, 0);
+    assert.equal(f.run.confirmed, false); assert.equal(f.Store.getState().activeModuleId, f.download.id); assert.ok(f.task(f.download.id).error);
+    assertOriginalRecords(f);
   }
   // Exercise the real bridge without a model connection or any live session.
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'yanxu-handoff-test-'));

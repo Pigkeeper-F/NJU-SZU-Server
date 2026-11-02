@@ -50,6 +50,8 @@
     function view(context) {
       return context ? { id: context.id, name: context.name, mode: context.mode, createdAt: context.createdAt,
         updatedAt: context.updatedAt, jobId: context.snapshot?.client?.literatureJobId || null,
+        messageCount: context.snapshot?.module?.messages?.length || 0,
+        hasDraft: !!(context.snapshot?.chat?.composer || context.snapshot?.chat?.draftText),
         active: false } : null;
     }
     function rememberSnapshot(context, snapshot) {
@@ -111,7 +113,15 @@
       try {
         const value = registry(), bucket = value.projects[bucketKey()];
         const item = bucket.contexts.find(item => item.id === bucket.activeId);
-        rememberSnapshot(item, capture());
+        const next = capture();
+        // A stale/empty project mirror must not erase the only stored discussion.
+        // Keep this as a recovery source, never as an executable task binding.
+        if (item.snapshot?.module?.messages?.length && !next.module.messages?.length) {
+          bucket.discussionBackups ||= [];
+          bucket.discussionBackups.push({ id: 'discussion_' + (root.crypto?.randomUUID?.() || Date.now().toString(36)),
+            name: item.name + ' · 空白覆盖前的原讨论', savedAt: stamp(), workspaceId: item.id, snapshot: copy(item.snapshot) });
+        }
+        rememberSnapshot(item, next);
         write(KEY, value);
         return { ok: true, context: { ...view(item), active: true } };
       } catch (error) { return { ok: false, error: '文献任务尚未保存：' + error.message }; }
@@ -130,7 +140,7 @@
       }
       if (errors.length) throw new Error(errors.join('；'));
     }
-    function transition(makeTarget) {
+    function transition(makeTarget, forceRestore = false) {
       if (busy()) return { ok: false, error: '当前有任务正在处理，请等待或停止后再新建、切换文献任务。' };
       const ready = ensure();
       if (!ready.ok) return ready;
@@ -144,7 +154,7 @@
         rememberSnapshot(previous, original);
         const target = makeTarget(bucket, original);
         if (!target) throw new Error('找不到这个文献任务，原任务未改动。');
-        if (target.id === bucket.activeId) return { ok: true, context: { ...view(target), active: true }, noop: true };
+        if (target.id === bucket.activeId && !forceRestore) return { ok: true, context: { ...view(target), active: true }, noop: true };
         const snapshot = copy(target.snapshot), nextState = copy(oldState);
         const position = nextState.modules.findIndex(item => item.id === moduleId);
         if (position < 0 || snapshot.module?.id !== moduleId) throw new Error('文献任务与当前模块不匹配。');
@@ -162,6 +172,7 @@
         restoreSideEffects(snapshot);
         if (projectId() !== id) throw new Error('项目已变化，未切换文献任务。');
         if (!root.Store.restoreState(nextState)) throw new Error('文献任务状态无法载入，旧记录保留。');
+        if (forceRestore) rememberSnapshot(bucket.contexts.find(item => item.id === target.id), snapshot);
         bucket.activeId = target.id; delete bucket.pendingSwitch;
         write(KEY, value);
         return { ok: true, context: { ...view(target), active: true } };
@@ -176,7 +187,10 @@
           catch (rollbackError) { failures.push(rollbackError.message); }
         });
         return { ok: false, error: '未切换文献任务：' + error.message + (failures.length ? ' 请保留当前页面并备份已有记录。' : '') };
-      } finally { changing = false; stagedId = null; }
+      } finally {
+        changing = false; stagedId = null;
+        if (root.dispatchEvent && root.CustomEvent) root.dispatchEvent(new root.CustomEvent('literature-workspace-change', { detail: { moduleId } }));
+      }
     }
     function create(input = {}) {
       const name = String(input.name || '').trim();
@@ -191,6 +205,12 @@
           if (typeof content !== 'string' || !content.trim() || content.length > 20000) throw new Error('复用的规则文档无效。');
           mod.doc = { content, status: 'draft', updatedAt: now, approvedAt: null };
         }
+        const discussion = input.discussion;
+        if (discussion) {
+          if (!Array.isArray(discussion.messages) || !discussion.messages.every(message => message && ['user', 'assistant', 'system'].includes(message.role) && typeof message.text === 'string' && message.text.length <= 20000)) throw new Error('讨论存档的消息格式无效，未恢复。');
+          mod.messages = copy(discussion.messages);
+          if (discussion.approvedDoc?.content) mod.doc = { ...copy(discussion.approvedDoc), status: 'draft', approvedAt: null };
+        }
         const client = copy(input.seedClient || {});
         // Session, output, candidate, and approval bindings can never be seeded.
         const allowed = ['backend', 'model', 'literatureConfig', 'literatureUntil', 'literatureConfigOpen', 'literatureSource'];
@@ -201,14 +221,68 @@
         }
         const context = { id: 'lit_' + (root.crypto?.randomUUID?.() || Date.now().toString(36) + '_' + Math.random().toString(36).slice(2)),
           name, mode: input.mode || 'test', createdAt: now, updatedAt: now,
-          snapshot: { module: mod, client, docHistory: [], legacy: null, rules: emptyRules(), chat: null } };
+          snapshot: { module: mod, client, docHistory: [], legacy: null,
+            rules: discussion ? { draft: discussion.rules?.draft || discussion.rules?.confirmed || '', confirmed: '', versions: [] } : emptyRules(),
+            chat: discussion ? { composer: discussion.composer || '', editing: discussion.docEditing === true, draftText: discussion.docDraftText || '' } : null } };
         bucket.contexts.push(context);
         return context;
       });
     }
     function switchContext(id) { return transition(bucket => bucket.contexts.find(item => item.id === id)); }
-    return { ensure, active, list, create, switch: switchContext, saveActive, busy };
+    function snapshot(id) {
+      const ready = ensure(); if (!ready.ok) throw new Error(ready.error);
+      const bucket = registry().projects[bucketKey()], workspaceId = id || bucket.activeId;
+      const context = bucket.contexts.find(item => item.id === workspaceId); if (!context) throw new Error('找不到原讨论工作区，已有记录未改动。');
+      const value = workspaceId === bucket.activeId ? capture() : copy(context.snapshot);
+      value.client ||= {};
+      // Revision envelopes must not recursively embed every earlier branch.
+      delete value.client.literatureRevisionOriginal; delete value.client.literatureRevisionDraft;
+      return { version: 1, projectId: projectId(), moduleId, workspaceId, snapshot: value };
+    }
+    function restoreCurrent(envelope) {
+      const ready = ensure(); if (!ready.ok) return ready;
+      if (envelope?.version !== 1 || envelope.projectId !== projectId() || envelope.moduleId !== moduleId || envelope.workspaceId !== ready.context.id
+        || envelope.snapshot?.module?.id !== moduleId || !object(envelope.snapshot.client)) return { ok: false, error: '讨论备份不属于当前项目、模块或文献工作区，未恢复。' };
+      return transition(bucket => ({ ...copy(bucket.contexts.find(item => item.id === bucket.activeId)), snapshot: copy(envelope.snapshot) }), true);
+    }
+    function storedSnapshot(id) {
+      const ready = ensure(); if (!ready.ok) throw new Error(ready.error);
+      const context = registry().projects[bucketKey()].contexts.find(item => item.id === (id || ready.context.id));
+      if (!context) throw new Error('找不到这份讨论记录。');
+      return { version: 1, projectId: projectId(), moduleId, workspaceId: context.id, snapshot: copy(context.snapshot) };
+    }
+    return { ensure, active, list, create, switch: switchContext, saveActive, busy, snapshot, storedSnapshot, captureCurrent: () => snapshot(), restoreCurrent, isChanging: () => changing };
   }
-  root.LiteratureTaskWorkspaces = { createManager, storageKey: KEY };
+  function discoverStored() {
+    const records = [], errors = [];
+    try {
+      const value = read(KEY, { version: 1, projects: {} });
+      if (value.version !== 1 || !object(value.projects)) throw new Error('文献工作区目录格式无效');
+      Object.entries(value.projects).forEach(([key, bucket]) => {
+        if (!object(bucket) || !Array.isArray(bucket.contexts)) { errors.push(key + '：目录不完整'); return; }
+        bucket.contexts.forEach(context => {
+          const add = (snapshot, suffix, label) => {
+            if (!snapshot?.module || !Array.isArray(snapshot.module.messages)) return;
+            if (!snapshot.module.messages.length && !snapshot.chat?.composer && !snapshot.chat?.draftText) return;
+            records.push({ name: (context.name || '文献讨论') + label, projectId: bucket.projectId || key.slice(0, key.lastIndexOf(':')),
+              moduleId: bucket.moduleId || snapshot.module.id, workspaceId: context.id + (suffix ? ':' + suffix : ''), sourceKey: KEY, sourceType: suffix || 'workspace', updatedAt: context.updatedAt,
+              envelope: { version: 1, projectId: bucket.projectId || key.slice(0, key.lastIndexOf(':')), moduleId: bucket.moduleId || snapshot.module.id, workspaceId: context.id + (suffix ? ':' + suffix : ''), snapshot: copy(snapshot) } });
+          };
+          add(context.snapshot, '', '');
+          add(context.snapshot?.client?.literatureRevisionOriginal?.context?.snapshot, 'revision-original', ' · 原讨论备份');
+          add(context.snapshot?.client?.literatureRevisionDraft?.context?.snapshot, 'revision-draft', ' · 修改草稿讨论备份');
+        });
+        (bucket.discussionBackups || []).forEach(backup => {
+          if (!Array.isArray(backup.snapshot?.module?.messages) || !backup.snapshot.module.messages.length) return;
+          const projectId = bucket.projectId || key.slice(0, key.lastIndexOf(':')), moduleId = bucket.moduleId || backup.snapshot.module.id;
+          records.push({ name: backup.name || '原讨论备份', projectId, moduleId, workspaceId: backup.id, sourceKey: KEY,
+            sourceType: 'empty-overwrite-backup', updatedAt: backup.savedAt,
+            envelope: { version: 1, projectId, moduleId, workspaceId: backup.id, snapshot: copy(backup.snapshot) } });
+        });
+      });
+    } catch (error) { errors.push(KEY + '：' + error.message); }
+    return { records, errors };
+  }
+  root.LiteratureTaskWorkspaces = { createManager, storageKey: KEY, discoverStored };
   if (root.TaskManager?.currentTaskId?.() && root.CodexUI?.render) root.CodexUI.render();
 })(typeof window !== 'undefined' ? window : this);

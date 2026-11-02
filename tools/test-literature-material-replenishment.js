@@ -76,6 +76,7 @@ async function deferCases(root) {
     write(job.dir, 'fulltext/manual-actions.json', { version: 1, generated_at: new Date().toISOString(), items: [
       { paper_id: 'PMID-004', title: 'Login paper', status: 'needs_attention', reason: 'access_required', message: 'Keep original login tab', official_url: 'https://publisher.example/article/4', main_pdf_missing: true, supplements: { status: 'unverified', missing: ['table.xlsx'] } },
       { paper_id: 'PMID-005', title: 'Verify paper', status: 'needs_attention', reason: 'verification', official_url: 'javascript:alert(1)', main_pdf_missing: true, supplements: { status: 'partial', check_status: 'checked', missing: [{ label: 'appendix.pdf', material_id: 'appendix' }, { material_id: 'data-table' }] } },
+      { paper_id: 'PMID-008', title: 'Still loading', status: 'needs_attention', reason: 'page_not_ready', page_readiness: 'not_ready', main_pdf_missing: null, main_pdf_status: 'page_not_ready', supplements: { status: 'unverified', check_status: 'page_not_ready', existing_check_status: 'unknown', missing: [], pending: [{ label: 'Observed table.xlsx', material_id: 'pending-table' }] } },
       { paper_id: 'PMID-006', title: 'Old non-auth manual entry', status: 'needs_attention', reason: 'load_timeout', main_pdf_missing: true },
       { paper_id: 'OUTSIDE-999', title: 'Unrelated report entry', status: 'needs_attention', reason: 'login', official_url: 'https://unrelated.example/' }
     ].filter(item => !skipOnly || item.reason === 'load_timeout') });
@@ -86,11 +87,13 @@ async function deferCases(root) {
       { paper_id: 'PMID-007', title: 'Broken article entry', status: 'skipped', reason: 'page_error', message: '404', main_pdf_missing: true },
       { paper_id: 'PMID-008', title: 'Wrong status', status: 'needs_attention', reason: 'load_timeout' },
       { paper_id: 'PMID-009', title: 'Auth is never a skip', status: 'skipped', reason: 'access_required' },
+      { paper_id: 'PMID-010', title: 'A loading page is never a skip', status: 'skipped', reason: 'page_not_ready' },
       { paper_id: 'OUTSIDE-999', title: 'Unrelated', status: 'skipped', reason: 'pdf_unavailable' }
     ] });
     for (const ext of ['csv', 'md']) write(job.dir, 'fulltext/skipped-materials.' + ext, 'Skipped material fixture\n');
     write(job.dir, 'fulltext-browser.json', { deferred_papers: {
-      'PMID-004': { paper_id: 'PMID-004', url: 'https://publisher.example/article/4', binding: { target_id: 'saved-tab-4' } }
+      'PMID-004': { paper_id: 'PMID-004', url: 'https://publisher.example/article/4', binding: { target_id: 'saved-tab-4' } },
+      'PMID-008': { paper_id: 'PMID-008', url: 'https://publisher.example/article/8', binding: { target_id: 'saved-tab-8' } }
     } });
     emit({ type: skipOnly ? 'result' : 'attention', stage: 'fulltext', ...(skipOnly ? { count: 1 } : { reason: 'deferred_materials' }),
       counts: { material_skipped: 2 }, message: skipOnly ? 'Acquisition finished with recorded skips' : 'Remaining papers attempted; researcher actions remain',
@@ -104,7 +107,14 @@ async function deferCases(root) {
   const paused = await settle(connector, child.id);
   assert.deepEqual(calls[1], ['--replenish-materials', '--defer-access', '--resume']);
   assert.equal(paused.status, 'needs_attention'); assert.equal(paused.attention.reason, 'deferred_materials');
-  assert.equal(paused.materialAccessPolicy, 'defer'); assert.equal(paused.materialManualCount, 2);
+  assert.equal(paused.materialAccessPolicy, 'defer'); assert.equal(paused.materialManualCount, 3);
+  assert.equal(paused.materialManualActions[2].reason, 'page_not_ready');
+  assert.equal(paused.materialManualActions[2].mainPdfMissing, null, 'A loading page is not evidence that a PDF is missing');
+  assert.equal(paused.materialManualActions[2].mainPdfStatus, 'page_not_ready');
+  assert.equal(paused.materialManualActions[2].pageReadiness, 'not_ready');
+  assert.equal(paused.materialManualActions[2].supplements.checkStatus, 'page_not_ready');
+  assert.deepEqual(paused.materialManualActions[2].supplements.missing, []);
+  assert.deepEqual(paused.materialManualActions[2].supplements.pending, ['Observed table.xlsx']);
   assert.equal(paused.materialSkippedCount, 2); assert.equal(paused.materialSkippedActions[0].status, 'skipped');
   assert.equal(paused.materialSkippedActions[0].paperId, 'PMID-006');
   assert.equal(paused.materialSkippedActions[0].supplements.checkStatus, 'unknown');
@@ -116,7 +126,7 @@ async function deferCases(root) {
   for (const ext of ['json', 'csv', 'md']) assert.ok(connector.download(child.id, 'fulltext/skipped-materials.' + ext));
   const restarted = new LiteratureConnector(root);
   assert.equal(restarted.snapshot(child.id).materialAccessPolicy, 'defer');
-  assert.equal(restarted.list(20).find(item => item.id === child.id).materialManualCount, 2);
+  assert.equal(restarted.list(20).find(item => item.id === child.id).materialManualCount, 3);
   assert.equal(restarted.snapshot(child.id).materialSkippedCount, 2);
   assert.equal(restarted.list(20).find(item => item.id === child.id).materialSkippedCount, 2);
   await new Promise(resolve => setImmediate(resolve));
@@ -127,6 +137,8 @@ async function deferCases(root) {
   assert.equal(openCalls, 0);
   assert.equal((await actionRoute({ id: child.id, paperId: 'PMID-004' })).status, 200);
   assert.equal(openCalls, 1); assert.equal(connector.jobs.get(child.id).browserOpening, false);
+  assert.equal((await actionRoute({ id: child.id, paperId: 'PMID-008' })).status, 200);
+  assert.equal(openCalls, 2, 'A not-ready paper can reopen its retained page without downloading');
   assert.equal(calls.length, 2, 'Opening a saved page does not download or retry');
   assert.equal((await advance({ id: child.id })).status, 200); await settle(connector, child.id);
   assert.deepEqual(calls[2], ['--replenish-materials', '--defer-access', '--resume'], 'ordinary resume does not retry deferred papers');
@@ -137,6 +149,24 @@ async function deferCases(root) {
   failRetry = false;
   assert.equal((await advance({ id: child.id })).status, 200); await settle(connector, child.id);
   assert.equal(calls[4].includes('--retry-deferred'), false, 'a failed explicit retry cannot leak into later ordinary resumes');
+  for (const body of [{ id: ID, retrySkipped: true }, { id: child.id, retrySkipped: false },
+    { id: child.id, firstPaperId: 'OUTSIDE-999' }, { id: child.id, firstPaperId: '../bad' }]) {
+    assert.equal((await advance(body)).status, 400);
+  }
+  const retryStatus = json(path.join(connector.jobs.get(child.id).dir, 'fulltext/status.json'));
+  const priorityEntry = retryStatus.items.find(item => item.paper_id === 'PMID-004');
+  if (priorityEntry) Object.assign(priorityEntry, { status: 'needs_attention', material_deferred: { reason: 'login' } });
+  else retryStatus.items.push({ paper_id: 'PMID-004', status: 'needs_attention', material_deferred: { reason: 'login' } });
+  write(connector.jobs.get(child.id).dir, 'fulltext/status.json', retryStatus);
+  assert.equal((await advance({ id: child.id, firstPaperId: 'PMID-004' })).status, 400, 'prioritizing never implicitly retries access pages');
+  assert.equal((await advance({ id: child.id, retryDeferred: true, retrySkipped: true, firstPaperId: 'PMID-004' })).status, 200);
+  await settle(connector, child.id);
+  assert.deepEqual(calls[5], ['--replenish-materials', '--defer-access', '--retry-deferred', '--retry-skipped', '--first-paper', 'PMID-004', '--resume']);
+  assert.equal(connector.jobs.get(child.id).retrySkipped, false);
+  assert.equal(connector.jobs.get(child.id).materialFirstPaperId, null);
+  assert.equal((await advance({ id: child.id })).status, 200); await settle(connector, child.id);
+  assert.equal(calls[6].includes('--retry-skipped'), false, 'skipped retry is explicit for one run only');
+  assert.equal(calls[6].includes('--first-paper'), false, 'priority does not mutate frozen task input or future runs');
   skipOnly = true;
   assert.equal((await advance({ id: child.id })).status, 200);
   const skippedDone = await settle(connector, child.id);
@@ -144,6 +174,58 @@ async function deferCases(root) {
   assert.equal(skippedDone.materialManualCount, 0, 'non-auth failures cannot enter the manual login queue');
   assert.equal(skippedDone.materialSkippedCount, 2); assert.equal(skippedDone.counters.materialsSkipped, 2);
   assert.equal((await advance({ id: child.id, retryDeferred: true })).status, 400, 'skipped materials cannot be retried through the authentication queue');
+  assert.equal((await advance({ id: child.id })).status, 400, 'completed materials never restart without an explicit skipped retry');
+  assert.equal((await advance({ id: child.id, retrySkipped: true })).status, 400, 'a stale report alone cannot reopen completed materials');
+  const childDir = connector.jobs.get(child.id).dir;
+  const originalChildFiles = hashes(childDir);
+  const skippedProgress = json(path.join(childDir, 'fulltext/status.json'));
+  for (const item of skippedProgress.items) {
+    if (item.paper_id === 'PMID-006') item.material_skipped = { reason: 'pdf_unavailable', policy: 'skip_non_access' };
+    if (item.paper_id === 'PMID-007') item.material_skipped = { reason: 'page_error', policy: 'skip_non_access' };
+  }
+  write(childDir, 'fulltext/status.json', skippedProgress);
+  for (const body of [{ id: ID, retrySkipped: true, deferAccess: true }, { id: child.id, deferAccess: true },
+    { id: child.id, retrySkipped: false }, { id: child.id, retrySkipped: true, until: 'extract' },
+    { id: child.id, retrySkipped: true, confirmations: { fields: [] } },
+    { id: child.id, retrySkipped: true, firstPaperId: 'PMID-001' }]) assert.equal((await advance(body)).status, 400);
+  const pendingReport = fs.readFileSync(path.join(childDir, 'fulltext/skipped-materials.json'));
+  const resolved = json(path.join(childDir, 'fulltext/skipped-materials.json'));
+  resolved.items = resolved.items.filter(item => ['PMID-006', 'PMID-007'].includes(item.paper_id)).map(item => ({ ...item,
+    main_pdf_missing: false, supplements: { status: 'complete', check_status: 'none_declared', missing: [] } }));
+  for (const checkStatus of ['none_declared', 'none_found']) {
+    for (const item of resolved.items) item.supplements.check_status = checkStatus;
+    write(childDir, 'fulltext/skipped-materials.json', resolved);
+    assert.equal((await advance({ id: child.id, retrySkipped: true })).status, 400, 'already resolved ' + checkStatus + ' entries cannot reopen the record');
+  }
+  fs.writeFileSync(path.join(childDir, 'fulltext/skipped-materials.json'), pendingReport);
+  connector.jobs.get(child.id).child = { stillExiting: true };
+  assert.equal((await advance({ id: child.id, retrySkipped: true })).status, 400, 'a still exiting worker must not be duplicated');
+  connector.jobs.get(child.id).child = null;
+  const callsBeforeCompletedRetry = calls.length;
+  assert.equal((await advance({ id: child.id, until: 'fulltext', deferAccess: true, retrySkipped: true, firstPaperId: 'PMID-006' })).status, 200);
+  assert.equal((await settle(connector, child.id)).status, 'completed');
+  assert.equal(calls.length, callsBeforeCompletedRetry + 1);
+  assert.deepEqual(calls.at(-1), ['--replenish-materials', '--defer-access', '--retry-skipped', '--first-paper', 'PMID-006', '--resume']);
+  assert.equal(connector.snapshot(child.id).resumeStage, null);
+  assert.equal(connector.jobs.get(child.id).retrySkipped, false);
+  assert.equal(connector.jobs.get(child.id).materialFirstPaperId, null);
+  for (const relative of ['run_config.json', 'candidates.json', 'candidates.csv', 'dedupe/dedupe.json', 'dedupe/dedupe.csv',
+    'fulltext/files/PMID-001.txt', 'fulltext/materials/PMID-001/table.csv']) assert.equal(hashes(childDir)[relative], originalChildFiles[relative]);
+  for (const relative of ['extraction', 'validation', 'export']) assert.equal(fs.existsSync(path.join(childDir, relative)), false);
+  // Reloaded completed records use the same explicit gate, not an inferred
+  // generic resumeStage; an empty report is rejected without starting Python.
+  const restored = new LiteratureConnector(root, { prepare: async () => 'mock-python' });
+  let restoredRuns = 0;
+  restored.runStage = async (script, args, job, emit) => { restoredRuns++; assert.equal(script, 'literature_fulltext.py');
+    assert.deepEqual(args, ['--replenish-materials', '--defer-access', '--retry-skipped', '--resume']);
+    emit({ type: 'result', stage: 'fulltext', count: 1, files: [] }); };
+  const restoredRoute = routeHandler(root, restored);
+  write(childDir, 'fulltext/skipped-materials.json', { version: 1, items: [] });
+  assert.equal((await restoredRoute({ id: child.id, retrySkipped: true }, '/api/literature/advance')).status, 400);
+  assert.equal(restoredRuns, 0);
+  fs.writeFileSync(path.join(childDir, 'fulltext/skipped-materials.json'), pendingReport);
+  assert.equal((await restoredRoute({ id: child.id, retrySkipped: true }, '/api/literature/advance')).status, 200);
+  assert.equal((await settle(restored, child.id)).status, 'completed'); assert.equal(restoredRuns, 1);
   assert.deepEqual(hashes(dir), original, 'deferring, reading, opening and retrying never write the original parent');
 }
 
@@ -228,6 +310,29 @@ async function main() {
     assert.throws(() => new LiteratureConnector(invalidRoot).replenishMaterials(ID), /删除/);
     fixture(invalidRoot); const busy = new LiteratureConnector(invalidRoot); busy.jobs.set(ID, { ...json(path.join(invalidDir, 'job.json')), status: 'running' });
     assert.throws(() => busy.replenishMaterials(ID), /运行/);
+    // Real on-disk material records: ten verified main PDFs, no supplementary
+    // mention under the confirmed none_found policy, and excluded legacy links.
+    const completeRoot = path.join(root, 'none-found'), completeDir = fixture(completeRoot);
+    const completeStatus = json(path.join(completeDir, 'fulltext/status.json'));
+    const completeManifest = json(path.join(completeDir, 'fulltext/materials.json'));
+    for (let i = 0; i < completeStatus.items.length; i++) {
+      const paperId = completeStatus.items[i].paper_id, relative = 'fulltext/files/' + paperId + '.pdf';
+      const bytes = '%PDF-1.4\n% Isolated verified material ' + paperId + '\n%%EOF\n';
+      write(completeDir, relative, bytes);
+      completeStatus.items[i] = { paper_id: paperId, status: 'fetched_pdf', path: relative, size: Buffer.byteLength(bytes), content_sha256: sha(bytes) };
+      const paper = completeManifest.papers[i];
+      paper.main_pdf_status = 'downloaded'; paper.supplement_check = { status: 'none_found', policy: 'no_mention_means_none' };
+      paper.materials = [{ material_id: 'main-pdf', role: 'main_pdf', download_status: 'downloaded', path: relative, size: Buffer.byteLength(bytes), sha256: sha(bytes) }];
+    }
+    completeManifest.papers[0].materials.push({ material_id: 'legacy-navigation', role: 'supplement', download_status: 'missing', excluded_from_supplement_counts: true });
+    write(completeDir, 'fulltext/status.json', completeStatus); write(completeDir, 'fulltext/materials.json', completeManifest);
+    const completeHashes = hashes(completeDir), completeConnector = new LiteratureConnector(completeRoot);
+    assert.equal(completeConnector.snapshot(ID).canReplenishMaterials, false, 'none_found and explicitly excluded navigation links do not create a material gap');
+    assert.throws(() => completeConnector.replenishMaterials(ID), /无需重复补齐/);
+    assert.deepEqual(hashes(completeDir), completeHashes, 'checking complete materials never rewrites original files');
+    completeManifest.papers[0].materials.at(-1).excluded_from_supplement_counts = false;
+    write(completeDir, 'fulltext/materials.json', completeManifest);
+    assert.equal(completeConnector.snapshot(ID).canReplenishMaterials, true, 'an actual unexcluded missing attachment remains a material gap');
     const fingerprint = backendFingerprint(root); write(root, 'tools/literature-material-replenishment.js', '// changed acquisition scope');
     assert.notEqual(backendFingerprint(root), fingerprint);
     console.log('LITERATURE_MATERIAL_REPLENISHMENT_TESTS_PASS');

@@ -68,6 +68,7 @@ USER_AGENT = "flow-agent-web/1.0 (literature discovery; python-urllib)"
 
 DEFAULT_TIMEOUT = 30.0
 MAX_RESULTS = 10  # 与 run_config.limit / batch.size 的上限一致
+MAX_QUERY_CHARS = 32768  # Same search-expression bound as literature-config.js.
 
 #: 各主机的最小请求间隔（秒）。NCBI 3 rps→0.34；Europe PMC 取官方 100/min 的保守值；
 #: OpenAlex 单请求上限 100 rps，这里留足余量。
@@ -859,6 +860,8 @@ def run(
     text = str(query or "").strip()
     if not text:
         raise ValueError("检索式为空")
+    if len(text) > MAX_QUERY_CHARS:
+        raise ValueError(f"检索式超过{MAX_QUERY_CHARS}字符；原式未自动截断")
     runner = _RUNNERS[source_key]
     return runner(text, max(1, min(int(limit or 1), MAX_RESULTS)), year_from, year_to, max(0, int(page_index or 0)))
 
