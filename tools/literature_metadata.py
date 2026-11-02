@@ -290,6 +290,32 @@ class MetadataBrowserFetcher:
     def close(self):
         self.browser.close()
 
+    def complete_record(self, record, item):
+        """Close this completed metadata lookup only after its record is saved."""
+        if record.get("source_key") != "cnki":
+            return {"closed": True}
+        if item.get("status") not in TERMINAL:
+            return {"closed": False}
+        from literature_cnki_fulltext import _hash, _norm
+        target = {**record, "source_candidate_id": record.get("source_candidate_id") or record.get("candidate_id")}
+        binding = self.browser._binding
+        flow = binding.get("cnki_flow") or {}
+        if not flow and not binding.get("target_id"):
+            return {"closed": True}
+        if (not isinstance(flow, dict)
+                or flow.get("paper_hash") != _hash("\n".join(str(target.get(key) or "") for key in
+                    ("source_key", "source_candidate_id", "paper_id", "id")))
+                or flow.get("title_hash") != _hash(_norm(target.get("title")))
+                or binding.get("pdf_click_pending") or flow.get("file_verified")
+                or flow.get("step") == "download_clicked" or flow.get("download_click_count")
+                or flow.get("download_click_target_ids")
+                or (flow.get("pending_popup") or {}).get("action") == "download"):
+            return {"closed": False}
+        result = self.browser.complete_paper()
+        if result.get("closed"):
+            self.browser._progress("摘要证据已保存，已关闭本篇详情页及对应的检索页。")
+        return result
+
     def _read_metadata(self, page, deadline, *, status=0, downloads=None, cnki=False):
         previous, stable, snapshot = None, 0, None
         expanded = False
@@ -522,7 +548,7 @@ def run(config, job_dir, *, total_budget_sec=300, per_record_timeout_sec=30, ret
         retry_empty_shell = (retry_attention and item.get("status") == "identity_mismatch"
             and item.get("reason") == "article_identity_not_verified" and isinstance(observed, dict)
             and "title" in observed and not any(observed.get(key) for key in ("title", "doi", "source_ids", "year", "authors")))
-        if same and (validated_evidence(record, item) or (not retry_unavailable and not retry_empty_shell and item.get("status") in TERMINAL - {"verified"})):
+        if same and not item.get("cleanup_pending") and (validated_evidence(record, item) or (not retry_unavailable and not retry_empty_shell and item.get("status") in TERMINAL - {"verified"})):
             continue
         pending.append(record)
     if state.get("last_stop_reason") in ACCESS_REASONS and (pending or only is not None) and not retry_attention:
@@ -539,6 +565,18 @@ def run(config, job_dir, *, total_budget_sec=300, per_record_timeout_sec=30, ret
                 stop_reason = "total_budget_exhausted"
                 break
             cid = record["candidate_id"]
+            previous = state["items"].get(cid, {})
+            if previous.get("cleanup_pending") and previous.get("record_sha256") == record_hash(record):
+                if fetcher is None:
+                    fetcher = MetadataBrowserFetcher(config, job_dir, on_progress=lambda msg: emit("stage", stage="metadata", message=msg))
+                complete = getattr(fetcher, "complete_record", None)
+                closed = complete(record, previous) if callable(complete) else {"closed": False}
+                if not isinstance(closed, dict) or closed.get("closed") is not True:
+                    stop_reason, stop_message = "page_error", "本篇摘要已保存，但检索页尚未关闭；保留清理断点，未开始下一篇。"
+                    break
+                previous.pop("cleanup_pending", None)
+                save()
+                continue
             urls = article_urls(record)
             if record.get("source_key") == "cnki" and string(record.get("title")):
                 urls = urls[:1] or ["https://kns.cnki.net/"]
@@ -590,11 +628,23 @@ def run(config, job_dir, *, total_budget_sec=300, per_record_timeout_sec=30, ret
             save()
             if item.get("status") == "attention":
                 break
+            complete = getattr(fetcher, "complete_record", None)
+            if item.get("attempts") and callable(complete):
+                try:
+                    closed = complete(record, item)
+                except Exception:
+                    closed = {"closed": False}
+                if not isinstance(closed, dict) or closed.get("closed") is not True:
+                    item["cleanup_pending"] = True
+                    stop_reason, stop_message = "page_error", "本篇摘要已保存，但检索页尚未关闭；保留清理断点，未开始下一篇。"
+                    save()
+                    break
     finally:
         if own_fetcher and fetcher is not None:
             fetcher.close()
     remaining_records = [r for r in needs if state["items"].get(r["candidate_id"], {}).get("record_sha256") != record_hash(r)
-                         or state["items"].get(r["candidate_id"], {}).get("status") == "attention"]
+                         or state["items"].get(r["candidate_id"], {}).get("status") == "attention"
+                         or state["items"].get(r["candidate_id"], {}).get("cleanup_pending")]
     def counts_for(rows):
         missing = [r for r in rows if not existing_abstract(r)]
         verified = sum(bool(validated_evidence(r, state["items"].get(r["candidate_id"]))) for r in missing)
