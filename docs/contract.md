@@ -1502,6 +1502,9 @@ README 的「调试」段给了一条命令的用法。
 
 ## 26. 多源检索：Scholar + 开放 API（2026-10-22）
 
+> 五库（知网/万方/WoS/Scopus/Google Scholar）篇关摘筛选与全文/补充材料的当前实现边界，以
+> [五库文献流程实现状态](literature-five-source-status.md)为准；本文记录接口契约，不等于所有来源的全文都已真实验证。
+
 ### 26.1 来源注册表
 
 单一真相仍是 `tools/literature-sources.json`；`state=executable` 的 10 个来源可自动执行：

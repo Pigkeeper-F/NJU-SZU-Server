@@ -101,6 +101,10 @@ node tools/debug-report.js --json
 - **以文献找文献（2026-10-23）**：DOI/PMID/PMCID/OpenAlex ID/S2 paperId/论文链接/标题为种子，
   扩展参考文献 / 被引 / 相似文献；OpenAlex 优先、S2 兜底；并入同一候选池（`batch_index=-1`，
   同种子整批替换），扩展条目带 `seed_relation` 可回溯——契约 §26.8
+- **五库文献流程（2026-11-02）**：知网/万方/WoS/Scopus/Google Scholar 五库配置与逐项核查，
+  篇关摘 `include/pending/exclude` 三态筛选；`include + pending` 进全文队列，`exclude` 不下载。
+  全文/补充材料、CDP 原生下载兜底、PMC 补充材料 OA 包、稳定附件链接续跑已接入；
+  真实状态与未完成边界见 [五库文献流程实现状态](literature-five-source-status.md)
 - 环节②科学问题凝练：候选问题 → 人选 → 问题说明书——契约 §24
 - 环节⑥文章撰写：目标期刊手填、LaTeX 生成器、AAAI/NeurIPS/ICML 规范——契约 §22.7 / §23.5
 - 调试台：服务端缓冲 + 调试页 + 命令行报告 + 文档——契约 §25
@@ -113,6 +117,8 @@ node tools/debug-report.js --json
 4. 少量文献卡在 Scholar 人机验证（需手动过，不自动绕过）
 5. 个别全文的要点抽取失败；「局限」字段几乎全是「文中未说明」（原文没明写）
 6. 全文：OA PDF 优先，PMC JATS 全文兜底；正文结构完整性与补充材料完整性单独记录（partial 不进入提取）；OpenAlex 等只有元数据
+7. **知网/万方的真实自动 PDF 尚未闭环**：需要研究者已登录、有机构权限的样本验证；会员墙/订阅墙不绕过
+8. **WoS/Scopus 只是索引**：出版社全文要靠 DOI 到出版社/PMC；Elsevier/Springer/Wiley 等订阅出版社与非 PMC 补充材料尚未真实样本验证
 
 ## 7. 下一步建议顺序
 
