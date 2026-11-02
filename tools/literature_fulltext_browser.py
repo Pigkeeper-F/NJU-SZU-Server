@@ -10,10 +10,12 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 import importlib
+import io
 import json
 from email.message import Message
 import os
 import mimetypes
+import zipfile
 from pathlib import Path
 import re
 import tempfile
@@ -1753,7 +1755,14 @@ class FulltextBrowserFetcher:
     def complete_material(self):
         """Caller invokes only after this file and its material status save."""
         flow = self._binding.get("material_flow")
-        if self._blocked or not isinstance(flow, dict) or flow.get("step") != "file_received":
+        if self._blocked:
+            return {"closed": False}
+        # A direct/package fetch opened no child page; there is nothing to
+        # clean up, so the caller must not turn a successful file into a
+        # "cleanup failed" attention state.
+        if not isinstance(flow, dict):
+            return {"closed": True}
+        if flow.get("step") != "file_received":
             return {"closed": False}
         try:
             child_id = flow.get("child_target_id")
@@ -1843,7 +1852,7 @@ class FulltextBrowserFetcher:
         URL comes from the current article snapshot and is only accepted when
         the HTTP response is an actual file rather than an HTML/login page.
         """
-        if not target or _site(target) == "cnki.net":
+        if not target or _site(target) == "cnki.net" or target.rstrip("/").endswith("/supplementaryFiles"):
             return None
         host = (urlsplit(target).hostname or "").lower()
         if host in {"localhost", "127.0.0.1", "::1"} or host.endswith((".invalid", ".test", ".example")):
@@ -1871,6 +1880,99 @@ class FulltextBrowserFetcher:
                 "mime_type": mime or str(descriptor.get("mime_type") or "application/octet-stream"),
                 "url": target}
 
+    def _pmc_supplementary_material(self, record: dict, descriptor: dict, timeout: int = 60):
+        """Fetch one PMC supplement from Europe PMC's stable OA package.
+
+        PMC article pages use a JavaScript proof-of-work interstitial before
+        serving an attachment. The Europe PMC ``supplementaryFiles`` ZIP is a
+        stable, documented OA endpoint and avoids reimplementing that challenge.
+        """
+        pmcid = ""
+        for value in (record.get("pmcid"), record.get("result_url"), record.get("source_url")):
+            match = re.search(r"PMC[1-9]\d*", str(value or ""), re.I)
+            if match:
+                pmcid = match.group(0).upper()
+                break
+        if not pmcid:
+            for link in record.get("fulltext_links") or []:
+                match = re.search(r"PMC[1-9]\d*", str((link or {}).get("url") or ""), re.I)
+                if match:
+                    pmcid = match.group(0).upper()
+                    break
+        if not pmcid:
+            return None
+        url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/supplementaryFiles"
+        try:
+            request = Request(url, headers={"User-Agent": "NJU-SZU-Workbench/1.0", "Accept": "application/zip,*/*"})
+            with urlopen(request, timeout=max(5, min(120, timeout))) as response:
+                if int(getattr(response, "status", 200) or 200) >= 400:
+                    return None
+                blob = response.read(MAX_MATERIAL_BYTES + 1)
+        except Exception:
+            return None
+        if not blob or len(blob) > MAX_MATERIAL_BYTES or not zipfile.is_zipfile(io.BytesIO(blob)):
+            return None
+        wanted = str(descriptor.get("filename") or "").replace("\\", "/").split("/")[-1].casefold()
+        try:
+            with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+                members = [item for item in archive.infolist() if not item.is_dir()]
+                if len(members) > 200:
+                    return None
+                selected = [item for item in members
+                            if wanted and item.filename.replace("\\", "/").split("/")[-1].casefold() == wanted]
+                if not selected and len(members) == 1:
+                    selected = members
+                if len(selected) != 1 or selected[0].file_size <= 0 or selected[0].file_size > MAX_MATERIAL_BYTES:
+                    return None
+                data = archive.read(selected[0])
+        except Exception:
+            return None
+        filename = selected[0].filename.replace("\\", "/").split("/")[-1] or descriptor.get("filename") or "material"
+        mime = str(descriptor.get("mime_type") or mimetypes.guess_type(filename)[0] or "application/octet-stream")
+        return {"status": "file", "bytes": data, "suggested_filename": filename,
+                "mime_type": mime, "url": url, "acquisition_method": "europe_pmc_supplementary_package"}
+
+    def _context_material(self, target: str, descriptor: dict, timeout: int = 60):
+        """Fetch a stable attachment URL with the task browser's cookies.
+
+        Some publisher/PMC attachment endpoints reject a cookie-less urllib
+        request even when the article itself is open. This uses the already
+        owned browser request context, never a signed CNKI/temporary URL.
+        """
+        if not target or _site(target) == "cnki.net" or target.rstrip("/").endswith("/supplementaryFiles"):
+            return None
+        host = (urlsplit(target).hostname or "").lower()
+        if host in {"localhost", "127.0.0.1", "::1"} or host.endswith((".invalid", ".test", ".example")):
+            return None
+        request = getattr(self._context, "request", None)
+        if request is None:
+            return None
+        try:
+            response = request.get(target, timeout=max(5, min(120, timeout)),
+                                   headers={"Accept": "*/*", "Referer": str(getattr(self._page, "url", "") or "")})
+            if int(response.status or 0) >= 400:
+                return None
+            headers = response.headers or {}
+            mime = str(headers.get("content-type") or "").lower()
+            if "html" in mime or "javascript" in mime:
+                return None
+            declared = str(headers.get("content-length") or "")
+            if declared.isdigit() and int(declared) > MAX_MATERIAL_BYTES:
+                return None
+            blob = response.body()
+        except Exception:
+            return None
+        if not isinstance(blob, bytes) or not blob or len(blob) > MAX_MATERIAL_BYTES:
+            return None
+        if re.match(br"\s*(?:<!doctype\s+html|<html|<form)", blob[:300], re.I):
+            return None
+        disposition = Message()
+        disposition["content-disposition"] = str((response.headers or {}).get("content-disposition") or "")
+        filename = disposition.get_filename() or descriptor.get("filename") or Path(urlsplit(target).path).name or "material"
+        return {"status": "file", "bytes": blob, "suggested_filename": str(filename),
+                "mime_type": mime or str(descriptor.get("mime_type") or "application/octet-stream"),
+                "url": target, "acquisition_method": "browser_context_request"}
+
     def fetch_material(self, descriptor, record, opts=None):
         """Click one currently witnessed supplementary link, exactly once.
 
@@ -1879,9 +1981,11 @@ class FulltextBrowserFetcher:
         """
         options = opts or {}
         target = _material_url(descriptor.get("url"))
-        if target and not _file_like_url(target):
-            # The descriptor may be a landing/fragment URL. Use the same
-            # attachment's real file URL from the latest page snapshot.
+        # A persisted material descriptor intentionally carries only identity
+        # (label/filename/source hash), not a transient attachment URL. The
+        # live page may already be closed after the main PDF was saved. Recover
+        # the exact URL from the last verified discovery for this same paper.
+        if not target or not _file_like_url(target):
             discovery = self._material_discoveries.get(_material_key(record)) or {}
             for link in discovery.get("links") or []:
                 if not isinstance(link, dict):
@@ -1896,8 +2000,18 @@ class FulltextBrowserFetcher:
         deferred = self._deferred_attention(target) or self._deferred_attention(record.get("source_url"))
         if deferred:
             return deferred
+        direct = self._pmc_supplementary_material(record, descriptor,
+                                                  int((options or {}).get("per_paper_timeout_sec") or 60))
+        if direct is not None:
+            self._material_results[key] = direct
+            return dict(direct)
         direct = self._direct_material(target, descriptor,
                                        int((options or {}).get("per_paper_timeout_sec") or 60))
+        if direct is not None:
+            self._material_results[key] = direct
+            return dict(direct)
+        direct = self._context_material(target, descriptor,
+                                        int((options or {}).get("per_paper_timeout_sec") or 60))
         if direct is not None:
             self._material_results[key] = direct
             return dict(direct)
@@ -1937,9 +2051,19 @@ class FulltextBrowserFetcher:
             if not resume:
                 if self._blocked:
                     return dict(self._blocked)
+                # Prefer a live snapshot when the article page is still open;
+                # fall back to the last verified discovery after the main PDF
+                # page has been closed. Never let an unavailable page erase a
+                # previously observed attachment identity.
                 discovery = self.capture_material_discovery(record)
                 matches = [item for item in discovery.get("links", [])
                            if item.get("url") == target and item.get("label") == descriptor.get("label")]
+                if not matches:
+                    cached = self._material_discoveries.get(_material_key(record)) or {}
+                    cached_matches = [item for item in cached.get("links", [])
+                                      if item.get("url") == target and item.get("label") == descriptor.get("label")]
+                    if cached_matches:
+                        discovery, matches = cached, cached_matches
                 # The same attachment is commonly rendered twice (top and
                 # bottom supplement blocks). Duplicate DOM anchors with the
                 # same href+label are one material, not an ambiguity.

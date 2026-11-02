@@ -22,7 +22,7 @@ import stat
 import tempfile
 import time
 import unicodedata
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -69,6 +69,27 @@ def _sha(blob):
 def _reason(value):
     text = re.sub(r"https?://\S+", "[链接已省略]", str(value or ""))
     return re.sub(r"\b(?:token|sid|session|password|api[_-]?key)\s*[=:]\s*\S+", "[敏感值已省略]", text, flags=re.I)[:1000]
+
+
+_AUTH_QUERY = re.compile(r"^(?:token|ticket|session|sid|signature|auth|authorization|api[_-]?key|key|code|state|v)$", re.I)
+
+
+def _durable_link(value):
+    """Return a stable official attachment URL safe to remember across restarts.
+
+    Signed/tokenized download links are deliberately not persisted; the next
+    run must rediscover those from the article page.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return ""
+    pairs = parse_qs(parsed.query, keep_blank_values=True)
+    if any(_AUTH_QUERY.search(key) for key in pairs):
+        return ""
+    return raw
 
 
 def _filename(value):
@@ -495,18 +516,49 @@ class MaterialsStore:
         targets = list(targets)
         self.job_dir = Path(job_dir).absolute()
         self.path = self.job_dir / "fulltext" / "materials.json"
+        self.links_path = self.job_dir / "fulltext" / "material-links.json"
         loaded = _read_json(self.job_dir, "fulltext/materials.json")
         if self.path.exists() and (not isinstance(loaded, dict) or loaded.get("version") != VERSION or not isinstance(loaded.get("papers"), list)):
             raise MaterialsError("已有材料清单无法解析或版本不符，请先核查，未覆盖清单。")
         self.document = copy.deepcopy(loaded) if loaded else {"version": VERSION, "papers": []}
         self.targets = {str(record.get("paper_id") or record.get("candidate_id") or ""): record for record in targets}
         self.descriptors = {}
+        self._load_links()
         for record in targets:
             self._paper(record)
         old_status = _read_json(self.job_dir, "fulltext/status.json")
         for item in (old_status or {}).get("items", []):
             if isinstance(item, dict) and item.get("paper_id") in self.targets:
                 self.register_main(self.targets[item["paper_id"]], item, flush=False)
+
+    def _load_links(self):
+        data = _read_json(self.job_dir, "fulltext/material-links.json")
+        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("links"), dict):
+            return
+        for paper_id, items in data["links"].items():
+            if not isinstance(paper_id, str) or not isinstance(items, dict):
+                continue
+            for material_id, url in items.items():
+                safe = _durable_link(url)
+                if safe and isinstance(material_id, str):
+                    self.descriptors[(paper_id, material_id)] = {"url": safe}
+
+    def _remember_link(self, paper_id, material_id, url):
+        safe = _durable_link(url)
+        if not safe:
+            return
+        key = (str(paper_id), str(material_id))
+        value = dict(self.descriptors.get(key) or {})
+        value["url"] = safe
+        self.descriptors[key] = value
+
+    def _links_document(self):
+        links = {}
+        for (paper_id, material_id), descriptor in self.descriptors.items():
+            safe = _durable_link((descriptor or {}).get("url"))
+            if safe:
+                links.setdefault(paper_id, {})[material_id] = safe
+        return {"version": 1, "links": links}
 
     def _paper(self, record):
         paper_id = str(record.get("paper_id") or record.get("candidate_id") or "")
@@ -575,6 +627,18 @@ class MaterialsStore:
         if role not in ROLES:
             raise MaterialsError("材料角色无效。")
         url = str(descriptor.get("url") or descriptor.get("source_url") or "")
+        if role == "supplement":
+            pmcid = ""
+            for value in (record.get("pmcid"), record.get("result_url"), record.get("source_url")):
+                match = re.search(r"PMC[1-9]\d*", str(value or ""), re.I)
+                if match:
+                    pmcid = match.group(0).upper()
+                    break
+            # PMC attachments sit behind a JavaScript proof-of-work page.
+            # Use Europe PMC's stable OA package instead; the browser fetcher
+            # extracts the requested filename from this ZIP.
+            if pmcid:
+                url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/supplementaryFiles"
         parsed = urlsplit(url)
         if url and (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password):
             raise MaterialsError("材料入口不是可核对的HTTP官方页面链接。")
@@ -625,7 +689,13 @@ class MaterialsStore:
             material = {key: value for key, value in descriptor.items() if key != "url"}
             material.update(path="", size=0, sha256="", download_status="pending", read_status="not_checked", read_reason="")
             paper["materials"].append(material)
-        self.descriptors[(paper["paper_id"], material["material_id"])] = descriptor
+        key = (paper["paper_id"], material["material_id"])
+        if not descriptor.get("url"):
+            remembered = self.descriptors.get(key) or {}
+            if remembered.get("url"):
+                descriptor["url"] = remembered["url"]
+        self.descriptors[key] = descriptor
+        self._remember_link(key[0], key[1], descriptor.get("url"))
         return paper, material, descriptor
 
     def register_main(self, record, item, *, flush=True):
@@ -666,6 +736,13 @@ class MaterialsStore:
                 material.update(path=str(item["path"]), size=len(blob), sha256=_sha(blob), download_status="downloaded")
                 if role == "main_pdf":
                     paper["main_pdf_status"] = "downloaded"
+        for supplement in item.get("supplements") or []:
+            if not isinstance(supplement, dict):
+                continue
+            filename = str(supplement.get("filename") or "").strip()
+            if not filename:
+                continue
+            self._upsert(record, {**supplement, "role": "supplement"})
         if flush:
             self.flush()
         return material
@@ -926,6 +1003,10 @@ class MaterialsStore:
             raise MaterialsError("材料清单目录无法安全核验，未覆盖原清单。")
         self.document["generated_at"] = _now()
         _atomic_bytes(self.path, (json.dumps(self.document, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        # Durable, non-signed attachment links live beside the manifest, not
+        # inside the exported materials.json. This keeps resume possible after
+        # the article page has been closed without exporting tokens.
+        _atomic_bytes(self.links_path, (json.dumps(self._links_document(), ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
         return self.path
 
 

@@ -1617,6 +1617,15 @@ node tools/check-contract.js                  # ALL_CHECKS_PASS
 - 正文成功后检查**已验证的文章页**（PMC 记录用 PMC 文章页，PDF 不用 PDF 当文章页），
   枚举并下载全部可见补充材料；`materials_completeness` 记录
   `expected / downloaded / pending / missing`。
+- **PMC 附件**：`pmc.ncbi.nlm.nih.gov/articles/instance/.../bin/...` 可能返回 JavaScript
+  proof-of-work 挑战页；改用 Europe PMC 稳定 OA 包
+  `https://www.ebi.ac.uk/europepmc/webservices/rest/{PMCID}/supplementaryFiles`，按 JATS
+  文件名取 ZIP 成员，不实现或绕过挑战。
+- **跨进程续跑**：观察到的补充材料 URL 不再只存内存；稳定、无 token/签名的链接写入
+  `fulltext/material-links.json`（内部文件，不混入导出的 `materials.json`），重启后恢复。
+  CNKI 临时链接、带签名/会话参数的 URL 不持久化。
+- 直接/包下载没有打开子窗口时，`complete_material()` 视为无需清理；不得把已保存文件误标为
+  “清理失败”。
 - `supplement_check` 为 `checked` / `none_declared` / `none_found` 且无 pending → complete；
   有 pending → partial；页面未核查/权限问题 → unverified。
 - 补充材料页 404/超时不再中断整批正文；该篇材料标 unverified/needs_attention，

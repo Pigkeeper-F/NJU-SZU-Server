@@ -606,7 +606,7 @@ class RunFlowTest(unittest.TestCase):
         # §3.5 item key set
         self.assertEqual(
             set(items["GSC-001"].keys()),
-            {"paper_id", "title", "doi", "source_url", "fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "content_sha256", "pdf_evidence", "completeness", "materials_completeness"},
+            {"paper_id", "title", "doi", "source_url", "fulltext_url", "kind", "status", "path", "size", "retrieved_at", "evidence_level", "reason", "content_sha256", "pdf_evidence", "completeness", "materials_completeness", "supplements"},
         )
 
     def test_captcha_pauses_with_attention_and_resume_completes(self) -> None:

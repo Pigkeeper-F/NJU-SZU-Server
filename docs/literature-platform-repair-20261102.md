@@ -38,3 +38,22 @@
 该兜底只解决“文件其实已下载但未收到 Playwright 事件”，不绕过登录、订阅、验证码或下载配额。若 Chrome 返回错误页/CAJ，仍按原规则暂停并保留页面。
 
 离线回归：`python tools/test_literature_cdp_download.py`（8 项）验证目录隔离、未完成文件忽略、HTML 拒绝、PDF 接受与已消费文件不复用；现有 `test_literature_cnki_fulltext.py`（83 项）和 `test_literature_fulltext_browser.py`（27 项）通过。
+
+## PMC 补充材料与跨进程续跑（2026-11-02 真实冒烟）
+
+三篇开放获取 PMC 样本（`PMC13714334`、`PMC13722600`、`PMC13718310`）实测：
+
+- 正文完整 3/3（PDF 2 + JATS/HTML 1）；
+- `AAS-71-0-s001.docx` 从 Europe PMC 开放包成功下载（892828 字节，ZIP 内文件读取校验）；
+- 该篇 `materials_completeness` 达到 `complete`，另两篇仍为 `unverified`（页面验证/补材入口未闭合，未虚报齐全）。
+
+修复的三处根因：
+
+1. **PMC 附件页有 JavaScript proof-of-work**：直接 GET `pmc.ncbi.nlm.nih.gov/articles/instance/.../bin/...` 返回挑战 HTML，不是文件。新增 `_pmc_supplementary_material()`：按 PMCID 取 `https://www.ebi.ac.uk/europepmc/webservices/rest/{PMCID}/supplementaryFiles` 的稳定 OA ZIP，按文件名取成员；不实现/绕过验证挑战。
+2. **补充材料 URL 跨进程丢失**：材料清单原先只在内存保存观察到的 URL，重启后无法续跑。新增 `fulltext/material-links.json`，只持久化**无 token/签名的稳定 HTTP(S) 链接**；`MaterialsStore` 启动时恢复，`materials.json` 本身不写入这些链接。
+3. **直接/包下载后清理误报**：直接下载没有打开子窗口，`complete_material()` 以前返回 `closed:false`，把已保存文件标成“清理失败”。现在无 `material_flow` 时视为无需清理；只有真实子窗口/暂存文件才走关闭流程。
+
+另外：
+- 浏览器上下文请求（带当前授权 Cookie）作为稳定附件 URL 的兜底；仍排除 CNKI、localhost/测试域名和签名链接。
+- JATS `<supplementary-material>` 的 label/filename 会登记为材料身份，即使渲染页把附件藏在下载挑战后面。
+- 离线回归：`test_literature_materials.py` 28 项、`test_literature_materials_browser.py` 32 项、`test_literature_fulltext.py` 71 项、`test_literature_cnki_fulltext.py` 83 项、`test_literature_cdp_download.py` 8 项、`test_literature_fulltext_browser.py` 27 项全部通过。

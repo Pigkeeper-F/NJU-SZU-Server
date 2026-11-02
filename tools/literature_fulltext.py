@@ -619,6 +619,8 @@ def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int,
     if not file_complete:
         item.update(status="partial", evidence_level="fulltext_pdf_partial",
                     reason="PDF 文件未通过完整性校验（魔数/EOF/大小/传输）")
+    if record:
+        item["supplements"] = _pmc_supplement_descriptors(record)
     return item
 
 
@@ -690,6 +692,38 @@ def _pmc_pdf_from_record(record: dict) -> str:
     if _pmc_article_url(source):
         return source.rstrip("/") + "/pdf/"
     return ""
+
+
+def _pmc_supplement_descriptors(record: dict, timeout: int = 30) -> list[dict]:
+    """Read JATS supplement identities without fetching the article body."""
+    pmcid = _pmc_id(str(record.get("pmcid") or ""))
+    if not pmcid:
+        for link in _collect_links(record):
+            pmcid = _pmc_id(str(link.get("url") or ""))
+            if pmcid:
+                break
+    if not pmcid:
+        pmcid = _pmc_id(_record_result_url(record))
+    if not pmcid:
+        return []
+    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
+    try:
+        request = Request(url, headers={"User-Agent": "NJU-SZU-Workbench/1.0"})
+        with urlopen(request, timeout=max(5, min(60, timeout))) as response:
+            raw = response.read(8 * 1024 * 1024 + 1)
+        root = ET.fromstring(raw)
+    except Exception:
+        return []
+    found = []
+    for node in root.findall(".//supplementary-material"):
+        href = str(node.get("{http://www.w3.org/1999/xlink}href") or node.get("href") or "").strip()
+        filename = href.replace("\\", "/").rsplit("/", 1)[-1]
+        if not filename:
+            continue
+        label = " ".join("".join(node.find("label").itertext()).split()) if node.find("label") is not None else ""
+        caption = " ".join("".join(node.find("caption").itertext()).split()) if node.find("caption") is not None else ""
+        found.append({"role": "supplement", "label": (label or caption or filename)[:500], "filename": filename})
+    return found
 
 
 def _pmc_xml_item(record: dict, job_dir: Path, opts: dict) -> dict | None:
@@ -791,8 +825,19 @@ def _pmc_xml_item(record: dict, job_dir: Path, opts: dict) -> dict | None:
     if verdict != "fulltext":
         return None
     saved = _settle_html(dict(_item_skeleton(record)), job_dir, article_text, pmc_url, verdict, reason, evidence)
+    # JATS declares supplements even when the rendered article page hides them
+    # behind a JavaScript download interstitial. Keep their stable identity so
+    # MaterialsStore can fetch them from the Europe PMC OA package.
+    supplements = []
+    for node in root.findall(".//supplementary-material"):
+        href = str(node.get("{http://www.w3.org/1999/xlink}href") or node.get("href") or "").strip()
+        filename = href.replace("\\", "/").rsplit("/", 1)[-1]
+        label = text(node.find("label")) or text(node.find("caption")) or filename
+        if filename:
+            supplements.append({"role": "supplement", "label": label[:500], "filename": filename})
     saved.update(kind="xml", xml_url=xml_url,
-                 evidence_level="fulltext_xml" if saved.get("status") == "fetched_html" else "fulltext_xml_partial")
+                 evidence_level="fulltext_xml" if saved.get("status") == "fetched_html" else "fulltext_xml_partial",
+                 supplements=supplements)
     return saved
 
 
