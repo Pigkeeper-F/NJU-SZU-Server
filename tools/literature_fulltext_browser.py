@@ -657,6 +657,65 @@ class FulltextBrowserFetcher:
                     pass
         return None
 
+    def _cnki_manual_resume_pages(self, owner):
+        """Read only direct children of this persisted task page.
+
+        This is not a general tab finder.  The CNKI caller must separately
+        require an explicit resume and verify each child's article identity.
+        A page claimed by another acquisition/discovery binding is never lent
+        to this task, even when its opener and bibliography happen to match.
+        """
+        context = self._connect()
+        if (owner is not self._page or owner not in context.pages or owner.is_closed()
+                or literature_browser._target_id(context, owner) != self._binding.get("target_id")):
+            return []
+
+        def target_ids(value):
+            result = set()
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key in {"target_id", "child_target_id", "parent_target_id", "owner_target_id", "cleanup_target_id"} and isinstance(child, str):
+                        result.add(child)
+                    elif key in {"cleanup_target_ids", "pdf_cleanup_target_ids", "download_click_target_ids"} and isinstance(child, list):
+                        result.update(item for item in child if isinstance(item, str))
+                    elif isinstance(child, (dict, list)):
+                        result.update(target_ids(child))
+            elif isinstance(value, list):
+                for child in value:
+                    result.update(target_ids(child))
+            return result
+
+        # Metadata has its own binding below the same literature task.  Only
+        # the three known binding locations of adjacent tasks are inspected.
+        task_dir = self.job_dir.parent.parent if self.job_dir.name == "browser" and self.job_dir.parent.name == "metadata" else self.job_dir
+        paths = set()
+        for pattern in ("*/fulltext-browser.json", "*/metadata/browser/fulltext-browser.json", "*/browser-tabs.json"):
+            paths.update(task_dir.parent.glob(pattern))
+        if len(paths) > 4096:
+            return []
+        claimed = target_ids(self._binding.get("deferred_papers", {})) | target_ids(self._binding.get("last_deferred_paper", {}))
+        try:
+            for file in paths:
+                if file.resolve() == self.binding_path.resolve():
+                    continue
+                if (file.is_symlink() or not file.resolve().is_relative_to(task_dir.parent.resolve())
+                        or file.stat().st_size > 2 * 1024 * 1024):
+                    return []
+                claimed.update(target_ids(json.loads(file.read_text(encoding="utf-8"))))
+        except (OSError, ValueError, TypeError):
+            # An unreadable ownership record is not permission to borrow.
+            return []
+        children = []
+        for page in context.pages:
+            try:
+                if page is owner or page.is_closed() or page.opener() is not owner:
+                    continue
+                if literature_browser._target_id(context, page) not in claimed:
+                    children.append(page)
+            except Exception:
+                return []
+        return children if len(children) <= 8 else []
+
     def _get_page(self):
         if self._page is not None:
             try:

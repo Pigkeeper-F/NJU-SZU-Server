@@ -120,6 +120,14 @@ def sanitize_metadata_diagnostic(value):
     return result
 
 
+def sanitize_cnki_probe_checkpoint(value):
+    if (not isinstance(value, dict) or not re.fullmatch(r"[a-f0-9]{64}", str(value.get("key") or ""))
+            or type(value.get("step")) is not int or type(value.get("max_steps")) is not int
+            or not 0 <= value["step"] <= value["max_steps"] <= 153 or value["max_steps"] < 1):
+        return None
+    return {key: value[key] for key in ("key", "step", "max_steps")}
+
+
 def verify_snapshot(record, snapshot, url):
     """Pure identity/completeness validator; no access to network or snippets."""
     original = identity(record)
@@ -283,9 +291,10 @@ METADATA_SNAPSHOT_JS = r"""/* literature_metadata_snapshot */ () => {
 
 class MetadataBrowserFetcher:
     """Only article navigation and read-only DOM, with a separate task tab."""
-    def __init__(self, config, job_dir, *, on_progress=None):
+    def __init__(self, config, job_dir, *, on_progress=None, allow_manual_cnki_resume=False):
         from literature_fulltext_browser import FulltextBrowserFetcher
         self.browser = FulltextBrowserFetcher(config, Path(job_dir) / "metadata" / "browser", on_progress=on_progress)
+        self.allow_manual_cnki_resume = allow_manual_cnki_resume is True
 
     def close(self):
         self.browser.close()
@@ -412,7 +421,10 @@ class MetadataBrowserFetcher:
         # normal exact-title UI locator in a mode that cannot scan materials,
         # click PDF controls, read file bodies, or resume prior download state.
         target_record = {**record, "source_candidate_id": record.get("source_candidate_id") or record.get("candidate_id")}
-        result = self.browser.fetch_cnki(target_record, {"metadata_only": True, "metadata_timeout_sec": timeout_sec})
+        options = {"metadata_only": True, "metadata_timeout_sec": timeout_sec, "cnki_probe_versions": True}
+        if getattr(self, "allow_manual_cnki_resume", False) is True:
+            options["cnki_manual_resume"] = True
+        result = self.browser.fetch_cnki(target_record, options)
         if result.get("status") != "ok":
             if result.get("status") == "fetch_error":
                 return {"status": "attention", "reason": "page_not_ready", "url": public_url(result.get("url")),
@@ -431,6 +443,12 @@ class MetadataBrowserFetcher:
         try:
             page.on("download", cancel_download)
             observed = self._read_metadata(page, deadline, downloads=downloads, cnki=True)
+            if (observed.get("reason") == "page_not_ready" and time.monotonic() >= deadline
+                    and (observed.get("metadata_diagnostic") or {}).get("ready_state") == "complete"):
+                from literature_cnki_fulltext import _version_probe_checkpoint
+                checkpoint = _version_probe_checkpoint(self.browser._binding.get("cnki_flow", {}))
+                if checkpoint:
+                    observed.update(reason="cnki_version_probe_budget", cnki_probe_checkpoint=checkpoint)
             observed["navigation_method"] = "cnki_exact_title_ui"
             return observed
         except Exception:
@@ -568,7 +586,8 @@ def run(config, job_dir, *, total_budget_sec=300, per_record_timeout_sec=30, ret
             previous = state["items"].get(cid, {})
             if previous.get("cleanup_pending") and previous.get("record_sha256") == record_hash(record):
                 if fetcher is None:
-                    fetcher = MetadataBrowserFetcher(config, job_dir, on_progress=lambda msg: emit("stage", stage="metadata", message=msg))
+                    fetcher = MetadataBrowserFetcher(config, job_dir, on_progress=lambda msg: emit("stage", stage="metadata", message=msg),
+                        allow_manual_cnki_resume=retry_attention)
                 complete = getattr(fetcher, "complete_record", None)
                 closed = complete(record, previous) if callable(complete) else {"closed": False}
                 if not isinstance(closed, dict) or closed.get("closed") is not True:
@@ -582,7 +601,8 @@ def run(config, job_dir, *, total_budget_sec=300, per_record_timeout_sec=30, ret
                 urls = urls[:1] or ["https://kns.cnki.net/"]
             item = {"candidate_id": cid, "record_sha256": record_hash(record), "status": "no_entry", "reason": "no_official_article_entry", "attempts": []}
             if fetcher is None and urls:
-                fetcher = MetadataBrowserFetcher(config, job_dir, on_progress=lambda msg: emit("stage", stage="metadata", message=msg))
+                fetcher = MetadataBrowserFetcher(config, job_dir, on_progress=lambda msg: emit("stage", stage="metadata", message=msg),
+                    allow_manual_cnki_resume=retry_attention)
             paper_started = clock()
             for url in urls:
                 remaining = min(total_budget_sec - (clock()-started), per_record_timeout_sec - (clock()-paper_started))
@@ -594,6 +614,13 @@ def run(config, job_dir, *, total_budget_sec=300, per_record_timeout_sec=30, ret
                 emit("stage", stage="metadata", paper_id=cid, message="回源核对完整摘要与关键词。")
                 fetch_record = getattr(fetcher, "fetch_record", None)
                 result = fetch_record(record, url, timeout_sec=remaining) if callable(fetch_record) else fetcher.fetch(url, timeout_sec=remaining)
+                if record.get("source_key") == "cnki" and result.get("reason") == "cnki_version_probe_budget":
+                    checkpoint = sanitize_cnki_probe_checkpoint(result.get("cnki_probe_checkpoint"))
+                    if checkpoint is not None:
+                        item["cnki_probe_checkpoint"] = checkpoint
+                    else:
+                        result = {"status": "attention", "reason": "page_error",
+                                  "message": "同名定位续接进度无法核验，已保留原页；未自动循环。"}
                 item["attempts"].append({"url": public_url(url), "status": result.get("status"), "reason": result.get("reason", ""), "at": common.now_iso()})
                 last_metadata_diagnostic = sanitize_metadata_diagnostic(result.get("metadata_diagnostic"))
                 if last_metadata_diagnostic:

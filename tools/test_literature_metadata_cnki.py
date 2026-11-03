@@ -165,7 +165,7 @@ class MetadataRecordTests(unittest.TestCase):
         self.assertGreaterEqual(clock[0], 2.5)
         actual_record, opts = fetcher.browser.fetch_cnki.call_args.args
         self.assertEqual(actual_record["source_candidate_id"], self.record["candidate_id"])
-        self.assertEqual(opts, {"metadata_only": True, "metadata_timeout_sec": 5})
+        self.assertEqual(opts, {"metadata_only": True, "metadata_timeout_sec": 5, "cnki_probe_versions": True})
         page.goto.assert_not_called()
 
     def test_stable_empty_or_title_only_page_is_retryable_not_mismatch(self):

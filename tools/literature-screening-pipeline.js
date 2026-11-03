@@ -25,6 +25,31 @@ function metadataCheckpoint(jobDir, candidateIds) {
   }
 }
 
+function cnkiProbeCheckpoint(jobDir, candidateIds) {
+  try {
+    const state = JSON.parse(fs.readFileSync(path.join(jobDir, 'metadata', 'status.json'), 'utf8'));
+    return new Map(Object.entries(state.items || {}).filter(([id, item]) => {
+      const point = item?.cnki_probe_checkpoint;
+      return (!candidateIds || candidateIds.includes(id)) && item?.status === 'attention'
+        && item.reason === 'cnki_version_probe_budget' && /^[a-f0-9]{64}$/.test(item.record_sha256 || '')
+        && /^[a-f0-9]{64}$/.test(point?.key || '') && Number.isSafeInteger(point?.step)
+        && Number.isSafeInteger(point?.max_steps) && point.step > 0 && point.step <= point.max_steps
+        && point.max_steps > 0 && point.max_steps <= 153;
+    }).map(([id, item]) => [id, { record: item.record_sha256, ...item.cnki_probe_checkpoint }]));
+  } catch (error) {
+    if (error.code === 'ENOENT') return new Map();
+    throw attention('screening_metadata_incomplete', '同名文献核对断点无法核验，未自动继续。');
+  }
+}
+
+function cnkiProbeProgressed(before, after) {
+  return [...after].some(([id, point]) => {
+    const previous = before.get(id);
+    return !previous || (point.record === previous.record && point.key === previous.key
+      && point.max_steps === previous.max_steps && point.step > previous.step);
+  });
+}
+
 // Metadata completion is a separate checkpoint. Its result cannot mark fulltext
 // done, and a blocked source must not immediately receive download requests.
 async function runScreeningPipeline({ root, bridge, job, onEvent = () => {}, signal, runMetadata,
@@ -47,6 +72,7 @@ async function runScreeningPipeline({ root, bridge, job, onEvent = () => {}, sig
   for (;;) {
     checkCancelled();
     const before = autoContinue ? metadataCheckpoint(job.dir, candidateIds) : null;
+    const beforeProbe = autoContinue ? cnkiProbeCheckpoint(job.dir, candidateIds) : null;
     let metadata;
     const args = ['--total-budget-sec', '300', '--per-record-timeout-sec', '30'];
     if (candidateIds) args.push('--only', JSON.stringify(candidateIds));
@@ -65,6 +91,15 @@ async function runScreeningPipeline({ root, bridge, job, onEvent = () => {}, sig
     if (ACCESS.has(metadata.stop_reason)) throw attention('screening_metadata_access', ACCESS_MESSAGES[metadata.stop_reason]);
     if (candidateIds && !sameIds(metadata.selected_candidate_ids, candidateIds)) throw attention('screening_scope_invalid', '摘要回源返回的文献范围与本批不一致，未开始筛选或下载。');
     if (metadata.complete === false && metadata.pending_count > 0) {
+      if (metadata.stop_reason === 'cnki_version_probe_budget') {
+        if (!autoContinue || !cnkiProbeProgressed(beforeProbe, cnkiProbeCheckpoint(job.dir, candidateIds))) {
+          throw attention('screening_metadata_budget', '同名文献核对本轮没有新增可核验进展，已保留页面和断点，请检查后继续。');
+        }
+        metadataBatch += 1;
+        onEvent({ type: 'stage', stage: 'metadata', reason: 'cnki_probe_budget_checkpoint', batch: metadataBatch,
+          message: '本页同名文献的逐条核对进展已保存，自动接续下一步；尚未作纳排或下载判断。', files: ['metadata/status.json'] });
+        continue;
+      }
       if (metadata.stop_reason === 'page_not_ready') throw attention('screening_metadata_page_not_ready',
         metadata.message || '摘要原页面尚未提供可核对的文献身份，原页面与断点保留；稍后点击继续，尚未进入初筛或下载。');
       if (metadata.stop_reason === 'page_error') throw attention('screening_metadata_page_error',

@@ -88,6 +88,36 @@ class MetadataBatchTests(unittest.TestCase):
             self.assertEqual(metadata.main(["--config", str(config), "--output-dir", str(self.job), "--only", '["R2"]']), 0)
         self.assertEqual(runner.call_args.kwargs["only"], ["R2"])
 
+    def test_cnki_version_probe_budget_saves_durable_scoped_progress(self):
+        self.rows[1]["source_key"] = "cnki"
+        self.write()
+        before = (self.job / "candidates.json").read_bytes()
+        point = {"key": "a" * 64, "step": 2, "max_steps": 9}
+        result = self.run_batch(FixtureFetcher([{"status": "attention", "reason": "cnki_version_probe_budget",
+            "cnki_probe_checkpoint": point}]), only=["R2"])
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["stop_reason"], "cnki_version_probe_budget")
+        item = metadata.read_status(self.job)["items"]["R2"]
+        self.assertEqual(item["status"], "attention")
+        self.assertEqual(item["cnki_probe_checkpoint"], point)
+        self.assertEqual(item["record_sha256"], metadata.record_hash(self.rows[1]))
+        self.assertEqual(result["selected_candidate_ids"], ["R2"])
+        self.assertFalse((self.job / "fulltext").exists())
+        self.assertEqual((self.job / "candidates.json").read_bytes(), before)
+
+    def test_invalid_cnki_probe_checkpoint_cannot_authorize_automatic_resume(self):
+        self.rows[1]["source_key"] = "cnki"
+        self.write()
+        for point in ({"key": "a" * 64, "step": 10, "max_steps": 9},
+                      {"key": "bad", "step": 1, "max_steps": 9},
+                      {"key": "a" * 64, "step": 1, "max_steps": 154}):
+            with self.subTest(point=point):
+                result = self.run_batch(FixtureFetcher([{"status": "attention", "reason": "cnki_version_probe_budget",
+                    "cnki_probe_checkpoint": point}]), only=["R2"])
+                item = metadata.read_status(self.job)["items"]["R2"]
+                self.assertEqual(result["stop_reason"], "page_error")
+                self.assertNotIn("cnki_probe_checkpoint", item)
+
 
 if __name__ == "__main__":
     unittest.main()

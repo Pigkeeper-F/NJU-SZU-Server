@@ -106,6 +106,54 @@ async function test() {
       assert.equal(calls, 1, 'real model problems must not be automatic retries');
     }
 
+    const probeItem = (step, overrides = {}) => ({ record_sha256: 'a'.repeat(64), status: 'attention',
+      reason: 'cnki_version_probe_budget', cnki_probe_checkpoint: { key: 'b'.repeat(64), step, max_steps: 9 }, ...overrides });
+    const probeJob = { ...auto.job, status: 'running', until: 'fulltext', resumeRun: true };
+    let probeCalls = 0, probeScreens = 0, probeEvents = [], probeArgs = [];
+    checkpoint({});
+    await runScreeningPipeline({ root: '.', bridge: {}, job: probeJob, onEvent: event => probeEvents.push(event),
+      screen: async () => { probeScreens++; return { ok: true }; }, runMetadata: async (a, emit) => {
+        probeArgs.push(a); probeCalls++;
+        checkpoint({ R1: probeCalls < 3 ? probeItem(probeCalls) : terminal('R1') });
+        emit({ type: 'result', ok: true, complete: probeCalls === 3,
+          stop_reason: probeCalls === 3 ? '' : 'cnki_version_probe_budget', pending_count: probeCalls === 3 ? 0 : 1 });
+      } });
+    assert.equal(probeCalls, 3); assert.equal(probeScreens, 1);
+    assert.equal(probeEvents.filter(e => e.reason === 'cnki_probe_budget_checkpoint').length, 2);
+    assert.ok(probeArgs[0].includes('--retry-attention'));
+    assert.ok(probeArgs.slice(1).every(a => !a.includes('--retry-attention')));
+
+    // Neither a timestamp/attempt-only update nor changed identity/queue can
+    // authorize another source request. Progress must belong to the same
+    // durable record, queue and bounded, strictly increasing phase counter.
+    for (const item of [probeItem(1), probeItem(2, { record_sha256: 'c'.repeat(64) }),
+      probeItem(2, { cnki_probe_checkpoint: { key: 'd'.repeat(64), step: 2, max_steps: 9 } }),
+      probeItem(10), probeItem(2, { cnki_probe_checkpoint: { key: 'b'.repeat(64), step: 2, max_steps: 154 } })]) {
+      checkpoint({ R1: probeItem(1) }); let attempts = 0;
+      await assert.rejects(runScreeningPipeline({ root: '.', bridge: {}, job: probeJob,
+        screen: async () => { throw new Error('must not screen'); }, runMetadata: async (_, emit) => {
+          attempts++; checkpoint({ R1: item });
+          emit({ type: 'result', ok: true, complete: false, stop_reason: 'cnki_version_probe_budget', pending_count: 1 });
+        } }), error => error.reason === 'screening_metadata_budget');
+      assert.equal(attempts, 1);
+    }
+    for (const stop_reason of ['verification', 'login', 'rate_limited', 'page_not_ready', 'page_error']) {
+      checkpoint({}); let attempts = 0;
+      await assert.rejects(runScreeningPipeline({ root: '.', bridge: {}, job: probeJob,
+        screen: async () => { throw new Error('must not screen'); }, runMetadata: async (_, emit) => {
+          attempts++; checkpoint({ R1: probeItem(1) });
+          emit({ type: 'result', ok: true, complete: false, stop_reason, pending_count: 1 });
+        } }), error => error.reason === (['page_not_ready', 'page_error'].includes(stop_reason)
+          ? `screening_metadata_${stop_reason}` : 'screening_metadata_access'));
+      assert.equal(attempts, 1, 'probe progress never bypasses a real access/readiness barrier');
+    }
+    checkpoint({});
+    await assert.rejects(runScreeningPipeline({ root: '.', bridge: {}, job: { ...probeJob, until: 'discover' },
+      screen: async () => { throw new Error('must not screen'); }, runMetadata: async (_, emit) => {
+        checkpoint({ R1: probeItem(1) });
+        emit({ type: 'result', ok: true, complete: false, stop_reason: 'cnki_version_probe_budget', pending_count: 1 });
+      } }), error => error.reason === 'screening_metadata_budget');
+
     for (const stage of ['metadata', 'screening']) {
       const stop = new AbortController(); calls = 0; checkpoint({});
       await assert.rejects(runScreeningPipeline({ ...auto, signal: stop.signal,
