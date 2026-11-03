@@ -179,7 +179,7 @@ _SNAPSHOT_JS = r"""/* literature_snapshot */ ({source, limit}) => {
   const wosTimeout524 = source === 'web-of-science' && Array.from(document.querySelectorAll('#cf-error-details,.cf-error-details,h1'))
     .some(el => visible(el) && /\berror\s+code\s*:?\s*524\b/i.test(text(el)));
   const captcha = Array.from(document.querySelectorAll('iframe[src*="recaptcha"],iframe[src*="captcha"],.geetest_panel,.verifybox,#captcha,.captcha')).some(visible)
-    || /人机验证|滑动验证|请完成验证|访问验证|验证码|unusual traffic|verify you are human|are you a robot|access denied.*bot/i.test(head.slice(0,1600));
+    || /人机验证|滑动验证|请完成(?:安全)?验证|安全验证|滑块|拖动到最右|访问验证|验证码|unusual traffic|verify you are human|are you a robot|access denied.*bot/i.test(head.slice(0,1600));
   const password = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
   const explicitAccess = /您所在的机构未订购|没有访问权限|无访问权限|不在授权范围|机构没有订购|your institution does not have|institutional access is required|not entitled|subscription required|access is not available|you do not have access|not authorized to access/i.test(head);
   const loginPrompt = /请先登录|请登录后|登录后方可|请通过机构登录|需要机构登录|sign in to access|sign in to search|log in to access|please sign in|please log in|access through your institution|institutional sign in|access web of science/i.test(head);

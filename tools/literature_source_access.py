@@ -10,7 +10,7 @@ ACCESS_STATE_JS = r"""/* literature_snapshot_access_state */ ({source,limit}) =>
   const status = Array.from(document.querySelectorAll('h1,h2,[role="alert"],.error-message,.error-title'))
     .filter(visible).map(el => el.innerText || el.textContent || '').join(' ').slice(0,1600);
   const captcha = Array.from(document.querySelectorAll('iframe[src*="captcha"],iframe[src*="recaptcha"],.geetest_panel,.verifybox,#captcha,.captcha,#challenge-running,.cf-turnstile')).some(visible)
-    || /人机验证|滑动验证|请完成验证|访问验证|验证码|unusual traffic|verify you are human|are you a robot|verify your identity|checking your browser/i.test(head);
+    || /人机验证|滑动验证|请完成(?:安全)?验证|安全验证|滑块|拖动到最右|访问验证|验证码|unusual traffic|verify you are human|are you a robot|verify your identity|checking your browser/i.test(head);
   const password = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
   const loginPrompt = /请先登录|请登录后|登录后方可|登录后检索|请通过机构登录|需要机构登录|sign in to access|sign in to search|log in to access|please sign in|please log in|access through your institution|institutional sign in/i.test(head);
   const accessRequired = /您所在的机构未订购|没有访问权限|无访问权限|不在授权范围|机构没有订购|your institution does not have|institutional access is required|not entitled|subscription required|access is not available|you do not have access|not authorized to access/i.test(head);
