@@ -1,6 +1,6 @@
 # 五库文献流程：实现状态与边界
 
-更新：2026-11-02  
+更新：2026-11-03  
 集成分支：`integration/literature-five-source`  
 合并提交：`19721b4`（学长五库分支） + `5446f69`、`0d9dbe4`（本轮修复）
 
@@ -18,6 +18,9 @@
 | Web of Science | `web-of-science` | 持久浏览器，机构订阅 |
 | Scopus | `scopus` | 持久浏览器，机构订阅 |
 | Google Scholar | `google-scholar` | 持久浏览器，可能人机验证 |
+
+> **五库不含 PMC/PubMed。** PMC、Europe PMC、OpenAlex、PubMed 是其他流程使用的开放检索/全文源；
+> 在本五库任务里，PMC/Europe PMC 只作为**全文与补充材料解析器**出现，不参与五库检索，也不是“第六个库”。
 
 - 检索式按来源分别保存，不再把一条 Scholar 语法复制给所有库。
 - 开跑前有逐项核查（研究范围、来源与检索式、纳排与交付、执行边界）；确认快照写入任务目录。
@@ -49,6 +52,7 @@
 已实现：
 
 - 正文优先级：平台原生 PDF（知网/出版社）→ Europe PMC/PMC PDF → PMC JATS 全文 → 文章页 HTML → DOI 落地页。
+  （这里的 PMC/Europe PMC 只是在解析全文，不是五库检索来源。）
 - 正文完整性：PDF 校验 `%PDF`/EOF/大小/传输；HTML/JATS 校验核心章节，`partial` 不进入提取。
 - 补充材料：按已验证文章页枚举附件，保留原格式；区分 `downloaded / missing / needs_attention / uninspected / none_declared`。
 - 断点续跑、单篇重试、访问受限逐篇暂缓、已保存文件按 SHA 复用。

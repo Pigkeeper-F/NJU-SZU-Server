@@ -98,6 +98,8 @@ node tools/debug-report.js --json
   OpenAlex / Europe PMC / Semantic Scholar 可在同一批合并；支持按源检索式（`sourceQueries`）、
   跨源 DOI/标题去重、逐源命中/失败展示；正式检索支持按来源翻页（50/100 条或到末页），
   Scholar 验证码打断时开放源结果先落盘（批次 `status: "partial"`）
+  注意：这是更广的“多源检索”能力；**学长的五库流程只指知网/万方/WoS/Scopus/Google Scholar，不含 PMC/PubMed**，
+  PMC/Europe PMC 在五库任务里只作为全文解析器。
 - **以文献找文献（2026-10-23）**：DOI/PMID/PMCID/OpenAlex ID/S2 paperId/论文链接/标题为种子，
   扩展参考文献 / 被引 / 相似文献；OpenAlex 优先、S2 兜底；并入同一候选池（`batch_index=-1`，
   同种子整批替换），扩展条目带 `seed_relation` 可回溯——契约 §26.8
