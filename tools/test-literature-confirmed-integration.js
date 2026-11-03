@@ -129,6 +129,14 @@ test('all ten confirmed presets bind exact policy/source/date and the full Schol
   assert.equal(sha(fs.readFileSync(path.join(root, 'config/confirmed-climate-research.json'))), sha(bytes), 'Building cannot edit the approved bundle');
 }));
 
+test('five-source catalog rejects PMC and other non-five discovery sources', () => isolated(async root => {
+  const file = path.join(root, 'config/confirmed-climate-research.json');
+  const data = read(file);
+  data.entries[0].source = 'pmc';
+  write(root, 'config/confirmed-climate-research.json', data);
+  assert.throws(() => confirmed.catalog(root), /非五库检索来源/);
+}));
+
 test('production prepare route creates ten paused tasks and never executes environment, search, browser or download', () => isolated(async root => {
   const h = harness(root); const catalog = await h.route('GET', '/api/literature/confirmed-plan'); assert.equal(catalog.code, 200);
   for (const entry of catalog.body.entries) {

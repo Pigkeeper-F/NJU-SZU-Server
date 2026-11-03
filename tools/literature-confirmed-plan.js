@@ -6,10 +6,18 @@ const { createHash } = require('node:crypto');
 const { normalizeConfig } = require('./literature-config');
 const screening = require('./literature-screening');
 
+//: 五库只包括这五个检索来源。PMC/Europe PMC 是全文解析器，不是检索库。
+const FIVE_SOURCE_KEYS = new Set(['cnki', 'wanfang', 'web-of-science', 'scopus', 'google-scholar']);
+
 function catalog(root) {
   const bytes = fs.readFileSync(path.join(root, 'config', 'confirmed-climate-research.json'));
   const data = JSON.parse(bytes);
   if (!Array.isArray(data.entries) || data.entries.length !== 10) throw new Error('五库已确认方案不完整');
+  for (const entry of [...data.entries, ...(Array.isArray(data.followups) ? data.followups : [])]) {
+    if (!FIVE_SOURCE_KEYS.has(String((entry && entry.source) || ''))) {
+      throw new Error('五库已确认方案包含非五库检索来源：' + String((entry && (entry.source || entry.id)) || '未知'));
+    }
+  }
   return { ...data, bundleHash: createHash('sha256').update(bytes).digest('hex') };
 }
 

@@ -21,6 +21,8 @@
 
 > **五库不含 PMC/PubMed。** PMC、Europe PMC、OpenAlex、PubMed 是其他流程使用的开放检索/全文源；
 > 在本五库任务里，PMC/Europe PMC 只作为**全文与补充材料解析器**出现，不参与五库检索，也不是“第六个库”。
+> 代码层已由 `tools/literature-confirmed-plan.js` 的 `FIVE_SOURCE_KEYS` 白名单强制：五库方案
+> 出现 `pmc` 等非五库来源会直接报错，不会准备任务。
 
 - 检索式按来源分别保存，不再把一条 Scholar 语法复制给所有库。
 - 开跑前有逐项核查（研究范围、来源与检索式、纳排与交付、执行边界）；确认快照写入任务目录。
