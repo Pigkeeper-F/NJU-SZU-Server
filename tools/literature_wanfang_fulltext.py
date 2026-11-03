@@ -156,6 +156,7 @@ def run_wanfang(fetcher, record: dict, opts: dict) -> dict:
 
         attach(page)
         control, caj_only = _choose_controls(page)
+        first_label = _label(control) if control is not None else ""
         if control is None:
             try:
                 page_text = page.inner_text("body")[:4000]
@@ -180,6 +181,7 @@ def run_wanfang(fetcher, record: dict, opts: dict) -> dict:
                 pass
 
         deadline = time.monotonic() + max(10, timeout_ms / 1000)
+        second_at, second_clicked = time.monotonic() + 2.0, False
         while time.monotonic() < deadline:
             if downloads:
                 blob = fetcher._read_download(downloads[0])
@@ -203,6 +205,27 @@ def run_wanfang(fetcher, record: dict, opts: dict) -> dict:
                             "url": literature_browser.safe_url(page.url) or url,
                             "acquisition_method": "wanfang_pdf_response"}
             active = popups[-1] if popups else page
+            if (not downloads and not responses and not second_clicked
+                    and time.monotonic() >= second_at):
+                # A generic "下载" control commonly opens a small format menu;
+                # click one newly revealed PDF control, never the same one twice.
+                second, caj_second = _choose_controls(active)
+                second_clicked = True
+                if second is not None:
+                    label = _label(second)
+                    try:
+                        if re.search(r"pdf", label, re.I) and label != first_label:
+                            fetcher._pace(getattr(active, "url", page.url))
+                            second.click(timeout=10_000, no_wait_after=True)
+                    finally:
+                        try:
+                            second.dispose()
+                        except Exception:
+                            pass
+                elif caj_second:
+                    return _attention(fetcher, "access_required", getattr(active, "url", page.url),
+                                      snapshot=snapshot,
+                                      message="万方下载菜单只提供 CAJ，未自动保存为 PDF。")
             try:
                 current = active.evaluate(_SNAPSHOT_JS)
             except Exception:
