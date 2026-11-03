@@ -49,12 +49,16 @@
 
 ## 3. 全文与补充材料
 
-代码入口：`tools/literature_fulltext.py`、`tools/literature_fulltext_browser.py`、`tools/literature_cnki_fulltext.py`、`tools/literature_materials.py`。
+代码入口：`tools/literature_fulltext.py`、`tools/literature_fulltext_browser.py`、`tools/literature_cnki_fulltext.py`、`tools/literature_wanfang_fulltext.py`、`tools/literature_materials.py`。
 
 已实现：
 
-- 正文优先级：平台原生 PDF（知网/出版社）→ Europe PMC/PMC PDF → PMC JATS 全文 → 文章页 HTML → DOI 落地页。
+- 正文优先级：平台原生 PDF（知网/万方/出版社）→ Europe PMC/PMC PDF → PMC JATS 全文 → 文章页 HTML → DOI 落地页。
   （这里的 PMC/Europe PMC 只是在解析全文，不是五库检索来源。）
+- **万方原生全文适配（2026-11-03）**：`literature_wanfang_fulltext.py` 导航官方详情页
+  （`d.wanfangdata.com.cn/periodical|thesis|conference/...`），核对题名/DOI，点击唯一可见的
+  PDF/下载控件，捕获 Download、CDP 原生下载或 PDF 响应；登录/付费/机构权限文本会返回
+  `access_required`，不绕过、不把错误页当 PDF。**离线回归 7 项已通过，真实万方站点尚未验证。**
 - 正文完整性：PDF 校验 `%PDF`/EOF/大小/传输；HTML/JATS 校验核心章节，`partial` 不进入提取。
 - 补充材料：按已验证文章页枚举附件，保留原格式；区分 `downloaded / missing / needs_attention / uninspected / none_declared`。
 - 断点续跑、单篇重试、访问受限逐篇暂缓、已保存文件按 SHA 复用。
@@ -79,6 +83,7 @@
 - `python tools/test_literature_materials_browser.py`：32 项
 - `python tools/test_literature_fulltext.py`：71 项
 - `python tools/test_literature_cnki_fulltext.py`：83 项
+- `python tools/test_literature_wanfang_fulltext.py`：7 项（离线点击/付费拦截）
 - `python tools/test_literature_fulltext_browser.py`：27 项
 - `python tools/test_literature_cdp_download.py`：8 项
 - `node tools/check-contract.js`：`ALL_CHECKS_PASS`
@@ -90,21 +95,28 @@
    - 代码路径已有 CDP 下载兜底与知网单篇续跑，但没有一篇**有权限的知网样本**真实跑通自动落盘。
    - 不能声称“知网全文已全部自动获取”。
 
-2. **万方/WoS/Scopus 的出版社全文未验证**
-   - 三者大量只是索引，全文要靠 DOI 到出版社/PMC；目前只验证了 OA/PMC，Elsevier/Springer/Wiley 等订阅出版社没有真实样本。
+2. **万方真实站点未验证**
+   - `literature_wanfang_fulltext.py` 已实现官方详情页定位、题名/DOI 核对、可见 PDF/下载控件点击、
+     Download/CDP/PDF 响应捕获和登录/付费拦截；离线 7 项通过。
+   - 但还没有一篇有权限的万方样本真实跑通；PDF、CAJ-only、付费墙、页面结构变化都未实测。
+   - 不能因为离线测试通过就宣称“万方全文已自动获取”。
+
+3. **WoS/Scopus 的出版社全文未验证**
+   - 两者大量只是索引，全文要靠 DOI 到出版社/PMC；目前只验证了 OA/PMC，Elsevier/Springer/Wiley 等订阅出版社没有真实样本。
    - 订阅墙/验证码/下载配额不绕过。
 
-3. **非 PMC 补充材料未验证**
+4. **非 PMC 补充材料未验证**
    - 通用页面扫描已实现；Elsevier/Springer/Wiley/Frontiers/MDPI 等真实补充材料入口未逐一实测。
    - “没找到”不等于“作者声明没有”；状态必须保留 `unverified/needs_attention`。
 
-4. **五库正式生产批次未完整跑完**
+5. **五库正式生产批次未完整跑完**
    - 已有一条历史任务越过知网第一篇停点，但 3814 条级任务没有全部跑完，PDF 覆盖未声明完整。
 
 ## 6. 继续验证的最小步骤
 
 1. 用研究者已登录的持久浏览器启动一个“小样测试”任务。
-2. 准备 3–5 篇有权限的知网样本：正常 PDF、仅 CAJ、下载报错、带附件、需登录各一类。
+2. 准备 3–5 篇有权限的知网样本：正常 PDF、仅 CAJ、下载报错、带附件、需登录各一类；
+   另准备 3 篇有权限的万方样本（PDF、CAJ-only、付费墙各一类）。
 3. 执行：检索/导入 → 去重 → 篇关摘筛选 → 全文获取。
 4. 检查 `fulltext/status.json`、`materials.json`、`download-diagnostics.jsonl` 和实际文件。
 5. 只有实际文件落盘并通过校验，才把对应能力标为“已验证”。

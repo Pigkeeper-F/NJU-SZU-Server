@@ -2408,6 +2408,15 @@ class FulltextBrowserFetcher:
             {"status": "unknown", "reason": "article_materials_not_observed", "source_url": "", "links": []}))
         return result
 
+    def fetch_wanfang(self, record, opts):
+        # Wanfang is a full-text platform: navigate the official detail URL,
+        # verify the article, then click its visible PDF/download control.
+        from literature_wanfang_fulltext import run_wanfang
+        result = self._deferred_attention("https://d.wanfangdata.com.cn/") or run_wanfang(self, record, opts)
+        result.setdefault("material_discovery", self._material_discoveries.get(_material_key(record),
+            {"status": "unknown", "reason": "article_materials_not_observed", "source_url": "", "links": []}))
+        return result
+
     def _fetch_pdf_via_context_request(self, target_url, out_path):
         api_request = getattr(self._context, "request", None)
         if api_request is None:

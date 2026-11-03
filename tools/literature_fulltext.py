@@ -907,6 +907,11 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
         saved = _checkpoint_main(_settle_cnki_result(result, record, job_dir, item), opts)
         _observe_materials(result, opts, paper_id)
         return saved
+    if record.get("source_key") == "wanfang" and callable(getattr(fetcher, "fetch_wanfang", None)):
+        result = fetcher.fetch_wanfang(record, opts)
+        saved = _checkpoint_main(_settle_cnki_result(result, record, job_dir, item), opts)
+        _observe_materials(result, opts, paper_id)
+        return saved
 
     # 1) PMC PDF as the preferred main artifact.
     real_fetcher = isinstance(fetcher, FulltextBrowserFetcher)
