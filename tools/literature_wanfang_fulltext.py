@@ -59,6 +59,29 @@ def _visible(node) -> bool:
         return False
 
 
+def _page_identity(snapshot: dict, page, record: dict) -> dict:
+    """Wanfang often omits citation meta; use its visible title/DOI text."""
+    if not isinstance(snapshot, dict):
+        return snapshot
+    if not snapshot.get("citation_title"):
+        try:
+            title = re.split(r"\s*-(?:期刊|学位论文|会议论文|万方数据知识服务平台)\s*",
+                             str(page.title() or "").strip(), maxsplit=1)[0]
+            if title:
+                snapshot["citation_title"] = title
+        except Exception:
+            pass
+    if not snapshot.get("citation_doi"):
+        try:
+            text = page.inner_text("body")[:8000]
+            match = re.search(r"DOI\s*[：:]\s*(10\.\d{4,9}/[^\s，,；;]+)", text, re.I)
+            if match:
+                snapshot["citation_doi"] = match.group(1)
+        except Exception:
+            pass
+    return snapshot
+
+
 def _choose_controls(page):
     controls = []
     for node in page.query_selector_all("button,a,[role='button']"):
@@ -114,6 +137,7 @@ def run_wanfang(fetcher, record: dict, opts: dict) -> dict:
                 snapshot = page.evaluate(_SNAPSHOT_JS)
             except Exception:
                 snapshot = None
+            snapshot = _page_identity(snapshot, page, record)
             if isinstance(snapshot, dict) and _material_identity(snapshot, record):
                 break
             reason = fetcher._reason(snapshot or {})

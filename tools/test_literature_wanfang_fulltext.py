@@ -138,6 +138,11 @@ def main() -> None:
     ok(wan._detail_url({"result_url": "https://d.wanfangdata.com.cn/periodical/abc"})
        == "https://d.wanfangdata.com.cn/periodical/abc", "official periodical detail URL accepted")
     ok(wan._detail_url({"result_url": "https://example.com/x"}) == "", "non-Wanfang URL rejected")
+    class TitlePage:
+        def title(self):
+            return "热应激对肉鸡生长性能的影响-期刊-万方数据知识服务平台"
+    snap = wan._page_identity({}, TitlePage(), {"title": TITLE})
+    ok(snap.get("citation_title") == TITLE, "visible Wanfang title used when citation meta is absent")
 
     page = Page()
     result = wan.run_wanfang(Fetcher(page), {

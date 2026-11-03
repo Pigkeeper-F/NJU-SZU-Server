@@ -184,7 +184,7 @@ _VERIFICATION_FUNCTION_JS = r"""(options = {}) => {
       || Array.from(e.querySelectorAll('*')).some(child=>visiblePrompt(child,value=>challengePrompt.test(value)))) return true;
     return Array.from(e.querySelectorAll('iframe,img,canvas,input:not([type="hidden"]),button,[role="button"],[role="slider"]')).some(challengeSurface);
   }));
-  const genericPrompt=value=>/人机验证|滑动验证|请完成验证|访问验证|unusual traffic|verify you are human|are you a robot/i.test(value);
+  const genericPrompt=value=>/人机验证|滑动验证|请完成(?:安全)?验证|安全验证|滑块|拖动到最右|访问验证|unusual traffic|verify you are human|are you a robot/i.test(value);
   const verificationPrompt=genericPrompt(text(document.body).slice(0,2000)) && promptElements().some(e=>visiblePrompt(e,genericPrompt));
   const evidence=[cnkiVerifyRoute?'cnki_verify_route':'',cnkiSecurityTitle?'cnki_security_title':'',
     cnkiHeadingPrompt?'cnki_security_heading_visible':'',cnkiBodyPrompt?'cnki_security_body_visible':'',
