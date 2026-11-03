@@ -44,6 +44,7 @@ class AmbiguousLookupTests(unittest.TestCase):
         self.context = Context(self.clock)
         self.record = version_record()
         self.context.initial_ui = version_rows()
+        self.context.initial_ui["lookup_complete"] = True
         # Row titles are complete; both versions lack usable row identity.
         # The detail, rather than the incomplete row, must decide the version.
         for row in self.context.initial_ui["rows"]:
@@ -112,11 +113,13 @@ class AmbiguousLookupTests(unittest.TestCase):
         self.addCleanup(fetcher.close)
         return fetcher
 
-    def run_lookup(self, *, fetcher=None, enabled=True, timeout_sec=120):
+    def run_lookup(self, *, fetcher=None, enabled=True, timeout_sec=120, manual_resume=False):
         fetcher = fetcher or self.fetcher()
         opts = {"metadata_only": True, "metadata_timeout_sec": timeout_sec}
         if enabled:
             opts["cnki_probe_versions"] = True
+        if manual_resume:
+            opts["cnki_manual_resume"] = True
         return fetcher, cnki.run_cnki(fetcher, self.record, opts)
 
     def assert_no_downloads(self):
@@ -393,6 +396,249 @@ class AmbiguousLookupTests(unittest.TestCase):
 
     def test_closing_resume_keeps_pending_download_until_settled(self):
         self.assert_closing_resume_preserves_changed_access({"download_pending": True}, "page_not_ready")
+
+    def second_version_after_challenge(self, *, clear=True):
+        self.versions[1]["verification"] = True
+        first, result = self.run_lookup()
+        self.assertEqual(result.get("reason"), "verification", result)
+        self.assertEqual(self.clicks, [0, 1])
+        self.assertTrue(self.details[0].closed)
+        child = self.details[1]
+        self.assertFalse(child.closed)
+        flow = first._binding["cnki_flow"]
+        self.assertEqual(flow["version_probe"]["active_index"], 1)
+        self.assertTrue(flow["pending_popup"]["opener_verified"])
+        self.assertTrue(flow["pending_popup"]["adopted"])
+        self.assertEqual(flow["target_id"], child.target)
+        first.close()
+        child.opener = lambda: None
+        if clear:
+            child.snap["verification"] = child.metadata["verification"] = False
+            self.versions[1]["verification"] = False
+        return child
+
+    def mutate_saved_binding(self, change):
+        path = self.path / "fulltext-browser.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        change(value)
+        path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+    def assert_second_version_preserved(self, child, result):
+        self.assertNotEqual(result.get("status"), "ok", result)
+        self.assertEqual(self.clicks, [0, 1])
+        self.assertFalse(child.closed)
+        self.assert_no_downloads()
+
+    def test_explicit_resume_after_second_version_verification_lost_opener_continues_same_index(self):
+        child = self.second_version_after_challenge()
+        _, result = self.run_lookup(manual_resume=True)
+        self.assertEqual(result.get("status"), "ok", result)
+        self.assertEqual(self.clicks, [0, 1, 1])
+        self.assertTrue(child.closed)
+        self.assertFalse(self.owner.closed)
+        self.assert_no_downloads()
+
+    def test_lost_opener_without_explicit_resume_does_not_claim_second_version(self):
+        child = self.second_version_after_challenge()
+        _, result = self.run_lookup()
+        self.assert_second_version_preserved(child, result)
+
+    def persist_detached_recovery_then_interrupt_budget(self):
+        child = self.second_version_after_challenge()
+        fetcher = self.fetcher()
+        original_write = fetcher._write_binding
+        interrupted = []
+
+        def write():
+            original_write()
+            probe = fetcher._binding.get("cnki_flow", {}).get("version_probe", {})
+            if probe.get("opener_recovery") and not interrupted:
+                interrupted.append(True)
+                self.clock.sleep(121)
+
+        fetcher._write_binding = write
+        _, result = self.run_lookup(fetcher=fetcher, manual_resume=True)
+        self.assertTrue(interrupted)
+        self.assertEqual(result.get("reason"), "cnki_version_probe_budget", result)
+        self.assertEqual(self.clicks, [0, 1])
+        proof = fetcher._binding["cnki_flow"]["version_probe"]["opener_recovery"]
+        self.assertEqual(proof["target_id"], child.target)
+        self.assertEqual(proof["parent_target_id"], self.owner.target)
+        self.assertFalse(child.closed)
+        fetcher.close()
+        return child
+
+    def test_saved_detached_recovery_survives_budget_and_continues_without_new_explicit_resume(self):
+        child = self.persist_detached_recovery_then_interrupt_budget()
+        _, result = self.run_lookup()
+        self.assertEqual(result.get("status"), "ok", result)
+        self.assertEqual(self.clicks, [0, 1, 1])
+        self.assertTrue(child.closed)
+        self.assert_no_downloads()
+
+    def test_saved_detached_recovery_does_not_override_later_identity_change(self):
+        child = self.persist_detached_recovery_then_interrupt_budget()
+        child.snap["citation_authors"] = child.metadata["authors"] = ["预算中断后变化的作者"]
+        _, result = self.run_lookup()
+        self.assert_second_version_preserved(child, result)
+        self.assertFalse(self.owner.closed)
+
+    def test_open_current_shows_exact_adopted_probe_child_after_lost_opener_without_navigation(self):
+        child = self.second_version_after_challenge()
+        fetcher = self.fetcher()
+        saved = copy.deepcopy(fetcher._binding)
+        before = (len(self.context.pages), len(self.owner.gotos), list(self.clicks), child.fronts)
+        result = fetcher.open_current()
+        self.assertTrue(result.get("opened"), result)
+        self.assertEqual((len(self.context.pages), len(self.owner.gotos), self.clicks), before[:3])
+        self.assertEqual(child.fronts, before[3] + 1)
+        self.assertEqual(fetcher._binding, saved)
+        self.assertFalse(child.closed)
+        self.assertFalse(self.owner.closed)
+        self.assert_no_downloads()
+
+    def test_open_current_does_not_show_unadopted_detached_probe_child(self):
+        child = self.second_version_after_challenge()
+        self.mutate_saved_binding(lambda saved: saved["cnki_flow"]["pending_popup"].update(adopted=False))
+        fetcher = self.fetcher()
+        before = child.fronts
+        result = fetcher.open_current()
+        self.assertFalse(result.get("opened"), result)
+        self.assertEqual(child.fronts, before)
+        self.assertEqual(self.clicks, [0, 1])
+        self.assertFalse(child.closed)
+        self.assert_no_downloads()
+
+    def test_open_current_does_not_show_probe_child_with_nonempty_other_opener(self):
+        child = self.second_version_after_challenge()
+        child.opener = lambda: self.context.pages[0]
+        fetcher = self.fetcher()
+        before = child.fronts
+        result = fetcher.open_current()
+        self.assertFalse(result.get("opened"), result)
+        self.assertEqual(child.fronts, before)
+        self.assertEqual(self.clicks, [0, 1])
+        self.assertFalse(child.closed)
+        self.assert_no_downloads()
+
+    def test_lost_opener_with_unadopted_witness_cannot_claim_second_version(self):
+        child = self.second_version_after_challenge()
+        self.mutate_saved_binding(lambda saved: saved["cnki_flow"]["pending_popup"].update(adopted=False))
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+
+    def test_lost_opener_with_wrong_paper_flow_cannot_claim_second_version(self):
+        child = self.second_version_after_challenge()
+        self.mutate_saved_binding(lambda saved: saved["cnki_flow"].update(paper_hash="0" * 64))
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+
+    def test_lost_opener_with_wrong_title_flow_cannot_claim_second_version(self):
+        child = self.second_version_after_challenge()
+        self.mutate_saved_binding(lambda saved: saved["cnki_flow"].update(title_hash="0" * 64))
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+
+    def test_lost_opener_with_wrong_flow_target_cannot_claim_second_version(self):
+        child = self.second_version_after_challenge()
+        self.mutate_saved_binding(lambda saved: saved["cnki_flow"].update(target_id="researcher-existing"))
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+
+    def test_lost_opener_with_wrong_bound_target_cannot_claim_second_version(self):
+        child = self.second_version_after_challenge()
+        self.mutate_saved_binding(lambda saved: saved.update(target_id="researcher-existing"))
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+
+    def test_explicit_resume_does_not_override_nonempty_other_opener(self):
+        child = self.second_version_after_challenge()
+        child.opener = lambda: self.context.pages[0]
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+
+    def test_lost_opener_resume_keeps_remaining_verification(self):
+        child = self.second_version_after_challenge(clear=False)
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+        self.assertFalse(self.owner.closed)
+
+    def test_lost_opener_resume_keeps_loading_second_version(self):
+        child = self.second_version_after_challenge()
+        child.snap.update(ready_state="loading", loading_pending=True)
+        child.metadata.update(ready_state="loading", loading_pending=True)
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+        self.assertFalse(self.owner.closed)
+
+    def test_lost_opener_resume_requires_live_original_parent(self):
+        child = self.second_version_after_challenge()
+        self.owner.closed = True
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+
+    def test_lost_opener_manual_metadata_recovery_does_not_enable_pdf_mode(self):
+        child = self.second_version_after_challenge()
+        fetcher = self.fetcher()
+        result = cnki.run_cnki(fetcher, self.record,
+            {"cnki_manual_resume": True, "cnki_probe_versions": True})
+        self.assert_second_version_preserved(child, result)
+
+    def test_lost_opener_resume_checks_frozen_parent_query_and_rows(self):
+        child = self.second_version_after_challenge()
+        self.owner.ui["queries"] = ["另一个题名"]
+        self.owner.ui["rows"][0]["anchors"][0]["text"] = "另一个检索结果"
+        _, result = self.run_lookup(manual_resume=True)
+        self.assert_second_version_preserved(child, result)
+
+    def test_explicit_closing_resume_lost_opener_closes_existing_verified_child_only(self):
+        close_attempts = []
+
+        def fail_first_close(child, index):
+            if len(self.details) != 1:
+                return
+            original_close = child.close
+
+            def close(**options):
+                close_attempts.append(child.target)
+                if len(close_attempts) == 1:
+                    raise RuntimeError("fixture close failure before lost opener")
+                return original_close(**options)
+
+            child.close = close
+
+        self.after_open = fail_first_close
+        first, blocked = self.run_lookup()
+        self.assertNotEqual(blocked.get("status"), "ok", blocked)
+        self.assertEqual(self.clicks, [0])
+        child = self.details[0]
+        self.assertEqual(first._binding["cnki_flow"]["version_probe"]["phase"], "closing")
+        first.close()
+        child.opener = lambda: None
+        _, result = self.run_lookup(manual_resume=True)
+        self.assertEqual(result.get("status"), "ok", result)
+        self.assertEqual(self.clicks, [0, 1, 1])
+        self.assertEqual(close_attempts, [child.target, child.target])
+        self.assertTrue(child.closed)
+        self.assert_no_downloads()
+
+    def test_explicit_closing_resume_lost_opener_rejects_changed_identity(self):
+        def fail_close(child, index):
+            if len(self.details) == 1:
+                child.close = lambda **options: (_ for _ in ()).throw(RuntimeError("fixture close failure"))
+        self.after_open = fail_close
+        first, _ = self.run_lookup()
+        child = self.details[0]
+        first.close()
+        child.opener = lambda: None
+        child.metadata["authors"] = ["关闭断点后身份变化"]
+        child.snap["citation_authors"] = ["关闭断点后身份变化"]
+        _, result = self.run_lookup(manual_resume=True)
+        self.assertNotEqual(result.get("status"), "ok", result)
+        self.assertEqual(self.clicks, [0])
+        self.assertFalse(child.closed)
+        self.assertFalse(self.owner.closed)
+        self.assert_no_downloads()
 
     def test_closed_probe_child_can_resume_saved_closing_phase_without_reopening(self):
         def interrupt_close(child, index):

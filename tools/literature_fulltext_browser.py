@@ -803,7 +803,20 @@ class FulltextBrowserFetcher:
                 owner = recorded_page(owner_id)
                 opener = child.opener()
                 if owner is not None:
-                    owned = opener is owner
+                    probe = flow.get("version_probe")
+                    rows = probe.get("rows") if isinstance(probe, dict) else None
+                    index = probe.get("active_index") if isinstance(probe, dict) else None
+                    detached_probe = (opener is None and witness.get("adopted") is True
+                        and witness.get("action") == "title" and bound_id == child_id
+                        and isinstance(probe, dict) and probe.get("version") == 1
+                        and probe.get("phase") in {"checking", "winner", "selected", "closing"}
+                        and probe.get("parent_target_id") == owner_id and flow.get("title_click_target_id") == owner_id
+                        and isinstance(rows, list) and 2 <= len(rows) <= 50
+                        and type(index) is int and 0 <= index < len(rows)
+                        and isinstance(rows[index], dict)
+                        and all(re.fullmatch(r"[a-f0-9]{64}", str(value or "")) for value in
+                            (flow.get("paper_hash"), flow.get("title_hash"), probe.get("expected_identity_hash"))))
+                    owned = opener is owner or detached_probe
                 else:
                     # A successfully adopted popup normally loses its opener
                     # when our old locator page closes. Unadopted windows with
