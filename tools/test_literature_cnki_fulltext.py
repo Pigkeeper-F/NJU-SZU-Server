@@ -600,6 +600,65 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(first._binding["cnki_flow"]["paper_hash"], expected_hash)
         self.assertEqual(first._page.download_clicks, 2)
 
+    def _saved_pdf_with_unadopted_download_window(self):
+        fetcher = self.fetcher()
+        self.assertEqual(mod.run_cnki(fetcher, RECORD, {})["status"], "pdf_page")
+        owner = fetcher._page
+        lookup = self.context.new_page()
+        lookup.url = mod.ENTRY
+        child = self.context.new_page(opener=owner)
+        child.url = "about:blank"
+        child.snap.update(ready_state="loading", loading_pending=True)
+        flow = fetcher._binding["cnki_flow"]
+        flow.update(file_verified=True, cleanup_target_id=lookup.target,
+                    cleanup_target_ids=[lookup.target], pending_popup={
+                        "target_id": child.target, "owner_target_id": owner.target,
+                        "opener_verified": True, "action": "download", "adopted": False})
+        fetcher._write_binding()
+        return fetcher, owner, lookup, child
+
+    def test_saved_pdf_closes_late_download_window_before_next_paper(self):
+        fetcher, owner, lookup, child = self._saved_pdf_with_unadopted_download_window()
+        # The file/status have been durably saved by the caller. A late blank
+        # download window must not strand this completed paper's state.
+        owner.snap["download_pending"] = True
+        self.assertTrue(fetcher.complete_paper()["closed"])
+        self.assertTrue(all(page.closed for page in (owner, lookup, child)))
+        self.assertFalse(self.context.pages[0].closed)
+        self.assertIsNone(fetcher._page)
+        self.assertNotIn("target_id", fetcher._binding)
+        self.assertNotIn("cnki_flow", fetcher._binding)
+
+        next_record = {**RECORD, "paper_id": "P-2", "source_candidate_id": "CNKI-2",
+                       "title": "不同水温对养殖鱼生长性能的影响"}
+        self.context.initial_ui = ui(title=next_record["title"], query=next_record["title"])
+        def setup(page):
+            def detail(current):
+                current.detail(current)
+                current.snap["citation_title"] = next_record["title"]
+                current.ui["titles"] = [next_record["title"]]
+            page.on_title = detail
+        self.context.next_setup = setup
+        result = mod.run_cnki(fetcher, next_record, {})
+        self.assertEqual(result["status"], "pdf_page", result)
+        self.assertIsNot(fetcher._page, owner)
+        self.assertEqual((owner.title_clicks, owner.download_clicks), (1, 1))
+        self.assertEqual((fetcher._page.title_clicks, fetcher._page.download_clicks), (1, 1))
+
+    def test_unverified_or_challenged_download_window_is_not_closed_as_complete(self):
+        for reason in ("unverified", "verification"):
+            with self.subTest(reason=reason):
+                self.path = Path(self.tmp.name) / reason
+                fetcher, owner, lookup, child = self._saved_pdf_with_unadopted_download_window()
+                if reason == "unverified":
+                    fetcher._binding["cnki_flow"].pop("file_verified")
+                else:
+                    child.snap["verification"] = True
+                fetcher._write_binding()
+                self.assertFalse(fetcher.complete_paper()["closed"])
+                self.assertTrue(all(not page.closed for page in (owner, lookup, child)))
+                self.assertEqual(fetcher._binding["target_id"], owner.target)
+
     def test_lookup_waits_for_dynamic_rows_without_resubmission(self):
         self.context.next_setup = lambda p: setattr(p, "lookup_delay", self.clock.now + 3)
         result = mod.run_cnki(self.fetcher(), RECORD, {})

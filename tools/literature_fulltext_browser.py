@@ -706,6 +706,65 @@ class FulltextBrowserFetcher:
                     pass
         return None
 
+    def _cnki_manual_resume_pages(self, owner):
+        """Read only direct children of this persisted task page.
+
+        This is not a general tab finder.  The CNKI caller must separately
+        require an explicit resume and verify each child's article identity.
+        A page claimed by another acquisition/discovery binding is never lent
+        to this task, even when its opener and bibliography happen to match.
+        """
+        context = self._connect()
+        if (owner is not self._page or owner not in context.pages or owner.is_closed()
+                or literature_browser._target_id(context, owner) != self._binding.get("target_id")):
+            return []
+
+        def target_ids(value):
+            result = set()
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key in {"target_id", "child_target_id", "parent_target_id", "owner_target_id", "cleanup_target_id"} and isinstance(child, str):
+                        result.add(child)
+                    elif key in {"cleanup_target_ids", "pdf_cleanup_target_ids", "download_click_target_ids"} and isinstance(child, list):
+                        result.update(item for item in child if isinstance(item, str))
+                    elif isinstance(child, (dict, list)):
+                        result.update(target_ids(child))
+            elif isinstance(value, list):
+                for child in value:
+                    result.update(target_ids(child))
+            return result
+
+        # Metadata has its own binding below the same literature task.  Only
+        # the three known binding locations of adjacent tasks are inspected.
+        task_dir = self.job_dir.parent.parent if self.job_dir.name == "browser" and self.job_dir.parent.name == "metadata" else self.job_dir
+        paths = set()
+        for pattern in ("*/fulltext-browser.json", "*/metadata/browser/fulltext-browser.json", "*/browser-tabs.json"):
+            paths.update(task_dir.parent.glob(pattern))
+        if len(paths) > 4096:
+            return []
+        claimed = target_ids(self._binding.get("deferred_papers", {})) | target_ids(self._binding.get("last_deferred_paper", {}))
+        try:
+            for file in paths:
+                if file.resolve() == self.binding_path.resolve():
+                    continue
+                if (file.is_symlink() or not file.resolve().is_relative_to(task_dir.parent.resolve())
+                        or file.stat().st_size > 2 * 1024 * 1024):
+                    return []
+                claimed.update(target_ids(json.loads(file.read_text(encoding="utf-8"))))
+        except (OSError, ValueError, TypeError):
+            # An unreadable ownership record is not permission to borrow.
+            return []
+        children = []
+        for page in context.pages:
+            try:
+                if page is owner or page.is_closed() or page.opener() is not owner:
+                    continue
+                if literature_browser._target_id(context, page) not in claimed:
+                    children.append(page)
+            except Exception:
+                return []
+        return children if len(children) <= 8 else []
+
     def _get_page(self):
         if self._page is not None:
             try:
@@ -793,7 +852,20 @@ class FulltextBrowserFetcher:
                 owner = recorded_page(owner_id)
                 opener = child.opener()
                 if owner is not None:
-                    owned = opener is owner
+                    probe = flow.get("version_probe")
+                    rows = probe.get("rows") if isinstance(probe, dict) else None
+                    index = probe.get("active_index") if isinstance(probe, dict) else None
+                    detached_probe = (opener is None and witness.get("adopted") is True
+                        and witness.get("action") == "title" and bound_id == child_id
+                        and isinstance(probe, dict) and probe.get("version") == 1
+                        and probe.get("phase") in {"checking", "winner", "selected", "closing"}
+                        and probe.get("parent_target_id") == owner_id and flow.get("title_click_target_id") == owner_id
+                        and isinstance(rows, list) and 2 <= len(rows) <= 50
+                        and type(index) is int and 0 <= index < len(rows)
+                        and isinstance(rows[index], dict)
+                        and all(re.fullmatch(r"[a-f0-9]{64}", str(value or "")) for value in
+                            (flow.get("paper_hash"), flow.get("title_hash"), probe.get("expected_identity_hash"))))
+                    owned = opener is owner or detached_probe
                 else:
                     # A successfully adopted popup normally loses its opener
                     # when our old locator page closes. Unadopted windows with
@@ -949,13 +1021,35 @@ class FulltextBrowserFetcher:
         if binding.get("attention_reason") in auth | {"page_not_ready"} or binding.get("material_flow") or binding.get("pdf_click_pending"):
             return {"closed": False}
         flow = binding.get("cnki_flow") or {}
+        verified_cnki_file = isinstance(flow, dict) and flow.get("file_verified") is True
+        finished_child_id = None
         if isinstance(flow, dict) and flow.get("pending_popup"):
             witness = flow["pending_popup"]
             adopted = isinstance(witness, dict) and witness.get("adopted") is True and witness.get("target_id") == binding.get("target_id")
             received_side = (isinstance(witness, dict) and flow.get("file_verified") is True
                 and witness.get("opener_verified") is True and witness.get("owner_target_id") == binding.get("target_id")
                 and witness.get("target_id") == flow.get("cleanup_target_id"))
-            if not (adopted or received_side):
+            # A download may finish before its blank attachment tab is adopted.
+            # The caller has already saved the verified file and success status;
+            # close that exact witnessed child with the article, rather than
+            # carrying a completed paper's popup into the next paper.
+            finished_side = (verified_cnki_file and isinstance(witness, dict)
+                and witness.get("opener_verified") is True and witness.get("action") == "download"
+                and witness.get("owner_target_id") == binding.get("target_id")
+                and flow.get("target_id") == binding.get("target_id")
+                and isinstance(witness.get("target_id"), str) and 0 < len(witness["target_id"]) <= 200
+                and witness["target_id"] != binding.get("target_id"))
+            if finished_side:
+                try:
+                    child = self._find_target_page(witness["target_id"])
+                    owner = self._find_target_page(witness["owner_target_id"])
+                    if child is not None and not child.is_closed():
+                        if owner is None or owner.is_closed() or child.opener() is not owner:
+                            return {"closed": False}
+                    finished_child_id = witness["target_id"]
+                except Exception:
+                    return {"closed": False}
+            if not (adopted or received_side or finished_side):
                 return {"closed": False}
         wanted = binding.get("target_id")
         if not wanted:
@@ -973,13 +1067,20 @@ class FulltextBrowserFetcher:
             if not isinstance(cleanup_ids, list) or len(cleanup_ids) > 3 or any(not isinstance(value, str) or not value or len(value) > 200 for value in cleanup_ids):
                 return {"closed": False}
             ids = list(dict.fromkeys(ids + cleanup_ids))
+            if finished_child_id and finished_child_id not in ids:
+                ids.append(finished_child_id)
             pages = []
             for target_id in ids:
                 page = self._find_target_page(target_id)
                 if page is not None and not page.is_closed():
                     snapshot = page.evaluate(_SNAPSHOT_JS)
-                    if not isinstance(snapshot, dict) or _page_loading(snapshot) or any(snapshot.get(key) for key in
-                            ("login", "verification", "access_required", "download_pending")):
+                    if not isinstance(snapshot, dict) or any(snapshot.get(key) for key in
+                            ("login", "verification", "access_required", "rate_limited", "access_blocked")):
+                        return {"closed": False}
+                    # Once the actual PDF is saved, an attachment tab may stay
+                    # blank or the old page may still say "generating" forever.
+                    # Those stale loading hints do not keep a finished paper open.
+                    if not verified_cnki_file and (_page_loading(snapshot) or snapshot.get("download_pending")):
                         return {"closed": False}
                     pages.append(page)
             for page in pages:
@@ -1008,7 +1109,12 @@ class FulltextBrowserFetcher:
     def complete_paper(self, *, skipped=False):
         """Caller has durably saved the file/status or recorded a non-auth skip."""
         reason = (self._blocked or {}).get("reason") or self._binding.get("attention_reason")
-        if (reason and not skipped) or reason in {"login", "verification", "access_required", "material_cleanup", "page_not_ready"} or str(reason or "").startswith("local_"):
+        flow = self._binding.get("cnki_flow") or {}
+        # A non-auth side-page error after a successful file must not poison
+        # the next paper. Authentication and unfinished transfers still retain
+        # their original page and checkpoint.
+        finished_cnki = isinstance(flow, dict) and flow.get("file_verified") is True and reason in {None, "page_error"}
+        if (reason and not skipped and not finished_cnki) or reason in {"login", "verification", "access_required", "rate_limited", "access_blocked", "material_cleanup", "page_not_ready"} or str(reason or "").startswith("local_"):
             return {"closed": False}
         wanted = self._binding.get("target_id")
         if not wanted:

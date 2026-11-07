@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import copy
+import json
 import math
 import re
 import unicodedata
@@ -80,9 +81,16 @@ _CNKI_UI_JS = r"""/* literature_cnki_fulltext_ui */ () => {
   const label = __CONTROL_LABEL__;
   const controls=Array.from(document.querySelectorAll('a,button,input[type=button],input[type=submit]')).map((e,index)=>({index,text:label(e),visible:visible(e),enabled:!e.disabled&&e.getAttribute('aria-disabled')!=='true'})).filter(e=>e.visible);
   const head=(document.body?.innerText||'').slice(0,8000);
+  const resultCount=head.match(/共找到\s*([\d,，]+)\s*条结果/);
+  const total=resultCount ? Number(resultCount[1].replace(/[,，]/g,'')) : null;
+  const next=Array.from(document.querySelectorAll('#PageNext,.pages a,.pager a,.pagination a,.pagination button')).filter(visible)
+    .some(e=>/下一页|next/i.test(text(e))&&!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&!e.classList.contains('disabled'));
+  const currentPage=Array.from(document.querySelectorAll('.pages .current,.pages .cur,.pager .current,.pagination .active')).filter(visible)
+    .map(text).find(t=>/^\d+$/.test(t));
+  const lookup_complete=Number.isSafeInteger(total)&&total>=0&&total<=rows.filter(r=>r.visible).length&&!next&&(!currentPage||currentPage==='1');
   const paymentDialog=Array.from(document.querySelectorAll('[role="dialog"],.modal,.layui-layer-dialog,.pay-dialog,.purchase-dialog')).filter(visible)
     .some(e=>/购买|付费|支付|充值|订阅|purchase|payment|buy access|subscribe/i.test(text(e)));
-  return {queries,rowSelector,rows,titles,controls,
+  return {queries,rowSelector,rows,titles,controls,lookup_complete,
     purchase_required:paymentDialog || /请购买全文|需付费|购买后(?:下载|阅读)|支付后(?:下载|阅读)|需支付|purchase (?:this article|access) to/i.test(head),
     generating:/正在(?:生成|准备|下载)|文件(?:生成|准备)中|下载准备中|generating (?:the )?(?:file|pdf)|preparing (?:the )?download/i.test(head)};
 }""".replace("__CONTROL_LABEL__", _CONTROL_LABEL_JS)
@@ -179,6 +187,51 @@ def _identity(snapshot, ui, record):
     if wanted_doi and actual_doi and wanted_doi != actual_doi:
         return False
     return title_ok or bool(wanted_doi and actual_doi == wanted_doi)
+
+
+def _manual_detail_identity(record, snapshot, url):
+    """Stronger than the ordinary navigation heading guard.
+
+    A manual child must also pass the metadata collector's identity contract;
+    its title is always literal, and reported author/year conflicts fail even
+    when a shared identifier is present. Missing fields alone may be resolved
+    by a matching reliable DOI/native identifier, never an opaque ``v`` URL.
+    """
+    from literature_identity import identity, exact_match
+    from literature_metadata import snapshot_identity
+    if not _norm(record.get("title")) or _norm(record.get("title")) != _norm(snapshot.get("title")):
+        return ""
+    expected_authors, actual_authors = _authors_key(record.get("authors")), _authors_key(snapshot.get("authors"))
+    expected_year, actual_year = str(record.get("year") or ""), str(snapshot.get("year") or "")
+    if (expected_authors and actual_authors and expected_authors != actual_authors
+            or expected_year and actual_year and expected_year != actual_year):
+        return ""
+    result = exact_match(identity(record), snapshot_identity(snapshot, url, "cnki"))
+    if result == "title_year_authors_exact" and not (expected_authors and actual_authors and expected_authors == actual_authors):
+        return ""
+    return result
+
+
+def _version_probe_checkpoint(flow):
+    """Pure bounded progress over a durable fixed location queue."""
+    probe = flow.get("version_probe") if isinstance(flow, dict) else None
+    if not isinstance(probe, dict) or probe.get("version") != 1:
+        return None
+    rows = probe.get("rows")
+    if not isinstance(rows, list) or not 2 <= len(rows) <= 50 or any(not isinstance(row, dict) for row in rows):
+        return None
+    done = sum(row.get("status") in {"match", "mismatch"} for row in rows)
+    phase = probe.get("phase")
+    if phase == "closing":
+        progress = max(0, done * 3 - 1)
+    elif phase in {"winner", "selected"}:
+        progress = len(rows) * 3 + (2 if phase == "selected" else 1)
+    else:
+        progress = done * 3 + (1 if type(probe.get("active_index")) is int else 0)
+    fixed = [{key: row.get(key) for key in ("row_index", "anchor_index", "row_hash")} for row in rows]
+    key = _hash(json.dumps([flow.get("paper_hash"), flow.get("title_hash"), probe.get("expected_identity_hash"), fixed],
+                           ensure_ascii=False, sort_keys=True))
+    return {"key": key, "step": progress, "max_steps": len(rows) * 3 + 3}
 
 
 def _query_matches(ui, title):
@@ -437,7 +490,7 @@ def run_cnki(fetcher, record, opts):
         flow = {"paper_hash": paper_hash, "title_hash": title_hash,
                 "target_id": updated.get("target_id"), "step": step}
         if preserve_popup and isinstance(previous, dict) and previous.get("paper_hash") == paper_hash and previous.get("title_hash") == title_hash:
-            for key in ("pending_popup", "cleanup_target_id", "cleanup_target_ids", "diagnostic", "lookup_repair", "lookup_diagnostic", "lookup_selection", "page_diagnostic", "title_click_target_id", "download_click_target_ids", "download_click_target_id", "download_click_count"):
+            for key in ("pending_popup", "cleanup_target_id", "cleanup_target_ids", "diagnostic", "lookup_repair", "lookup_diagnostic", "lookup_selection", "page_diagnostic", "title_click_target_id", "download_click_target_ids", "download_click_target_id", "download_click_count", "version_probe"):
                 if key in previous:
                     flow[key] = previous[key]
         if title_target is not None:
@@ -834,6 +887,378 @@ def run_cnki(fetcher, record, opts):
         fetcher._blocked = dict(result)
         return result
 
+    def resume_manual_detail(owner):
+        """Adopt one verified manual child only on explicit ambiguous resume."""
+        nonlocal step
+        flow = fetcher._binding.get("cnki_flow", {})
+        children = getattr(fetcher, "_cnki_manual_resume_pages", None)
+        if (opts.get("cnki_manual_resume") is not True or not metadata_only or not resuming
+                or step != "lookup" or flow.get("lookup_diagnostic") != "ambiguous"
+                or flow.get("version_probe") is not None
+                or not callable(children)):
+            return None
+        from literature_metadata import METADATA_SNAPSHOT_JS
+        found, uncertain = [], False
+        candidates = children(owner)
+        if not candidates and opts.get("cnki_probe_versions") is True:
+            return None
+        candidate_ids = {literature_browser._target_id(fetcher._context, page) for page in candidates}
+        for child in candidates:
+            check_metadata_budget()
+            try:
+                parsed = urlsplit(str(child.url or ""))
+                if (not _official(child.url) or parsed.hostname != "kns.cnki.net"
+                        or parsed.path.rstrip("/").casefold() not in {"/kcms2/article/abstract", "/kcms/detail/detail.aspx"}):
+                    continue
+                snap = child.evaluate(_SNAPSHOT_JS)
+                details = child.evaluate(METADATA_SNAPSHOT_JS)
+                if not isinstance(snap, dict) or not isinstance(details, dict):
+                    uncertain = True
+                    continue
+                reason = fetcher._reason(snap) or fetcher._reason(details)
+                if reason:
+                    return pause(reason, snapshot=snap if fetcher._reason(snap) else details)
+                if (snap.get("ready_state") != "complete" or details.get("ready_state") != "complete"
+                        or _page_loading(snap) or snap.get("download_pending")):
+                    return pause("page_not_ready", "研究者打开的知网详情仍未就绪；原页面和断点保留，待加载完成后再继续。")
+                if _norm(details.get("title")) != _norm(title):
+                    continue
+                match = _manual_detail_identity(record, details, child.url)
+                if not match:
+                    uncertain = True
+                    continue
+                found.append((child, match, details))
+            except MetadataBudgetExpired:
+                raise
+            except Exception:
+                uncertain = True
+        if uncertain or len(found) != 1:
+            return lookup_pause("ambiguous")
+        child, match, details = found[0]
+        # Recheck ownership and identity immediately before the durable handoff.
+        # Never persist a signed URL, a copied abstract, or an inferred click.
+        try:
+            latest_children = children(owner)
+            if (child not in latest_children or child.opener() is not owner
+                    or {literature_browser._target_id(fetcher._context, page) for page in latest_children} != candidate_ids):
+                return lookup_pause("ambiguous")
+            latest = child.evaluate(METADATA_SNAPSHOT_JS)
+            latest_snap = child.evaluate(_SNAPSHOT_JS)
+            if (not isinstance(latest, dict) or not isinstance(latest_snap, dict)
+                    or latest != details or latest.get("ready_state") != "complete"
+                    or latest_snap.get("ready_state") != "complete" or _page_loading(latest_snap)
+                    or latest_snap.get("download_pending") or not _official(child.url)
+                    or urlsplit(child.url).hostname != "kns.cnki.net"
+                    or urlsplit(child.url).path.rstrip("/").casefold() not in {"/kcms2/article/abstract", "/kcms/detail/detail.aspx"}
+                    or fetcher._reason(latest) or fetcher._reason(latest_snap)
+                    or not _lookup_page(owner.url) or not _query_matches(owner.evaluate(_CNKI_UI_JS), title)
+                    or _manual_detail_identity(record, latest, child.url) != match):
+                return lookup_pause("ambiguous")
+            owner_id = literature_browser._target_id(fetcher._context, owner)
+            child_id = literature_browser._target_id(fetcher._context, child)
+            updated = copy.deepcopy(fetcher._binding)
+            updated["cnki_flow"]["pending_popup"] = {"target_id": child_id, "owner_target_id": owner_id,
+                "opener_verified": True, "action": "title", "adopted": False,
+                "manual_resume": True, "identity_match": match}
+            updated["cnki_flow"]["title_click_target_id"] = owner_id
+            commit_binding(updated)
+            popups.append((owner, child))
+            attach(child)
+            if not promote(owner, child):
+                return popup_pause()
+            step = "detail"
+            flow_write(step)
+            fetcher._progress("摘要回源：已核对研究者打开的唯一同篇详情，原检索页保留至证据保存后关闭。")
+            return True
+        except MetadataBudgetExpired:
+            raise
+        except Exception:
+            return popup_pause("handoff_error")
+
+    def probe_rows(ui):
+        """Freeze visible exact-title positions, not transient article URLs."""
+        result = []
+        for row_index, anchor_index in _title_matches(ui, title):
+            row = next(row for row in ui["rows"] if row["index"] == row_index)
+            signature = [row_index, anchor_index, _norm(title), _norm(row.get("authors")),
+                         str(row.get("year") or ""), row.get("authors_complete") is True]
+            result.append({"row_index": row_index, "anchor_index": anchor_index,
+                           "row_hash": _hash(json.dumps(signature, ensure_ascii=False))})
+        return result
+
+    def save_probe(probe):
+        updated = copy.deepcopy(fetcher._binding)
+        updated["cnki_flow"]["version_probe"] = probe
+        commit_binding(updated)
+
+    def detached_probe_witness(owner_id, child_id):
+        """Only an exact, already adopted metadata probe can lose its opener."""
+        from literature_identity import digest, identity
+        flow = fetcher._binding.get("cnki_flow", {})
+        probe, witness = flow.get("version_probe"), flow.get("pending_popup", {})
+        if not metadata_only or opts.get("cnki_probe_versions") is not True or not isinstance(probe, dict):
+            return None
+        rows, index = probe.get("rows"), probe.get("active_index")
+        if (probe.get("version") != 1 or probe.get("phase") not in {"checking", "winner", "selected", "closing"}
+                or not isinstance(rows, list) or not 2 <= len(rows) <= 50
+                or any(not isinstance(row, dict) for row in rows)
+                or type(index) is not int or not 0 <= index < len(rows)
+                or probe.get("expected_identity_hash") != digest(identity(record))
+                or flow.get("paper_hash") != paper_hash or flow.get("title_hash") != title_hash
+                or flow.get("target_id") != child_id or fetcher._binding.get("target_id") != child_id
+                or probe.get("parent_target_id") != owner_id or flow.get("title_click_target_id") != owner_id
+                or not isinstance(witness, dict) or witness.get("opener_verified") is not True
+                or witness.get("adopted") is not True or witness.get("action") != "title"
+                or witness.get("target_id") != child_id or witness.get("owner_target_id") != owner_id
+                or owner_id == child_id):
+            return None
+        return probe, rows[index]
+
+    def recheck_detached_probe_child(owner, child, owner_id, child_id):
+        """Verification can sever window.opener; recheck this saved child only."""
+        proof = detached_probe_witness(owner_id, child_id)
+        if proof is None or owner is None or child.opener() is not None:
+            return popup_pause("owner")
+        from literature_identity import digest
+        from literature_metadata import METADATA_SNAPSHOT_JS, snapshot_identity
+        probe, _ = proof
+        checkpoint = _version_probe_checkpoint(fetcher._binding["cnki_flow"])
+        recovery = probe.get("opener_recovery", {})
+        saved_recovery = (isinstance(recovery, dict) and recovery.get("target_id") == child_id
+                          and recovery.get("parent_target_id") == owner_id
+                          and checkpoint and recovery.get("queue_key") == checkpoint["key"])
+        if opts.get("cnki_manual_resume") is not True and not saved_recovery:
+            return popup_pause("owner")
+        parsed = urlsplit(str(child.url or ""))
+        if (not _official(child.url) or parsed.hostname != "kns.cnki.net"
+                or parsed.path.rstrip("/").casefold() not in {"/kcms2/article/abstract", "/kcms/detail/detail.aspx"}
+                or not _official(owner.url) or not _lookup_page(owner.url)):
+            return popup_pause("owner")
+        snap, parent_snap = child.evaluate(_SNAPSHOT_JS), owner.evaluate(_SNAPSHOT_JS)
+        for current_snap in (snap, parent_snap):
+            if not isinstance(current_snap, dict):
+                return pause("page_not_ready")
+            reason = fetcher._reason(current_snap)
+            if reason:
+                return pause(reason, snapshot=current_snap)
+            if current_snap.get("ready_state") != "complete" or _page_loading(current_snap) or current_snap.get("download_pending"):
+                return pause("page_not_ready")
+        parent_ui = owner.evaluate(_CNKI_UI_JS)
+        if (not isinstance(parent_ui, dict) or parent_ui.get("lookup_complete") is not True
+                or not _query_matches(parent_ui, title)
+                or probe_rows(parent_ui) != [{key: row.get(key) for key in ("row_index", "anchor_index", "row_hash")}
+                                             for row in probe["rows"]]):
+            return popup_pause("owner")
+        details = child.evaluate(METADATA_SNAPSHOT_JS)
+        if not isinstance(details, dict):
+            return pause("page_not_ready")
+        reason = fetcher._reason(details)
+        if reason:
+            return pause(reason, snapshot=details)
+        if (details.get("ready_state") != "complete" or _page_loading(details)
+                or details.get("download_pending") or _norm(details.get("title")) != _norm(title)):
+            return pause("page_not_ready")
+        complete_version = bool(_authors_key(details.get("authors"))
+                                and re.fullmatch(r"(?:19|20)\d{2}", str(details.get("year") or "")))
+        if not complete_version and not _manual_detail_identity(record, details, child.url):
+            return pause("page_not_ready", "验证后的原详情身份仍不完整，保留该页与逐条核对断点。")
+        identity_hash = digest(snapshot_identity(details, child.url, "cnki"))
+        if saved_recovery and recovery.get("identity_hash") != identity_hash:
+            return pause("page_error", "验证后原详情的身份发生变化，保留原页与逐条核对断点。")
+        updated_probe = copy.deepcopy(probe)
+        updated_probe["opener_recovery"] = {"target_id": child_id, "parent_target_id": owner_id,
+                                             "identity_hash": identity_hash, "queue_key": checkpoint["key"]}
+        save_probe(updated_probe)
+        fetcher._progress("摘要定位：已重新核对验证后的原详情与同名队列，继续本条；未重新点击检索结果。")
+        return None
+
+    def finish_probe_close():
+        """A saved location verdict precedes closing exactly its witnessed child."""
+        nonlocal step, action
+        flow = fetcher._binding.get("cnki_flow", {})
+        probe = flow.get("version_probe")
+        if not isinstance(probe, dict) or probe.get("phase") != "closing":
+            return None
+        witness = flow.get("pending_popup", {})
+        index = probe.get("active_index")
+        rows = probe.get("rows", [])
+        parent_id, child_id = probe.get("parent_target_id"), probe.get("active_target_id")
+        if (not metadata_only or not isinstance(index, int) or not 0 <= index < len(rows)
+                or rows[index].get("status") not in {"match", "mismatch"}
+                or not rows[index].get("identity_hash") or parent_id == child_id
+                or flow.get("paper_hash") != paper_hash or flow.get("title_hash") != title_hash
+                or witness.get("opener_verified") is not True or witness.get("action") != "title"
+                or witness.get("owner_target_id") != parent_id or witness.get("target_id") != child_id
+                or fetcher._binding.get("target_id") != child_id):
+            return popup_pause("owner")
+        try:
+            context = fetcher._connect()
+            parent, child = find_target(context, parent_id, strict=True), find_target(context, child_id, strict=True)
+            if parent is None:
+                return popup_pause("owner")
+            if child is not None and child.opener() is not parent:
+                # The saved row verdict and fresh identity/access checks below
+                # still precede closing this exact adopted temporary page.
+                if child.opener() is not None or detached_probe_witness(parent_id, child_id) is None:
+                    return popup_pause("owner")
+            if child is not None:
+                from literature_identity import digest
+                from literature_metadata import METADATA_SNAPSHOT_JS, snapshot_identity
+                current_snap = child.evaluate(_SNAPSHOT_JS)
+                current_details = child.evaluate(METADATA_SNAPSHOT_JS)
+                if not isinstance(current_snap, dict) or not isinstance(current_details, dict):
+                    return pause("page_not_ready")
+                reason = fetcher._reason(current_snap) or fetcher._reason(current_details)
+                if reason:
+                    return pause(reason, snapshot=current_snap if fetcher._reason(current_snap) else current_details)
+                if (current_snap.get("ready_state") != "complete" or current_details.get("ready_state") != "complete"
+                        or _page_loading(current_snap) or current_snap.get("download_pending")):
+                    return pause("page_not_ready", "同名版本临时页仍在加载或下载，已保留清理断点，未关闭。")
+                if (not _official(child.url) or _norm(current_details.get("title")) != _norm(title)
+                        or digest(snapshot_identity(current_details, child.url, "cnki")) != rows[index]["identity_hash"]):
+                    return pause("page_error", "同名版本临时页的身份在关闭前已变化，已保留原页核对。")
+                child.close(run_before_unload=False)
+                if not child.is_closed():
+                    return popup_pause("handoff_error")
+            updated = copy.deepcopy(fetcher._binding)
+            updated["target_id"] = parent_id
+            updated_flow = updated["cnki_flow"]
+            updated_flow.update(target_id=parent_id, step="lookup")
+            for key in ("pending_popup", "title_click_target_id", "cleanup_target_id"):
+                updated_flow.pop(key, None)
+            updated_flow["cleanup_target_ids"] = [value for value in updated_flow.get("cleanup_target_ids", [])
+                                                   if value not in {parent_id, child_id}]
+            updated_probe = updated_flow["version_probe"]
+            updated_probe.update(phase="checking")
+            updated_probe.pop("active_target_id", None)
+            updated_probe.pop("active_index", None)
+            commit_binding(updated)
+            fetcher._page, step, action = parent, "lookup", None
+            attach(parent)
+            popups[:] = [(owner, popup) for owner, popup in popups if popup is not child]
+            fetcher._progress("摘要定位：已保存这一同名版本的身份核对结果并关闭临时详情；原检索页保留。")
+            return True
+        except Exception:
+            return popup_pause("handoff_error")
+
+    def probe_lookup(owner, ui):
+        """Serial normal clicks over this page's frozen exact-title results."""
+        nonlocal step, action, start
+        if not metadata_only or opts.get("cnki_probe_versions") is not True:
+            return None
+        from literature_identity import digest, identity
+        rows = probe_rows(ui)
+        flow = fetcher._binding.get("cnki_flow", {})
+        probe = copy.deepcopy(flow.get("version_probe"))
+        expected = digest(identity(record))
+        if probe is None:
+            if len(rows) <= 1 or len(_exact_result(ui, title, record)) == 1:
+                return None
+            if len(rows) > 50:
+                return lookup_pause("ambiguous")
+            probe = {"version": 1, "phase": "checking", "parent_target_id": fetcher._binding.get("target_id"),
+                     "expected_identity_hash": expected, "rows": [{**row, "status": "pending"} for row in rows]}
+            save_probe(probe)
+        if (ui.get("lookup_complete") is False or not isinstance(probe, dict) or probe.get("version") != 1
+                or probe.get("parent_target_id") != fetcher._binding.get("target_id")
+                or probe.get("expected_identity_hash") != expected
+                or [{key: row.get(key) for key in ("row_index", "anchor_index", "row_hash")}
+                    for row in probe.get("rows", [])] != rows):
+            return lookup_pause("ambiguous")
+        if probe.get("phase") in {"ambiguous", "no_match"}:
+            return lookup_pause("ambiguous" if probe["phase"] == "ambiguous" else "title_mismatch")
+        pending = [index for index, row in enumerate(probe["rows"]) if row.get("status") == "pending"]
+        if pending:
+            index = pending[0]
+            probe["phase"] = "checking"
+        else:
+            matched = [index for index, row in enumerate(probe["rows"]) if row.get("status") == "match"]
+            if len(matched) != 1:
+                probe["phase"] = "ambiguous" if matched else "no_match"
+                save_probe(probe)
+                return lookup_pause("ambiguous" if matched else "title_mismatch")
+            index = matched[0]
+            probe["phase"] = "winner"
+        selected = probe["rows"][index]
+        link = owner.locator(ui["rowSelector"]).nth(selected["row_index"]).locator("a").nth(selected["anchor_index"])
+        pace(owner.url)
+        latest_snap, latest_ui = read()
+        reason = fetcher._reason(latest_snap)
+        if reason:
+            return pause(reason, snapshot=latest_snap)
+        if (_page_loading(latest_snap) or latest_snap.get("download_pending")
+                or latest_ui.get("lookup_complete") is False
+                or latest_ui.get("purchase_required") or not _query_matches(latest_ui, title)
+                or probe_rows(latest_ui) != rows or not link.is_visible()
+                or _norm(link.inner_text()) != _norm(title)):
+            return lookup_pause("ambiguous")
+        probe["active_index"] = index
+        save_probe(probe)
+        flow_write("detail_pending", title_target=fetcher._binding.get("target_id"))
+        step, action = "detail_pending", "title"
+        fetcher._progress(f"摘要定位：逐条核对同名结果 {index+1}/{len(rows)} 的详情身份。")
+        link.click(timeout=operation_timeout(15_000), no_wait_after=True)
+        start = fetcher._clock()
+        return True
+
+    def probe_detail(current, snap):
+        """Classify location identity only; never change scientific screening."""
+        flow = fetcher._binding.get("cnki_flow", {})
+        probe = copy.deepcopy(flow.get("version_probe"))
+        if not metadata_only or not isinstance(probe, dict) or probe.get("phase") not in {"checking", "winner"}:
+            return None
+        from literature_identity import identity, conflicts, digest
+        from literature_metadata import METADATA_SNAPSHOT_JS, snapshot_identity
+        witness = flow.get("pending_popup", {})
+        current_id = literature_browser._target_id(fetcher._context, current)
+        if current_id == probe.get("parent_target_id") and _lookup_page(current.url):
+            return None
+        parsed = urlsplit(str(current.url or ""))
+        if (parsed.hostname != "kns.cnki.net"
+                or parsed.path.rstrip("/").casefold() not in {"/kcms2/article/abstract", "/kcms/detail/detail.aspx"}):
+            return pause("page_error", "同名结果尚未进入可核对的知网文章详情，保留原页和逐条断点。")
+        index = probe.get("active_index")
+        if (not isinstance(index, int) or not 0 <= index < len(probe.get("rows", []))
+                or witness.get("opener_verified") is not True or witness.get("adopted") is not True
+                or witness.get("action") != "title" or witness.get("target_id") != current_id
+                or witness.get("owner_target_id") != probe.get("parent_target_id")):
+            return popup_pause("owner")
+        details = current.evaluate(METADATA_SNAPSHOT_JS)
+        if not isinstance(details, dict):
+            return pause("page_not_ready")
+        reason = fetcher._reason(details)
+        if reason:
+            return pause(reason, snapshot=details)
+        if (snap.get("ready_state") != "complete" or details.get("ready_state") != "complete"
+                or _page_loading(snap) or snap.get("download_pending")):
+            return pause("page_not_ready", "同名结果详情仍未就绪；保留当前详情和逐条核对断点，稍后继续。")
+        if _norm(details.get("title")) != _norm(title):
+            return pause("page_error", "同名结果打开的详情题名不符，保留当前页核对；未选择其他版本。")
+        expected, observed = identity(record), snapshot_identity(details, current.url, "cnki")
+        match = _manual_detail_identity(record, details, current.url)
+        observed_authors, observed_year = _authors_key(details.get("authors")), str(details.get("year") or "")
+        known_different = conflicts(expected, observed) or bool(
+            _authors_key(record.get("authors")) and re.fullmatch(r"(?:19|20)\d{2}", str(record.get("year") or ""))
+            and observed_authors and re.fullmatch(r"(?:19|20)\d{2}", observed_year))
+        if not match and not known_different:
+            return pause("page_not_ready", "同名详情的作者、年份或可靠文献编号仍不足以判断；当前页保留，不将身份未知当作不匹配。")
+        proof = digest(observed)
+        if probe["phase"] == "winner":
+            if not match or probe["rows"][index].get("identity_hash") != proof:
+                return pause("page_error", "最终同名版本的身份与逐条核对证据不一致，已保留停点。")
+            probe["phase"] = "selected"
+            save_probe(probe)
+            return None
+        probe["rows"][index].update(status="match" if match else "mismatch", identity_hash=proof,
+            identity_match=match or "different_complete_identity")
+        probe.update(phase="closing", active_target_id=current_id)
+        save_probe(probe)
+        return finish_probe_close()
+
+    def probe_checkpoint():
+        """Monotonic, bounded progress over the fixed location queue only."""
+        return _version_probe_checkpoint(fetcher._binding.get("cnki_flow", {}))
+
     def repair_lookup(current, ui):
         """Submit at most one visible literal-title repair for this paper."""
         previous = fetcher._binding.get("cnki_flow", {}).get("lookup_repair")
@@ -1038,13 +1463,24 @@ def run_cnki(fetcher, record, opts):
             return popup_pause("owner")
         context = fetcher._connect()
         owner, popup = find_target(context, owner_id), find_target(context, popup_id)
+        updated = copy.deepcopy(fetcher._binding)
+        updated["cnki_flow"]["popup_restore_observation"] = {
+            "owner_found": owner is not None, "child_found": popup is not None,
+            "opener_relation": ("missing_child" if popup is None else "original" if popup.opener() is owner and owner is not None
+                                else "none" if popup.opener() is None else "other")}
+        commit_binding(updated)
         if popup is None:
             # Do not manufacture a replacement or repeat the previous click.
             fetcher._page = owner
             return popup_pause("owner")
         if owner is not None and popup.opener() is not owner:
-            fetcher._page = owner
-            return popup_pause("owner")
+            if popup.opener() is None:
+                recovery = recheck_detached_probe_child(owner, popup, owner_id, popup_id)
+                if recovery:
+                    return recovery
+            else:
+                fetcher._page = owner
+                return popup_pause("owner")
         if owner is None and popup.opener() is not None:
             return popup_pause("owner")
         if fetcher._binding.get("target_id") == popup_id:
@@ -1083,6 +1519,9 @@ def run_cnki(fetcher, record, opts):
         restart_guard = guard_restart()
         if restart_guard:
             return restart_guard
+        closed_probe = finish_probe_close()
+        if isinstance(closed_probe, dict):
+            return closed_probe
         restored = restore_popup()
         if restored:
             return restored
@@ -1208,6 +1647,17 @@ def run_cnki(fetcher, record, opts):
                     repair = fetcher._binding.get("cnki_flow", {}).get("lookup_repair")
                     if repair is not None and (not isinstance(repair, dict) or repair.get("state") != "submitted"):
                         return lookup_pause("repair_incomplete")
+                    if _query_matches(ui, title):
+                        manual = resume_manual_detail(current)
+                        if manual is True:
+                            continue
+                        if isinstance(manual, dict):
+                            return manual
+                        probed = probe_lookup(current, ui)
+                        if probed is True:
+                            continue
+                        if isinstance(probed, dict):
+                            return probed
                     titles_found = _title_matches(ui, title)
                     if len(titles_found) > 1 and len(_exact_result(ui, title, record)) != 1:
                         return lookup_pause("ambiguous")
@@ -1276,6 +1726,11 @@ def run_cnki(fetcher, record, opts):
                     start = fetcher._clock()
                     continue
             elif step in {"detail_pending", "detail"}:
+                probed = probe_detail(current, snap)
+                if probed is True:
+                    continue
+                if isinstance(probed, dict):
+                    return probed
                 if not _lookup_page(current.url) and _identity(snap, ui, record):
                     step = "detail"
                     if fetcher._binding.get("cnki_flow", {}).get("step") != step:
@@ -1378,6 +1833,15 @@ def run_cnki(fetcher, record, opts):
                 return pause("page_not_ready", "知网详情或下载入口仍未就绪，原窗口已保留；稍后可显式重新检查。")
             tick()
     except MetadataBudgetExpired:
+        explicitly_loading = (last_page_diagnostic.get("ready_state") == "loading"
+                              or last_page_diagnostic.get("loading_pending") is True
+                              or last_page_diagnostic.get("download_pending") is True)
+        checkpoint = None if explicitly_loading else probe_checkpoint()
+        if checkpoint:
+            result = pause("page_not_ready", "同名结果核对的本段预算已到，逐条定位证据和当前页面已保存。")
+            result.update(reason="cnki_version_probe_budget", cnki_probe_checkpoint=checkpoint)
+            fetcher._blocked = dict(result)
+            return result
         return pause("page_not_ready", "摘要原页面仍未就绪，回源预算已到；原任务页面和断点保留，可稍后继续核对。")
     except Exception:
         if fetcher._page is not None:
