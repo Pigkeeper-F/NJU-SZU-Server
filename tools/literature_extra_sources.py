@@ -12,15 +12,22 @@ Official search semantics:
 from __future__ import annotations
 
 import json
+import os
 import re
 from urllib.parse import urlencode, urlsplit
 
 from literature_source_access import submission_allowed
 
 
+# SZU's off-campus channel rewrites the publisher host through accproxy and
+# carries the institution entitlement.  Override for another school.
+SCOPUS_SEARCH_URL = os.environ.get(
+    "LITERATURE_SCOPUS_SEARCH",
+    "https://www-scopus-com.accproxy.lib.szu.edu.cn/pages/home?display=basic#basic")
+
 SOURCE_INFO = {
     "wanfang": ("万方", "https://g.wanfangdata.com.cn/"),
-    "scopus": ("Scopus", "https://www.scopus.com/pages/home?display=basic#basic"),
+    "scopus": ("Scopus", SCOPUS_SEARCH_URL),
     "pubmed": ("PubMed", "https://pubmed.ncbi.nlm.nih.gov/"),
 }
 MAX_QUERY_CHARS = 32768  # Same search-expression bound as literature-config.js.

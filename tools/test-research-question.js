@@ -67,31 +67,31 @@ const RISKS = [{
     queries: [{ query: '("long-term fertilization") "soil organic carbon"', rationale: '宽口径' }],
     perSource: [
       { source: 'google-scholar', query: '("long-term fertilization") "soil organic carbon"', rationale: '通用' },
-      { source: 'pubmed', query: '"soil organic carbon"[Title/Abstract] AND fertilization[Title/Abstract]', rationale: 'PubMed 字段标签' },
+      { source: 'scopus', query: 'TITLE-ABS-KEY("soil organic carbon") AND TITLE-ABS-KEY(fertilization)', rationale: 'Scopus 字段检索' },
       { source: 'cnki', query: '施肥 土壤有机碳', rationale: '未启用的来源应被丢掉' }
     ]
   });
   let multiPrompt = '';
   const multiPlan = await rq.planQueries({
     idea: '长期施肥对土壤碳的影响',
-    sources: ['google-scholar', 'pubmed'],
+    sources: ['google-scholar', 'scopus'],
     modelCfg: {},
     callModel: async (cfg, messages) => { multiPrompt = messages[0].content; return multiReply; }
   });
-  ok(multiPlan.sources.length === 2 && multiPlan.sources[1] === 'pubmed', '只保留启用的目标来源');
+  ok(multiPlan.sources.length === 2 && multiPlan.sources[1] === 'scopus', '只保留启用的目标来源');
   ok(multiPlan.perSource.length === 2 && !multiPlan.perSource.some(item => item.source === 'cnki'), '未启用的来源计划被丢掉');
-  ok(multiPlan.perSource.some(item => item.source === 'pubmed' && item.query.includes('[Title/Abstract]')), 'PubMed 使用字段标签语法');
-  ok(multiPrompt.includes('PubMed') && multiPrompt.includes('字段标签'), '提示词按来源给出语法说明');
+  ok(multiPlan.perSource.some(item => item.source === 'scopus' && item.query.includes('TITLE-ABS-KEY')), 'Scopus 使用字段检索语法');
+  ok(multiPrompt.includes('Scopus') && multiPrompt.includes('TITLE-ABS-KEY'), '提示词按来源给出语法说明');
 
   const partialReply = JSON.stringify({
     queries: [{ query: '"soil organic carbon" fertilization', rationale: '通用' }],
     perSource: [{ source: 'google-scholar', query: '"soil organic carbon" fertilization', rationale: '通用' }]
   });
   const fallbackPlan = await rq.planQueries({
-    idea: '土壤碳', sources: ['google-scholar', 'openalex'], modelCfg: {},
+    idea: '土壤碳', sources: ['google-scholar', 'wanfang'], modelCfg: {},
     callModel: async () => partialReply
   });
-  const fallback = fallbackPlan.perSource.find(item => item.source === 'openalex');
+  const fallback = fallbackPlan.perSource.find(item => item.source === 'wanfang');
   ok(!!fallback && fallback.query === fallbackPlan.queries[0].query, '模型漏写的来源用通用检索式补齐');
   ok(/沿用通用检索式/.test(fallback.rationale), '补齐项明确标注是兜底');
 

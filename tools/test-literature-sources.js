@@ -10,15 +10,18 @@ const base = { topic: '气候变化与养殖', query: 'climate change aquacultur
   geography: '中国', language: '', studyTypes: ['原始研究'], inclusion: [], exclusion: [], targetFields: ['产量'], limit: 10 };
 
 function main() {
-  // 注册表：浏览器六源 + 开放 API 四源都可执行；不写死完整顺序。
-  const EXPECTED_KEYS = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed',
-    'pmc', 'openalex', 'semantic-scholar', 'europe-pmc'];
-  for (const key of EXPECTED_KEYS) assert.ok(SOURCES.some(item => item.key === key), '已登记：' + key);
-  assert.deepEqual(executableSources().map(item => item.key).sort(), EXPECTED_KEYS.slice().sort(), '全部来源可执行');
+  // 检索范围固定为五库；PubMed/PMC/OpenAlex/Europe PMC/Semantic Scholar 保留登记
+  // 但不可执行（PMC/Europe PMC 仍作为全文解析器，见 fulltext 流程）。
+  const EXPECTED_KEYS = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus'];
+  const RETIRED_KEYS = ['pubmed', 'pmc', 'openalex', 'semantic-scholar', 'europe-pmc'];
+  for (const key of EXPECTED_KEYS.concat(RETIRED_KEYS)) assert.ok(SOURCES.some(item => item.key === key), '已登记：' + key);
+  assert.deepEqual(executableSources().map(item => item.key).sort(), EXPECTED_KEYS.slice().sort(), '只有五库可执行');
   for (const source of SOURCES) {
     assert.ok(source.label, '每个来源都有显示名：' + source.key);
     assert.ok(source.idPrefix, '每个来源都有候选 id 前缀：' + source.key);
-    assert.equal(source.state, 'executable', 'state 可执行：' + source.key);
+    const retired = RETIRED_KEYS.includes(source.key);
+    assert.equal(source.state, retired ? 'registered' : 'executable', 'state 与五库口径一致：' + source.key);
+    if (retired) assert.ok(source.reason, '退出检索的来源写明原因：' + source.key);
   }
   assert.equal(SOURCES[0].adapter.kind, 'soc-script');
   assert.ok(SOURCES[0].adapter.script.endsWith('google_scholar_search.py'));
@@ -49,8 +52,10 @@ function main() {
   copy[0].state = 'mutated';
   assert.equal(SOURCES[0].state, 'executable', 'listSources 必须返回副本');
 
-  // 全部来源可执行；未知来源仍明确拒绝，不能静默换源。
-  assert.equal(assertExecutable(SOURCES.map(item => item.key)), true);
+  // 五库可执行；已退役来源与未知来源都明确拒绝，不能静默换源。
+  assert.equal(assertExecutable(EXPECTED_KEYS), true);
+  assert.throws(() => assertExecutable(['cnki', 'pmc']),
+    error => error.message.includes('尚未接通以下检索来源') && error.message.includes('pmc'));
   assert.throws(() => assertExecutable(['arxiv', 'unknown-source']),
     error => error.message === '尚未接通以下检索来源：arxiv、unknown-source；请选择已接通来源，或等待相应连接器。');
 
@@ -62,8 +67,8 @@ function main() {
   assert.throws(() => normalizeConfig({ ...base, limit: 11 }), /首批检索数量必须为 1–10/);
   assert.throws(() => normalizeConfig({ ...base, publicationYearFrom: 1800 - 1 }), /发表起始年份无效/);
   assert.throws(() => normalizeConfig({ ...base, publicationYearFrom: 2026, publicationYearTo: 2000 }), /不能晚于/);
-  assert.deepEqual(normalizeConfig({ ...base, sources: SOURCES.map(item => item.key) }, { executable: true }).sources, SOURCES.map(item => item.key), '六来源可同时进入执行链');
-  for (const source of SOURCES) assert.deepEqual(normalizeConfig({ ...base, sources: [source.key] }, { executable: true }).sources, [source.key], '每个来源也可独立选择');
+  assert.deepEqual(normalizeConfig({ ...base, sources: EXPECTED_KEYS }, { executable: true }).sources, EXPECTED_KEYS, '五库可同时进入执行链');
+  for (const key of EXPECTED_KEYS) assert.deepEqual(normalizeConfig({ ...base, sources: [key] }, { executable: true }).sources, [key], '每个来源也可独立选择');
   assert.deepEqual(normalizeConfig({ ...base, sources: ['google-scholar', 'scopus'] }).sources, ['google-scholar', 'scopus'], '非 executable 模式保持登记语义');
 
   const normalized = normalizeConfig(base);
@@ -74,9 +79,9 @@ function main() {
   assert.deepEqual(
     normalizeConfig({ ...base, sources: ['google-scholar', 'pubmed'], sourceQueries: { pubmed: '"soil organic carbon"[Title/Abstract]' } }).sourceQueries,
     { pubmed: '"soil organic carbon"[Title/Abstract]' });
-  const allQueries = Object.fromEntries(SOURCES.map(source => [source.key, ' ' + source.key + ' query ']));
-  assert.deepEqual(normalizeConfig({ ...base, sources: SOURCES.map(item => item.key), sourceQueries: allQueries }, { executable: true }).sourceQueries,
-    Object.fromEntries(SOURCES.map(source => [source.key, source.key + ' query'])), '每个来源的独立检索式保持并归一');
+  const allQueries = Object.fromEntries(EXPECTED_KEYS.map(key => [key, ' ' + key + ' query ']));
+  assert.deepEqual(normalizeConfig({ ...base, sources: EXPECTED_KEYS, sourceQueries: allQueries }, { executable: true }).sourceQueries,
+    Object.fromEntries(EXPECTED_KEYS.map(key => [key, key + ' query'])), '每个来源的独立检索式保持并归一');
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: [] }), /分来源检索式必须是对象/);
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: { arxiv: 'test' } }), /未知来源/);
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: ' ' } }), /不能为空/);
@@ -86,9 +91,9 @@ function main() {
   assert.deepEqual(normalized.sourceQueries, {});
   assert.deepEqual(normalizeConfig({ ...base, sources: ['cnki', 'web-of-science'], sourceQueries: { cnki: ' 肉鸡 高温 ', 'web-of-science': 'broiler heat stress' } }, { executable: true }).sourceQueries,
     { cnki: '肉鸡 高温', 'web-of-science': 'broiler heat stress' });
-  const sixQueries = Object.fromEntries(SOURCES.map(source => [source.key, ' ' + source.key + ' query ']));
-  assert.deepEqual(normalizeConfig({ ...base, sources: SOURCES.map(item => item.key), sourceQueries: sixQueries }, { executable: true }).sourceQueries,
-    Object.fromEntries(SOURCES.map(source => [source.key, source.key + ' query'])), '新增三来源的独立检索式保持并归一');
+  const sixQueries = Object.fromEntries(EXPECTED_KEYS.map(key => [key, ' ' + key + ' query ']));
+  assert.deepEqual(normalizeConfig({ ...base, sources: EXPECTED_KEYS, sourceQueries: sixQueries }, { executable: true }).sourceQueries,
+    Object.fromEntries(EXPECTED_KEYS.map(key => [key, key + ' query'])), '五库的独立检索式保持并归一');
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: [] }), /分来源检索式必须是对象/);
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: { arxiv: 'test' } }), /未知来源/);
   assert.throws(() => normalizeConfig({ ...base, sourceQueries: { cnki: ' ' } }), /不能为空/);

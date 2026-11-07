@@ -174,11 +174,10 @@ function asList(value, limit) {
 //: 各来源的检索语法差异。写进提示词，避免模型把 Scholar 的语法照搬给所有源。
 const SOURCE_SYNTAX = {
   'google-scholar': 'Google Scholar：短语用双引号，OR / AND 连接，必要时加括号',
-  'pubmed': 'PubMed：用字段标签，如 "soil organic carbon"[Title/Abstract] AND fertilization[Title/Abstract]；也可用 MeSH Terms',
-  'pmc': 'PMC：与 PubMed 相同（NCBI E-utilities），用 [Title/Abstract] 等字段标签',
-  'openalex': 'OpenAlex：自然语言关键词（检索标题/摘要全文），不要写字段标签或大括号',
-  'europe-pmc': 'Europe PMC：可用 TITLE_ABS:"..."、AUTH:"..." 等字段，AND / OR 连接',
-  'semantic-scholar': 'Semantic Scholar：自然语言关键词，支持 + | 等简单连接，不要写字段标签'
+  'cnki': '中国知网：中文关键词，AND / OR / NOT 连接；短语用英文双引号，不要写英文数据库字段标签',
+  'wanfang': '万方：中文关键词，多个词用空格或 AND 连接；不要照搬英文字段标签',
+  'web-of-science': 'Web of Science：主题检索用 TS=(...)，AND / OR / NOT 连接，短语用双引号',
+  'scopus': 'Scopus：字段检索用 TITLE-ABS-KEY(...)，AND / OR 连接，短语用双引号'
 };
 
 function normalizePlanSources(sources) {

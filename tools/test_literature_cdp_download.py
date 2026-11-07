@@ -53,6 +53,11 @@ def main() -> None:
     (directory / "error.html").write_bytes(b"<html>download error</html>" + b"x" * (_browser.MIN_PDF_BYTES + 10))
     ok(fetcher._take_cdp_download(before) is None, "HTML shell is rejected")
 
+    truncated = directory / "truncated.pdf"
+    truncated.write_bytes(pdf_bytes()[:-len(b"\n%%EOF\n")])
+    ok(fetcher._take_cdp_download(before) is None, "PDF without %%EOF is rejected")
+    truncated.unlink()
+
     blob = pdf_bytes()
     target = directory / "download.pdf"
     target.write_bytes(blob)
@@ -64,6 +69,13 @@ def main() -> None:
     after = fetcher._cdp_download_snapshot()
     ok("download.pdf" in after, "snapshot includes the completed file")
     ok(fetcher._take_cdp_download(after) is None, "already consumed files are not reused")
+
+    # CNKI's WebFastLoad appends <FileProperty> after %%EOF; the file is still
+    # complete and must be accepted.
+    suffixed = pdf_bytes() + b"WebFastLoad<FileProperty><Doi>1</Doi></FileProperty>"
+    (directory / "cnki-suffixed.pdf").write_bytes(suffixed)
+    got = fetcher._take_cdp_download(after)
+    ok(got == suffixed, "trailing CNKI metadata after %%EOF is accepted")
 
     print("\n结果：" + str(PASS) + " 通过 / " + str(FAIL) + " 失败")
     if FAIL:

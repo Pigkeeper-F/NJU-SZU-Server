@@ -931,6 +931,10 @@ def run_cnki(fetcher, record, opts):
                 return pause("page_error", "知网下载事件的文件来源无法核对，已暂停；未把未知文件当作全文。")
             blob = fetcher._read_download(download)
             if blob is None:
+                # CDP-attached Chrome can emit a zero-byte download event while
+                # the real PDF lands in the page-scoped download directory.
+                blob = fetcher._take_cdp_download(fetcher._cdp_download_before)
+            if blob is None:
                 return pause("page_error", "知网下载返回的文件未通过PDF校验（可能为CAJ或错误文件），已暂停；请在原页面核对。")
             return finish_artifact(blob)
         for item in list(pdf_responses):
@@ -945,6 +949,9 @@ def run_cnki(fetcher, record, opts):
                 if not isinstance(blob, bytes) or not blob.startswith(b"%PDF") or not MIN_PDF_BYTES <= len(blob) <= MAX_PDF_BYTES:
                     raise ValueError("Invalid PDF")
             except Exception:
+                blob = fetcher._take_cdp_download(fetcher._cdp_download_before)
+                if blob is not None:
+                    return finish_artifact(blob)
                 return pause("page_error", "知网页面响应未通过PDF内容校验，已暂停；请在原页面核对。")
             return finish_artifact(blob)
         if step == "download_clicked":

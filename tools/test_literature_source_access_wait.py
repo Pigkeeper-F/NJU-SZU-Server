@@ -233,7 +233,7 @@ class SourceAccessWaitTests(unittest.TestCase):
     def test_loading_zero_does_not_claim_no_results(self):
         page = fixtures.Page("loading", {})
         loading = fixtures.snapshot(resultContainer=True, resultsLoading=True, noResults=True)
-        with patch.object(adapter.time, "monotonic", side_effect=[0, 16]), patch.object(adapter.time, "sleep") as sleep:
+        with patch.object(adapter.time, "monotonic", side_effect=[0, 31]), patch.object(adapter.time, "sleep") as sleep:
             result = adapter._wait_source_records(page, "cnki", loading, 200, full_page=True)
         self.assertTrue(result["_source_loading_pending"])
         sleep.assert_not_called()

@@ -267,6 +267,82 @@
     return wrap;
   }
 
+  // ---- 登录相关问题 → 内嵌快捷操作面板（2026-11-07）----
+  // 用户问登录/权限/验证码时，AI 回复下方直接给出登录按钮与状态检查，
+  // 不用再去文献任务顶部找「账号与权限」面板。只看用户消息，AI 提及登录不触发。
+  var ACCESS_QUESTION_RE = /登录|登入|机构|权限|验证码|多因子|账号|会员|付费|fsso|accproxy|ezproxy|sign\s*in|log\s*in|institution/i;
+  var CHAT_ACCESS_TARGETS = [
+    ['打开机构登录', 'institution'],
+    ['知网机构登录', 'cnki'],
+    ['Web of Science 登录', 'wos'],
+    ['Scopus 登录', 'scopus'],
+    ['EZproxy 统一登录', 'ezproxy'],
+    ['打开万方会员', 'purchase']
+  ];
+
+  function isAccessQuestion(text) {
+    return typeof text === 'string' && ACCESS_QUESTION_RE.test(text);
+  }
+
+  function chatAccessFetch(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok) throw new Error(data && data.error ? data.error : '请求失败');
+        return data;
+      });
+    });
+  }
+
+  function buildChatAccessPanel() {
+    var box = el('div', 'chat-access-panel');
+    var status = el('p', 'chat-access-status', '点下方按钮打开官方登录页；在该页完成登录后点「检查登录状态」。');
+    var row = el('div', 'chat-access-actions');
+    CHAT_ACCESS_TARGETS.forEach(function (pair) {
+      var button = el('button', 'quiet-button', pair[0]);
+      button.type = 'button';
+      button.onclick = function () {
+        status.textContent = '正在打开' + pair[0] + '…';
+        chatAccessFetch('/api/literature/access-page', { target: pair[1] })
+          .then(function (result) { status.textContent = '已打开' + (result.label || pair[0]) + '；在该页完成登录后点「检查登录状态」。'; })
+          .catch(function (error) { status.textContent = '打开失败：' + error.message; });
+      };
+      row.appendChild(button);
+    });
+    var checkButton = el('button', 'quiet-button', '检查登录状态');
+    checkButton.type = 'button';
+    checkButton.onclick = function () {
+      status.textContent = '正在读取登录状态（万方/知网/WoS/Scopus/EZproxy，可能需要一两分钟）…';
+      chatAccessFetch('/api/literature/access-status', { source: 'all' })
+        .then(function (result) {
+          var lines = (result.results || []).map(function (item) { return item.label + '：' + (item.message || '未判定'); });
+          status.textContent = lines.length ? lines.join('｜') : (result.message || '未判定');
+        })
+        .catch(function (error) { status.textContent = '状态读取失败：' + error.message; });
+    };
+    row.appendChild(checkButton);
+    box.appendChild(row);
+    box.appendChild(status);
+    return box;
+  }
+
+  /** 追加消息区间；若某条 AI 回复的触发提问（跳过 system 通知）在问登录，
+   *  回复后插入快捷操作面板。回落 API 时中间会插 system 通知，不能只看 i-1。 */
+  function appendChatMessages(list, messages, from, to) {
+    for (var i = from; i < to; i++) {
+      list.appendChild(buildMessage(messages[i]));
+      if (messages[i].role !== 'assistant' || i === 0) continue;
+      var j = i - 1;
+      while (j >= 0 && messages[j].role === 'system') j--;
+      if (j >= 0 && messages[j].role === 'user' && isAccessQuestion(messages[j].text)) {
+        list.appendChild(buildChatAccessPanel());
+      }
+    }
+  }
+
   /** 取当前可发送的模块 id：模块必须真实存在（Store 保证；这里再兜底校验一次） */
   function activeModuleId() {
     var Store = getStore();
@@ -366,9 +442,28 @@
     render();
     if (root.CodexUI && root.CodexUI.useCodex(module)) {
       return root.CodexUI.reply(module, messagesFor(moduleId)).catch(function (error) {
+        var detail = (error && error.message) || '';
+        // Codex 未登录 / 不可用时自动回落到 AI API（.env 凭据），
+        // 让没配置过 Codex 的新用户也能直接问 AI，而不是卡在报错上。
+        if (/codex login|没有可用模型|请先在终端/i.test(detail)) {
+          getStore().appendMessage(moduleId, '本机 Codex 未连接，已自动改用 API 对话。', 'system');
+          return apiReply(moduleId);
+        }
         getStore().appendMessage(moduleId, 'Codex 请求失败：' + error.message, 'system');
       }).finally(function () { delete pendingModules[moduleId]; render(); });
     }
+    return apiReply(moduleId).finally(function () {
+      delete pendingModules[moduleId];
+      render();
+    });
+  }
+
+  /** API 对话路径：.env / 浏览器设置里的模型凭据（Codex 未连接时的自动回落目标）。 */
+  function apiReply(moduleId) {
+    var module = findModule(getStore().getState().modules, moduleId);
+    var credential = root.ApiKeys && typeof root.ApiKeys.getActiveCredential === 'function'
+      ? root.ApiKeys.getActiveCredential()
+      : null;
     return fetch('/api/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -405,9 +500,6 @@
           + ' | 来源：' + sourceText + '）';
       }
       getStore().appendMessage(moduleId, 'AI 回复失败：' + detail, 'system');
-    }).finally(function () {
-      delete pendingModules[moduleId];
-      render();
     });
   }
 
@@ -2848,7 +2940,7 @@
           var editingList = spaceEl.querySelector('.msg-list');
           if (editingList) {
             while (editingList.firstChild) editingList.removeChild(editingList.firstChild);
-            messages.forEach(function (message) { editingList.appendChild(buildMessage(message)); });
+            appendChatMessages(editingList, messages, 0, messages.length);
           }
           var editingPending = spaceEl.querySelector('.ai-pending');
           if (pendingLive && !editingPending) spaceEl.appendChild(el('div', 'ai-pending', 'AI 正在思考…'));
@@ -2879,9 +2971,7 @@
           var staleEmpty = fastList.querySelector('.empty-state');
           if (staleEmpty) staleEmpty.remove();
         }
-        for (var fi = msgListState.count; fi < messages.length; fi++) {
-          fastList.appendChild(buildMessage(messages[fi]));
-        }
+        appendChatMessages(fastList, messages, msgListState.count, messages.length);
         // 模块名可能被重命名 / 条数变化：头部整体重建（节点少，代价可忽略）
         var oldHeader = spaceEl.querySelector('.module-header');
         if (oldHeader) {
@@ -2942,7 +3032,7 @@
         list.appendChild(emptyState(active.name,
           '输入研究目标或已有材料。切换到 AI 对话后，助手会依据本模块工作流协助你补齐输入、推进执行并检查交付。'));
       } else {
-        for (var i = 0; i < messages.length; i++) list.appendChild(buildMessage(messages[i]));
+        appendChatMessages(list, messages, 0, messages.length);
       }
       spaceEl.appendChild(list);
 

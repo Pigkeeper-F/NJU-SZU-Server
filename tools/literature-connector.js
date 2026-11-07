@@ -37,6 +37,11 @@ function reviewLineage(value) {
   return { parentJobId: value.parentJobId, parentReviewId: value.parentReviewId, parentRevision: value.parentRevision };
 }
 
+//: 账号与权限入口白名单（2026-11-06 从万方两键扩到五库 + EZproxy）。
+//: institution/purchase 保留原键名，避免旧调用与历史文案失效。
+const ACCESS_TARGETS = ['institution', 'purchase', 'cnki', 'wos', 'scopus', 'ezproxy'];
+const ACCESS_STATUS_SOURCES = ['wanfang', 'cnki', 'wos', 'scopus', 'ezproxy', 'all'];
+
 //: 六阶段冻结顺序（设计 §2；与 tools/literature-common.py STAGES 一致）
 const STAGES = ['discover', 'dedupe', 'fulltext', 'extract', 'validate', 'export'];
 
@@ -1767,6 +1772,43 @@ class LiteratureConnector {
       if (!result || result.opened !== true || result.source !== source) throw new Error('检索页面打开失败');
       return { opened: true, source, label: executableSources().find(item => item.key === source).label };
     } finally { job.browserOpening = false; }
+  }
+
+  //: 任务开始前主动打开官方登录/购买页；只接受白名单目标，不传任意 URL。
+  async openAccessPage(target) {
+    if (!ACCESS_TARGETS.includes(target)) throw new Error('只能打开白名单内的登录或购买页面');
+    if ([...this.jobs.values()].some(item => item.status === 'running')) throw new Error('检索浏览器正在使用，请等任务暂停后再打开');
+    const raw = await this.runAccessScript(['--open', target]);
+    let result;
+    try { result = JSON.parse(raw); } catch (_) { throw new Error('登录页未返回有效状态，请重试'); }
+    if (!result || result.opened !== true || result.target !== target) {
+      throw new Error(result?.message || '无法打开登录页，请检查本机检索浏览器');
+    }
+    return result;
+  }
+
+  //: 读取一个来源或全部来源的登录状态；不读凭据，仅返回显示名与判定。
+  async accessStatus(source = 'wanfang') {
+    if (!ACCESS_STATUS_SOURCES.includes(source)) throw new Error('只能读取白名单内的登录状态');
+    const raw = await this.runAccessScript(['--status', source], source === 'all' ? 330000 : 60000);
+    let result;
+    try { result = JSON.parse(raw); } catch (_) { throw new Error('登录状态未返回有效结果，请重试'); }
+    if (!result || result.checked !== true) throw new Error(result?.message || '登录状态未返回，请重试');
+    return result;
+  }
+
+  async runAccessScript(args, timeout = 90000) {
+    const python = path.join(this.root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+    if (!fs.existsSync(python)) throw new Error('本地 Python 环境尚未准备，请先运行一次文献任务');
+    try {
+      return await runCommand(python, ['-u', path.join(this.root, 'tools', 'literature_access.py'), ...args],
+        { cwd: this.root, timeout });
+    } catch (error) {
+      const line = String(error.message || '').trim().split(/\r?\n/).pop();
+      let parsed;
+      try { parsed = JSON.parse(line); } catch (_) { parsed = null; }
+      throw new Error(parsed?.message || error.message || '登录页操作未完成');
+    }
   }
 
   //: 追加确认记录（append-only，原子重写；§3.2）。

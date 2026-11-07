@@ -23,7 +23,19 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = SKILL_ROOT / "state"
 USER_DATA_DIR = STATE_DIR / "user-data"
 PID_FILE = STATE_DIR / "browser.pid"
-CDP_PORT = 9222
+
+
+def _cdp_port() -> int:
+    """Allow a hidden-desktop run to use its own browser without touching 9222."""
+    raw = (os.environ.get("LITERATURE_CDP_PORT") or "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 9222
+    return value if 1024 <= value <= 65535 else 9222
+
+
+CDP_PORT = _cdp_port()
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 
 # Papers live at the repo root — change this if you move the papers folder.

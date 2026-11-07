@@ -106,7 +106,8 @@ node tools/debug-report.js --json
 - **五库文献流程（2026-11-02）**：知网/万方/WoS/Scopus/Google Scholar 五库配置与逐项核查，
   篇关摘 `include/pending/exclude` 三态筛选；`include + pending` 进全文队列，`exclude` 不下载。
   全文/补充材料、CDP 原生下载兜底、PMC 补充材料 OA 包、稳定附件链接续跑已接入；
-  万方原生详情页 PDF/下载控件适配已实现（离线 7 项通过，真实站点待有权限样本验证）；
+  万方原生详情页 PDF/下载控件适配已补齐与知网同级的处理（稳定性复核、付费控件排除、
+  点击痕迹落盘与两次上限、事件归属、补充材料；离线 27 项通过，真实站点待有权限样本验证）；
   真实状态与未完成边界见 [五库文献流程实现状态](literature-five-source-status.md)
 - 环节②科学问题凝练：候选问题 → 人选 → 问题说明书——契约 §24
 - 环节⑥文章撰写：目标期刊手填、LaTeX 生成器、AAAI/NeurIPS/ICML 规范——契约 §22.7 / §23.5

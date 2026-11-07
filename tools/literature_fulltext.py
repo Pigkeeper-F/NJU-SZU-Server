@@ -57,6 +57,9 @@ RETRYABLE_ON_RESUME = {"pending", "needs_attention", "partial"}
 GATED_ON_RESUME = {"unavailable", "abstract_only"}
 
 MIN_PDF_BYTES = 50 * 1024  # %PDF magic + >=50KB, same thresholds as SOC download_pdf
+# 补充材料核查只是附加产物：主 PDF 已保存时给它更短的页面预算，
+# 否则每篇都要等满默认空闲窗口（实测 5 篇白等约 10 分钟）。
+MATERIAL_INSPECT_SECONDS = 30
 HTML_MIN_TEXT_CHARS = 300
 HTML_MIN_FULLTEXT_CHARS = 2000
 
@@ -591,7 +594,8 @@ def _item_skeleton(record: dict) -> dict:
     return item
 
 
-def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int, record=None, *, cnki_navigation=False) -> dict:
+def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int, record=None, *,
+                cnki_navigation=False, identity_method="", acquisition_method="") -> dict:
     item.update(
         fulltext_url=url,
         kind="pdf",
@@ -602,8 +606,13 @@ def _settle_pdf(item: dict, out_path: Path, files_rel: str, url: str, size: int,
         evidence_level="fulltext_pdf",
         reason="",
     )
+    if acquisition_method:
+        # Which official control produced this file (e.g. Wanfang download vs
+        # Playwright/CDP fallback) is part of the evidence, not a transient
+        # adapter detail.
+        item["acquisition_method"] = acquisition_method
     blob = out_path.read_bytes()
-    proof = pdf_proof(blob, record or item, cnki_navigation=cnki_navigation)
+    proof = pdf_proof(blob, record or item, cnki_navigation=cnki_navigation, identity_method=identity_method)
     text_chars = int(proof.get("text_chars") or 0)
     # “下载完整”以文件完整性为准：PDF 魔数、EOF、传输完成、大小阈值。
     # 文本能否抽取是独立事实（扫描版可完整但没有可提取文本），不据此
@@ -841,30 +850,56 @@ def _pmc_xml_item(record: dict, job_dir: Path, opts: dict) -> dict | None:
     return saved
 
 
-def _settle_cnki_result(result, record, job_dir, item):
-    """Use the same PDF/body evidence gate after normal official navigation."""
+PLATFORM_SETTLE = {
+    "cnki": {
+        "identity_method": "cnki_normal_navigation",
+        "invalid_pdf": "知网下载文件未通过PDF校验，已暂停；请在原页面核对文件格式。",
+        "not_fulltext": "知网已打开页面，但尚未取得可确认的全文，已暂停；请核对下载入口和正文。",
+        "not_complete": "知网单篇下载未完成，已暂停；请查看原任务页面。",
+    },
+    "wanfang": {
+        "identity_method": "wanfang_normal_navigation",
+        "invalid_pdf": "万方下载文件未通过PDF校验（可能为错误文件或非PDF格式），已暂停；请在原页面核对文件格式。",
+        "not_fulltext": "万方已打开页面，但尚未取得可确认的全文，已暂停；请核对下载入口和正文。",
+        "not_complete": "万方单篇下载未完成，已暂停；请查看原任务页面。",
+    },
+}
+
+
+def _settle_platform_result(result, record, job_dir, item, *, source_key="cnki"):
+    """Use the same PDF/body evidence gate after normal official navigation.
+
+    The message and the recorded identity method always name the platform that
+    actually served the file; a Wanfang failure must not be reported as CNKI.
+    """
+    labels = PLATFORM_SETTLE.get(source_key) or PLATFORM_SETTLE["cnki"]
     _raise_page_attention(result, item["paper_id"], "")
     page_url = safe_url(result.get("url") or "")
     if result.get("status") == "pdf_page":
         blob = result.get("bytes") or b""
         valid, why, size = validate_pdf_bytes(blob)
         if not valid:
-            raise FulltextPause(item["paper_id"], page_url, reason="page_error",
-                                message="知网下载文件未通过PDF校验，已暂停；请在原页面核对文件格式。")
+            raise FulltextPause(item["paper_id"], page_url, reason="page_error", message=labels["invalid_pdf"])
         path = artifact_destination(job_dir, item["paper_id"], "pdf")
         relative = path.relative_to(Path(job_dir).absolute()).as_posix()
         atomic_write_bytes(path, blob)
-        return _settle_pdf(item, path, relative, page_url, size, record, cnki_navigation=True)
+        return _settle_pdf(item, path, relative, page_url, size, record,
+                           identity_method=labels["identity_method"],
+                           acquisition_method=str(result.get("acquisition_method") or ""))
     if result.get("status") == "ok":
         proof = result.get("html_evidence") if isinstance(result.get("html_evidence"), dict) else {}
         text = str(result.get("text") or "")
         verdict, reason = assess_html_text(text, page_url, proof, record.get("title") or "", record.get("doi") or "")
         if verdict == "fulltext":
             return _settle_html(item, job_dir, str(proof.get("article_text") or text), page_url, verdict, reason, proof)
-        raise FulltextPause(item["paper_id"], page_url, reason="page_error",
-                            message="知网已打开页面，但尚未取得可确认的全文，已暂停；请核对下载入口和正文。")
+        raise FulltextPause(item["paper_id"], page_url, reason="page_error", message=labels["not_fulltext"])
     raise FulltextPause(item["paper_id"], page_url, reason="page_error",
-                        message=str(result.get("message") or "知网单篇下载未完成，已暂停；请查看原任务页面。"))
+                        message=str(result.get("message") or labels["not_complete"]))
+
+
+def _settle_cnki_result(result, record, job_dir, item):
+    """Backward-compatible CNKI entry point."""
+    return _settle_platform_result(result, record, job_dir, item, source_key="cnki")
 
 
 def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
@@ -909,7 +944,7 @@ def fetch_one(record: dict, out_dir: Path, opts: dict) -> dict:
         return saved
     if record.get("source_key") == "wanfang" and callable(getattr(fetcher, "fetch_wanfang", None)):
         result = fetcher.fetch_wanfang(record, opts)
-        saved = _checkpoint_main(_settle_cnki_result(result, record, job_dir, item), opts)
+        saved = _checkpoint_main(_settle_platform_result(result, record, job_dir, item, source_key="wanfang"), opts)
         _observe_materials(result, opts, paper_id)
         return saved
 
@@ -1609,6 +1644,7 @@ def _run_fulltext(
     only: list[str] | str | None = None,
     retry_unavailable: bool = False,
     restart_cnki: bool = False,
+    restart_wanfang: bool = False,
     skip_unavailable: bool = False,
     replenish_materials: bool = False,
     defer_access: bool = False,
@@ -1975,7 +2011,8 @@ def _run_fulltext(
     browser_ready = False
     catalog = ReuseCatalog(job_dir, targets, load_targets)
     opts = {"fetcher": fetcher, "per_paper_timeout_sec": options["per_paper_timeout_sec"],
-            "cnki_restart": restart_cnki, "replenish_materials": replenish_materials}
+            "cnki_restart": restart_cnki, "wanfang_restart": restart_wanfang,
+            "replenish_materials": replenish_materials}
 
     def ensure_browser():
         nonlocal browser_ready
@@ -2060,7 +2097,7 @@ def _run_fulltext(
             def inspect_materials_safely():
                 if not collector.main_pdf_preflight_only and (updated.get("materials_completeness") or {}).get("status") == "complete":
                     return
-                attention = collector.inspect_existing(paper_opts)
+                attention = collector.inspect_existing({**paper_opts, 'material_timeout_sec': MATERIAL_INSPECT_SECONDS})
                 if not attention:
                     return
                 if replenish_materials or (screening_batch and attention.get("reason") in {
@@ -2093,7 +2130,7 @@ def _run_fulltext(
                         raise FulltextPause(item["paper_id"], reason="page_error", message=str(ready.get("message") or "PDF检查浏览器尚未就绪。"))
                 if replenish_materials:
                     paper_opts["main_pdf_first"] = True
-                    attention = collector.inspect_existing(paper_opts)
+                    attention = collector.inspect_existing({**paper_opts, 'material_timeout_sec': MATERIAL_INSPECT_SECONDS})
                     if attention:
                         raise FulltextPause(item["paper_id"], reason=str(attention.get("reason") or "material_download"),
                                             message=str(attention.get("message") or "材料补齐需要人工处理，原页面已保留。"))
@@ -2278,10 +2315,10 @@ def _verify_material_replenishment(config, job_dir):
         materials.verify_saved(target)
 
 
-def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, skip_unavailable=False, replenish_materials=False, defer_access=False, retry_deferred=False, first_paper_id=None, retry_skipped=False, fetcher=None, screening_batch=False):
+def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailable=False, restart_cnki=False, restart_wanfang=False, skip_unavailable=False, replenish_materials=False, defer_access=False, retry_deferred=False, first_paper_id=None, retry_skipped=False, fetcher=None, screening_batch=False):
     job_dir = Path(job_dir)
     if screening_batch and (only is None or not config.get("screeningPolicy") or replenish_materials
-            or restart_cnki or retry_unavailable or skip_unavailable or limit is not None):
+            or restart_cnki or restart_wanfang or retry_unavailable or skip_unavailable or limit is not None):
         emit("error", stage="screening", message="逐批全文获取须指定已筛选文献，不能混用材料补齐、跳过访问问题、单篇重试或临时限量。")
         return 1
     screened = None
@@ -2306,7 +2343,7 @@ def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailab
         return 1
     if replenish_materials:
         try:
-            if not resume or only is not None or limit is not None or retry_unavailable or restart_cnki or skip_unavailable:
+            if not resume or only is not None or limit is not None or retry_unavailable or restart_cnki or restart_wanfang or skip_unavailable:
                 raise ValueError("材料补齐须使用 --resume，不能与单篇、限量、跳过、普通重试或知网重新定位混用")
             _verify_material_replenishment(config, job_dir)
         except MaterialsError as error:
@@ -2324,6 +2361,18 @@ def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailab
             prior = _load_previous_items(job_dir / "fulltext" / "status.json").get(ids[0])
             if len(targets) != 1 or targets[0].get("source_key") != "cnki" or not prior or prior.get("status") not in {"pending", "needs_attention", "unavailable", "abstract_only"}:
                 raise ValueError("只能重新定位当前尚未获取全文的知网单篇，已有全文不重复下载")
+        except (ValueError, OSError) as error:
+            emit("error", stage="fulltext", message=f"全文获取失败：{error}")
+            return 1
+    if restart_wanfang:
+        try:
+            ids = _parse_only(only)
+            if not resume or not retry_unavailable or limit != 1 or not ids or len(ids) != 1:
+                raise ValueError("重新定位仅适用于明确选择的一篇万方文献，须同时使用 --resume --only <id> --retry-unavailable --limit 1")
+            targets = [target for target in load_targets(job_dir, config) if target["paper_id"] == ids[0]]
+            prior = _load_previous_items(job_dir / "fulltext" / "status.json").get(ids[0])
+            if len(targets) != 1 or targets[0].get("source_key") != "wanfang" or not prior or prior.get("status") not in {"pending", "needs_attention", "unavailable", "abstract_only"}:
+                raise ValueError("只能重新定位当前尚未获取全文的万方单篇，已有全文不重复下载")
         except (ValueError, OSError) as error:
             emit("error", stage="fulltext", message=f"全文获取失败：{error}")
             return 1
@@ -2346,6 +2395,7 @@ def run(config, job_dir, *, resume=False, limit=None, only=None, retry_unavailab
     try:
         return _run_fulltext(config, job_dir, resume=resume, limit=limit, only=only,
                              retry_unavailable=retry_unavailable, restart_cnki=restart_cnki,
+                             restart_wanfang=restart_wanfang,
                              skip_unavailable=skip_unavailable, replenish_materials=replenish_materials,
                              defer_access=defer_access, retry_deferred=retry_deferred,
                              first_paper_id=first_paper_id, retry_skipped=retry_skipped, fetcher=actual,
@@ -2372,6 +2422,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--first-paper", dest="first_paper_id", metavar="PAPER_ID", help="材料补齐时优先处理此篇，不改变冻结候选顺序，须 --defer-access")
     parser.add_argument("--retry-skipped", action="store_true", help="显式重查旧材料跳过项，保留原记录审计和已存文件，须 --defer-access")
     parser.add_argument("--restart-cnki", action="store_true", help="显式重新定位已选知网单篇，从正常检索页开始一次")
+    parser.add_argument("--restart-wanfang", action="store_true", help="显式重新定位已选万方单篇，从官方详情页开始一次")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review-only", action="store_true", help="仅离线复核缓存，不访问网站")
     mode.add_argument("--open-current", action="store_true", help="只显示任务已绑定的全文页面")
@@ -2383,7 +2434,7 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(config, dict):
             raise ValueError("运行配置无效")
         view_mode = args.review_only or args.open_current or args.open_deferred is not None
-        if args.restart_cnki and view_mode:
+        if (args.restart_cnki or args.restart_wanfang) and view_mode:
             raise ValueError("重新定位不能与离线复核或仅查看原页面同时使用")
         if (args.replenish_materials or args.defer_access or args.retry_deferred or args.first_paper_id is not None or args.retry_skipped) and view_mode:
             raise ValueError("材料补齐不能与离线复核或仅查看原页面同时使用")
@@ -2413,6 +2464,7 @@ def main(argv: list[str] | None = None) -> int:
             screening_batch=args.screening_batch,
             retry_unavailable=args.retry_unavailable,
             restart_cnki=args.restart_cnki,
+            restart_wanfang=args.restart_wanfang,
             skip_unavailable=args.skip_unavailable,
             replenish_materials=args.replenish_materials,
             defer_access=args.defer_access,

@@ -1,0 +1,6 @@
+
+> flow-agent-web@1.0.0 start
+> node tools/start-workbench.js
+
+Flow Agent server started: http://localhost:8123
+工作台已就绪：http://localhost:8123/

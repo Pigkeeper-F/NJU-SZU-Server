@@ -320,7 +320,7 @@ async function main() {
     assert.equal(fs.readFileSync(frozen, 'utf8'), frozenBytes, '继续执行不能回写原模式和目标');
 
     // 到末页任务遇到运行问题暂停；保留已经落盘的候选、原 id 和执行边界。
-    const endConfig = { ...config, sources: ['pubmed'], searchMode: 'formal', stopMode: 'end', perSourceLimit: null };
+    const endConfig = { ...config, sources: ['cnki'], searchMode: 'formal', stopMode: 'end', perSourceLimit: null };
     for (const failure of ['event', 'process', 'empty']) {
       let attempts = 0;
       const endOptions = {
@@ -334,7 +334,7 @@ async function main() {
             batches: [{ batch_index: 1 }], records: Array.from({ length: 12 }, (_, index) => ({ candidate_id: `PMID-${index + 1}` })) }));
           fs.writeFileSync(path.join(job.dir, 'candidates.csv'), 'candidate_id\nPMID-1\n');
           if (attempts > 1) emit({ type: 'result', count: 12, files: ['candidates.json', 'candidates.csv'], message: '已核对真实末页' });
-          else if (failure === 'event') emit({ type: 'error', source: 'pubmed', message: '网络暂时不可用', count: 12, files: ['candidates.csv'] });
+          else if (failure === 'event') emit({ type: 'error', source: 'cnki', message: '网络暂时不可用', count: 12, files: ['candidates.csv'] });
           else if (failure === 'process') throw new Error('fixture process failed');
         }
       };
@@ -349,7 +349,7 @@ async function main() {
       assert.equal(paused.counters.candidates, 12);
       assert.ok(paused.files.includes('candidates.csv'));
       assert.match(paused.message, /尚未确认末页.*检查并继续/);
-      if (failure === 'event') assert.deepEqual(paused.attention, { source: 'pubmed', reason: 'results_unrecognized' });
+      if (failure === 'event') assert.deepEqual(paused.attention, { source: 'cnki', reason: 'results_unrecognized' });
       else assert.equal(paused.attention, null, '环境或通用进程问题不能伪造等待数据库登录');
       const frozen = fs.readFileSync(endConnector.download(started.id, 'run_config.json'), 'utf8');
       endConnector = new LiteratureConnector(root, endOptions);

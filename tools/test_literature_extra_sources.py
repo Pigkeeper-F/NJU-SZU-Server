@@ -414,7 +414,7 @@ class SourceNavigationTests(unittest.TestCase):
         self.assertTrue(adapter.navigate(page, "scopus", QUERY))
         self.assertEqual(page.filled, QUERY)
         self.assertEqual(page.clicked, 1)
-        self.assertEqual(page.visited, ["https://www.scopus.com/pages/home?display=basic#basic"])
+        self.assertEqual(page.visited, [adapter.SOURCE_INFO["scopus"][1]])
 
     def test_current_scopus_document_mode_does_not_confuse_selected_history_tab(self):
         class DOMPage:

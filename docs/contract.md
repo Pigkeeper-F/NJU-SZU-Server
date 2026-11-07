@@ -1609,9 +1609,13 @@ node tools/check-contract.js                  # ALL_CHECKS_PASS
 - PDF 完整性按**文件**判定：`pdf_magic` + `%%EOF` + 传输完成 + ≥50KB；
   `completeness.text_extractable` 单独记录文本能否抽取（扫描版仍算完整 PDF，提取需 OCR）。
 - **万方原生全文**：`tools/literature_wanfang_fulltext.py` 只导航官方详情页
-  （`d.wanfangdata.com.cn/periodical|thesis|conference/...`），核对题名/DOI 后点击唯一可见的
-  PDF/下载控件；捕获 Download、CDP 原生下载或 PDF 响应。登录/付费/机构权限文本返回
-  `access_required`，CAJ-only 不伪装成 PDF。真实站点仍需有权限样本验证。
+  （`d.wanfangdata.com.cn/periodical|thesis|conference/...`），核对题名/DOI 并连续两次读取一致后
+  点击唯一可见的 PDF/下载控件；购买/付费/订阅控件不进入候选；点击前写入 `wanfang_flow`，
+  全生命周期最多两次点击，中断后不得静默重复点击（须显式 `--restart-wanfang`）；
+  下载事件与 PDF 响应必须归属本任务页面。捕获 Download、CDP 原生下载或 PDF 响应。
+  登录/付费/机构权限文本返回 `access_required`，CAJ-only 不伪装成 PDF。
+  落盘证据标注 `wanfang_normal_navigation` 并保留 `acquisition_method`。
+  真实站点仍需有权限样本验证。
 - **CDP 原生下载兜底**：研究者浏览器通过 CDP 附着时，Chrome 可能直接保存文件而不发
   Playwright `Download` 事件。任务页（及其已核对弹窗）设置 page-scoped
   `Page.setDownloadBehavior` 到 `fulltext/.downloads/cdp/`；点击后除事件/PDF 响应外，

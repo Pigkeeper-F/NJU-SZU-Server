@@ -64,8 +64,9 @@
     {
       "key": "pubmed",
       "label": "PubMed",
-      "state": "executable",
+      "state": "registered",
       "access": "api",
+      "reason": "按五库口径不再作为检索来源；条目保留仅供全文解析与历史任务识别",
       "adapter": {
         "kind": "public-api",
         "script": "tools/literature_pubmed.py"
@@ -81,8 +82,9 @@
     {
       "key": "pmc",
       "label": "PMC",
-      "state": "executable",
+      "state": "registered",
       "access": "api",
+      "reason": "按五库口径不再作为检索来源；条目保留仅供全文解析与历史任务识别",
       "adapter": {
         "kind": "open-api",
         "module": "pmc",
@@ -100,8 +102,9 @@
     {
       "key": "openalex",
       "label": "OpenAlex",
-      "state": "executable",
+      "state": "registered",
       "access": "api",
+      "reason": "按五库口径不再作为检索来源；条目保留仅供全文解析与历史任务识别",
       "adapter": {
         "kind": "open-api",
         "module": "openalex",
@@ -119,8 +122,9 @@
     {
       "key": "semantic-scholar",
       "label": "Semantic Scholar",
-      "state": "executable",
+      "state": "registered",
       "access": "api",
+      "reason": "按五库口径不再作为检索来源；条目保留仅供全文解析与历史任务识别",
       "adapter": {
         "kind": "open-api",
         "module": "semantic-scholar",
@@ -137,8 +141,9 @@
     {
       "key": "europe-pmc",
       "label": "Europe PMC",
-      "state": "executable",
+      "state": "registered",
       "access": "api",
+      "reason": "按五库口径不再作为检索来源；条目保留仅供全文解析与历史任务识别",
       "adapter": {
         "kind": "open-api",
         "module": "europe-pmc",

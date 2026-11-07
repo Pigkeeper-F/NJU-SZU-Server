@@ -413,7 +413,12 @@ class SourcesRegistryTest(unittest.TestCase):
         for key in ("google-scholar", "cnki", "wanfang", "web-of-science", "scopus", "pubmed",
                     "pmc", "openalex", "europe-pmc", "semantic-scholar"):
             self.assertIn(key, keys, key + " 应已登记")
-        self.assertEqual(sources.executable_keys(), keys, "全部登记来源当前均可执行")
+        self.assertEqual(set(sources.executable_keys()),
+                         {"google-scholar", "cnki", "wanfang", "web-of-science", "scopus"},
+                         "执行链只剩五库")
+        for key in ("pubmed", "pmc", "openalex", "europe-pmc", "semantic-scholar"):
+            self.assertIsNotNone(sources.get_source(key), key + " 条目保留（供全文解析与历史识别）")
+            self.assertFalse(sources.is_executable(key), key + " 不再作为检索来源")
         for key in sources.executable_keys():
             self.assertTrue(sources.id_prefix_of(key), key + " 应有 id 前缀")
         for source in sources.list_sources():
@@ -424,7 +429,7 @@ class SourcesRegistryTest(unittest.TestCase):
         self.assertTrue(sources.is_executable("web-of-science"))
         self.assertTrue(sources.is_executable("wanfang"))
         self.assertTrue(sources.is_executable("scopus"))
-        self.assertTrue(sources.is_executable("pubmed"))
+        self.assertFalse(sources.is_executable("pubmed"))
         google = sources.get_source("google-scholar")
         self.assertEqual(google["state"], "executable")
         self.assertEqual(google["adapter"]["kind"], "soc-script")
@@ -442,9 +447,11 @@ class SourcesRegistryTest(unittest.TestCase):
 
         literature_search.validate_config({"query": "q", "limit": 10, "sources": ["google-scholar"]})
         literature_search.validate_config({"query": "q", "limit": 10, "sources": ["google-scholar", "cnki", "web-of-science"]})
-        literature_search.validate_config({"query": "q", "limit": 10, "sources": sources.all_keys()})
-        for source in sources.all_keys():
+        literature_search.validate_config({"query": "q", "limit": 10, "sources": sources.executable_keys()})
+        for source in sources.executable_keys():
             literature_search.validate_config({"query": "q", "limit": 10, "sources": [source]})
+        with self.assertRaisesRegex(ValueError, "尚未接通以下检索来源"):
+            literature_search.validate_config({"query": "q", "limit": 10, "sources": ["pubmed"]})
         with self.assertRaisesRegex(ValueError, "运行配置缺少检索式或包含未接通来源"):
             literature_search.validate_config({"query": "q", "limit": 10, "sources": ["arxiv"]})
         with self.assertRaisesRegex(ValueError, "运行配置缺少检索式或包含未接通来源"):

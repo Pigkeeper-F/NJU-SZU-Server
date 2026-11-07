@@ -746,7 +746,7 @@ class BrowserAdapterTests(unittest.TestCase):
         empty = snapshot(resultContainer=True, visible_result_count=50, loaded_title_count=0)
         page = self.wos_summary(empty, page_number=2)
         original, binding = page.url, (self.job / "browser-tabs.json").read_bytes()
-        with patch.object(adapter.time, "monotonic", side_effect=[0, 16]), \
+        with patch.object(adapter.time, "monotonic", side_effect=[0, 46]), \
                 patch.object(adapter, "_navigate_search", side_effect=AssertionError("preserve summary")), \
                 patch.object(adapter, "_submit_wos", side_effect=AssertionError("preserve summary")), \
                 patch.object(adapter, "_advance_page", side_effect=AssertionError("empty page never advances")):
@@ -812,7 +812,7 @@ class BrowserAdapterTests(unittest.TestCase):
     def test_wos_formal_partial_titles_timeout_returns_no_partial_page(self):
         partial = snapshot(results=[ROW], resultContainer=True, visible_result_count=2, loaded_title_count=1)
         self.wos_summary(partial)
-        with patch.object(adapter.time, "monotonic", side_effect=[0, 16]):
+        with patch.object(adapter.time, "monotonic", side_effect=[0, 46]):
             result = self.call("web-of-science", resume=True, full_page=True)
         self.assertEqual(result["message"], adapter._WOS_LOADING_MESSAGE)
         self.assertEqual(result["results"], [])

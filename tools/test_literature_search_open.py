@@ -49,9 +49,10 @@ def section(title: str) -> None:
 
 # ---------------------------------------------------------------- S1 注册表
 section("S1 来源注册表")
-for key in ("google-scholar", "pubmed", "pmc", "openalex", "europe-pmc"):
+# 开放 API 源已按五库口径退出检索（registered）；解析器代码仍保留并可单测。
+for key in ("pubmed", "pmc", "openalex", "europe-pmc"):
     ok(_sources.is_known(key), "已登记：" + key)
-    ok(_sources.is_executable(key), "可执行：" + key)
+    ok(not _sources.is_executable(key), "不进入执行链：" + key)
     ok(bool(_sources.label_of(key)), "有中文名：" + key)
     ok(bool(_sources.id_prefix_of(key)), "有 id 前缀：" + key)
 
@@ -61,7 +62,8 @@ for key in ("cnki", "wanfang", "web-of-science", "scopus"):
     ok(_sources.access_of(key) == "browser", "接入方式为浏览器：" + key)
     ok(bool(_sources.label_of(key)), "有显示名：" + key)
 
-ok(set(_sources.executable_keys()) == set(_sources.all_keys()), "全部登记来源均可执行")
+ok(set(_sources.executable_keys()) == {"google-scholar", "cnki", "wanfang", "web-of-science", "scopus"},
+   "执行链只剩五库")
 
 
 # ---------------------------------------------------------------- S2 请求构造
@@ -265,13 +267,13 @@ try:
         out = io.StringIO()
         cfg = {"topic": "t", "query": "q", "sources": ["openalex"], "limit": 10,
                "searchMode": "formal", "stopMode": "end", "perSourceLimit": None}
-        with redirect_stdout(out):
-            code = _search.run(cfg, Path(temp))
-        events = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
-        ok(code == 0 and events and events[-1]["type"] == "result", "开放 API 源也能正式检索到末页")
-        report = json.loads((Path(temp) / "candidates.json").read_text(encoding="utf-8"))
-        ok(report["count"] == 10 and report["source_status"]["openalex"]["stop_reason"] == "exhausted",
-           "分页结果落盘并如实标记末页")
+        try:
+            with redirect_stdout(out):
+                _search.run(cfg, Path(temp))
+            ok(False, "退役来源不应进入正式检索")
+        except ValueError as error:
+            ok("尚未接通以下检索来源" in str(error) and "openalex" in str(error),
+               "退役来源在调度入口被明确拒绝")
 finally:
     _open.run = original
 

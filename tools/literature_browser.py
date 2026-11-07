@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import os
 from contextlib import contextmanager
 from pathlib import Path
 import re
@@ -27,10 +28,15 @@ from literature_source_access import ACCESS_STATE_JS as _ACCESS_STATE_JS
 
 ROOT = Path(__file__).resolve().parents[1]
 SOC_SCRIPTS = ROOT / "SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/scripts"
+# SZU's off-campus channel is the verified entitlement route (2026-11-06).
+# Other institutions can override this without touching code.
+WOS_SEARCH_URL = os.environ.get(
+    "LITERATURE_WOS_SEARCH",
+    "https://www-webofscience-com.accproxy.lib.szu.edu.cn/wos/woscc/basic-search")
 SOURCES = {
     "google-scholar": ("Google Scholar", "https://scholar.google.com/scholar"),
     "cnki": ("中国知网", "https://kns.cnki.net/kns8s/defaultresult/index"),
-    "web-of-science": ("Web of Science 核心合集", "https://www.webofscience.com/wos/woscc/basic-search"),
+    "web-of-science": ("Web of Science 核心合集", WOS_SEARCH_URL),
     **extra_sources.SOURCE_INFO,
 }
 _AUTH_KEYS = re.compile(r"token|ticket|session|password|passwd|authorization|saml|signature|auth|^sid$|^code$|^state$|^key$|^v$", re.I)
@@ -469,7 +475,15 @@ def _auth_reason(page, snapshot):
         auth_url = True
         legacy_access = clarivate_auth = False
     # A navigation bar 'Sign in' is not a mandatory login requirement.
-    if auth_url or clarivate_auth or snapshot.get("password") or (snapshot.get("loginPrompt") and not snapshot.get("results")):
+    if auth_url or clarivate_auth or snapshot.get("password"):
+        return "login"
+    if snapshot.get("loginPrompt") and not snapshot.get("results"):
+        # WoS says "Sign in to access ..." for personalization even when the
+        # institutional session is entitled; a ready search form without an
+        # explicit access block is not a login wall.
+        if (_wos_form_ready(page) and not snapshot.get("accessRequired")
+                and not snapshot.get("accessBlocked")):
+            return None
         return "login"
     if legacy_access and not snapshot.get("results"):
         return "access_required"
@@ -492,6 +506,11 @@ _WOS_PROOF_MESSAGE = "WOS原结果页面的检索式或页码尚不能与本任�
 _WOS_PICKER_SELECTORS = (
     '[data-ta="search-field-dropdown"]', '[data-ta="search-field"]',
     'mat-select[aria-label*="Search field"]', 'button[aria-label*="Search field"]',
+    # The China mirror renders the picker as a button whose data-ta is the
+    # selected field text (e.g. " Topic") and whose aria-label is lowercase
+    # "Select search field Topic".
+    'button[data-ta*="Topic"]', 'button[data-ta*="topic"]',
+    'button[aria-label*="search field" i]', 'button[aria-label*="检索字段"]',
 )
 _WOS_FIELD_SELECTORS = (
     'textarea[data-ta="search-criteria-input"]', 'input[data-ta="search-criteria-input"]',
@@ -552,6 +571,42 @@ def _wos_form_ready(page):
             and _first_visible(page, _WOS_BUTTON_SELECTORS) is not None)
 
 
+def _dismiss_consent(page):
+    """Accept/dismiss a visible cookie-consent overlay so controls are clickable."""
+    selectors = (
+        '#onetrust-accept-btn-handler',
+        'button#onetrust-reject-all-handler',
+        '.onetrust-close-btn-handler',
+        '#onetrust-close-btn-container button',
+        'button:has-text("Accept all")',
+        'button:has-text("接受全部")',
+    )
+    for selector in selectors:
+        control = _first_visible(page, (selector,))
+        if control is not None:
+            try:
+                control.click(timeout=3_000)
+                page.wait_for_timeout(600)
+                return True
+            except Exception:
+                continue
+    # The consent dialog's own dark filter can intercept pointer clicks even on
+    # its accept button; a DOM click performs the same user action.
+    try:
+        clicked = page.evaluate("""() => {
+          const button = document.querySelector('#onetrust-accept-btn-handler');
+          if (!button) return false;
+          button.click();
+          return true;
+        }""")
+        if clicked:
+            page.wait_for_timeout(600)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _submit_wos(page, query):
     # The official Core Collection basic-search URL is fixed.  No fabricated
     # undocumented URL search parameters or copied session identifiers are used.
@@ -560,6 +615,7 @@ def _submit_wos(page, query):
     current = _snapshot(page, "web-of-science", 10)
     if current.get("service_error") or _auth_reason(page, current):
         return False  # An access challenge can appear while the form is loading.
+    _dismiss_consent(page)
     topic = re.fullmatch(r"\s*TS\s*=\s*\((.*)\)\s*", query, re.I | re.S)
     # A persistent profile may remember Author/Title from a previous search.
     # Confirm Topic for every query, including ordinary unprefixed expressions.
@@ -592,6 +648,7 @@ def _submit_wos(page, query):
     button = _first_visible(page, _WOS_BUTTON_SELECTORS)
     if button is None:
         return False
+    _dismiss_consent(page)
     button.click()
     _wait_results(page, "web-of-science")
     return True
@@ -809,12 +866,25 @@ def _row_fingerprint(snapshot):
     return hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+def _accproxy_for_source(host, source):
+    """Accept SZU's off-campus rewrite only for the matching database host."""
+    if not (host == "accproxy.lib.szu.edu.cn" or host.endswith(".accproxy.lib.szu.edu.cn")):
+        return False
+    if source == "scopus":
+        return "scopus" in host
+    if source == "web-of-science":
+        return "webofscience" in host or "clarivate" in host
+    return False
+
+
 def _official_result_page(page, source):
     try:
         parsed = urlsplit(page.url)
         host = (parsed.hostname or "").lower()
         if parsed.scheme not in ("https", "http") or parsed.username or parsed.password:
             return False
+        if _accproxy_for_source(host, source):
+            return True
         if source == "web-of-science" and host == "webofscience.clarivate.cn":
             return True
         domain = {"google-scholar": "scholar.google.com", "cnki": "cnki.net",
@@ -966,7 +1036,7 @@ def _source_records_ready(current, limit, *, full_page=False):
 
 def _wait_source_records(page, source, current, limit, *, full_page=False):
     """Bounded, read-only wait; never retry a request or navigate a login page."""
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + 30
     while True:
         if (_auth_reason(page, current) or current.get("service_error")
                 or (current.get("noResults") and not current.get("resultsLoading"))
@@ -981,7 +1051,7 @@ def _wait_source_records(page, source, current, limit, *, full_page=False):
 
 def _wait_wos_records(page, current, limit, *, full_page=False):
     """Wait on this exact tab without navigating, submitting, or paging it."""
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + 45
     while True:
         if (_auth_reason(page, current) or current.get("service_error")
                 or (current.get("noResults") and not current.get("resultsLoading"))
@@ -1283,6 +1353,17 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                             "position_verified": False, "continuity_verified": False,
                             "message": f"Scholar旧断点缺少可核对页位，正在从首页重新定位至第{page_index + 1}页；已有候选保留并去重，连续性仍需核对。"}
                     submitted = _navigate_search(page, source_key, query, year_from, year_to)
+                if source_key == "web-of-science" and submitted:
+                    # The SPA submits asynchronously: the tab can still show the
+                    # basic-search form for a few seconds before the summary URL
+                    # and rows arrive. Wait for that transition before reading.
+                    deadline = time.monotonic() + 20
+                    while True:
+                        current = _snapshot(page, source_key, read_limit)
+                        if (_wos_result_context(page, current) or current.get("service_error")
+                                or time.monotonic() >= deadline):
+                            break
+                        page.wait_for_timeout(400)
                 current = _snapshot(page, source_key, read_limit)
                 if source_key == "web-of-science" and _wos_result_context(page, current):
                     current = _wait_wos_records(page, current, read_limit, full_page=full_page)

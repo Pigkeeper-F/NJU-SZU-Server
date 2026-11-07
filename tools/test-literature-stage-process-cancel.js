@@ -31,7 +31,7 @@ async function main() {
     fs.mkdirSync(path.join(root, 'tools'));
     fs.writeFileSync(path.join(root, 'tools', 'literature_search.py'), script);
     connector = new LiteratureConnector(root, { prepare: async () => python });
-    const started = connector.start({ topic: 'isolated cancel', query: 'fixture', sources: ['pubmed'], limit: 10 });
+    const started = connector.start({ topic: 'isolated cancel', query: 'fixture', sources: ['cnki'], limit: 10 });
     const live = connector.jobs.get(started.id), processFile = path.join(live.dir, 'actual-process.json');
     const deadline = Date.now() + 10000;
     while (!fs.existsSync(processFile) && Date.now() < deadline) await sleep(20);
@@ -60,7 +60,7 @@ async function main() {
       stopped.cancel(args[2].id);
       return pending;
     };
-    const cancelledBeforeSpawn = stopped.start({ topic: 'cancel before stage', query: 'fixture', sources: ['pubmed'], limit: 10 });
+    const cancelledBeforeSpawn = stopped.start({ topic: 'cancel before stage', query: 'fixture', sources: ['cnki'], limit: 10 });
     await sleep(100);
     const cancelledJob = stopped.jobs.get(cancelledBeforeSpawn.id);
     assert.equal(cancelledJob.status, 'cancelled');

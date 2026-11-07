@@ -1115,6 +1115,12 @@ body dialog.literature-help-dialog details > summary:focus-visible { border-radi
 body .literature-connector .literature-task-selector { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin: 12px 0 22px; }
 body .literature-connector .literature-task-selector > label { display: grid; flex: 1 1 420px; gap: 9px; min-width: 0; max-width: 760px; }
 body .literature-connector .literature-task-selector select { width: 100%; min-width: 0; }
+body .literature-connector .literature-access-panel { flex-basis: 100%; display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--border, #dfe5e1); border-radius: 9px; background: #fff; }
+body .literature-connector .literature-access-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+body .literature-connector .literature-access-panel p { margin: 0; }
+body .msg-list .chat-access-panel { display: grid; gap: 8px; margin: 6px 0 12px; padding: 10px 12px; border: 1px solid var(--border, #dfe5e1); border-radius: 9px; background: #fff; }
+body .msg-list .chat-access-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+body .msg-list .chat-access-panel p { margin: 0; font-size: 13px; color: var(--text, #333); }
 body .literature-connector .literature-reader-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
 body .literature-connector .literature-reader-controls button { min-width: 48px; padding-inline: 12px; }
 body .literature-connector .literature-reader-controls output { min-width: 3.2em; text-align: center; font-size: var(--literature-reader-size, 20px); font-variant-numeric: tabular-nums; }

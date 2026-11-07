@@ -8,7 +8,7 @@ const { LiteratureConnector, STAGES, __internals } = require('./literature-conne
 
 const ID = '12345678-1234-4234-8234-123456789abc';
 const SOURCE = 'web-of-science';
-const sources = ['pubmed', 'scopus', 'wanfang', SOURCE, 'google-scholar', 'cnki'];
+const sources = ['scopus', 'wanfang', SOURCE, 'google-scholar', 'cnki'];
 const config = { version: 2, topic: 'fixture', query: 'broiler "heat stress"', sources,
   sourceQueries: { [SOURCE]: 'TS=(broiler AND "heat stress")' }, limit: 10, searchMode: 'test',
   stopMode: 'count', perSourceLimit: 10 };

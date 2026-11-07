@@ -21,7 +21,8 @@ import re
 import tempfile
 import time
 import unicodedata
-from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
+import urllib.request
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 import literature_browser
@@ -480,6 +481,47 @@ def _material_identity(snapshot, record):
     # differently. Require a long containment match, not a loose token overlap.
     shorter, longer = sorted((wanted_title, actual_title), key=len)
     return len(shorter) >= 12 and shorter in longer and len(shorter) / len(longer) >= 0.8
+
+
+def _normalized_title(value):
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").lower())
+
+
+def _crossref_doi(record, timeout=15):
+    """Resolve a DOI from title/year through Crossref; ambiguous means empty."""
+    title = str((record or {}).get("title") or "").strip()
+    if len(title) < 8:
+        return ""
+    query = urlencode({"query.bibliographic": title, "rows": 5,
+                       "select": "DOI,title,issued"})
+    request = urllib.request.Request(
+        "https://api.crossref.org/works?" + query,
+        headers={"User-Agent": "literature-workbench/1.0", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except Exception:
+        return ""
+    items = ((payload or {}).get("message") or {}).get("items") or []
+    target = _normalized_title(title)
+    year_match = re.search(r"(?:19|20)\d{2}", str((record or {}).get("year") or ""))
+    year = year_match.group(0) if year_match else ""
+    matches = []
+    for item in items:
+        titles = item.get("title") or []
+        candidate = _normalized_title(titles[0] if titles else "")
+        if not candidate:
+            continue
+        if candidate == target or (len(candidate) > 12 and (candidate in target or target in candidate)):
+            issued = ((item.get("issued") or {}).get("date-parts") or [[None]])[0]
+            item_year = str(issued[0]) if issued and issued[0] else ""
+            matches.append((bool(year) and item_year == year, str(item.get("DOI") or "")))
+    if not matches:
+        return ""
+    matches.sort(key=lambda item: item[0], reverse=True)
+    if len(matches) > 1 and matches[0][0] == matches[1][0]:
+        return ""  # Two equally plausible titles: never guess a DOI.
+    return matches[0][1]
 
 
 def _material_key(record):
@@ -1342,6 +1384,11 @@ class FulltextBrowserFetcher:
                 if not blob.startswith(b"%PDF") or len(blob) < MIN_PDF_BYTES:
                     self._pdf_diagnostic("cdp_download_invalid_body", bytes=len(blob))
                     continue
+                # CNKI's WebFastLoad appends a small <FileProperty> block after
+                # %%EOF, so accept the marker anywhere in the last 2 KiB.
+                if b"%%EOF" not in blob[-2048:]:
+                    self._pdf_diagnostic("cdp_download_incomplete_body", bytes=len(blob))
+                    continue
                 if out_path is not None:
                     _save_pdf(out_path, blob)
                 self._pdf_diagnostic("cdp_download_accepted", bytes=len(blob), source="page_download_directory")
@@ -2025,7 +2072,12 @@ class FulltextBrowserFetcher:
             result = self._attention(reason, url or getattr(parent, "url", ""), snapshot=snapshot)
             if message:
                 result["message"] = message
-                self._blocked = dict(result)
+                # 单篇材料页错误只影响这一篇；登录/验证/权限/限流才是站点级阻断，
+                # 否则下一篇会在打开网页前被直接拒绝。
+                if str(reason) in {"login", "verification", "access_required", "rate_limited"}:
+                    self._blocked = dict(result)
+                else:
+                    self._blocked = None
             return result
 
         try:
@@ -2284,6 +2336,7 @@ class FulltextBrowserFetcher:
             timeout = max(5000, min(MAX_PAGE_TIMEOUT_MS, int(opts.get("per_paper_timeout_sec") or 120) * 1000))
             pending = self._binding.get("pending_url_hash") == _url_hash(url)
             downloads = []
+            cdp_before = self._cdp_download_snapshot()
             def capture_download(download):
                 downloads.append(download)
             page.on("download", capture_download)
@@ -2316,6 +2369,13 @@ class FulltextBrowserFetcher:
                         self._clear_pending()
                         return {"status": "saved" if out_path else "pdf_page", "url": literature_browser.safe_url(page.url) or safe,
                                 "bytes": blob, "size": len(blob)}
+                # A CDP-attached Chrome can emit a zero-byte Download object while
+                # the real file lands in the page-scoped directory.
+                blob = self._take_cdp_download(cdp_before, out_path)
+                if blob is not None:
+                    self._clear_pending()
+                    return {"status": "saved" if out_path else "pdf_page", "url": literature_browser.safe_url(page.url) or safe,
+                            "bytes": blob, "size": len(blob), "acquisition_method": "cdp_page_download"}
                 if nav_error is not None and not any(token in (type(nav_error).__name__ + " " + str(nav_error)).lower()
                                                      for token in ("timeout", "err_aborted", "download is starting")):
                     return self._attention("page_error", safe, observed_url=page.url)
@@ -2362,6 +2422,11 @@ class FulltextBrowserFetcher:
                         self._clear_pending()
                         return {"status": "saved" if out_path else "pdf_page", "url": literature_browser.safe_url(page.url) or safe,
                                 "bytes": blob, "size": len(blob)}
+                blob = self._take_cdp_download(cdp_before, out_path)
+                if blob is not None:
+                    self._clear_pending()
+                    return {"status": "saved" if out_path else "pdf_page", "url": literature_browser.safe_url(page.url) or safe,
+                            "bytes": blob, "size": len(blob), "acquisition_method": "cdp_page_download"}
                 # Legacy adapters keep their one-off body-render retry.
                 if "ready_state" not in snapshot:
                     snapshot = _settle_article_snapshot(page, snapshot)
@@ -2392,7 +2457,148 @@ class FulltextBrowserFetcher:
         except Exception:
             return {"status": "fetch_error", "error": "全文浏览器连接或页面读取失败；请检查原任务页面。", "url": safe}
 
+    def _wos_export_doi(self, page):
+        """Export one WoS full record as plain text and read its DI field."""
+        downloads = []
+
+        def capture(download):
+            downloads.append(download)
+
+        def click_text(labels, last=False):
+            for label in labels:
+                try:
+                    locator = page.get_by_text(label, exact=True)
+                    if locator.count():
+                        (locator.last if last else locator.first).click(timeout=5_000)
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        page.on("download", capture)
+        try:
+            opened = page.evaluate("""() => {
+              const button = Array.from(document.querySelectorAll('button'))
+                .find(item => item.offsetWidth && /^(?:Export|导出)/.test((item.innerText || '').trim()));
+              if (!button) return false;
+              button.click();
+              return true;
+            }""")
+            if not opened:
+                return ""
+            page.wait_for_timeout(900)
+            if not click_text(("Plain text file", "纯文本文件")):
+                return ""
+            page.wait_for_timeout(800)
+            if not click_text(("Author, Title, Source", "作者、标题、来源", "作者, 标题, 来源")):
+                return ""
+            page.wait_for_timeout(500)
+            if not click_text(("Full Record", "完整记录")):
+                return ""
+            page.wait_for_timeout(500)
+            if not click_text(("Export", "导出"), last=True):
+                return ""
+            deadline = time.monotonic() + 20
+            while not downloads and time.monotonic() < deadline:
+                page.wait_for_timeout(300)
+            if not downloads:
+                self._pdf_diagnostic("wos_export_no_download")
+                return ""
+            path = downloads[0].path()
+            if not path:
+                return ""
+            text = Path(path).read_bytes().decode("utf-8", "replace")
+            match = re.search(r"(?m)^DI\s+(10\.\S+)", text)
+            if not match:
+                match = re.search(r"10\.\d{4,9}/\S+", text)
+            return match.group(1) if match and match.lastindex else (match.group(0) if match else "")
+        except Exception as error:
+            self._pdf_diagnostic("wos_export_failed", error_class=type(error).__name__)
+            return ""
+        finally:
+            try:
+                page.remove_listener("download", capture)
+            except Exception:
+                pass
+
+    def _resolve_index_record(self, url, record=None):
+        """Turn a WoS/Scopus index record into the publisher's proxied URL.
+
+        The index record is a SPA that never yields a fulltext body; its DOI is
+        the stable bridge.  DOI resolution is public; the publisher host is then
+        rewritten to SZU's accproxy host so the institution entitlement applies.
+        """
+        try:
+            host = (urlsplit(url).hostname or "").lower()
+        except ValueError:
+            return None
+        if "accproxy.lib.szu.edu.cn" not in host:
+            return None
+        if not any(key in host for key in ("scopus", "webofscience", "clarivate")):
+            return None
+        page = self._get_page()
+        try:
+            page.goto(url, wait_until="commit", timeout=45_000)
+            page.wait_for_timeout(3_500)
+            doi = page.evaluate(r"""() => {
+              const meta = document.querySelector('meta[name="citation_doi"],meta[name="dc.identifier"],meta[name="DC.Identifier"]');
+              const text = (document.body.innerText || '');
+              const match = text.match(/10\.[0-9]{4,9}\/[-._;()/:A-Za-z0-9]+/);
+              return ((meta && meta.content) || (match ? match[0] : '') || '').trim();
+            }""")
+            doi = str(doi or "").strip().rstrip(".,;)")
+            if not doi.startswith("10.") and any(key in host for key in ("webofscience", "clarivate")):
+                # WoS full-record pages hide the DOI; its official plain-text
+                # export carries the DI field.
+                doi = self._wos_export_doi(page)
+            if not doi.startswith("10."):
+                # Last resort: resolve title/year through Crossref.
+                doi = _crossref_doi(record)
+            if not doi.startswith("10."):
+                self._pdf_diagnostic("index_record_doi_missing", host=host)
+                return None
+            page.goto("https://doi.org/" + doi, wait_until="commit", timeout=45_000)
+            page.wait_for_timeout(2_000)
+            final = page.url
+            parsed = urlsplit(final)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                return None
+            if "accproxy.lib.szu.edu.cn" in parsed.hostname.lower():
+                return final
+            proxied = parsed.hostname.lower().replace(".", "-") + ".accproxy.lib.szu.edu.cn"
+            target = urlunsplit((parsed.scheme, proxied, parsed.path, parsed.query, parsed.fragment))
+            self._pdf_diagnostic("index_record_doi_resolved", doi=doi, host=parsed.hostname)
+            # Prefer the publisher's declared PDF so the generic fetcher gets a
+            # file response instead of an SPA article shell.
+            try:
+                page.goto(target, wait_until="commit", timeout=45_000)
+                page.wait_for_timeout(3_500)
+                pdf = page.evaluate(r"""() => {
+                  const meta = document.querySelector('meta[name="citation_pdf_url"]');
+                  if (meta && meta.content) return meta.content;
+                  const link = Array.from(document.querySelectorAll('a[href]'))
+                    .find(a => /\.pdf(?:$|[?#])/i.test(a.href));
+                  return link ? link.href : '';
+                }""")
+                pdf = str(pdf or "").strip()
+                if pdf.startswith("http"):
+                    parts = urlsplit(pdf)
+                    if parts.hostname and "accproxy.lib.szu.edu.cn" not in parts.hostname.lower():
+                        pdf = urlunsplit((parts.scheme,
+                                          parts.hostname.lower().replace(".", "-") + ".accproxy.lib.szu.edu.cn",
+                                          parts.path, parts.query, parts.fragment))
+                    return pdf
+            except Exception:
+                pass
+            return target
+        except Exception as error:
+            self._pdf_diagnostic("index_record_resolve_failed", error_class=type(error).__name__)
+            return None
+
     def fetch_page(self, url, opts):
+        resolved = self._resolve_index_record(url, opts.get("record"))
+        if resolved:
+            url = resolved
         result = self._visit(url, opts)
         if "material_discovery" not in result:
             result["material_discovery"] = self._material_discoveries.get(_material_key(opts.get("record") or {}),
@@ -2772,6 +2978,11 @@ class FulltextBrowserFetcher:
                     return self._attention("page_error", safe, observed_url=active.url)
                 if downloads:
                     blob = self._read_download(downloads[0], out_path)
+                    if blob is None:
+                        # A CDP-attached Chrome can emit a zero-byte Download
+                        # object while the real file lands in the page-scoped
+                        # download directory; fall back before giving up.
+                        blob = self._take_cdp_download(self._cdp_download_before, out_path)
                     if blob is None:
                         return self._attention("page_not_ready", safe, observed_url=active.url)
                     self._clear_pending()

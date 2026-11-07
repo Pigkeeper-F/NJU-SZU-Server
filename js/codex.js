@@ -567,6 +567,54 @@
     dialog.addEventListener('close', () => { if (literatureNewTaskDialog === dialog) literatureNewTaskDialog = null; dialog.remove(); });
     dialog.showModal(); query.focus();
   }
+  // 账号与权限：任务开始前先把机构登录/会员购买处理好，避免跑到一半撞登录墙。
+  // 平台只打开官方页面，不代填账号、不代付款；2026-11-06 扩到五库 + EZproxy。
+  function literatureAccessPanel(t) {
+    const box = node('div', undefined, 'literature-access-panel');
+    box.append(node('p', '账号与权限（登录一次，后续任务复用）', 'codex-status'));
+    const row = node('div', undefined, 'literature-access-actions');
+    const busy = () => t.busy || t.literatureBusy;
+    const act = async (target, label) => {
+      if (busy()) return;
+      t.literatureAccessStatus = '正在打开' + label + '…'; render();
+      try {
+        const result = await request('/api/literature/access-page', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target }) });
+        t.literatureAccessStatus = '已打开' + (result.label || label) + '；在该页完成登录后点“检查登录状态”。';
+      } catch (error) { t.literatureAccessStatus = '打开失败：' + error.message; }
+      render();
+    };
+    const check = async () => {
+      if (busy()) return;
+      t.literatureAccessStatus = '正在读取登录状态（万方/知网/WoS/Scopus/EZproxy，可能需要一两分钟）…'; render();
+      try {
+        const result = await request('/api/literature/access-status', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'all' }) });
+        const lines = Array.isArray(result.results) && result.results.length
+          ? result.results.map(item => item.label + '：' + (item.message || '未判定'))
+          : [result.message || (result.signedIn ? '已登录' : '未登录')];
+        t.literatureAccessStatus = '当前：' + lines.join('｜');
+      } catch (error) { t.literatureAccessStatus = '状态读取失败：' + error.message; }
+      render();
+    };
+    const add = (label, target) => {
+      const button = node('button', label, 'quiet-button'); button.type = 'button';
+      button.onclick = () => act(target, label); row.append(button);
+    };
+    add('打开机构登录', 'institution');
+    add('知网机构登录', 'cnki');
+    add('Web of Science 登录', 'wos');
+    add('Scopus 登录', 'scopus');
+    add('EZproxy 统一登录', 'ezproxy');
+    add('打开万方会员', 'purchase');
+    const statusBtn = node('button', '检查登录状态', 'quiet-button'); statusBtn.type = 'button';
+    statusBtn.onclick = () => check();
+    row.append(statusBtn);
+    box.append(row, node('p', t.literatureAccessStatus || '当前：未检测', 'codex-status'),
+      node('p', '登录状态保存在平台专用浏览器；普通浏览器不共享。万方勾选“7天免登录”约 7 天，其他库按各自会话有效期，过期需重登。EZproxy 一次登录覆盖已订购资源，但适配器仍需经 EZproxy 地址访问才会带上机构权限。', 'codex-status'));
+    return box;
+  }
+
   function literatureTaskSelector(mod, t) {
     const manager = literatureWorkspaceManager(mod);
     if (!manager) return null;
@@ -590,6 +638,7 @@
       render(); ModuleSpace.render(); void hydrateLiteratureWorkspace(mod);
     };
     label.append(select); box.append(label, add);
+    box.append(literatureAccessPanel(t));
     const trial = node('button', '谷歌学术小范围预试（最多2页，仅候选）', 'quiet-button'); trial.type = 'button';
     trial.disabled = literatureWorkspaceBusy(mod.id);
     trial.onclick = () => openScholarTrial(Store.getState().modules.find(item => item.id === mod.id) || mod); box.append(trial);
@@ -1877,12 +1926,13 @@
   function literatureJobStatusLabel(job) {
     return job.stage === 'prepared' && job.status === 'needs_attention' ? '待开始检索' : (LITERATURE_STATUS_LABELS[job.status] || job.status || '未知');
   }
+  // 检索来源固定为五库。PubMed/PMC/OpenAlex/Europe PMC/Semantic Scholar 已按五库口径
+  // 移出可选列表（注册表标记 registered）；PMC/Europe PMC 仍作为全文与补充材料解析器。
   const LITERATURE_SOURCE_LABELS = { 'google-scholar': 'Google Scholar', 'cnki': '中国知网', 'web-of-science': 'Web of Science 核心合集',
-    'wanfang': '万方', 'scopus': 'Scopus', 'pubmed': 'PubMed',
-    'pmc': 'PMC', 'openalex': 'OpenAlex', 'europe-pmc': 'Europe PMC', 'semantic-scholar': 'Semantic Scholar' };
+    'wanfang': '万方', 'scopus': 'Scopus' };
   // 可使用平台专用浏览器的来源。PubMed 默认走 API，仅在已转官方网页且
   // 实际等待登录/验证时显示浏览器入口；其他开放 API 源不在此列。
-  const LITERATURE_EXECUTABLE_SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
+  const LITERATURE_EXECUTABLE_SOURCES = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus'];
   const LITERATURE_FILE_LABELS = { 'run_config.json': '运行配置（冻结）', 'rule-review-confirmed.json': '已确认配置与逐项核查记录', 'processing-basis.json': '本次处理依据', 'candidates.json': '候选清单 JSON（累计）', 'candidates.csv': '候选清单 CSV（累计）',
     'dedupe/dedupe.json': '去重结果 JSON', 'dedupe/dedupe.csv': '去重结果 CSV', 'fulltext/status.json': '全文获取状态',
     'fulltext/review.json': '全文缓存复核报告', 'fulltext/materials.json': '每篇材料清单 JSON',
@@ -2930,7 +2980,7 @@
     const flowNotes = node('details', undefined, 'literature-deliverable-group');
     flowNotes.append(node('summary', '流程与登录说明（点击展开）'));
     flowNotes.append(node('p', '讨论需求 → 确认设置 → 执行 → 核查结果', 'codex-status'));
-    flowNotes.append(node('p', '候选检索支持 ' + Object.values(LITERATURE_SOURCE_LABELS).join(' / ') + '；开放 API 源免验证码。', 'codex-status'));
+    flowNotes.append(node('p', '候选检索固定为五库：' + Object.values(LITERATURE_SOURCE_LABELS).join(' / ') + '；按研究需要勾选，不是每次都全选。', 'codex-status'));
     flowNotes.append(node('p', '登录流程：需要登录、验证或机构权限时，平台会尝试自动打开本任务的官方页面。请在平台专用检索浏览器操作，它会保存该浏览器的登录状态；普通 Edge/Chrome 的登录不会自动共享。完成后回到本平台点击“检查并继续”，任务才会恢复。', 'codex-status'));
     flowNotes.append(node('p', '全文页面按加载、生成和传输进展等待，确认就绪后取材；长时间没有新进展或达到活动保护上限时，保留尚未就绪的页面，稍后显式重新检查。人工登录与等待不限时。', 'codex-status'));
     if (job?.files?.includes('fulltext/status.json') || job?.resumeStage === 'fulltext') {
@@ -3164,7 +3214,7 @@
         : config.searchMode === 'formal' ? '正式检索：自动翻页，直到各来源数据库当前可访问末页，不按候选数量停止。遇到登录、验证、网站访问限制或其他问题时暂停并保留已有结果；可访问末页不代表主题相关文献已全部获取。'
         : '测试运行：每个来源最多取10条候选，用于检查检索词和流程；不会自动扩大到正式数量。';
       details.append(node('p', quantity, 'codex-status'));
-      const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（按研究需要勾选；开放 API 源免验证）'));
+      const sources = node('div', undefined, 'literature-sources'); sources.append(node('span', '检索来源（按研究需要勾选）'));
       newLiteratureSourceOrder(Object.keys(LITERATURE_SOURCE_LABELS)).forEach(value => {
         const label = LITERATURE_SOURCE_LABELS[value];
         const wrap = node('label', label); const check = node('input'); check.type = 'checkbox'; check.checked = config.sources.includes(value);
@@ -3198,12 +3248,7 @@
           cnki: '例如：肉鸡 热应激 增重',
           wanfang: '例如：肉鸡 高温 生长性能',
           'web-of-science': '例如：(broiler OR broilers) AND ("heat stress" OR "high temperature") AND growth',
-          scopus: '例如：(broiler OR broilers) AND ("heat stress" OR "high temperature") AND growth（Documents：Title Abstract Keywords）',
-          pubmed: '例如：(broiler[Title/Abstract] OR broilers[Title/Abstract]) AND "heat stress"[Title/Abstract]',
-          pmc: '例如：(broiler[Title/Abstract]) AND "heat stress"[Title/Abstract]',
-          openalex: '例如：broiler heat stress growth performance（自然语言关键词）',
-          'europe-pmc': '例如：TITLE_ABS:"heat stress" AND TITLE_ABS:broiler',
-          'semantic-scholar': '例如：broiler heat stress growth performance（自然语言关键词）'
+          scopus: '例如：(broiler OR broilers) AND ("heat stress" OR "high temperature") AND growth（Documents：Title Abstract Keywords）'
         };
         field.placeholder = examples[source] || '';
         field.oninput = () => {
@@ -3223,13 +3268,20 @@
       if (config.sources.some(source => !LITERATURE_SOURCE_LABELS[source])) box.append(node('p', '配置含无法识别的来源，请重新选择本次检索来源。', 'codex-error'));
       if (job && !sameConfig) box.append(node('p', '当前设置与已有任务的冻结配置不同。继续旧任务请从历史任务重新载入；确认新设置并检索会创建新任务，不混用旧结果。', 'codex-status'));
     } else if (!segment) box.append(node('p', '先在本模块对话讨论规则，再点“从对话更新规则并核查”。AI 生成的是候选配置，需你核对后才会执行。', 'codex-status'));
-    if (!job) box.append(node('p', '已接入 Google Scholar、中国知网、万方、Web of Science 核心合集、Scopus 和 PubMed，按研究需要选择来源。PubMed 公开检索通常无需登录；其他来源需要登录、验证或机构权限时暂停，请在官方页面操作后继续。全文提取前需要你确认参数字段含义与单位。', 'codex-status'));
+    if (!job) box.append(node('p', '检索来源固定为 Google Scholar、中国知网、万方、Web of Science 核心合集、Scopus 五库，按研究需要勾选。需要登录、验证或机构权限时会暂停，请在官方页面操作后继续。全文提取前需要你确认参数字段含义与单位。', 'codex-status'));
     if (job) {
       const deliverables = literatureDeliverables(job);
       if (deliverables) box.append(deliverables);
       if (Array.isArray(job.events) && job.events.length > 1) {
-        const details = node('details'); details.append(node('summary', '查看阶段记录'));
-        details.append(node('pre', job.events.map(event => event.message).join('\n')));
+        // 轮询会反复重建面板；展开状态、面板滚动和这段日志自身的滚动都必须跟着
+        // 任务走。日志段落自带 max-height + overflow，重置它才是“下滑弹回顶部”。
+        const details = node('details'); details.open = t.literatureStageOpen === true;
+        details.append(node('summary', '查看阶段记录'));
+        const stageLog = node('pre', job.events.map(event => event.message).join('\n'));
+        stageLog.className = 'literature-stage-log';
+        stageLog.addEventListener('scroll', () => { t.literatureStageScroll = stageLog.scrollTop; });
+        details.append(stageLog);
+        details.addEventListener('toggle', () => { t.literatureStageOpen = details.open; });
         box.append(details);
       }
     }
@@ -3250,6 +3302,11 @@
   async function reply(module, messages) {
     const t = task(module.id);
     if (t.busy) throw new Error('文件上传或 Codex 任务正在进行');
+    // 同步预检：Codex 未连接时立即抛出（chat 层据此自动回落到 API 对话），
+    // 避免先建 job 再在轮询里失败——新用户看到的是 AI 回复而不是登录报错。
+    try { account = await request('/api/codex/status'); }
+    catch (error) { account = { loggedIn: false, error: error.message }; }
+    if (!account.loggedIn) throw new Error('请先在终端执行 codex login，用 ChatGPT 账号登录。');
     const executeRequested = t.executeOnce || t.execute;
     const cleanPlan = module.type === 'clean-data' && executeRequested ? t.preparedCleanPlan : undefined;
     if (module.type === 'clean-data' && executeRequested) {
@@ -4370,7 +4427,17 @@
     const literatureView = mod.type === 'literature-mining';
     const contextId = literatureView ? literatureWorkspaceManager(mod)?.active()?.id || '' : '';
     const scrollKey = literatureView ? [mod.id, contextId, t.literatureJob?.id || saved[mod.id]?.literatureJobId || 'draft'].join(':') : '';
-    const previousScroll = literatureView && panel.literatureScrollKey === scrollKey ? panel.scrollTop : 0;
+    // 轮询期间内容会缩短并夹紧 scrollTop；记住用户最后一次真实的滚动位置，
+    // 重建后按较大值恢复，避免“下滑就弹回顶部”。
+    if (literatureView && !panel.literatureScrollBound) {
+      panel.literatureScrollBound = true;
+      panel.addEventListener('scroll', () => {
+        if (panel.literatureScrollKey) panel.literatureScrollTop = panel.scrollTop;
+      });
+    }
+    const sameScrollContext = literatureView && panel.literatureScrollKey === scrollKey;
+    const previousScroll = sameScrollContext ? Math.max(panel.scrollTop, panel.literatureScrollTop || 0) : 0;
+    if (!sameScrollContext) panel.literatureScrollTop = 0;
     panel.literatureScrollKey = scrollKey;
     if (literatureView) { panel.tabIndex = 0; panel.setAttribute('aria-label', '文献任务滚动区域'); }
     else { panel.removeAttribute('tabindex'); panel.removeAttribute('aria-label'); }
@@ -4407,6 +4474,13 @@
       literaturePanel(mod, t);
       if (t.error) panel.append(node('p', t.error, 'codex-error'));
       panel.scrollTop = previousScroll;
+      panel.literatureScrollTop = previousScroll;
+      const restoreStageLog = () => {
+        const stageLog = panel.querySelector('.literature-stage-log');
+        if (stageLog && t.literatureStageScroll) stageLog.scrollTop = t.literatureStageScroll;
+      };
+      restoreStageLog();
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restoreStageLog);
       return;
     }
     if (t.backend === 'api' && mod.type !== 'download-data') { panel.append(node('p', 'API 模式提供文字指导；文件上传与实际执行需切换本机 Codex。')); return; }

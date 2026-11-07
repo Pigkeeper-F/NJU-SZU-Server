@@ -278,32 +278,30 @@ async function main() {
     await auth.subject.watchLiterature(MODULE, 'original-job');
     assert.equal(auth.count('/api/literature/browser'), 1, 'Auth-related wait opens once: ' + reason);
   }
-  // PubMed normally uses E-utilities, but an API failure can persist the same
-  // source's browser fallback. A genuine verification wait must retain its
-  // manual page and skip-source controls; the other open API sources never
-  // acquire browser controls merely because they need attention.
-  const pubmedFallback = harness();
-  const pubmedJob = job({ config: { ...job().config, sources: ['pubmed'] },
-    attention: { source: 'pubmed', reason: 'verification' }, message: 'PubMed 官方网页需要人工验证' });
-  pubmedFallback.setJob(pubmedJob);
-  await pubmedFallback.subject.watchLiterature(MODULE, pubmedJob.id);
-  assert.equal(pubmedFallback.count('/api/literature/browser'), 1, 'PubMed browser fallback can open its actual verification page');
-  assert.match(pubmedFallback.subject.literatureAttentionMessage(pubmedJob), /平台专用检索浏览器/);
-  pubmedFallback.setJob(pubmedJob);
-  await pubmedFallback.subject.continueLiterature(mod, { deferSource: 'pubmed' });
-  assert.deepEqual(pubmedFallback.posts().find(call => call.url === '/api/literature/advance').body,
-    { id: pubmedJob.id, until: 'discover', deferSource: 'pubmed' }, 'PubMed fallback can be deferred without losing the original task');
-  const pubmedApi = harness();
-  pubmedApi.setJob({ ...pubmedJob, attention: null, stage: 'interrupted', message: 'PubMed API 网络请求暂停' });
-  await pubmedApi.subject.watchLiterature(MODULE, pubmedJob.id);
-  assert.equal(pubmedApi.count('/api/literature/browser'), 0, 'An ordinary PubMed API error does not open a browser');
-  for (const sourceKey of ['pmc', 'openalex', 'europe-pmc', 'semantic-scholar']) {
-    const apiOnly = harness();
-    apiOnly.setJob(job({ config: { ...job().config, sources: [sourceKey] }, attention: { source: sourceKey, reason: 'verification' } }));
-    await apiOnly.subject.watchLiterature(MODULE, 'original-job');
-    assert.equal(apiOnly.count('/api/literature/browser'), 0, 'Open API source cannot auto-open a login window: ' + sourceKey);
-    await apiOnly.subject.continueLiterature(mod, { deferSource: sourceKey });
-    assert.equal(apiOnly.count('/api/literature/advance'), 0, 'Browser source deferral must not be offered for an open API source: ' + sourceKey);
+  // 五库来源需要人工验证时保留原页面与暂缓入口；已退役来源即使历史任务里
+  // 带着 attention，也不应再获得浏览器入口。
+  const cnkiFallback = harness();
+  const cnkiJob = job({ config: { ...job().config, sources: ['cnki'] },
+    attention: { source: 'cnki', reason: 'verification' }, message: '知网官方网页需要人工验证' });
+  cnkiFallback.setJob(cnkiJob);
+  await cnkiFallback.subject.watchLiterature(MODULE, cnkiJob.id);
+  assert.equal(cnkiFallback.count('/api/literature/browser'), 1, '浏览器来源可打开其真实验证页');
+  assert.match(cnkiFallback.subject.literatureAttentionMessage(cnkiJob), /平台专用检索浏览器/);
+  cnkiFallback.setJob(cnkiJob);
+  await cnkiFallback.subject.continueLiterature(mod, { deferSource: 'cnki' });
+  assert.deepEqual(cnkiFallback.posts().find(call => call.url === '/api/literature/advance').body,
+    { id: cnkiJob.id, until: 'discover', deferSource: 'cnki' }, '浏览器来源可暂缓而不丢原任务');
+  const cnkiInterrupted = harness();
+  cnkiInterrupted.setJob({ ...cnkiJob, attention: null, stage: 'interrupted', message: '网络暂停' });
+  await cnkiInterrupted.subject.watchLiterature(MODULE, cnkiJob.id);
+  assert.equal(cnkiInterrupted.count('/api/literature/browser'), 0, '普通中断不会打开浏览器');
+  for (const sourceKey of ['pmc', 'openalex', 'europe-pmc', 'semantic-scholar', 'pubmed']) {
+    const retired = harness();
+    retired.setJob(job({ config: { ...job().config, sources: [sourceKey] }, attention: { source: sourceKey, reason: 'verification' } }));
+    await retired.subject.watchLiterature(MODULE, 'original-job');
+    assert.equal(retired.count('/api/literature/browser'), 0, '退役来源不能再开登录窗口: ' + sourceKey);
+    await retired.subject.continueLiterature(mod, { deferSource: sourceKey });
+    assert.equal(retired.count('/api/literature/advance'), 0, '退役来源不再提供暂缓入口: ' + sourceKey);
   }
   const failedOpen = harness(); failedOpen.setBrowserError(new Error('fixture browser unavailable'));
   await failedOpen.subject.watchLiterature(MODULE, 'original-job');

@@ -1065,6 +1065,28 @@ async function handleLiterature(req, res, url) {
       if (!data || typeof data !== 'object' || Object.keys(data).some(key => key !== 'id')) throw new Error('只需提供当前检索任务标识');
       return sendJson(res, 200, await scholar.openLogin(data.id));
     }
+    // 【账号与权限 · 2026-11-05，2026-11-06 扩五库】任务开始前主动打开官方登录/购买页，
+    // 或读取当前登录身份。只接受白名单目标，不接受任意 URL；不读凭据、不代填、不代付。
+    if (req.method === 'POST' && route === '/api/literature/access-page') {
+      const data = JSON.parse(await readLiteratureBody(req, 1024));
+      if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).length !== 1
+          || !['institution', 'purchase', 'cnki', 'wos', 'scopus', 'ezproxy'].includes(data.target)) {
+        throw new Error('只能打开白名单内的登录或购买页面');
+      }
+      return sendJson(res, 200, await scholar.openAccessPage(data.target));
+    }
+    if (req.method === 'POST' && route === '/api/literature/access-status') {
+      let source = 'wanfang';
+      if (Number(req.headers['content-length'] || 0) > 0) {
+        const data = JSON.parse(await readLiteratureBody(req, 1024));
+        if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).length !== 1
+            || !['wanfang', 'cnki', 'wos', 'scopus', 'ezproxy', 'all'].includes(data.source)) {
+          throw new Error('只能读取白名单内的登录状态');
+        }
+        source = data.source;
+      }
+      return sendJson(res, 200, await scholar.accessStatus(source));
+    }
     if (req.method === 'POST' && route === '/api/literature/material-action-page') {
       const data = JSON.parse(await readLiteratureBody(req, 4 * 1024));
       if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).length !== 2

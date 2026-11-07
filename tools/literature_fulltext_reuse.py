@@ -177,11 +177,16 @@ def _pdf_text_check(blob, expected):
                    identity_method="pdf_text_doi" if doi_matches else "pdf_text_title")
 
 
-def pdf_proof(blob, record, *, cnki_navigation=False):
-    """Evidence recorded only for a newly received complete browser artifact."""
+def pdf_proof(blob, record, *, cnki_navigation=False, identity_method=""):
+    """Evidence recorded only for a newly received complete browser artifact.
+
+    ``identity_method`` names the platform whose normal navigation produced the
+    file, so a Wanfang download is never recorded as a CNKI one.
+    """
     expected = identity(record)
     checked = _pdf_text_check(blob, expected)
-    method = checked.get("identity_method") or ("cnki_normal_navigation" if cnki_navigation else "candidate_entry_unverified")
+    method = (checked.get("identity_method") or identity_method
+              or ("cnki_normal_navigation" if cnki_navigation else "candidate_entry_unverified"))
     return {"version": PROOF_VERSION, "sha256": hashlib.sha256(blob).hexdigest(), "size": len(blob),
             "pdf_magic": blob.startswith(b"%PDF"), "eof_marker": b"%%EOF" in blob[-2048:],
             "transfer_completed": True, "identity": expected, "identity_method": method,

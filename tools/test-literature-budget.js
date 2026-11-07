@@ -6,8 +6,8 @@ const { normalizeConfig, DEFAULT_LIMITS } = require('./literature-config');
 const { __internals: { resolveLimits } } = require('./literature-connector');
 const { workflowPrompt } = require('../server');
 
-const sources = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus', 'pubmed'];
-for (const count of [1, 2, 3, 6]) {
+const sources = ['google-scholar', 'cnki', 'wanfang', 'web-of-science', 'scopus'];
+for (const count of [1, 2, 3, 5]) {
   const raw = { topic: '温度与肉鸡', query: 'broiler heat stress', sources: sources.slice(0, count) };
   const normalized = normalizeConfig(raw, { executable: true });
   assert.equal(normalized.limits.discover, count * 180, '新任务每来源保留 180 秒');
