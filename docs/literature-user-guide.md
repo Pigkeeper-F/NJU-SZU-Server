@@ -10,6 +10,10 @@
 2. 首次访问需注册：注册页输入测试码（定义在 `js/auth-config.js`），再设置账号密码；也可以点「测试直达（免登录）」先体验。
 3. 平台数据存在浏览器本地，服务重启不丢；换浏览器或换端口需要重新登录。
 
+> **检索浏览器默认后台运行，不弹窗口。** 需要人工登录或过滑块时，设环境变量 `LITERATURE_HEADLESS=0`
+> 后重启（`python SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/scripts/browser.py stop` 再 `launch`），
+> 会回到可见窗口模式；登录态保存在 profile 里，切回后台模式仍然有效。
+
 ## 2. 新建文献任务
 
 1. 左侧栏点「任务」展开 → 点「**＋ 新建任务**」。

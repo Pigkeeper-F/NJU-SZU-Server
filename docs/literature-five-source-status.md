@@ -6,17 +6,28 @@
 > 这份文件是给后续 agent 和研究者看的“事实状态”。不要把它当成“全自动投稿流水线已完成”的宣传页。
 > 这里明确区分：**已实现并验证**、**已实现但未真实站点验证**、**未实现/受权限限制**。
 
-## 0. 五库全文真机验证总表（2026-11-07）
+## 0. 五库全文真机验证总表（2026-11-09 复验）
 
 | 数据库 | 自动检索 | 自动下载 PDF | 证据目录 | 登录方式 |
 |---|---|---|---|---|
-| 万方 | ✅ | ✅ 2/2 | `.workbench/wanfang-login-demo/` | 深大机构登录（`fsso.wanfangdata.com.cn`） |
-| 知网 | ✅ | ✅ 1/1 | `.workbench/cnki-login-demo4/` | 深大机构登录（`fsso.cnki.net`） |
-| Web of Science | ✅ 3 条 | ✅ 1/1 | `.workbench/wos-doi-demo/` | 深大 accproxy 校外通道 |
-| Scopus | ✅ 3 条 | ✅ 1/1 | `.workbench/scopus-login-demo4/` | 深大 accproxy 校外通道 |
-| Google Scholar | ✅ 3 条 | ✅ 1/1 | `.workbench/scholar-fulltext-test/` | 无需登录（免费索引库） |
+| 万方 | ✅ 3 条 | ✅ 1.29 MB PDF | `.workbench/final5/wanfang/` | 深大机构登录（`fsso.wanfangdata.com.cn`） |
+| 知网 | ✅ 3 条 | ✅ 1.66 MB PDF | `.workbench/fixsample/cnki/` | 深大机构登录（`fsso.cnki.net`） |
+| Web of Science | ✅ 2–3 条 | ✅ 104 KB PDF | `.workbench/fixsample/wos/` | 深大 accproxy 校外通道 |
+| Scopus | ✅ 3 条 | ✅ 2.34 MB PDF | `.workbench/final5/scopus/` | 深大 accproxy 校外通道 |
+| Google Scholar | ✅ 3 条 | ✅ 91 KB PDF | `.workbench/final5/google-scholar/` | 无需登录（免费索引库） |
 
-筛选（篇关摘三态）：`test_literature_screening.py` 8 项 + `test_literature_screening_integration.py` 11 项通过。
+2026-11-09 复验同时修了三处工程问题：
+
+1. **headless 被站点识别**：后台模式默认 UA 带 `HeadlessChrome`，万方/Scopus/Scholar 直接判成机器人
+   （Scholar 出验证码、另两库结果页空白）。启动改为发送普通桌面 Chrome 的 UA + `--lang=zh-CN`，
+   五库在无窗口模式下全部恢复。
+2. **WoS 结果页被开在新标签**：代理镜像有时把 summary 开在新 tab 而把表单页留在 `basic-search`，
+   原流程只看当前页 → 误报“列表未加载”。现在会采纳标题匹配的新 summary 标签并回写绑定。
+3. **研究标签跨批次堆积**：每轮检索留一个 summary 页，累计到 22 个后浏览器变慢、其他库开始超时。
+   新增 `_retire_stale_pages()`：只清理同一来源的旧页，绝不碰研究者其他页面。
+4. **抽样时 WoS 半截页被判失败**：镜像渲染的行数可能少于结果头声称的数量，
+   抽样模式（非正式检索）允许在“列表已停止加载且行可读”时接受；
+   正式检索仍严格拒绝半截页（113 项 WoS 回归保证）。
 
 ## 1. 五库与检索
 

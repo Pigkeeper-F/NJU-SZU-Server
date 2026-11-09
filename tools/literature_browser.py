@@ -156,6 +156,43 @@ def _save_binding(job_dir, source, target_id, query_hash="", *, page_index=None,
     temporary.replace(path)
 
 
+def _source_page_hosts(source):
+    """Hosts that belong to one source, used to retire its stale tabs."""
+    return {
+        "web-of-science": ("webofscience", "clarivate"),
+        "scopus": ("scopus",),
+        "cnki": ("cnki.net",),
+        "wanfang": ("wanfangdata",),
+        "google-scholar": ("scholar.google",),
+        "pubmed": ("pubmed.ncbi.nlm.nih.gov",),
+    }.get(source, ())
+
+
+def _retire_stale_pages(context, source, keep=None):
+    """Close this source's previous research tabs so a long run cannot pile up.
+
+    Each search may leave its own summary tab; after a day of batches that is
+    dozens of renderers and the browser starts timing out. Only tabs whose host
+    belongs to this source are touched, never the user's other pages.
+    """
+    hosts = _source_page_hosts(source)
+    if not hosts:
+        return 0
+    closed = 0
+    for page in list(context.pages):
+        try:
+            if page is keep or page.is_closed():
+                continue
+            url = str(page.url or "")
+            if not any(host in url for host in hosts):
+                continue
+            page.close()
+            closed += 1
+        except Exception:
+            continue
+    return closed
+
+
 def _pick_page(context, source, job_dir):
     path = _binding_path(job_dir)
     bindings = _load_json(path, {}) if path else {}
@@ -164,10 +201,12 @@ def _pick_page(context, source, job_dir):
         for page in context.pages:
             try:
                 if _target_id(context, page) == wanted:
+                    _retire_stale_pages(context, source, keep=page)
                     return page, False
             except Exception:
                 continue
     page = context.new_page()
+    _retire_stale_pages(context, source, keep=page)
     _save_binding(job_dir, source, _target_id(context, page))
     return page, True
 
@@ -254,6 +293,13 @@ def _snapshot(page, source, limit):
     current = (extra_sources.snapshot(page, source, limit) if source in extra_sources.SOURCE_INFO
                else page.evaluate(_SNAPSHOT_JS, arguments))
     access = page.evaluate(_ACCESS_STATE_JS, arguments)
+    # The China mirror carries the submitted expression only in the document
+    # title; expose it for query matching without storing the URL.
+    if source == "web-of-science" and isinstance(current, dict):
+        try:
+            current["page_title"] = page.title()
+        except Exception:
+            current["page_title"] = ""
     # Keep the common safety signals consistent across every browser source.
     # Only booleans cross this boundary; page text and redirect tokens do not.
     return {**current, **{key: bool(current.get(key) or access.get(key))
@@ -341,6 +387,13 @@ def _matches_query(snapshot, page_url, source, query):
         # A stale URL parameter must not overrule a newer query typed by the
         # researcher into an AJAX result page.
         return any(expected == comparable(value) for value in observed)
+    # The China mirror's summary view puts the expression only in the document
+    # title ("heat stress broiler (Topic) – 3,537 – Web of Science ...").
+    if source == "web-of-science":
+        title = str(snapshot.get("page_title") or "")
+        header = re.match(r"(.+?)\s*\((?:Topic|主题)\)", title)
+        if header and comparable(header.group(1)) == expected:
+            return True
     try:
         parsed = urlsplit(page_url)
         if source == "cnki" and parsed.hostname and parsed.hostname.endswith("cnki.net"):
@@ -642,16 +695,28 @@ def _submit_wos(page, query):
     field = _first_visible(page, _WOS_FIELD_SELECTORS)
     if field is None:
         return False
-    field.fill(query)
-    if _normalized(field.input_value()) != _normalized(query):
-        return False
-    button = _first_visible(page, _WOS_BUTTON_SELECTORS)
-    if button is None:
-        return False
-    _dismiss_consent(page)
-    button.click()
+    for attempt in range(2):
+        field.fill(query)
+        if _normalized(field.input_value()) != _normalized(query):
+            return False
+        button = _first_visible(page, _WOS_BUTTON_SELECTORS)
+        if button is None:
+            return False
+        _dismiss_consent(page)
+        button.click()
+        # The SPA occasionally swallows the first click while its handlers are
+        # still binding; only re-click when the tab visibly stayed on the form.
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if "basic-search" not in page.url:
+                break
+            page.wait_for_timeout(300)
+        if "basic-search" not in page.url:
+            break
+        if attempt == 1:
+            break
     _wait_results(page, "web-of-science")
-    return True
+    return "basic-search" not in page.url
 
 
 def _navigate_search(page, source, query, year_from, year_to):
@@ -1019,7 +1084,16 @@ def _wos_records_ready(current, limit, *, full_page=False):
     # A sample can stop after ten titles on a native fifty-record page. Formal
     # collection must not advance past any still-empty visible record component.
     needed = visible if full_page else min(limit, visible)
-    return needed > 0 and loaded >= needed and len(rows) >= needed
+    if not (needed > 0 and loaded >= needed and len(rows) >= needed):
+        # Sampling only: the mirror may render fewer rows than its header claims
+        # (partial lazy list). Accept a stable page with usable rows when the
+        # whole visible list has finished loading. Formal collection keeps the
+        # strict rule — it must never advance past an empty visible record.
+        if (not full_page and limit < visible and loaded >= 1 and len(rows) >= 1
+                and not current.get("resultsLoading") and loaded >= len(rows)):
+            return True
+        return False
+    return True
 
 
 def _source_records_ready(current, limit, *, full_page=False):
@@ -1208,6 +1282,7 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
             scholar_anchor = scholar_saved
             proven_index = None
             recheck_auth = False
+            stale_wos_query = False
             inspect_bound_wos = source_key == "web-of-science" and not created
             if scrape_current or page_index or not created:
                 current = _snapshot(page, source_key, read_limit)
@@ -1218,15 +1293,29 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                 reason = _auth_reason(page, current)
                 if inspect_bound_wos and not current.get("service_error") and _wos_result_context(page, current):
                     # An existing summary is user state, even if its search
-                    # form is also visible. Never restart it to cure empty rows.
+                    # form is also visible. Never restart it to cure empty rows —
+                    # unless it shows a *different* expression, which is stale
+                    # page state and must be re-submitted below.
                     if reason:
                         return response("attention", reason=reason)
-                    current = _wait_wos_records(page, current, read_limit, full_page=full_page)
-                    reason = _auth_reason(page, current)
-                    if reason:
-                        return response("attention", reason=reason)
-                    if current.get("service_error") or current.get("_wos_loading_pending"):
-                        return response("attention", reason="results_unrecognized")
+                    if not _matches_query(current, page.url, source_key, query):
+                        # The bound tab still shows a different expression's
+                        # summary. Sampling may re-submit (handled below); a
+                        # resumed/formal run must not restart silently.
+                        if scrape_current or full_page:
+                            result = response("attention", reason="results_unrecognized")
+                            result["message"] = _WOS_PROOF_MESSAGE
+                            return result
+                        stale_wos_query = True
+                        proven_index = None
+                        current = {}
+                    else:
+                        current = _wait_wos_records(page, current, read_limit, full_page=full_page)
+                        reason = _auth_reason(page, current)
+                        if reason:
+                            return response("attention", reason=reason)
+                        if current.get("service_error") or current.get("_wos_loading_pending"):
+                            return response("attention", reason="results_unrecognized")
                 # Institution SSO can finish in another tab while this target
                 # still displays its old login form. Only an explicit resume
                 # may re-probe the frozen official search with the shared
@@ -1311,7 +1400,14 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                     if observed_index is not None:
                         proven_index = observed_index
                     allowed = (page_index, page_index - 1) if page_index else (0,)
-                    if not _matches_query(current, page.url, source_key, query) or proven_index not in allowed:
+                    if not _matches_query(current, page.url, source_key, query):
+                        # The bound tab still shows a different expression's
+                        # summary. That is stale page state, not a broken task:
+                        # navigate the official search entry and submit this
+                        # expression instead of failing the run.
+                        stale_wos_query = True
+                        proven_index = None
+                    elif proven_index not in allowed:
                         result = response("attention", reason="results_unrecognized")
                         result["message"] = _WOS_PROOF_MESSAGE
                         return result
@@ -1364,6 +1460,30 @@ def run(source_key, query, scrape_current, limit, year_from=None, year_to=None, 
                                 or time.monotonic() >= deadline):
                             break
                         page.wait_for_timeout(400)
+                    if not _wos_result_context(page, current) and not current.get("service_error"):
+                        # The mirror occasionally opens the summary in a NEW tab
+                        # and leaves the form tab on basic-search. Adopt the tab
+                        # whose visible expression matches this run.
+                        for candidate in context.pages:
+                            try:
+                                if candidate is page or "webofscience" not in candidate.url:
+                                    continue
+                                if "/wos/woscc/summary/" not in candidate.url:
+                                    continue
+                                snap = _snapshot(candidate, source_key, read_limit)
+                                if _matches_query(snap, candidate.url, source_key, query):
+                                    page = candidate
+                                    current = snap
+                                    if job_dir is not None:
+                                        try:
+                                            _save_binding(job_dir, source_key,
+                                                          _target_id(context, candidate),
+                                                          query_hash=query_hash, page_index=page_index)
+                                        except Exception:
+                                            pass
+                                    break
+                            except Exception:
+                                continue
                 current = _snapshot(page, source_key, read_limit)
                 if source_key == "web-of-science" and _wos_result_context(page, current):
                     current = _wait_wos_records(page, current, read_limit, full_page=full_page)

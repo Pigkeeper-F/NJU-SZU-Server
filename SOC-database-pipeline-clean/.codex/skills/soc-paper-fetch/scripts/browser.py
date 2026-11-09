@@ -40,6 +40,15 @@ def _chromium_executable() -> str:
     return path
 
 
+def headless_requested() -> bool:
+    """Headless is the default (no popup windows); set LITERATURE_HEADLESS=0 for
+    a visible window — needed when a human must complete login or a slider."""
+    raw = (os.environ.get("LITERATURE_HEADLESS") or "").strip().lower()
+    if raw in ("0", "false", "no", "off", "visible"):
+        return False
+    return True
+
+
 def launch() -> dict:
     ensure_dirs()
     if cdp_alive():
@@ -50,6 +59,7 @@ def launch() -> dict:
         }
 
     exe = _chromium_executable()
+    headless = headless_requested()
     args = [
         exe,
         f"--remote-debugging-port={CDP_PORT}",
@@ -57,11 +67,25 @@ def launch() -> dict:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-blink-features=AutomationControlled",
-        "--start-maximized",
         # Harmless flags to make the profile feel normal
         "--disable-background-networking",
         "--disable-features=ChromeWhatsNewUI,Translate",
     ]
+    if headless:
+        # New headless keeps the full renderer + download pipeline, so the
+        # adapters behave the same while no window is shown at all.
+        # Sites key on the "HeadlessChrome" token in the default UA, so present
+        # the same UA/locale a normal desktop Chrome would send.
+        args += [
+            "--headless=new",
+            "--window-size=1600,1000",
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "--lang=zh-CN",
+            "--accept-lang=zh-CN,zh;q=0.9,en;q=0.8",
+        ]
+    else:
+        args.append("--start-maximized")
 
     creationflags = 0
     if sys.platform == "win32":
@@ -89,7 +113,11 @@ def launch() -> dict:
                 "pid": proc.pid,
                 "cdp_url": CDP_URL,
                 "user_data_dir": str(USER_DATA_DIR),
+                "headless": headless,
                 "message": (
+                    "Chromium 已以后台模式（无窗口）启动；登录态沿用 profile 中已有的会话。"
+                    "需要人工登录或过滑块时，设 LITERATURE_HEADLESS=0 重启可见窗口再操作。"
+                    if headless else
                     "Chromium 已启动。请在这个浏览器窗口里手动登录"
                     "（Google Scholar / Google / 校园 VPN / 出版商站点等），"
                     "登录完成后回来继续。"

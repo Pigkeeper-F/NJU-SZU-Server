@@ -87,8 +87,14 @@ _STATUS_JS = r"""() => {
   const clean = v => !/登录|注册|退出|简\s*繁|万方会员|切换个人版/.test(v);
   const top = document.querySelector('.anxs-8qwe-top-rt') || document.querySelector('.wf-header');
   const names = [];
-  const chip = document.querySelector('.anxs-8qwe-list-jg');
-  if (chip && text(chip) && clean(text(chip))) names.push(text(chip));
+  // The institution chip lives in .anxs-8qwe-jgName (inner <b>深圳大学</b>);
+  // .anxs-8qwe-list-jg is the older container and still present in some layouts.
+  for (const selector of ['.anxs-8qwe-jgName', '.anxs-8qwe-list-jg']) {
+    for (const chip of document.querySelectorAll(selector)) {
+      const value = text(chip);
+      if (value && clean(value) && !names.includes(value)) names.push(value);
+    }
+  }
   if (top) {
     for (const e of top.querySelectorAll('b')) {
       const value = text(e);
@@ -191,6 +197,10 @@ def _message(entry: dict) -> tuple[bool, str, str]:
         return False, name, "未判定"
     if password:
         return False, name, "未登录（检测到登录表单）"
+    # A unified-auth page also shows a "安全退出" entry; that alone is not
+    # proof of an authenticated database session.
+    if "authserver" in host or data.get("authPage") or data.get("mfa"):
+        return False, name, "需要完成统一身份认证/多因子认证"
     if sign_out:
         return True, name, (f"已登录（{name}）" if name else "已登录")
     if mode != "ezproxy" and "ezproxy" in host:
