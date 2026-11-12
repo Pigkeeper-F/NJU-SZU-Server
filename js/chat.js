@@ -172,6 +172,55 @@
     return row;
   }
 
+  /** 待确认的写操作：AI 想打开登录页一类的动作，渲染成「确认执行」按钮，
+   *  用户点了才真的调端点。标记格式：[[待确认：工具名|参数JSON]] */
+  var PENDING_LINE = /^\s*\[\[待确认[:：]\s*([^|\]]+)\|(.+?)\s*\]\]\s*$/;
+
+  var PENDING_LABELS = {
+    open_login_page: '打开登录页'
+  };
+
+  function buildPendingRow(toolName, rawArgs) {
+    var args = {};
+    try { args = JSON.parse(rawArgs); } catch (_) { args = {}; }
+    var box = el('div', 'md-pending');
+    box.appendChild(el('span', 'md-pending-text',
+      'AI 想执行：' + (PENDING_LABELS[toolName] || toolName)));
+    var run = el('button', 'md-pending-run', '确认执行');
+    run.type = 'button';
+    var result = el('span', 'md-pending-result', '');
+    run.onclick = function () {
+      run.disabled = true;
+      run.textContent = '执行中…';
+      var endpoint = toolName === 'open_login_page' ? '/api/literature/access-page' : '';
+      var body = toolName === 'open_login_page' ? { target: args.target } : null;
+      if (!endpoint || !body) {
+        result.textContent = '（暂不支持该操作）';
+        run.disabled = false; run.textContent = '确认执行';
+        return;
+      }
+      fetch(endpoint, { method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Workbench': '1' },
+        body: JSON.stringify(body) })
+        .then(function (response) { return response.json().then(function (data) {
+          if (!response.ok) throw new Error(data && data.error ? data.error : '执行失败');
+          return data; }); })
+        .then(function (data) {
+          result.textContent = '已打开' + (data.label || '') + '；完成登录后点「检查登录状态」。';
+          run.remove();
+        })
+        .catch(function (error) {
+          result.textContent = '执行失败：' + error.message;
+          run.disabled = false; run.textContent = '重试';
+        });
+    };
+    var skip = el('button', 'md-pending-skip', '不用了');
+    skip.type = 'button';
+    skip.onclick = function () { result.textContent = '已跳过'; box.remove(); };
+    box.appendChild(run); box.appendChild(skip); box.appendChild(result);
+    return box;
+  }
+
   /** 块级解析：段落 / 代码块 / 标题 / 列表 / 选项行 → DocumentFragment（全部 DOM API 构造） */
   function renderRichText(text) {
     var container = document.createDocumentFragment();
@@ -193,6 +242,14 @@
 
     while (i < lines.length) {
       var line = lines[i];
+
+      var pendingAction = line.match(PENDING_LINE);   // [[待确认：工具|参数]] → 确认按钮
+      if (pendingAction) {
+        flushParagraph();
+        container.appendChild(buildPendingRow(pendingAction[1].trim(), pendingAction[2]));
+        i += 1;
+        continue;
+      }
 
       var choice = line.match(CHOICE_LINE);                 // [[选项：A|B|C]]
       if (choice) {
@@ -511,7 +568,13 @@
           throw failure;
         }
         if (!data || typeof data.text !== 'string') throw new Error('AI 服务返回了无效响应');
-        return data.text;
+        // 【2026-11-12】工具提议的写操作：追加一行确认标记，渲染时变成确认按钮。
+        var events = Array.isArray(data.toolEvents) ? data.toolEvents : [];
+        var pending = events.filter(function (item) { return item && item.pending === true && item.args; });
+        var suffix = pending.map(function (item) {
+          return '\n[[待确认：' + item.name + '|' + JSON.stringify(item.args) + ']]';
+        }).join('');
+        return data.text + suffix;
       });
     }).then(function (text) {
       getStore().appendMessage(moduleId, text, 'assistant');

@@ -16,6 +16,8 @@ const { streamCleanResultsArchive } = require('./tools/clean-results-archive');
 const { CleaningTasks } = require('./tools/cleaning');
 const cleanVerificationRules = require('./js/clean-verification-rules');
 const { fetchSource } = require('./tools/source-download');
+// 【2026-11-12】API 对话的工具层：只读工具直接执行，写操作交给用户确认。
+const aiTools = require('./tools/ai-tools');
 const { SourceDownloads } = require('./tools/faostat-download');
 const { LiteratureFlow } = require('./tools/literature-flow');
 const { LiteratureConnector } = require('./tools/literature-connector');
@@ -115,7 +117,7 @@ function workflowPrompt(module, executor = 'api') {
     '按定义、输入、执行、交付、检查、异常推进，直接帮助整理方案、规则、数据结构、代码、报告与交接内容；只在有证据时报告完成或通过检查。输出应具体、简洁，优先给出当前可用成果与下一步。',
     module.type === 'clean-data' ? '数据清洗先在本平台当前模块讨论规则，再提取候选规则、由研究者确认后执行。你应主动读取当前交接数据（有文件工具时）并识别会影响结果的口径缺口，例如配对键、单位、缺失/重复/汇总项处理、比例分母和验收条件；每轮只问影响下一步的1–3个问题，提供易懂选项并说明影响，已有明确决定直接沿用。不要等待研究者自行想齐问题或去其他聊天确定方法，不把建议或未回答的问题当成确认规则。“先讨论”“暂不执行”“请明确某口径”属于阶段指令，不能直接抄成已定的数据处理方法。处于讨论或提取规则的请求只读材料并交流，不运行清洗；执行时遇到未定的关键口径，在当前对话具体提问后继续。' : '',
     module.type === 'clean-data' ? cleanVerificationRules.guidance() : '',
-    executor === 'api' ? '当前系统只提供文字对话，没有文件读取、下载、代码执行、浏览、数据库或模块操作工具。不能声称已经下载数据、读取未提供的文件、运行计算或生成实际附件。需要外部操作时提供可执行步骤或代码，并让用户提供结果后继续检查。API 接入不等于拥有这些工具。' : ['clean-data', 'calculation', 'result-audit', 'plotting'].includes(module.type) ? '本次是 Codex 本地文件任务。按任务模式读取已上传数据、代码与计算结果；只在允许执行的模块与模式下写入输出目录。只有实际执行成功时才报告完成。' : '本次是本机 Codex 模块对话。当前模块仅提供方案、规则和结果检查的文字指导；没有上传文件、联网浏览、下载或写入执行功能。不要声称已访问网站、读取未上传的文件、运行计算或生成实际附件。',
+    executor === 'api' ? '你可以调用下面这组平台工具：check_login_status（读五库登录状态）、list_literature_jobs（列已有文献任务）、explain_failure（解释某来源失败原因）、open_login_page（打开某库官方登录页）。前三个是只读的，直接调用即可；open_login_page 会打开真实页面，调用后系统会向用户弹出确认按钮，由用户决定是否真打开——你不必等它执行，可以先把建议说完。除这组工具外，你没有文件读写、代码执行、任意联网或模块操作能力：不能声称已下载数据、读取未提供的文件、运行计算或生成实际附件。需要那些操作时给出可执行步骤，让用户执行后把结果贴回来。' : ['clean-data', 'calculation', 'result-audit', 'plotting'].includes(module.type) ? '本次是 Codex 本地文件任务。按任务模式读取已上传数据、代码与计算结果；只在允许执行的模块与模式下写入输出目录。只有实际执行成功时才报告完成。' : '本次是本机 Codex 模块对话。当前模块仅提供方案、规则和结果检查的文字指导；没有上传文件、联网浏览、下载或写入执行功能。不要声称已访问网站、读取未上传的文件、运行计算或生成实际附件。',
     '人工审核模块中，AI 只能提供审核建议和证据整理，最终人工决定由用户给出。SOC 是可替换示例，仅在主题适用时采用。',
     module.type === 'literature-mining' ? '网页文献执行面板支持：审核通过获取方案后点击“按审核方案开始执行”，按方案检索 Europe PMC/Crossref/Google Scholar、筛选首批最多3篇、获取开放全文、读取全文或上传材料、提取数据与原文证据；问题会暂停并列出，研究者答复并点击继续后续跑。此普通对话只讨论和补充方案，不自行执行上述工具；材料与进度以面板真实记录为准，不说已完成未发生的操作。方案应明确检索范围、筛选条件、提取字段/单位、验收；复杂来源登录、OCR、图中数值不自动执行。' : '',
     module.type === 'download-data' ? '数据下载使用上方“按方案下载数据”区域：用户直接讨论并形成方案，审核后点击“按方案开始下载”才真正执行。FAOSTAT详细贸易矩阵TM已经接入官方整包目录，执行器自动查找官方压缩包、流式下载全量原包，再按方案年份和明确条件筛选CSV。用户决定数据源、年份、商品、国家和数量/金额等业务范围；不要求用户查找FAO下载链接、官方商品代码、要素代码或填写配置。执行器负责从官方目录及包内字典核对商品名称/代码、要素名称/代码/单位、年份可用性、文件URL、版本、大小与包内结构：商品/国家采用官方字典的完整名称精确匹配，唯一匹配时自动采用并记录证据，不能因用户只写“小麦（Wheat）”却没有代码就停止；要素名按官方大小写规范归一（如Import quantity/Export quantity），同一明确要素对应的多个官方代码保留全部变体并核查实际单位，不把代码变体误当作必须用户再选的业务歧义；只有真实官方匹配多义、无匹配、业务决定缺失或范围冲突时才暂停并展示具体候选请用户选择，不能凭记忆猜代码或忽略明确限定。未限定的国家/商品/指标保留官方全部记录并明确未筛选。每个原包/结果支持至2GiB，保留整包、来源、SHA256、CRC及行数检查记录，允许停止、刷新找回和继续原任务。用户当前明确指令与已确认规则优先于旧AI草稿：旧草稿中的待查证信息是程序核对步骤，不是要求用户再确认的启动条件；不能把AI自行写入的“20MB限制”“需再批准整包下载”“必须提供代码/链接”等继续当成用户规则，也不能据此重复审核同一已授权范围；确由用户明确设定的限制仍遵守，新的业务范围变更仍须按平台修订审核。方案已有公开HTTP(S)文件地址的数据源通过同一大文件下载任务获取；其他数据库的自动定位或认证接口仍需单独接入，不能声称所有网站都已支持。旧手动文件地址弹窗仍限每个20MB，仅作兼容入口；该兼容限制不适用于FAO自动路径，不要求用户选择这个弹窗。只报告执行面板实际完成的进度，普通AI对话本身不会开始下载或完成官方核对；下载成功仍须人工检查后交给清洗。旧文献批次记录仅作历史参考，不构成下载任务待办。' : '',
@@ -1374,6 +1376,40 @@ async function callModel(cfg, messages, timeoutMs, signal) {
   return text.trim();
 }
 
+// 【2026-11-12】带工具的原始调用：返回上游的完整 message（含 tool_calls），
+// 供 tools/ai-tools.js 的工具循环使用。tools 为 null 时不挂工具。
+async function callModelRaw(cfg, messages, tools, timeoutMs) {
+  const url = cfg.baseUrl + '/chat/completions';
+  const requestBody = {
+    model: cfg.model,
+    messages: cfg.sysPrompt ? [{ role: 'system', content: cfg.sysPrompt }].concat(messages) : messages
+  };
+  if (Array.isArray(tools) && tools.length) {
+    requestBody.tools = tools;
+    requestBody.tool_choice = 'auto';
+  }
+  let upstream;
+  try {
+    upstream = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(timeoutMs || 60000)
+    });
+  } catch (error) {
+    const aborted = error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+    if (aborted) throw new UpstreamError(502, 'AI 服务响应超时，正在重试。', 'transient');
+    throw new UpstreamError(502, '无法连接 AI 服务（' + (cfg.baseUrl || '未配置地址') + '）。', 'fatal-network');
+  }
+  let result;
+  try { result = await upstream.json(); } catch (error) { result = null; }
+  if (!upstream.ok) {
+    const described = describeUpstreamError(errorText(result), upstream.status);
+    throw new UpstreamError(described.kind === 'transient' ? 502 : 400, described.message, described.kind);
+  }
+  return result;
+}
+
 /**
  * 判断当前生效的模型配置来自哪一份（用于报错时告诉用户"你正在用哪份配置"）。
  * 优先级与 resolveModelConfig + normalizeCredential 一致：凭证 > 网页设置分组 > 服务端 .env。
@@ -1525,14 +1561,36 @@ async function handleChat(req, res) {
   const moduleContext = buildChatModuleContext(payload.module);
   cfg.sysPrompt = [instructions, moduleContext, cfg.sysPrompt].filter(Boolean).join('\n\n');
   try {
+    // 【2026-11-12】API 对话也能用工具：只读工具（查登录状态、列任务、解释失败）
+    // 直接执行并把结果回灌给模型；写操作（打开登录页）只登记提议，由前端渲染
+    // 确认按钮，用户点了才真调端点。工具轮次失败时回退到原来的纯文本调用。
+    let text;
+    let toolEvents = [];
+    try {
+      const outcome = await aiTools.runWithTools(cfg, messages, {
+        accessStatus: (source) => scholar.accessStatus(source),
+        listJobs: (limit) => ({ jobs: scholar.list(limit) }),
+        callRaw: (config, conversation, tools) => callModelRaw(config, conversation, tools, CHAT_TIMEOUT_MS),
+        callPlain: (config, conversation) => callModel(config, conversation, CHAT_TIMEOUT_MS),
+        upstreamError: (message) => new UpstreamError(502, message, 'transient')
+      });
+      text = outcome.text;
+      toolEvents = outcome.toolEvents;
+    } catch (error) {
+      // 上游不支持 tools（部分免费模型）时退回纯文本，不让对话整体失败。
+      if (error && (error.status === 400 || error.kind === 'fatal-config')) {
+        const trace0 = {};
+        text = await callModelWithRetry(cfg, messages, CHAT_TIMEOUT_MS, CHAT_ATTEMPTS, CHAT_BUDGET_MS,
+          { fallbacks: resolveFallbackModels(cfg), trace: trace0 });
+      } else {
+        throw error;
+      }
+    }
     // 【2026-10-21】聊天同样接入「退避重试 + 同网关免费模型降级链」：
     // 旧实现只调一次 callModel，免费通道一抖动（429 temporarily unavailable）就红字。
     // 聊天有独立的超时预算（比 compose 短），但重试与降级逻辑与 compose 完全一致。
     const trace = {};
-    const text = await callModelWithRetry(cfg, messages,
-      CHAT_TIMEOUT_MS, CHAT_ATTEMPTS, CHAT_BUDGET_MS,
-      { fallbacks: resolveFallbackModels(cfg), trace: trace });
-    sendJson(res, 200, Object.assign({ text, config: activeConfig }, modelUsedInfo(trace)));
+    sendJson(res, 200, Object.assign({ text, config: activeConfig, toolEvents }, modelUsedInfo(trace)));
   } catch (error) {
     sendJson(res, (error && error.status) || 500, { error: (error && error.message) || '服务端内部错误', config: activeConfig });
   }

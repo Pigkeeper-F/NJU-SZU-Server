@@ -2061,3 +2061,28 @@ GET /api/codex/clean-results/archive?session=<UUID>&run=<UUID> 返回当前所�
 导入 `batch_index=0` 按来源独立替换：重新导入万方只能替换原万方导入，其他来源、检索批次与记录必须保留，JSON/CSV 候选保持一致。未确认的条目继续为 `pending_review`。
 
 PubMed 默认公开 API 检索；真实转为官方网页并等待验证时仍保留原页与暂缓入口。新增四个开放 API 来源不使用浏览器登录入口。研究、问题凝练、开放检索、清单导入、写作及辅助操作模块全部加入后台指纹，修改后必须加载新版后台。
+
+## §22 API 对话的工具层（2026-11-12）
+
+`tools/ai-tools.js` 给「API 接入的模型」加一层受控工具，让它能读到平台真实状态、
+并请求打开官方登录页，而不只是给建议。
+
+**协议**：`POST /api/ai/chat` 响应新增可选字段 `toolEvents: [{name, args, ok, pending}]`。
+
+**工具表**（新增工具必须在此登记，写操作须 `write: true`）：
+
+| 工具 | 读/写 | 行为 | 对应端点 |
+|---|---|---|---|
+| `check_login_status` | 读 | 五库登录状态 | `POST /api/literature/access-status` |
+| `list_literature_jobs` | 读 | 列出文献任务 | `GET /api/literature/jobs` |
+| `explain_failure` | 读 | 按来源给排查清单（不发请求） | 无 |
+| `open_login_page` | **写** | 打开某库官方登录页 | `POST /api/literature/access-page` |
+
+**硬约束**：
+
+1. 写操作不在服务端执行。模型调用后服务端只返回 `needs_user_confirmation`，
+   前端把它渲染成 `[[待确认：工具|参数]]` 卡片，用户点「确认执行」才真调端点。
+2. 工具参数一律白名单枚举（`ACCESS_TARGETS` / `SOURCES`），不接受任意 URL 或路径。
+3. 单轮最多 4 次工具往返、每次最多 3 个并行调用；超限后让模型直接收尾。
+4. 上游不支持 `tools`（部分免费模型返回 400）时自动回退到纯文本调用，对话不失败。
+5. 工具层不碰宿主文件系统、不执行代码、不抓任意 URL。
