@@ -1132,6 +1132,9 @@ body .literature-connector .literature-more { flex-basis: 100%; margin-top: 10px
 body .literature-connector .literature-more > summary { cursor: pointer; color: var(--muted, #667); font-size: 0.86rem; }
 body .literature-connector .literature-more-body { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 8px; padding: 10px 12px; border: 1px dashed var(--border, #dfe5e1); border-radius: 8px; }
 /* 空状态引导卡：替代"尚未检索"的空白区，对齐 Consensus 的 "Research starts here" */
+body .literature-connector .literature-guide-line { display: block; margin: 12px 0 4px; padding: 10px 14px; border-left: 3px solid var(--accent, #2f6f57); background: #f7faf8; font-size: 0.9rem; line-height: 1.6; color: var(--text, #333); }
+body .literature-connector .literature-guide-line b { margin-right: 4px; }
+body .literature-connector .literature-guide-line span { color: var(--muted, #667); }
 body .literature-connector .literature-guide { display: grid; gap: 8px; margin: 14px 0; padding: 16px 18px; border: 1px solid var(--border, #dfe5e1); border-radius: 10px; background: #f7faf8; }
 body .literature-connector .literature-guide-title { margin: 0; font-weight: 600; font-size: 1rem; }
 body .literature-connector .literature-guide-steps { display: grid; gap: 7px; margin: 0; padding-left: 20px; color: var(--text, #333); font-size: 0.9rem; line-height: 1.5; }
@@ -1210,6 +1213,10 @@ body.literature-reading-view #module-space .msg-list { max-width: 1400px; }
 body.literature-reading-view #module-space :is(.doc-card, .status-bar, .spec-card) { box-sizing: border-box; width: 100%; max-width: 1400px; margin: 18px auto 0; padding: 20px 22px; font-size: var(--literature-reader-size, 20px); line-height: 1.65; }
 body.literature-reading-view #module-space :is(.doc-card, .status-bar, .spec-card) :where(*) { font-size: inherit; }
 body.literature-reading-view #module-space :is(.doc-card-title, .spec-title),
+/* 文献模块空状态：未确认的提取规则卡默认收起，避免挤占首屏 */
+.doc-card-collapsed { margin: 10px 0; }
+.doc-card-collapsed > summary { cursor: pointer; padding: 8px 12px; border: 1px dashed var(--border, #dfe5e1); border-radius: 8px; color: var(--muted, #667); font-size: 0.88rem; }
+.doc-card-collapsed[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 /* AI 提议的写操作（打开登录页等）：确认按钮，用户点了才真执行 */
 .msg-text .md-pending { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; padding: 10px 12px; border: 1px solid #d8c48a; border-radius: 8px; background: #fffdf4; }
 .msg-text .md-pending-text { flex: 1 1 auto; min-width: 0; color: #6b5a1f; font-size: 0.9rem; }

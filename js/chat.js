@@ -3118,12 +3118,31 @@
       if (researchPanel) spaceEl.appendChild(researchPanel);
       var questionPanel = buildQuestionPanel(active);
       if (questionPanel) spaceEl.appendChild(questionPanel);
-      if (!(active.type === 'calculation' && active.mode === 'modify') && active.type !== 'plotting') spaceEl.appendChild(buildDocCard(active));
+      // 【2026-11-12 审视】文献模块尚无文档时，把「提取规则」卡默认收起：
+      // 空状态首屏应让"输入主题"成为主角，而不是三张待填的卡片。
+      var docCard = (!(active.type === 'calculation' && active.mode === 'modify') && active.type !== 'plotting')
+        ? buildDocCard(active) : null;
+      if (docCard && active.type === 'literature-mining' && docStatusOf(active) === 'none'
+          && docEditingId !== active.id) {
+        var collapsed = el('details', 'doc-card-collapsed');
+        collapsed.open = false;
+        var summaryEl = el('summary', 'doc-card-collapsed-summary',
+          '文献数据提取规则 · 待确认（点击展开）');
+        collapsed.appendChild(summaryEl);
+        collapsed.appendChild(docCard);
+        spaceEl.appendChild(collapsed);
+      } else if (docCard) {
+        spaceEl.appendChild(docCard);
+      }
 
       var list = el('div', 'msg-list');
       if (!messages.length) {
-        list.appendChild(emptyState(active.name,
-          '输入研究目标或已有材料。切换到 AI 对话后，助手会依据本模块工作流协助你补齐输入、推进执行并检查交付。'));
+        // 【2026-11-12 审视】空状态提示按模块给具体引导，不再用通用的
+        // "切换到 AI 对话后…"（用户已经在 AI 对话里，这句话没有信息量）。
+        var hint = active.type === 'literature-mining'
+          ? '在上方对话框写清研究主题，例如「肉鸡热应激 2020 年后」。AI 会整理成可核对的检索设置，核对后再开始检索。'
+          : '输入研究目标或已有材料。助手会依据本模块工作流协助你补齐输入、推进执行并检查交付。';
+        list.appendChild(emptyState('还没有对话', hint));
       } else {
         appendChatMessages(list, messages, 0, messages.length);
       }

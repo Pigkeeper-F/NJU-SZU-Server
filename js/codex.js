@@ -2703,23 +2703,15 @@
       if (Number.isSafeInteger(counters.fulltextPdf)) pieces.push('PDF ' + counters.fulltextPdf + ' 篇');
       if (Number.isSafeInteger(counters.fulltextHtml)) pieces.push('网页正文 ' + counters.fulltextHtml + ' 篇');
       if (Number.isSafeInteger(counters.parameterRows)) pieces.push('参数记录 ' + counters.parameterRows + ' 行');
-    } else pieces.push('尚未检索 · 先讨论需求并核对设置');
+    } else pieces.push('尚未开始检索');
     const summary = node('p', pieces.join('　·　'), 'literature-task-summary');
     summary.setAttribute('aria-live', 'polite');
-    // 【2026-11-12】没有任务时给一张明确的"下一步"引导卡，替代空白区。
+    // 【2026-11-12 审视】空状态引导从三张大卡改成一行：首屏要让"输入主题"成为主角，
+    // 说明性内容降到辅助位置。
     let guideCard = null;
     if (!job) {
-      const guide = node('div', undefined, 'literature-guide');
-      guide.append(node('p', '从这里开始', 'literature-guide-title'));
-      const steps = node('ol', undefined, 'literature-guide-steps');
-      [['确认账号与权限', '上方「账号与权限」点「检查登录状态」；已登录的来源会自动隐藏入口。'],
-       ['说明研究主题', '在下方对话框写清主题、范围与年份，AI 会整理成可核对的检索设置。'],
-       ['核对设置并开始检索', '展开「检索与执行设置」，确认来源与检索式后开始。']].forEach(([title, text]) => {
-        const li = node('li');
-        li.append(node('b', title), node('span', text));
-        steps.append(li);
-      });
-      guide.append(steps);
+      const guide = node('p', undefined, 'literature-guide-line');
+      guide.append(node('b', '开始：'), node('span', '在下方对话框写清研究主题（如"肉鸡热应激 2020 年后"），AI 会整理成可核对的检索设置；登录状态已就绪可直接开始。'));
       guideCard = guide;
     }
     let contextId = '';
@@ -2778,7 +2770,8 @@
       const exports = node('div', undefined, 'literature-deliverables literature-main-results');
       finalFiles.forEach(child => exports.append(child)); body.append(exports);
     }
-    body.append(settings, files); box.append(body);
+    // 【2026-11-12 审视】空任务时没有可展开的内容，不渲染空面板。
+    if (job) { body.append(settings, files); box.append(body); }
     // Keep native history/log disclosures open during the same job's polling updates.
     Array.from(box.querySelectorAll?.('details') || []).forEach(details => {
       const heading = Array.from(details.children).find(child => child.tagName === 'SUMMARY');
@@ -2792,6 +2785,8 @@
     const box = node('div', undefined, 'literature-connector');
     const scholarTrial = (t.literatureJob?.config || t.literatureConfig)?.scholarPlan?.trialMaxPages != null;
     let timeoutAttention = null;
+    // 有实际任务成果时才需要阅读字号；空状态下不显示。
+    const hasResults = Boolean(t.literatureJob?.id || saved[mod.id]?.literatureJobId);
     const overview = node('div', undefined, 'literature-overview');
     const introduction = node('div');
     introduction.append(node('h3', '文献任务'));
@@ -2799,7 +2794,9 @@
     help.onclick = () => document.dispatchEvent(new CustomEvent('literature-help-open'));
     overview.append(introduction, help); box.append(overview);
     if (root.LiteratureConfirmedPlan) {
-      const confirmed = node('button', '载入五库已确认方案', 'primary-button'); confirmed.type = 'button';
+      // 【2026-11-12 审视】"载入已确认方案"是高级入口（复用旧配置），
+      // 不该比"新建文献任务"更抢眼；降为次级按钮。
+      const confirmed = node('button', '载入五库已确认方案', 'quiet-button'); confirmed.type = 'button';
       confirmed.disabled = literatureWorkspaceBusy(mod.id);
       confirmed.onclick = () => root.LiteratureConfirmedPlan.open({
         onPrepared: job => {
@@ -2820,7 +2817,9 @@
         overview.append(screening);
       }
     }
-    if (typeof literatureReaderControls === 'function') overview.append(literatureReaderControls());
+    // 【2026-11-12 审视】字号是阅读辅助，不该占据首屏核心位置：
+    // 收进「更多操作」，只在阅读长文时才需要。
+    if (typeof literatureReaderControls === 'function' && hasResults) overview.append(literatureReaderControls());
     if (typeof literatureTaskSelector === 'function') {
       const selector = literatureTaskSelector(mod, t);
       if (selector) box.append(selector);
