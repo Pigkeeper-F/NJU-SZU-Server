@@ -1210,6 +1210,12 @@ body.literature-reading-view #module-space .msg-list { max-width: 1400px; }
 body.literature-reading-view #module-space :is(.doc-card, .status-bar, .spec-card) { box-sizing: border-box; width: 100%; max-width: 1400px; margin: 18px auto 0; padding: 20px 22px; font-size: var(--literature-reader-size, 20px); line-height: 1.65; }
 body.literature-reading-view #module-space :is(.doc-card, .status-bar, .spec-card) :where(*) { font-size: inherit; }
 body.literature-reading-view #module-space :is(.doc-card-title, .spec-title),
+/* 结构化选项行（AI 输出 [[选项：A|B|C]]）：点一下填进输入框，省去手打 */
+.msg-text .md-choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.msg-text .md-choice { padding: 7px 14px; border: 1px solid var(--accent, #2f6f57); border-radius: 16px; background: #fff; color: var(--accent, #2f6f57); font: inherit; font-size: 0.9rem; line-height: 1.4; cursor: pointer; }
+.msg-text .md-choice:hover { background: var(--accent, #2f6f57); color: #fff; }
+.msg-text .md-choice:active { transform: translateY(1px); }
+body.literature-reading-view #module-space .msg-text .md-choice { font-size: var(--literature-reader-size, 20px); padding: 9px 16px; }
 body.literature-reading-view #module-space .doc-card :is(h2, h3, h4),
 body.literature-reading-view #module-space .msg-text .md-h { font-size: calc(var(--literature-reader-size, 20px) + 4px); line-height: 1.5; }
 body.literature-reading-view #module-space :is(.doc-meta, .doc-advance-hint, .doc-file-size, .doc-file-total, .doc-run-meta) { font-size: max(16px, calc(var(--literature-reader-size, 20px) - 2px)); line-height: 1.6; }

@@ -151,7 +151,28 @@
     return frag;
   }
 
-  /** 块级解析：段落 / 代码块 / 标题 / 列表 → DocumentFragment（全部 DOM API 构造） */
+  /** 结构化选项行：AI 用 [[选项：A|B|C]] 标出可点选择项（借鉴 DeepTutor 的 ask_user）。
+   *  渲染成按钮，点击把该项写入输入框——用户不必手打选项文字。 */
+  var CHOICE_LINE = /^\s*\[\[选项[:：]\s*(.+?)\s*\]\]\s*$/;
+
+  function buildChoiceRow(labels) {
+    var row = el('div', 'md-choices');
+    labels.forEach(function (label) {
+      var button = el('button', 'md-choice', label);
+      button.type = 'button';
+      button.onclick = function () {
+        var input = document.getElementById('composer-input');
+        if (!input) return;
+        input.value = label;
+        input.focus();
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      row.appendChild(button);
+    });
+    return row;
+  }
+
+  /** 块级解析：段落 / 代码块 / 标题 / 列表 / 选项行 → DocumentFragment（全部 DOM API 构造） */
   function renderRichText(text) {
     var container = document.createDocumentFragment();
     var lines = String(text).split('\n');
@@ -172,6 +193,15 @@
 
     while (i < lines.length) {
       var line = lines[i];
+
+      var choice = line.match(CHOICE_LINE);                 // [[选项：A|B|C]]
+      if (choice) {
+        flushParagraph();
+        var labels = choice[1].split('|').map(function (s) { return s.trim(); }).filter(Boolean);
+        if (labels.length) container.appendChild(buildChoiceRow(labels));
+        i += 1;
+        continue;
+      }
 
       if (line.indexOf('```') === 0) {                      // 代码块
         flushParagraph();
