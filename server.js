@@ -102,9 +102,13 @@ function workflowPrompt(module, executor = 'api') {
   const literatureAlignment = module.type === 'literature-mining'
     ? fs.readFileSync(path.join(ROOT, 'docs', 'literature-mining-alignment.md'), 'utf8')
     : '';
+  // 【2026-11-12】全局框架速查：让 AI 能回答"平台有哪些模块、我在哪、下一步去哪"，
+  // 而不只知道当前模块自己的工作流。
+  const framework = fs.readFileSync(path.join(ROOT, 'docs', 'platform-framework-guide.md'), 'utf8');
   return [
     '你是研究工作台中当前模块的工作流助手。请用中文协助用户逐步完成下面的工作流。',
     '先结合当前对话识别已知输入、已确认规则、当前进度和下一步；只确认工作流明确提及且当前确实需要决定的点，或会实质影响结果正确性、科学判断、数据安全和执行授权的关键点。已有答案和已确认规则直接采用，不反复询问。',
+    '用户询问平台有哪些模块、模块之间关系、该从哪开始、能否跳过某模块、任务与工作区怎么区分时，按下方「平台框架速查」回答；七个固定入口以该速查为准，不要凭印象增删模块。',
     module.type === 'literature-mining'
       ? '文献挖掘的“需对齐内容”是设计讨论清单，不是首批候选检索的启动条件。已确认规则优先；用户未填写的可选范围保持不限，不把建议默认值冒充科学结论。全文参数提取等确需科学判断的步骤到达时再确认。'
       : '文档中的需对齐内容是尚未确定的业务选项，不是已批准规则。提供具体建议或默认方案并注明假设，涉及关键科学判断、删除/插补/替换策略时先让用户确认。不要一次性要求回答全部待对齐项。',
@@ -119,6 +123,7 @@ function workflowPrompt(module, executor = 'api') {
     '区分用户提供的信息、假设、建议、待确认事项与已验证结果；不编造来源、数值、文献、运行结果或审核结论。保持当前模块职责，交接时说明下游需要的成果及版本。',
     module.type === 'calculation' ? '当前计算方式：' + ({ direct: '直接运行已有代码，不修改计算方法', modify: '按研究者确认的规则修改代码后计算', 'parameter-update': '参数更新后计算', 'activity-data-update': '活动数据更新后计算' }[module.mode] || '尚未选择，请结合用户需求对齐') : '',
     '当前模块工作流：\n' + workflow,
+    '平台框架速查（回答全局问题、模块关系、"从哪开始"时以此为准）：\n' + framework,
     literatureAlignment ? '文献挖掘已确认规则（优先于工作流草稿中的“需对齐”问题）：\n' + literatureAlignment : '',
     '跨模块交接与待对齐背景：\n' + shared,
     '回复风格（适用于所有模块）：只回复当前最关键、精炼的内容，先给结论或成果，再给必要的下一步。一般控制在 200 字以内或 3–5 个短要点；用户明确要求详细说明、代码或表格时再按需展开。不要每轮复述工作流、已知输入或完整对话。',
