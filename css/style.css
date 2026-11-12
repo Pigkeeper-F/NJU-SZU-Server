@@ -1115,7 +1115,29 @@ body dialog.literature-help-dialog details > summary:focus-visible { border-radi
 body .literature-connector .literature-task-selector { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin: 12px 0 22px; }
 body .literature-connector .literature-task-selector > label { display: grid; flex: 1 1 420px; gap: 9px; min-width: 0; max-width: 760px; }
 body .literature-connector .literature-task-selector select { width: 100%; min-width: 0; }
-body .literature-connector .literature-access-panel { flex-basis: 100%; display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--border, #dfe5e1); border-radius: 9px; background: #fff; }
+body .literature-connector .literature-access-panel { flex-basis: 100%; display: grid; gap: 0; padding: 10px 14px; border: 1px solid var(--border, #dfe5e1); border-radius: 9px; background: #fbfcfb; }
+/* 【2026-11-12 界面简化】登录面板收成一行状态条（标题 + 摘要 + 检查按钮），
+   七个入口折叠到「管理登录」里；对齐 Consensus/Elicit 的"次要设置不占首屏"。 */
+body .literature-connector .literature-access-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+body .literature-connector .literature-access-title { font-weight: 600; font-size: 0.92rem; }
+body .literature-connector .literature-access-summary { flex: 1 1 auto; min-width: 0; color: var(--muted, #667); font-size: 0.88rem; }
+body .literature-connector .literature-access-summary:has(+ *) { color: var(--muted, #667); }
+body .literature-connector .literature-access-toggle { padding: 2px 8px; border: 1px solid var(--border, #dfe5e1); border-radius: 6px; background: #fff; color: var(--accent, #2f6f57); font-size: 0.84rem; cursor: pointer; }
+body .literature-connector .literature-access-body { display: grid; gap: 8px; margin-top: 8px; }
+body .literature-connector .literature-access-body[hidden] { display: none; }
+body .literature-connector .literature-access-detail { color: var(--muted, #667); font-size: 0.86rem; }
+body .literature-connector .literature-access-note { color: var(--muted, #667); font-size: 0.84rem; }
+/* 更多操作（预试/讨论记录/草稿）折叠 */
+body .literature-connector .literature-more { flex-basis: 100%; margin-top: 10px; }
+body .literature-connector .literature-more > summary { cursor: pointer; color: var(--muted, #667); font-size: 0.86rem; }
+body .literature-connector .literature-more-body { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 8px; padding: 10px 12px; border: 1px dashed var(--border, #dfe5e1); border-radius: 8px; }
+/* 空状态引导卡：替代"尚未检索"的空白区，对齐 Consensus 的 "Research starts here" */
+body .literature-connector .literature-guide { display: grid; gap: 8px; margin: 14px 0; padding: 16px 18px; border: 1px solid var(--border, #dfe5e1); border-radius: 10px; background: #f7faf8; }
+body .literature-connector .literature-guide-title { margin: 0; font-weight: 600; font-size: 1rem; }
+body .literature-connector .literature-guide-steps { display: grid; gap: 7px; margin: 0; padding-left: 20px; color: var(--text, #333); font-size: 0.9rem; line-height: 1.5; }
+body .literature-connector .literature-guide-steps li { padding-left: 2px; }
+body .literature-connector .literature-guide-steps b { display: block; font-weight: 600; }
+body .literature-connector .literature-guide-steps span { color: var(--muted, #667); }
 body .literature-connector .literature-access-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 body .literature-connector .literature-access-panel p { margin: 0; }
 body .msg-list .chat-access-panel { display: grid; gap: 8px; margin: 6px 0 12px; padding: 10px 12px; border: 1px solid var(--border, #dfe5e1); border-radius: 9px; background: #fff; }

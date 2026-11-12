@@ -51,10 +51,16 @@ async function main() {
       '登录页路由拒绝多余字段，避免夹带任意 URL');
 
     const ui = fs.readFileSync(path.join(__dirname, '..', 'js', 'codex.js'), 'utf8');
-    for (const text of ['账号与权限（登录一次，后续任务复用）', '打开机构登录', '知网机构登录',
+    // 【2026-11-12 界面简化】七个入口收进「管理登录」折叠区，但入口本身必须仍在；
+    // 首屏只保留标题 + 一行状态 + 检查按钮。
+    for (const text of ['账号与权限', '管理登录', '打开机构登录', '知网机构登录',
       'Web of Science 登录', 'Scopus 登录', 'EZproxy 统一登录', '打开万方会员', '检查登录状态']) {
       assert.ok(ui.includes(text), '界面应提供: ' + text);
     }
+    assert.ok(ui.includes('literature-access-body') && ui.includes('literature-access-toggle'),
+      '登录入口应放在可折叠的「管理登录」区，避免占据首屏');
+    assert.ok(!ui.includes('账号与权限（登录一次，后续任务复用）'),
+      '旧的常驻长标题不应再出现在首屏');
     assert.ok(ui.includes("body: JSON.stringify({ target })"), '界面只提交枚举目标');
     assert.ok(ui.includes("body: JSON.stringify({ source: 'all' })"), '界面状态查询只提交枚举来源');
     assert.ok(ui.includes('/api/literature/access-page') && ui.includes('/api/literature/access-status'),

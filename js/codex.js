@@ -569,50 +569,110 @@
   }
   // 账号与权限：任务开始前先把机构登录/会员购买处理好，避免跑到一半撞登录墙。
   // 平台只打开官方页面，不代填账号、不代付款；2026-11-06 扩到五库 + EZproxy。
+  // 【2026-11-12 界面简化】默认收起成一行状态摘要，七个登录入口收进折叠区——
+  // 科研流程首屏应该是"输入主题"，不是七个登录按钮。
   function literatureAccessPanel(t) {
     const box = node('div', undefined, 'literature-access-panel');
-    box.append(node('p', '账号与权限（登录一次，后续任务复用）', 'codex-status'));
-    const row = node('div', undefined, 'literature-access-actions');
+    const head = node('div', undefined, 'literature-access-head');
+    head.append(node('span', '账号与权限', 'literature-access-title'));
+    const summary = node('span', literatureAccessSummary(t), 'literature-access-summary');
+    head.append(summary);
     const busy = () => t.busy || t.literatureBusy;
-    const act = async (target, label) => {
-      if (busy()) return;
-      t.literatureAccessStatus = '正在打开' + label + '…'; render();
-      try {
-        const result = await request('/api/literature/access-page', { method: 'POST',
-          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target }) });
-        t.literatureAccessStatus = '已打开' + (result.label || label) + '；在该页完成登录后点“检查登录状态”。';
-      } catch (error) { t.literatureAccessStatus = '打开失败：' + error.message; }
-      render();
-    };
+
     const check = async () => {
       if (busy()) return;
-      t.literatureAccessStatus = '正在读取登录状态（万方/知网/WoS/Scopus/EZproxy，可能需要一两分钟）…'; render();
+      summary.textContent = '正在检查登录状态…';
       try {
         const result = await request('/api/literature/access-status', { method: 'POST',
           headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'all' }) });
-        const lines = Array.isArray(result.results) && result.results.length
-          ? result.results.map(item => item.label + '：' + (item.message || '未判定'))
-          : [result.message || (result.signedIn ? '已登录' : '未登录')];
-        t.literatureAccessStatus = '当前：' + lines.join('｜');
-      } catch (error) { t.literatureAccessStatus = '状态读取失败：' + error.message; }
+        const list = Array.isArray(result.results) ? result.results : [];
+        t.literatureAccessResults = list;
+        t.literatureAccessStatus = list.length
+          ? list.map(item => item.label + '：' + (item.message || '未判定')).join('｜')
+          : (result.message || (result.signedIn ? '已登录' : '未登录'));
+        summary.textContent = literatureAccessSummary(t);
+        detail.textContent = t.literatureAccessStatus;
+        // 已登录的来源成组收起；只有需要处理的（未登录/需认证）留着入口。
+        renderDetail();
+      } catch (error) {
+        summary.textContent = '状态读取失败';
+        t.literatureAccessStatus = '状态读取失败：' + error.message;
+        detail.textContent = t.literatureAccessStatus;
+      }
+      render();
+    };
+
+    const checkBtn = node('button', '检查登录状态', 'quiet-button literature-access-check');
+    checkBtn.type = 'button';
+    checkBtn.onclick = check;
+    head.append(checkBtn);
+    box.append(head);
+
+    // 折叠区：只在展开时才渲染七个入口。
+    const toggle = node('button', '管理登录', 'literature-access-toggle');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    const body = node('div', undefined, 'literature-access-body');
+    body.hidden = true;
+    const detail = node('p', t.literatureAccessStatus || '尚未检查登录状态。', 'literature-access-detail');
+    const row = node('div', undefined, 'literature-access-actions');
+    const busy2 = busy;
+    const act = async (target, label) => {
+      if (busy2()) return;
+      detail.textContent = '正在打开' + label + '…';
+      try {
+        const result = await request('/api/literature/access-page', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target }) });
+        detail.textContent = '已打开' + (result.label || label) + '；在该页完成登录后点「检查登录状态」。';
+      } catch (error) { detail.textContent = '打开失败：' + error.message; }
       render();
     };
     const add = (label, target) => {
       const button = node('button', label, 'quiet-button'); button.type = 'button';
       button.onclick = () => act(target, label); row.append(button);
     };
-    add('打开机构登录', 'institution');
-    add('知网机构登录', 'cnki');
-    add('Web of Science 登录', 'wos');
-    add('Scopus 登录', 'scopus');
-    add('EZproxy 统一登录', 'ezproxy');
-    add('打开万方会员', 'purchase');
-    const statusBtn = node('button', '检查登录状态', 'quiet-button'); statusBtn.type = 'button';
-    statusBtn.onclick = () => check();
-    row.append(statusBtn);
-    box.append(row, node('p', t.literatureAccessStatus || '当前：未检测', 'codex-status'),
-      node('p', '登录状态保存在平台专用浏览器；普通浏览器不共享。万方勾选“7天免登录”约 7 天，其他库按各自会话有效期，过期需重登。EZproxy 一次登录覆盖已订购资源，但适配器仍需经 EZproxy 地址访问才会带上机构权限。', 'codex-status'));
+    function renderDetail() {
+      row.replaceChildren();
+      const results = Array.isArray(t.literatureAccessResults) ? t.literatureAccessResults : [];
+      const needs = results.filter(item => !item.signedIn);
+      if (!results.length) {
+        // 未检查过：给出全部入口 + 一句用途说明。
+        add('知网机构登录', 'cnki'); add('打开机构登录', 'institution');
+        add('Web of Science 登录', 'wos'); add('Scopus 登录', 'scopus');
+        add('EZproxy 统一登录', 'ezproxy'); add('打开万方会员', 'purchase');
+        body.append(row, node('p', '先点「检查登录状态」；已登录的来源会自动隐藏入口。登录只需一次，之后任务复用。', 'literature-access-note'));
+      } else if (needs.length) {
+        needs.forEach(item => {
+          const target = { 万方: 'institution', 知网: 'cnki', 'Web of Science': 'wos',
+                           Scopus: 'scopus', EZproxy: 'ezproxy' }[item.label];
+          if (target) add(item.label + ' 登录', target);
+        });
+        body.append(row, node('p', (results.length - needs.length) + ' 个来源已就绪；只有上面几个需要处理。', 'literature-access-note'));
+      } else {
+        body.append(node('p', '五个来源都已就绪，可以开始检索。', 'literature-access-note'));
+      }
+    }
+    renderDetail();
+    toggle.onclick = () => {
+      const open = body.hidden;
+      body.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.textContent = open ? '收起登录管理' : '管理登录';
+      if (open) body.append(detail);
+    };
+    head.append(toggle);
+    box.append(head, body);
     return box;
+  }
+
+  /** 一行摘要：已就绪 N/5、需要处理 M；未检查时提示先去检查。 */
+  function literatureAccessSummary(t) {
+    const results = Array.isArray(t.literatureAccessResults) ? t.literatureAccessResults : [];
+    if (!results.length) return t.literatureAccessStatus ? t.literatureAccessStatus.slice(0, 26) : '未检查';
+    const ready = results.filter(item => item.signedIn).length;
+    const needs = results.length - ready;
+    return needs ? ready + '/' + results.length + ' 已就绪 · ' + needs + ' 个待处理'
+                 : ready + '/' + results.length + ' 已就绪';
   }
 
   function literatureTaskSelector(mod, t) {
@@ -639,27 +699,34 @@
     };
     label.append(select); box.append(label, add);
     box.append(literatureAccessPanel(t));
+    // 【2026-11-12 界面简化】预试、讨论记录、草稿等技术操作收进折叠区，
+    // 首屏只留"检索设置 + 开始检索"这条主线。
+    const moreBox = node('details', undefined, 'literature-more');
+    moreBox.append(node('summary', '更多操作（预试 / 讨论记录 / 草稿）', 'literature-more-summary'));
+    const moreBody = node('div', undefined, 'literature-more-body');
     const trial = node('button', '谷歌学术小范围预试（最多2页，仅候选）', 'quiet-button'); trial.type = 'button';
     trial.disabled = literatureWorkspaceBusy(mod.id);
-    trial.onclick = () => openScholarTrial(Store.getState().modules.find(item => item.id === mod.id) || mod); box.append(trial);
+    trial.onclick = () => openScholarTrial(Store.getState().modules.find(item => item.id === mod.id) || mod); moreBody.append(trial);
     if (root.LiteratureDiscussions) {
       const discussions = node('button', '讨论记录', 'quiet-button'); discussions.type = 'button'; discussions.onclick = () => root.LiteratureDiscussions.open(mod.id);
       const saveDiscussion = node('button', '保存讨论与草稿', 'quiet-button'); saveDiscussion.type = 'button'; saveDiscussion.onclick = () => root.LiteratureDiscussions.save(mod.id, true);
       const saveState = root.LiteratureDiscussions.status(mod.id);
       const discussionStatus = node('p', saveState.text, saveState.error ? 'codex-error' : 'codex-status');
       discussionStatus.setAttribute('data-literature-discussion-scope', root.TaskManager.currentTaskId() + ':' + mod.id + ':' + active.id);
-      box.append(discussions, saveDiscussion, discussionStatus);
+      moreBody.append(discussions, saveDiscussion, discussionStatus);
       const origin = saved[mod.id]?.literatureDiscussionOrigin;
       if (!(mod.messages || []).length) {
-        box.append(node('p', '当前文献工作区暂无讨论；这不表示其他工作区的原讨论被删除。点击“讨论记录”查看所有已保存讨论。', 'codex-status'));
-        if (origin) { const back = node('button', '回到原讨论', 'primary-button'); back.type = 'button'; back.disabled = literatureWorkspaceBusy(mod.id); back.onclick = () => root.LiteratureDiscussions.returnOrigin(mod.id); box.append(back); }
+        moreBody.append(node('p', '当前文献工作区暂无讨论；这不表示其他工作区的原讨论被删除。点击“讨论记录”查看所有已保存讨论。', 'codex-status'));
+        if (origin) { const back = node('button', '回到原讨论', 'primary-button'); back.type = 'button'; back.disabled = literatureWorkspaceBusy(mod.id); back.onclick = () => root.LiteratureDiscussions.returnOrigin(mod.id); moreBody.append(back); }
       }
     }
     if (saved[mod.id]?.literatureDiscussionEditingForJobId) {
-      box.append(node('p', '正在继续讨论并修改检索规则。下方发送修改要求后，点击“从对话更新规则并核查”；新草稿保存成功才进入核查。原检索结果保留。', 'codex-status'));
-      if (!(mod.messages || []).some(message => message.role === 'user')) box.append(node('p', '当前工作区没有已保存的讨论。可先点“讨论记录”查找旧讨论，或在下方补充修改要求；历史任务详情不会保存完整聊天。', 'codex-error'));
+      moreBody.append(node('p', '正在继续讨论并修改检索规则。下方发送修改要求后，点击“从对话更新规则并核查”；新草稿保存成功才进入核查。原检索结果保留。', 'codex-status'));
+      if (!(mod.messages || []).some(message => message.role === 'user')) moreBody.append(node('p', '当前工作区没有已保存的讨论。可先点“讨论记录”查找旧讨论，或在下方补充修改要求；历史任务详情不会保存完整聊天。', 'codex-error'));
     }
-    if (!t.literatureJob?.id && !saved[mod.id]?.literatureJobId) box.append(node('span', '草稿 · 尚未检索', 'codex-status'));
+    moreBox.append(moreBody);
+    box.append(moreBox);
+    if (!t.literatureJob?.id && !saved[mod.id]?.literatureJobId) box.append(node('span', '尚未检索', 'codex-status'));
     return box;
   }
   function literatureSegmentSelection(preview, fromStage, until, paperIds) {
@@ -2639,6 +2706,22 @@
     } else pieces.push('尚未检索 · 先讨论需求并核对设置');
     const summary = node('p', pieces.join('　·　'), 'literature-task-summary');
     summary.setAttribute('aria-live', 'polite');
+    // 【2026-11-12】没有任务时给一张明确的"下一步"引导卡，替代空白区。
+    let guideCard = null;
+    if (!job) {
+      const guide = node('div', undefined, 'literature-guide');
+      guide.append(node('p', '从这里开始', 'literature-guide-title'));
+      const steps = node('ol', undefined, 'literature-guide-steps');
+      [['确认账号与权限', '上方「账号与权限」点「检查登录状态」；已登录的来源会自动隐藏入口。'],
+       ['说明研究主题', '在下方对话框写清主题、范围与年份，AI 会整理成可核对的检索设置。'],
+       ['核对设置并开始检索', '展开「检索与执行设置」，确认来源与检索式后开始。']].forEach(([title, text]) => {
+        const li = node('li');
+        li.append(node('b', title), node('span', text));
+        steps.append(li);
+      });
+      guide.append(steps);
+      guideCard = guide;
+    }
     let contextId = '';
     try { if (typeof literatureWorkspaceManager === 'function') contextId = literatureWorkspaceManager(mod)?.active()?.id || ''; } catch (_) {}
     const key = [mod.id, contextId, job?.id || 'draft'].join(':');
@@ -2656,7 +2739,11 @@
     const fileCount = Array.isArray(job?.files) ? job.files.filter(name => !String(name).startsWith('export/')).length : 0;
     const files = disclosure('材料、过程文件与历史记录' + (fileCount ? ' · ' + fileCount + ' 个文件' : ''), 'literature-process-files', 'files', false);
     process.forEach(child => files.append(child));
-    box.replaceChildren(...retained, summary);
+    // 引导卡插在"文献任务"标题区之后、任务选择器之前，首屏可见且不抢占标题。
+    const ordered = [...retained];
+    const guideIndex = ordered.length ? 1 : 0;
+    if (guideCard) ordered.splice(guideIndex, 0, guideCard);
+    box.replaceChildren(...ordered, summary);
     // A running task always keeps its stop action visible, even with settings closed.
     if (job?.status === 'running') {
       const toolbar = operations.find(child => hasClass(child, 'literature-toolbar'));
