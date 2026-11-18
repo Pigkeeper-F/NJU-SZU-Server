@@ -284,6 +284,3 @@
   bind();
   load(false);
 })();
-
-// drill: broken syntax
-function broken( { 
