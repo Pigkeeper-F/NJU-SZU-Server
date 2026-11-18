@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>更新日志 - 研序 · 研究工作台</title>
+  <meta name="description" content="研序研究工作台的开发更新记录，直接同步自 GitHub 仓库提交历史。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231c263c'/%3E%3Cpath d='M9 9h5v14H9m9-14h5v14h-5' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/changelog.css">
+</head>
+<body class="changelog-page">
+  <header class="cl-header">
+    <a class="cl-brand" href="index.html">
+      <span class="brand-mark">研</span>
+      <span>研序 · 研究工作台</span>
+    </a>
+    <nav class="cl-nav">
+      <a class="cl-nav-link" id="cl-repo-link" href="#" target="_blank" rel="noopener noreferrer">GitHub 仓库 ↗</a>
+      <a class="cl-nav-link" href="index.html">进入工作台</a>
+    </nav>
+  </header>
+
+  <main class="cl-main">
+    <section class="cl-hero">
+      <h1>更新日志</h1>
+      <p class="cl-intro">
+        这里列出平台每一次改动。内容直接读取 GitHub 仓库的提交记录，不经过人工转述——
+        所以看到的就是代码里真实发生的变化。老师可以用它核对进展，同学可以查某天改了什么。
+      </p>
+      <div class="cl-meta" id="cl-meta"></div>
+    </section>
+
+    <div class="cl-toolbar">
+      <div class="cl-filters" id="cl-filters" role="group" aria-label="按类型筛选"></div>
+      <div class="cl-actions">
+        <input class="cl-search" id="cl-search" type="search" placeholder="搜索提交内容…" aria-label="搜索提交内容" autocomplete="off">
+        <button class="quiet-button" id="cl-refresh" type="button">立即刷新</button>
+      </div>
+    </div>
+
+    <div id="cl-status" class="cl-status" role="status" hidden></div>
+    <div id="cl-timeline" class="cl-timeline" aria-live="polite"></div>
+
+    <section class="cl-empty" id="cl-empty" hidden>
+      <h2>没有匹配的记录</h2>
+      <p>换个关键词，或点「全部」看完整列表。</p>
+    </section>
+  </main>
+
+  <footer class="cl-footer">
+    <span>数据来源：GitHub 提交历史 · 每次刷新最多请求一次上游，缓存 5 分钟</span>
+  </footer>
+
+  <script src="js/changelog.js"></script>
+</body>
+</html>

@@ -48,6 +48,14 @@ const scholar = new LiteratureConnector(ROOT, {
 });
 const literature = new LiteratureFlow(codex, { scholarSearch: options => scholarSearch(scholar, options) });
 const literatureAuxiliary = new LiteratureAuxiliary(ROOT, scholar);
+// 【部署 · 2026-11-18】更新日志：从 GitHub 拉提交给老师看。配置见 .env 的 CHANGELOG_* 段。
+const { Changelog } = require('./tools/changelog');
+const changelog = new Changelog({
+  repository: process.env.CHANGELOG_REPO || 'Pigkeeper-F/NJU-SZU-Server',
+  branch: process.env.CHANGELOG_BRANCH || 'main',
+  token: process.env.GITHUB_TOKEN || '',
+  limit: Number(process.env.CHANGELOG_LIMIT || 60)
+});
 const literatureRuleReviews = new LiteratureRuleReviewStore(ROOT);
 const literatureRuleReviewAssist = new LiteratureRuleReviewAssist(literatureRuleReviews, codex);
 const literatureDiscussions = new LiteratureDiscussionStore(ROOT);
@@ -183,18 +191,53 @@ const literatureRuntime = createLiteratureRuntime({
 //   Origin 允许「无 Origin」(curl/桌面工具) 与 "null" (file:// 双击直开的推荐用法)，
 //          其余第三方来源一律 403。file:// 用户建议优先用「左下角齿轮」配置 Key——
 //          该 Key 只存在浏览器本地、随请求体发送，恶意网页拿不到，攻击链自然断裂。
+// 【部署 · 2026-11-18】部署到服务器后，浏览器用的是公网地址（如 IP:端口），Host 头不再是
+// localhost，上面的白名单会把所有请求 403 掉。这里保留「本机默认」，再叠加环境变量白名单：
+//   PUBLIC_HOSTS=114.212.75.219:18700,yanxu.example.edu
+//   PUBLIC_ORIGINS=http://114.212.75.219:18700
+// 两者都留空时行为与改造前完全一致（只认本机），本地开发不受影响。
+function parseListEnv(value) {
+  return String(value || '').split(',').map(item => item.trim().toLowerCase()).filter(Boolean);
+}
+const PUBLIC_HOSTS = parseListEnv(process.env.PUBLIC_HOSTS);
+const PUBLIC_ORIGINS = parseListEnv(process.env.PUBLIC_ORIGINS);
 const ALLOWED_HOSTS = new Set([
   'localhost:' + PORT,
   '127.0.0.1:' + PORT,
-  '[::1]:' + PORT
+  '[::1]:' + PORT,
+  ...PUBLIC_HOSTS
 ]);
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:' + PORT,
-  'http://127.0.0.1:' + PORT
+  'http://127.0.0.1:' + PORT,
+  ...PUBLIC_ORIGINS
 ]);
-const RATE_LIMIT = { max: 30, windowMs: 60000 }; // 每分钟 30 次对话请求，防脚本刷上游配额
+// 【部署 · 2026-11-18】多人共用时按 IP 计数，避免一个用户把配额刷满导致全班被限流；
+// 单机（无 PUBLIC_HOSTS）仍沿用原来的全局计数语义。上限可用 RATE_LIMIT_MAX 调。
+const RATE_LIMIT = { max: Number(process.env.RATE_LIMIT_MAX || 30) || 30, windowMs: 60000 };
+const rateBuckets = new Map();
 let rateCount = 0;
 let rateWindowStart = 0;
+
+function hitRateLimit(req) {
+  const now = Date.now();
+  if (PUBLIC_HOSTS.length === 0) {
+    if (now - rateWindowStart > RATE_LIMIT.windowMs) { rateWindowStart = now; rateCount = 0; }
+    return ++rateCount > RATE_LIMIT.max;
+  }
+  const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+    || (req.socket && req.socket.remoteAddress) || 'unknown';
+  const bucket = rateBuckets.get(ip);
+  if (!bucket || now - bucket.start > RATE_LIMIT.windowMs) {
+    rateBuckets.set(ip, { start: now, count: 1 });
+    // 顺手清掉过期的桶，避免长期运行后 Map 无限增长
+    if (rateBuckets.size > 512) {
+      for (const [key, value] of rateBuckets) if (now - value.start > RATE_LIMIT.windowMs) rateBuckets.delete(key);
+    }
+    return false;
+  }
+  return ++bucket.count > RATE_LIMIT.max;
+}
 
 function checkRequestGuards(req, res) {
   const host = String(req.headers.host || '').toLowerCase();
@@ -207,15 +250,11 @@ function checkRequestGuards(req, res) {
     sendJson(res, 403, { error: '拒绝跨站请求。' });
     return false;
   }
-  const now = Date.now();
-  if (now - rateWindowStart > RATE_LIMIT.windowMs) {
-    rateWindowStart = now;
-    rateCount = 0;
-  }
-  if (String(req.url || '').startsWith('/api/ai/') || req.url === '/api/code/exec') rateCount += 1;
-  if (rateCount > RATE_LIMIT.max) {
-    sendJson(res, 429, { error: '请求过于频繁，请稍后再试。' });
-    return false;
+  if (String(req.url || '').startsWith('/api/ai/') || req.url === '/api/code/exec') {
+    if (hitRateLimit(req)) {
+      sendJson(res, 429, { error: '请求过于频繁，请稍后再试。' });
+      return false;
+    }
   }
   return true;
 }
@@ -642,7 +681,7 @@ async function handleResearch(req, res, url) {
     release = literatureAuxiliary.acquire();
     const data = JSON.parse(await readBody(req, 256 * 1024));
     const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
-    if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
+    if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：点击左侧「添加 API」填入你自己的 Key（本站不提供共享 Key）。' });
     const rq = require('./tools/research-question');
     let gaps = [];
     let notes = [];
@@ -817,7 +856,7 @@ async function handleLiterature(req, res, url) {
       release = literatureAuxiliary.acquire();
       const job = literatureAuxiliary.job(jobId);
       const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
-      if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
+      if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：点击左侧「添加 API」填入你自己的 Key（本站不提供共享 Key）。' });
       try {
         const result = await require('./tools/literature-research').runResearchStage({ job, modelCfg: cfg, callModel: callModelWithRetry });
         scholar.registerFiles(job, result.files);
@@ -839,7 +878,7 @@ async function handleLiterature(req, res, url) {
       release = literatureAuxiliary.acquire();
       const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
       const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
-      if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
+      if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：点击左侧「添加 API」填入你自己的 Key（本站不提供共享 Key）。' });
       try {
         const plan = await require('./tools/research-question').planQueries({ idea: data.idea, sources: data.sources, modelCfg: cfg, callModel: callModelWithRetry });
         return sendJson(res, 200, { ...plan, config: configInfo(cfg, configSource(data.settings, normalizeCredential(data.credential))) });
@@ -1251,6 +1290,9 @@ function normalizeCredential(raw) {
 // 【T3 重构 · 2026-10-14】把模型配置解析（Key / baseUrl / model / protocol / 系统提示词）从 handleChat
 // 里抽出来，供 handleChat 与 handleCompose 复用，保证两个端点的解析规则完全一致。
 // 优先级：前端 settings（左下角齿轮，随请求发来、只存浏览器本地） > 服务端 .env。
+// 【部署 · 2026-11-18】REQUIRE_USER_KEY=1（多人服务器模式）：只用请求里带的 Key，
+// 绝不回落到服务端 .env。否则任何访问者都能匿名消耗站长的额度。
+const REQUIRE_USER_KEY = process.env.REQUIRE_USER_KEY === '1';
 function resolveModelConfig(rawSettings) {
   const s = (rawSettings && typeof rawSettings === 'object') ? rawSettings : {};
   const cliKey = (typeof s.apiKey === 'string') ? s.apiKey.trim() : '';
@@ -1260,7 +1302,7 @@ function resolveModelConfig(rawSettings) {
   // 【体验升级 · 2026-10-13】系统提示词（可选）：前端「模型设置」填写，注入为 system 指令。
   const sysPrompt = (typeof s.systemPrompt === 'string') ? s.systemPrompt.trim().slice(0, 2000) : '';
   return {
-    apiKey: cliKey || process.env.AI_API_KEY || '',
+    apiKey: cliKey || (REQUIRE_USER_KEY ? '' : (process.env.AI_API_KEY || '')),
     baseUrl: (cliBase || process.env.AI_API_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
     model: cliModel || process.env.AI_MODEL || 'gpt-5-mini',
     protocol: cliProto || process.env.AI_API_PROTOCOL || 'responses',
@@ -1553,7 +1595,7 @@ async function handleChat(req, res) {
   const cfg = Object.assign(resolveModelConfig(payload.settings), credential || {});
   const activeConfig = configInfo(cfg, configSource(payload.settings, credential));
   if (!cfg.apiKey) {
-    sendJson(res, 503, { error: '尚未配置 API Key。请点击左侧「添加 API」选择 DeepSeek 或 OpenAI，或使用设置中的模型配置。' });
+    sendJson(res, 503, { error: '尚未配置 API Key：请点击左侧「添加 API」填入你自己的 Key（本站不提供共享 Key）。' });
     return;
   }
   // 【W2 · 2026-10-14】环节上下文：module 存在时，把「环节 + 上游产出摘要」拼在最终
@@ -1618,7 +1660,7 @@ async function handleAiTest(req, res) {
   }
   const cfg = Object.assign(resolveModelConfig(payload.settings), normalizeCredential(payload.credential) || {});
   if (!cfg.apiKey) {
-    sendJson(res, 503, { error: '尚未配置 API Key：请填写设置中的模型配置，或使用服务端 .env。' });
+    sendJson(res, 503, { error: '尚未配置 API Key：请填写设置中的模型配置，填入你自己的 Key（本站不提供共享 Key）。' });
     return;
   }
   const messages = normalizeMessages([{ role: 'user', text: '连通性测试：请只回复 pong' }]);
@@ -2619,7 +2661,11 @@ const STATIC_EXT = new Set([
 // localStorage 里的账号/记录互不可见（用户从不同地址进来会「注册后登录不上」）。
 // 页面类 GET/HEAD 请求若来自 127.0.0.1，统一 302 到 localhost，保证所有人都落在同一 origin。
 // API 的 POST 不重定向（页面固定在 localhost 后，API 自然同源）。
+// 【部署 · 2026-11-18】只在「本机自用」时重定向。配置了 PUBLIC_HOSTS（服务器部署，浏览器
+// 走公网地址）时直接跳过：那台机器上没有人从 127.0.0.1 浏览，一旦重定向到 localhost，
+// 用户浏览器会去连自己电脑的 localhost，页面直接打不开。
 function redirectLoopback(req, res) {
+  if (PUBLIC_HOSTS.length > 0) return false;
   if ((req.method === 'GET' || req.method === 'HEAD') &&
       String(req.headers.host || '').toLowerCase().indexOf('127.0.0.1:') === 0) {
     res.writeHead(302, { Location: 'http://localhost:' + PORT + safePathname(req.url) });
@@ -2641,6 +2687,7 @@ function serveStatic(req, res) {
   if (!filePath.startsWith(ROOT + path.sep) && filePath !== ROOT) { res.writeHead(403); res.end(); return; }
   // Only public assets are served. Uploaded files and local credentials use no static route.
   if (!(relative === 'index.html' || relative === 'login.html' || relative === 'register.html' || relative === 'debug.html' ||
+    relative === 'changelog.html' ||
     /^(?:css|js)\/[\w\-/]+\.(?:css|js|svg)$/.test(relative))) { res.writeHead(403); res.end(); return; }
   fs.readFile(filePath, (error, data) => {
     if (error) { res.writeHead(error.code === 'ENOENT' ? 404 : 500); res.end(); return; }
@@ -2679,6 +2726,13 @@ if (require.main === module) {
       handleDebug(request, response, new URL(request.url, 'http://localhost')));
     if (String(req.url || '').startsWith('/api/research/')) return guarded('/api/research', (request, response) =>
       handleResearch(request, response, new URL(request.url, 'http://localhost')));
+    // 【部署 · 2026-11-18】更新日志：只读接口，老师不用登录也能看。
+    if (req.method === 'GET' && String(req.url || '').indexOf('/api/changelog') === 0) {
+      return guarded('/api/changelog', async (request, response) => {
+        const force = /(?:\?|&)refresh=1(?:&|$)/.test(request.url || '');
+        sendJson(response, 200, await changelog.get({ force }));
+      });
+    }
     if (req.method === 'POST' && req.url === '/api/dependencies/open') return guarded('/api/dependencies/open', (_, response) => openDependencies(response));
     if (req.method === 'POST' && req.url === '/api/ai/chat') return guarded('/api/ai/chat', handleChat);
     if (req.method === 'POST' && req.url === '/api/ai/test') return guarded('/api/ai/test', handleAiTest);

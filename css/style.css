@@ -876,6 +876,22 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
 }
 .sidebar-debug-link:hover { color: var(--text); text-decoration: underline; }
 
+/* 【部署 · 2026-11-18】侧栏「更新日志」按钮：与底部工具区（＋添加 API / ✎编辑依赖）同高同宽 */
+.sidebar-changelog-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0 12px 6px;
+  width: calc(100% - 24px);
+  box-sizing: border-box;
+}
+/* 侧栏折叠态只留图标：文字标签隐藏，按钮退化为窄条（与既有工具栏折叠规则一致） */
+.sidebar-collapsed .sidebar-changelog-btn .changelog-button-label,
+body.sidebar-collapsed .sidebar-changelog-btn .changelog-button-label { display: none; }
+.sidebar-collapsed .sidebar-changelog-btn,
+body.sidebar-collapsed .sidebar-changelog-btn { margin: 0 4px 6px; width: calc(100% - 8px); }
+
 .research-plans { margin: 4px 0 6px; width: 100%; }
 .research-plan {
   display: flex;

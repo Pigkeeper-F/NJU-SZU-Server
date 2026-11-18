@@ -160,6 +160,27 @@
     return box;
   }
 
+  /**
+   * 【部署 · 2026-11-18】侧栏「更新日志」入口：老师/同学从工作台一键看到 GitHub 上的改动。
+   * 与调试台不同，这个默认常显——它是给非开发者的，藏在 ?debug=1 后面没人会找到。
+   * 位置放在底部工具区（＋添加 API / ✎编辑依赖）之前，避免跑到「个人工作空间」下面。
+   */
+  function ensureChangelogButton() {
+    var existing = elSidebar.querySelector ? elSidebar.querySelector('.sidebar-changelog-btn') : null;
+    if (existing) return existing;
+    var btn = doc.createElement('button');
+    btn.type = 'button';
+    btn.className = 'quiet-button sidebar-changelog-btn';
+    btn.title = '查看平台的更新记录（同步自 GitHub）';
+    btn.setAttribute('aria-label', '更新日志');
+    btn.innerHTML = '<span aria-hidden="true">↻</span><span class="changelog-button-label">更新日志</span>';
+    btn.addEventListener('click', function () { root.location.href = 'changelog.html'; });
+    var footer = elSidebar.querySelector ? elSidebar.querySelector('.sidebar-footer') : null;
+    if (footer && footer.parentNode === elSidebar) elSidebar.insertBefore(btn, footer);
+    else elSidebar.appendChild(btn);
+    return btn;
+  }
+
   function ensureHint() {
     var hint = elSidebar.querySelector ? elSidebar.querySelector('.sidebar-hint') : null;
     if (!hint) {
@@ -962,6 +983,9 @@
 
     // 7) 左下角齿轮：模型设置（接口地址 / API Key）
     ensureSettingsButton();
+
+    // 8) 更新日志入口（常显）：给老师和同学看 GitHub 上的改动记录
+    ensureChangelogButton();
   }
 
   // ------------------------------------------------------------ 事件

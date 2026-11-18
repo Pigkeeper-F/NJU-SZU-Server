@@ -1,0 +1,355 @@
+/* ============================================================================
+ * 更新日志页 —— 沿用全站白主题变量（css/style.css 的 :root），不引入新配色体系。
+ * 只做这一页需要的排版：时间线、类型徽标、筛选条、状态条。
+ * ========================================================================== */
+
+.changelog-page {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ------------------------------------------------------------- 顶栏 */
+.cl-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 28px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.cl-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.cl-brand:hover { color: var(--accent); }
+
+.cl-nav { display: flex; align-items: center; gap: 18px; }
+
+.cl-nav-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  padding: 4px 2px;
+  border-bottom: 1px solid transparent;
+  transition: color var(--transition), border-color var(--transition);
+}
+
+.cl-nav-link:hover { color: var(--text); border-bottom-color: var(--accent-line); }
+
+/* ------------------------------------------------------------- 主体 */
+.cl-main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 36px 24px 60px;
+  box-sizing: border-box;
+}
+
+.cl-hero { margin-bottom: 28px; }
+
+.cl-hero h1 {
+  font-size: 30px;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  margin: 0 0 14px;
+}
+
+.cl-intro {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.75;
+  margin: 0 0 16px;
+  max-width: 62ch;
+}
+
+.cl-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cl-meta strong { color: var(--text); font-weight: 600; }
+
+/* ------------------------------------------------------------- 工具栏 */
+.cl-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 22px;
+}
+
+.cl-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.cl-chip {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+}
+
+.cl-chip:hover { color: var(--text); border-color: var(--accent-line); }
+
+.cl-chip[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.cl-chip .cl-chip-count { opacity: 0.65; margin-left: 5px; }
+
+.cl-actions { display: flex; align-items: center; gap: 8px; }
+
+.cl-search {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  min-width: 180px;
+}
+
+.cl-search:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent-line); }
+
+/* ------------------------------------------------------------- 状态条 */
+.cl-status {
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  margin-bottom: 20px;
+}
+
+.cl-status[data-tone="error"] {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.cl-status[data-tone="warn"] {
+  border-color: #e0b400;
+  background: #fffbe6;
+  color: #7a5c00;
+}
+
+/* ------------------------------------------------------------- 时间线 */
+.cl-timeline { display: flex; flex-direction: column; gap: 30px; }
+
+.cl-day { position: relative; padding-left: 22px; }
+
+/* 竖线：最后一天不延伸到末尾，避免视觉上「还有内容」的错觉 */
+.cl-day::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 24px;
+  bottom: -30px;
+  width: 1px;
+  background: var(--border);
+}
+
+.cl-day:last-child::before { display: none; }
+
+.cl-day-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+  position: relative;
+}
+
+/* 圆点标记当天 */
+.cl-day-head::before {
+  content: "";
+  position: absolute;
+  left: -22px;
+  top: 8px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--bg);
+}
+
+.cl-day-date {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.cl-day-week { font-size: 12px; color: var(--muted); }
+
+.cl-day-count {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.cl-commits { display: flex; flex-direction: column; gap: 2px; }
+
+.cl-commit {
+  display: grid;
+  grid-template-columns: 68px 1fr auto;
+  align-items: start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  transition: background var(--transition);
+}
+
+.cl-commit:hover { background: var(--panel-2); }
+
+.cl-badge {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-align: center;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+}
+
+/* 每类一个低饱和色，靠色调区分而不是靠刺眼的高饱和色 */
+.cl-badge[data-type="feat"]     { background: #eaf5ea; color: #1f6b2c; border-color: #c9e5cb; }
+.cl-badge[data-type="fix"]      { background: #fdeceb; color: #a3211a; border-color: #f6cfcb; }
+.cl-badge[data-type="perf"]     { background: #fdf3e3; color: #8a5b00; border-color: #f0dcb8; }
+.cl-badge[data-type="refactor"] { background: #e9f0fb; color: #274b84; border-color: #cdddf5; }
+.cl-badge[data-type="docs"]     { background: #f0eefb; color: #4a3a8a; border-color: #dcd5f6; }
+.cl-badge[data-type="test"]     { background: #e8f4f6; color: #1d5c66; border-color: #c9e3e8; }
+.cl-badge[data-type="build"],
+.cl-badge[data-type="ci"]       { background: #eef1f4; color: #3f4a57; border-color: #d9e0e7; }
+.cl-badge[data-type="style"]    { background: #fbeef4; color: #8a2957; border-color: #f2d3e1; }
+.cl-badge[data-type="chore"]    { background: var(--panel-2); color: var(--muted); }
+.cl-badge[data-type="revert"],
+.cl-badge[data-type="merge"]    { background: #f4f0e8; color: #6b5636; border-color: #e6ddcb; }
+
+.cl-commit-body { min-width: 0; }
+
+.cl-commit-summary {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.cl-commit-scope {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+  margin-left: 6px;
+}
+
+.cl-commit-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cl-commit-sha {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+a.cl-commit-sha:hover {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--panel);
+}
+
+.cl-empty {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--muted);
+}
+
+.cl-empty h2 { font-size: 17px; color: var(--text); margin: 0 0 8px; }
+.cl-empty p { font-size: 13px; margin: 0; }
+
+/* 骨架屏：首次加载时不要留白屏 */
+.cl-skeleton { display: flex; flex-direction: column; gap: 12px; }
+
+.cl-skeleton-row {
+  height: 46px;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--panel-2) 25%, #f2f4f7 50%, var(--panel-2) 75%);
+  background-size: 200% 100%;
+  animation: cl-shimmer 1.3s ease-in-out infinite;
+}
+
+@keyframes cl-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cl-skeleton-row { animation: none; }
+}
+
+/* ------------------------------------------------------------- 页脚 */
+.cl-footer {
+  border-top: 1px solid var(--border);
+  padding: 18px 28px;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ------------------------------------------------------------- 窄屏 */
+@media (max-width: 720px) {
+  .cl-header { padding: 12px 16px; }
+  .cl-main { padding: 24px 16px 44px; }
+  .cl-hero h1 { font-size: 24px; }
+  .cl-commit { grid-template-columns: 1fr; gap: 6px; }
+  .cl-commit .cl-badge { justify-self: start; }
+  .cl-toolbar { flex-direction: column; align-items: stretch; }
+  .cl-actions { flex-wrap: wrap; }
+  .cl-search { flex: 1; min-width: 0; }
+}
