@@ -14,21 +14,24 @@
       <div id="login-msg" class="msg" role="alert"></div>
 
       <div class="form-row">
-        <label for="login-user">账号</label>
-        <input class="input" type="text" id="login-user" placeholder="请输入账号"
+        <label for="login-code">测试码</label>
+        <input class="input" type="text" id="login-code" placeholder="请输入测试码（必填）"
+               autocomplete="off" maxlength="64" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>
+
+      <div class="form-row">
+        <label for="login-user">账号（选填）</label>
+        <input class="input" type="text" id="login-user" placeholder="留空则以访客身份进入"
                autocomplete="username" maxlength="32">
       </div>
       <div class="form-row">
-        <label for="login-pass">密码</label>
-        <input class="input" type="password" id="login-pass" placeholder="请输入密码"
+        <label for="login-pass">密码（选填）</label>
+        <input class="input" type="password" id="login-pass" placeholder="留空则以访客身份进入"
                autocomplete="current-password">
       </div>
+      <p class="hint">测试码必填。账号密码都留空 → 以「访客」进入；要显示自己的名字就填账号密码登录。别只填一半。</p>
       <div class="actions">
         <button class="btn btn-primary btn-block" type="button" id="btn-login">登录</button>
-      </div>
-
-      <div class="actions">
-        <button class="btn btn-block btn-quiet-entry" type="button" id="btn-test-entry">测试直达（免登录）</button>
       </div>
 
       <p class="hint">还没有账号？<a href="register.html">去注册</a></p>

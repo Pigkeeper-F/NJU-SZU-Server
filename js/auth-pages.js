@@ -5,7 +5,8 @@
  * 职责：
  *   1) 注册页两段式：第一段校验测试码（对 APP_CONFIG.testCode trim 后严格比对），
  *      通过后才显示第二段「账号 + 密码 + 确认密码」表单；
- *   2) 登录页：账号 + 密码校验，成功后写入会话并进入主页。
+ *   2) 登录页：测试码必填；账号密码都留空则以访客进入，都填写则校验账号密码
+ *      （2026-11-18 起；原来的「测试直达（免登录）」入口已移除）。
  * 安全边界：测试码与密码校验均在前端完成，可被绕过；
  *          生产环境必须由后端校验测试码与凭据。
  * ========================================================= */
@@ -109,23 +110,48 @@
 
   /* ---------------- 登录页 ---------------- */
 
+  // 【2026-11-18】访客身份：账号密码都留空时显示的固定名。
+  // 它不是账号（不会被写入 wa_accounts），只是一个显示用的标签。
+  var GUEST_NAME = "访客";
+
   function initLoginPage() {
     var btn = document.getElementById("btn-login");
     if (!btn) { return; } // 当前不在登录页
     setTitle("登录");
 
     var msg = document.getElementById("login-msg");
+    var codeInput = document.getElementById("login-code");
     var userInput = document.getElementById("login-user");
     var passInput = document.getElementById("login-pass");
 
     if (Session.get()) { location.href = "index.html"; return; } // 已登录直接进主页
 
-    // 标准写法见 contract.md §4.2
+    // 登录规则（2026-11-18 主人指定）：
+    //   测试码必填；账号密码两者可都留空（访客进入），或都填写（校验通过后用自己的名字）。
+    //   只填一半属于输错，直接拦下而不是猜用户想干什么。
     function login() {
+      var code = (codeInput.value || "").trim();
       var username = (userInput.value || "").trim();
       var password = passInput.value || "";
-      if (!username) { showMsg(msg, "请输入账号", "error"); userInput.focus(); return; }
-      if (!password) { showMsg(msg, "请输入密码", "error"); passInput.focus(); return; }
+
+      if (!code) { showMsg(msg, "请输入测试码", "error"); codeInput.focus(); return; }
+      if (code !== APP.testCode) {
+        showMsg(msg, "测试码不正确，请重新输入", "error");
+        codeInput.select();
+        return;
+      }
+
+      // 两者都留空 → 访客进入，不查账号表
+      if (!username && !password) {
+        Session.set(GUEST_NAME);
+        showMsg(msg, "已以访客身份进入…", "ok");
+        location.href = "index.html";
+        return;
+      }
+
+      // 只填一半 → 明确提示该补哪一个
+      if (!username) { showMsg(msg, "已填密码但没填账号：请补上账号，或把密码也清空以访客身份进入", "error"); userInput.focus(); return; }
+      if (!password) { showMsg(msg, "已填账号但没填密码：请补上密码，或把账号也清空以访客身份进入", "error"); passInput.focus(); return; }
 
       var acc = AuthStore.findAccount(username);
       // 账号不存在与密码错误统一提示，避免枚举已注册账号
@@ -140,22 +166,11 @@
     }
 
     btn.addEventListener("click", login);
+    onEnter(codeInput, function () { userInput.focus(); });
     onEnter(userInput, function () { passInput.focus(); });
     onEnter(passInput, login);
   }
 
-  /* ---------------- 测试直达（免登录）——开发/演示便利入口 ---------------- */
-
-  function initTestEntry() {
-    var btn = document.getElementById("btn-test-entry");
-    if (!btn) { return; } // 当前页面没有测试直达按钮
-    btn.addEventListener("click", function () {
-      Session.set("tester"); // 写入测试会话，工作台守卫（guard.js）即放行
-      location.href = "index.html";
-    });
-  }
-
   initRegisterPage();
   initLoginPage();
-  initTestEntry();
 })();
