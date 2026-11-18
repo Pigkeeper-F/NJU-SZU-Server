@@ -54,7 +54,10 @@ const changelog = new Changelog({
   repository: process.env.CHANGELOG_REPO || 'Pigkeeper-F/NJU-SZU-Server',
   branch: process.env.CHANGELOG_BRANCH || 'main',
   token: process.env.GITHUB_TOKEN || '',
-  limit: Number(process.env.CHANGELOG_LIMIT || 60)
+  limit: Number(process.env.CHANGELOG_LIMIT || 60),
+  // 可选：给提交补手写中文说明（键=短sha，值=一句中文）。文件不存在就用英文原文。
+  notesPath: process.env.CHANGELOG_NOTES_PATH
+    || path.join(ROOT, 'config', 'changelog-notes.txt')
 });
 const literatureRuleReviews = new LiteratureRuleReviewStore(ROOT);
 const literatureRuleReviewAssist = new LiteratureRuleReviewAssist(literatureRuleReviews, codex);

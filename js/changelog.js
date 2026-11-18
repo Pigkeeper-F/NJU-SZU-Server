@@ -119,7 +119,7 @@
     return (STATE.payload.commits || []).filter(function (item) {
       if (STATE.type && item.type !== STATE.type) return false;
       if (!keyword) return true;
-      var haystack = [item.summary, item.subject, item.scope, item.author, item.typeLabel]
+      var haystack = [item.note, item.summary, item.subject, item.scope, item.scopeLabel, item.author, item.typeLabel]
         .join(" ").toLowerCase();
       return haystack.indexOf(keyword) >= 0;
     });
@@ -145,9 +145,19 @@
     row.appendChild(badge);
 
     var body = el("div", "cl-commit-body");
-    var summary = el("div", "cl-commit-summary", item.summary || item.subject || "");
-    if (item.scope) summary.appendChild(el("span", "cl-commit-scope", "(" + item.scope + ")"));
-    body.appendChild(summary);
+
+    // 有手写中文说明时，中文为主、英文原文降为次行（老师读中文，开发者对得上原文）
+    if (item.note) {
+      body.appendChild(el("div", "cl-commit-summary", item.note));
+      var origin = el("div", "cl-commit-origin", item.summary || item.subject || "");
+      if (item.scopeLabel || item.scope) origin.appendChild(el("span", "cl-commit-scope", " · " + (item.scopeLabel || item.scope)));
+      body.appendChild(origin);
+    } else {
+      var summary = el("div", "cl-commit-summary", item.summary || item.subject || "");
+      var scopeText = item.scopeLabel || item.scope;
+      if (scopeText) summary.appendChild(el("span", "cl-commit-scope", "（" + scopeText + "）"));
+      body.appendChild(summary);
+    }
 
     var foot = el("div", "cl-commit-foot");
     if (item.author) foot.appendChild(el("span", "", item.author));

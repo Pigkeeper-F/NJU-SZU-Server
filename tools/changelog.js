@@ -37,6 +37,33 @@ const TYPE_LABELS = Object.freeze({
 
 const TYPE_ORDER = ['feat', 'fix', 'perf', 'refactor', 'docs', 'test', 'build', 'ci', 'style', 'chore', 'merge', 'revert', 'other'];
 
+// 提交的 scope 段落（如 feat(literature) 里的 literature）翻成中文，让老师能看懂改的是哪一块。
+// 只翻译**已知**的模块名；查不到就原样显示，不猜。
+const SCOPE_LABELS = Object.freeze({
+  'literature': '文献',
+  'download': '下载数据',
+  'download-data': '下载数据',
+  'clean': '数据清洗',
+  'clean-data': '数据清洗',
+  'cleaning': '数据清洗',
+  'calculation': '模型计算',
+  'plotting': '绘图',
+  'result-audit': '结果核查',
+  'manual-review': '人工审核',
+  'ui': '界面',
+  'chat': '对话',
+  'ai': 'AI 助手',
+  'auth': '账号登录',
+  'deploy': '部署',
+  'server': '服务端',
+  'docs': '文档',
+  'sidebar': '侧栏',
+  'tasks': '任务',
+  'workspace': '工作区',
+  'contract': '接口契约',
+  'test': '测试'
+});
+
 /**
  * 解析 conventional commit 风格的标题。
  * 例："feat(literature): add Wanfang adapter" → { type: 'feat', scope: 'literature', summary: 'add Wanfang adapter' }
@@ -66,6 +93,7 @@ function shapeCommit(item) {
     type: parsed.type,
     typeLabel: TYPE_LABELS[parsed.type] || '其他',
     scope: parsed.scope,
+    scopeLabel: SCOPE_LABELS[parsed.scope.toLowerCase()] || '',
     summary: parsed.summary,
     author: (commit.author && commit.author.name) || (item.author && item.author.login) || '未知',
     date: (commit.author && commit.author.date) || (commit.committer && commit.committer.date) || '',
@@ -101,6 +129,7 @@ class Changelog {
    * @param {string} [options.token]    GitHub token（可选，私有仓库或提高限额）
    * @param {number} [options.limit]    最多取多少条提交
    * @param {number} [options.pageUrl]  仓库网页地址（用于「在 GitHub 上查看」按钮）
+   * @param {string} [options.notesPath] 手写中文说明文件的绝对路径（可选）
    */
   constructor(options = {}) {
     this.repository = String(options.repository || '').trim();
@@ -109,11 +138,54 @@ class Changelog {
     this.limit = Math.min(Math.max(Number(options.limit) || 60, 1), 200);
     this.pageUrl = String(options.pageUrl || '').trim()
       || (this.repository ? 'https://github.com/' + this.repository : '');
+    this.notesPath = String(options.notesPath || '').trim();
     this.cache = null;       // { at: number, payload: object }
+    this.notesCache = null;  // { at: mtimeMs, notes: Map }
     this.inflight = null;    // 并发请求合并，避免瞬间打出多次上游请求
   }
 
   get enabled() { return Boolean(this.repository); }
+
+  /**
+   * 读取手写中文说明。文件格式（键值对，一行一条，`#` 开头为注释）：
+   *   4789a53 = 给 AI 的提问改成可点的选项按钮
+   *   af184d3 = 让 AI 知道平台有哪些模块
+   * 键支持完整 sha 或 7 位短 sha。文件不存在 = 没有说明，页面只显示原文，不报错。
+   */
+  readNotes() {
+    if (!this.notesPath) return new Map();
+    let stat;
+    try { stat = require('node:fs').statSync(this.notesPath); }
+    catch (error) { return new Map(); }
+    if (this.notesCache && this.notesCache.at === stat.mtimeMs) return this.notesCache.notes;
+    const notes = new Map();
+    try {
+      const text = require('node:fs').readFileSync(this.notesPath, 'utf8');
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const at = trimmed.indexOf('=');
+        if (at <= 0) continue;
+        const key = trimmed.slice(0, at).trim().toLowerCase();
+        const value = trimmed.slice(at + 1).trim();
+        if (/^[0-9a-f]{7,40}$/.test(key) && value) notes.set(key, value);
+      }
+    } catch (error) {
+      return new Map();
+    }
+    this.notesCache = { at: stat.mtimeMs, notes };
+    return notes;
+  }
+
+  /** 给每条提交挂上中文说明：先找短 sha，再找全长 sha。 */
+  attachNotes(commits) {
+    const notes = this.readNotes();
+    if (!notes.size) return commits;
+    return commits.map(item => {
+      const note = notes.get(item.shortSha.toLowerCase()) || notes.get(item.sha.toLowerCase()) || '';
+      return note ? { ...item, note } : item;
+    });
+  }
 
   /** 缓存是否还能用。 */
   fresh() { return this.cache && (Date.now() - this.cache.at) < CACHE_TTL_MS; }
@@ -134,7 +206,8 @@ class Changelog {
     }
     const data = await response.json();
     if (!Array.isArray(data)) throw new Error('GitHub 返回格式异常');
-    return data.map(shapeCommit).filter(item => item.sha);
+    // 中文说明在缓存层之前挂上：说明文件改了不必等 GitHub 缓存过期。
+    return this.attachNotes(data.map(shapeCommit).filter(item => item.sha));
   }
 
   /**

@@ -278,6 +278,15 @@
   margin-left: 6px;
 }
 
+/* 手写中文说明存在时，英文原文降为次行（字号更小、颜色更淡） */
+.cl-commit-origin {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin-top: 3px;
+  word-break: break-word;
+}
+
 .cl-commit-foot {
   display: flex;
   flex-wrap: wrap;
