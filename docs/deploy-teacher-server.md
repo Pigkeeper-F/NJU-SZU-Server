@@ -53,7 +53,60 @@ ssh LZ@114.212.75.219
 tmux attach -t yanxu     # 退出用 Ctrl-B 然后按 D
 ```
 
-## 五、更新代码的流程
+## 五、更新代码的流程（已改为 git 同步）
+
+**主人本地 push 之后，服务器上执行一条命令即可：**
+
+```bash
+~/yanxu/yanxu.sh update
+```
+
+它会：拉取远程 → 快进合并 → 对改动过的 .js 逐个做语法检查 → 通过才重启。
+**任何一步失败都不会重启**，线上服务保持运行（代码可能已更新但跑的还是旧进程，
+脚本会明确提示）。
+
+`.env` / `.workbench` / `.venv` 都在 `.gitignore` 里，`git` 不会碰它们：
+配置、任务数据、Python 环境在更新中安全。（`.venv` 实际是软链到 `/home/LZ/yanxu/.venv`，
+不在仓库目录内。）
+
+### 分支
+
+服务器默认跟踪 clone 时指定的分支（当前 `feat/teacher-deploy`）。
+要看别的分支或切分支：
+
+```bash
+~/yanxu/yanxu.sh update main        # 把服务器切到 main 并更新
+```
+
+### 首次建立（记录用，不用再执行）
+
+原来的目录是 tar 快照、没有 .git，已在本轮改成真正的仓库：
+
+```bash
+mv repo/.venv .venv                  # 452M 移到仓库外，避免被 git 影响
+mv repo repo_oldsnapshot             # 保留旧快照做兜底
+git clone --branch feat/teacher-deploy   https://github.com/Pigkeeper-F/NJU-SZU-Server.git repo
+ln -sfn /home/LZ/yanxu/.venv repo/.venv
+cp repo_oldsnapshot/.env repo/.env
+cp -a repo_oldsnapshot/.workbench/. repo/.workbench/
+```
+
+`repo_oldsnapshot` 确认没问题后可以删：`rm -rf /home/LZ/yanxu/repo_oldsnapshot`
+
+### 老办法（tar 快照，仅当 git 不可用时）
+
+```bash
+cd /tmp
+curl -sL -o r.tar.gz https://codeload.github.com/Pigkeeper-F/NJU-SZU-Server/tar.gz/refs/heads/main
+mkdir -p /tmp/r && tar xzf r.tar.gz -C /tmp/r --strip-components=1
+rsync -av --exclude='.env' --exclude='.workbench' --exclude='.venv' /tmp/r/ /home/LZ/yanxu/repo/
+~/yanxu/yanxu.sh restart
+```
+
+> 注意 `--exclude`：`.env` 是这台机器的配置，`.workbench` 是任务数据，`.venv` 是环境。
+> 覆盖这三个会把配置和用户数据冲掉。
+
+## 五之二、更新代码的流程（旧版说明，保留备查）
 
 服务器上 `git clone` 不可用（TLS 中断），所以走快照：
 
