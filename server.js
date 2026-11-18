@@ -50,15 +50,23 @@ const literature = new LiteratureFlow(codex, { scholarSearch: options => scholar
 const literatureAuxiliary = new LiteratureAuxiliary(ROOT, scholar);
 // 【部署 · 2026-11-18】更新日志：从 GitHub 拉提交给老师看。配置见 .env 的 CHANGELOG_* 段。
 const { Changelog } = require('./tools/changelog');
-const changelog = new Changelog({
-  repository: process.env.CHANGELOG_REPO || 'Pigkeeper-F/NJU-SZU-Server',
-  branch: process.env.CHANGELOG_BRANCH || 'main',
-  token: process.env.GITHUB_TOKEN || '',
-  limit: Number(process.env.CHANGELOG_LIMIT || 60),
-  // 可选：给提交补手写中文说明（键=短sha，值=一句中文）。文件不存在就用英文原文。
-  notesPath: process.env.CHANGELOG_NOTES_PATH
-    || path.join(ROOT, 'config', 'changelog-notes.txt')
-});
+// 【修复 · 2026-11-18】这里**不能**在模块顶层建实例：本文件在 loadEnvFile() 之前就执行到
+// 这一行，那时 .env 还没读进 process.env，CHANGELOG_BRANCH 等配置会全部回落到默认值
+// （实测改 .env 后重启仍读 main 分支）。改为首次请求时再建，此后复用同一个实例。
+let changelogInstance = null;
+function getChangelog() {
+  if (changelogInstance) return changelogInstance;
+  changelogInstance = new Changelog({
+    repository: process.env.CHANGELOG_REPO || 'Pigkeeper-F/NJU-SZU-Server',
+    branch: process.env.CHANGELOG_BRANCH || 'main',
+    token: process.env.GITHUB_TOKEN || '',
+    limit: Number(process.env.CHANGELOG_LIMIT || 60),
+    // 可选：给提交补手写中文说明（键=短sha，值=一句中文）。文件不存在就用英文原文。
+    notesPath: process.env.CHANGELOG_NOTES_PATH
+      || path.join(ROOT, 'config', 'changelog-notes.txt')
+  });
+  return changelogInstance;
+}
 const literatureRuleReviews = new LiteratureRuleReviewStore(ROOT);
 const literatureRuleReviewAssist = new LiteratureRuleReviewAssist(literatureRuleReviews, codex);
 const literatureDiscussions = new LiteratureDiscussionStore(ROOT);
@@ -2733,7 +2741,7 @@ if (require.main === module) {
     if (req.method === 'GET' && String(req.url || '').indexOf('/api/changelog') === 0) {
       return guarded('/api/changelog', async (request, response) => {
         const force = /(?:\?|&)refresh=1(?:&|$)/.test(request.url || '');
-        sendJson(response, 200, await changelog.get({ force }));
+        sendJson(response, 200, await getChangelog().get({ force }));
       });
     }
     if (req.method === 'POST' && req.url === '/api/dependencies/open') return guarded('/api/dependencies/open', (_, response) => openDependencies(response));
