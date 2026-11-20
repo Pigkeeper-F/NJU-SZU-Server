@@ -8,6 +8,8 @@ const { createHash, randomUUID } = require('node:crypto');
 const BACKEND_FILES = [
   'server.js',
   'tools/codex-bridge.js',
+  'tools/workbuddy-research.js',
+  'tools/research-gap-discussion.js',
   'tools/clean-results-view.js',
   'tools/clean-results-archive.js',
   'tools/cleaning.js',

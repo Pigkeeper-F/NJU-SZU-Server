@@ -83,6 +83,7 @@
   ];
   var LEGACY_MODULE_TYPES = ['download-data', 'clean-data', 'calculation', 'result-audit', 'literature-mining', 'manual-review', 'plotting'];
   var PREPARATION_TYPES = ['download-data', 'clean-data', 'literature-mining'];
+  var DATA_MODEL_MODULE_TYPES = ['download-data', 'clean-data', 'literature-mining', 'calculation', 'plotting', 'result-audit', 'manual-review'];
 
   // 业务拓扑由 type 推导，不给旧存储添加第二份依赖列表。
   function upstreamModules(mod, modules) {
@@ -163,6 +164,8 @@
   // 【能力节点 · 2026-10-14】环节文档上限。与单条消息同量级（2 万字），超长返回 null 由 UI 提示，
   // 避免超长文档撑爆 localStorage 配额（配额满会静默降级为纯内存，刷新即丢）。
   var MAX_DOC_CHARS = 20000;
+  var REVIEW_EVIDENCE_LIMITS = { claim: 1000, source: 500, locator: 300, excerpt: 2000, url: 2048 };
+  var REVIEW_EVIDENCE_LABELS = { claim: '结论', source: '文献来源', locator: '原文位置', excerpt: '原文摘录', url: '来源链接' };
   var TABS_DEFAULT = [{ id: 'flow', name: '流程' }];
   var ROLES = ['user', 'assistant', 'system'];
   // 必须与其他常量一起放在顶部：normalizeModule() 在**文件开头加载 localStorage** 时就会用到它
@@ -196,6 +199,45 @@
 
   function nowISO() {
     return new Date().toISOString();
+  }
+
+  function reviewEvidenceFields(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { reason: '依据格式有误' };
+    var fields = {};
+    var keys = Object.keys(REVIEW_EVIDENCE_LIMITS);
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i], label = REVIEW_EVIDENCE_LABELS[key], limit = REVIEW_EVIDENCE_LIMITS[key];
+      if (raw[key] != null && typeof raw[key] !== 'string') return { reason: label + '须为文本' };
+      var value = (raw[key] || '').trim();
+      if (!value && (key === 'claim' || key === 'source' || key === 'locator')) return { reason: '请填写' + label };
+      if (value.length > limit) return { reason: label + '最多可填 ' + limit + ' 个字符' };
+      fields[key] = value;
+    }
+    if (fields.url) {
+      try {
+        if (!/^https?:\/\/[^/\\?#\s]/i.test(fields.url) || !new URL(fields.url).hostname) throw new Error();
+      } catch (_) { return { reason: '来源链接须为完整的 HTTP 或 HTTPS 网页地址' }; }
+    }
+    return { value: fields };
+  }
+
+  function isEvidenceOwner(mod) {
+    return !!mod && mod.step === 'literature' && mod.type === 'literature-research';
+  }
+
+  function restoreReviewEvidence(raw) {
+    if (!Array.isArray(raw)) return [];
+    var seen = Object.create(null), entries = [];
+    raw.forEach(function (item) {
+      var fields = reviewEvidenceFields(item).value;
+      if (!fields || typeof item.id !== 'string' || !item.id || seen[item.id]) return;
+      seen[item.id] = true;
+      fields.id = item.id;
+      var date = typeof item.verifiedAt === 'string' ? new Date(item.verifiedAt) : null;
+      fields.verifiedAt = date && isFinite(date.getTime()) && date.toISOString() === item.verifiedAt ? item.verifiedAt : null;
+      entries.push(fields);
+    });
+    return entries;
   }
 
   function deepClone(value) {
@@ -336,6 +378,7 @@
       params: params
     };
     if (step) out.step = step;
+    if (isEvidenceOwner(out)) out.reviewEvidence = restoreReviewEvidence(raw.reviewEvidence);
     if (spec) out.spec = spec;
     if (approvedAt) out.approvedAt = approvedAt;
     return out;
@@ -421,10 +464,13 @@
 
   // -------------------------------------------------------- 读写与广播
 
+  // 核对依据的保存会替换当前任务快照；用最近读取或写入的原文检测其他页面的更新。
+  var lastStoredSnapshot = null;
   function readStorage() {
     try {
       if (!root.localStorage || typeof root.localStorage.getItem !== 'function') return null;
       var raw = root.localStorage.getItem(STORAGE_KEY);
+      lastStoredSnapshot = raw;
       if (!raw) return null;
       return sanitize(JSON.parse(raw));
     } catch (e) {
@@ -434,18 +480,21 @@
 
   function persist() {
     try {
-      if (!root.localStorage || typeof root.localStorage.setItem !== 'function') return;
-      root.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      if (!root.localStorage || typeof root.localStorage.setItem !== 'function') return false;
+      var snapshot = JSON.stringify(state);
+      root.localStorage.setItem(STORAGE_KEY, snapshot);
+      lastStoredSnapshot = snapshot;
+      return true;
     } catch (e) {
-      /* 隐私模式 / 配额不足：静默降级为纯内存，内存状态仍然有效 */
+      return false;
     }
   }
 
   var state = readStorage() || defaultState();
   var listeners = [];
 
-  function emit(type, payload) {
-    persist();
+  function emit(type, payload, requireStorage) {
+    if (!persist() && requireStorage) return false;
     var snapshot = { type: type, payload: payload };
     var list = listeners.slice();
     for (var i = 0; i < list.length; i++) {
@@ -455,6 +504,7 @@
         if (root.console && root.console.error) root.console.error('[Store] 订阅回调异常（已忽略）:', e);
       }
     }
+    return true;
   }
 
   function indexOfModule(id) {
@@ -870,6 +920,39 @@
     return { created: created.length, firstId: created[0].id };
   }
 
+  /**
+   * 一次建立日常数据与模型科研任务的固定模块。
+   * 参数更新和活动数据更新由计算模块按需选择，选择后再建立对应的更新子模块。
+   * 下游模块先建立用于配置，真正执行时仍由各模块检查前置结果。
+   */
+  function initDataModelModules() {
+    var created = [];
+    for (var i = 0; i < DATA_MODEL_MODULE_TYPES.length; i++) {
+      var typeId = DATA_MODEL_MODULE_TYPES[i];
+      if (state.modules.some(function (item) { return item.type === typeId && !item.step; })) continue;
+      var definition = FIXED_MODULES.filter(function (item) { return item.id === typeId; })[0];
+      if (!definition) continue;
+      var mod = {
+        id: uid('mod_'),
+        name: definition.name,
+        type: definition.id,
+        mode: definition.mode,
+        dependsOn: null,
+        status: 'todo',
+        createdAt: nowISO(),
+        messages: [],
+        doc: null,
+        run: null
+      };
+      state.modules.push(mod);
+      created.push(deepClone(mod));
+    }
+    state.modules = arrangeModules(state.modules);
+    if (created.length && !findModule(state.activeModuleId)) state.activeModuleId = created[0].id;
+    if (created.length) emit('data-model:init', { created: created.length, ids: created.map(function (m) { return m.id; }) });
+    return { created: created.length, firstId: created.length ? created[0].id : null };
+  }
+
   /** 改模块状态：todo | doing | review | approved（非法值按 todo 处理） */
   function setModuleStatus(id, status) {
     var mod = findModule(id);
@@ -964,6 +1047,88 @@
     return null;
   }
 
+  function reviewEvidenceOwner(moduleId) {
+    var mod = findModule(moduleId);
+    if (isEvidenceOwner(mod)) return { owner: mod };
+    if (!mod || mod.step !== 'writing' || mod.type !== 'writing') return { reason: '请在当前九步任务的文献调研或文章撰写环节操作' };
+    var owners = state.modules.filter(isEvidenceOwner);
+    if (owners.length !== 1) return { reason: owners.length ? '当前任务存在多个文献调研模块，无法确定依据归属' : '当前任务缺少文献调研模块，无法保存综述依据' };
+    return { owner: owners[0] };
+  }
+
+  function getReviewEvidence(moduleId) {
+    var owner = reviewEvidenceOwner(moduleId).owner;
+    return deepClone(owner && owner.reviewEvidence || []);
+  }
+
+  function getReviewEvidenceOwnerId(moduleId) {
+    var owner = reviewEvidenceOwner(moduleId).owner;
+    return owner ? owner.id : null;
+  }
+
+  function sameEvidenceContent(left, right) {
+    return Object.keys(REVIEW_EVIDENCE_LIMITS).every(function (key) { return left[key] === right[key]; });
+  }
+
+  function reviewEditConflict(guard, previous) {
+    var taskManager = root.TaskManager;
+    if (taskManager && typeof taskManager.currentTaskId === 'function') {
+      var taskId = taskManager.currentTaskId();
+      if (!taskId || (guard && guard.taskId != null && guard.taskId !== taskId)) return '当前科研任务已切换，请重新打开依据';
+    }
+    if (guard && guard.original && (!previous || guard.original.id !== previous.id ||
+      guard.original.verifiedAt !== previous.verifiedAt || !sameEvidenceContent(guard.original, previous))) {
+      return '这条依据已变更，请重新打开后核对';
+    }
+    try {
+      if (root.localStorage.getItem(STORAGE_KEY) !== lastStoredSnapshot) return '另一个页面已更新任务，请刷新后再保存';
+    } catch (_) { return '浏览器存储不可用，无法保存依据'; }
+    return '';
+  }
+
+  function commitReviewEvidence(owner, moduleId, entries, id) {
+    var previous = owner.reviewEvidence;
+    owner.reviewEvidence = entries;
+    if (!emit('review-evidence:change', { moduleId: moduleId, ownerId: owner.id, id: id }, true)) {
+      owner.reviewEvidence = previous;
+      return { ok: false, reason: '浏览器存储写入失败，请检查可用空间后重试' };
+    }
+    return { ok: true, id: id };
+  }
+
+  function saveReviewEvidence(moduleId, entry, guard) {
+    var scope = reviewEvidenceOwner(moduleId);
+    if (!scope.owner) return { ok: false, reason: scope.reason };
+    var fields = reviewEvidenceFields(entry);
+    if (fields.reason) return { ok: false, reason: fields.reason };
+    var entries = (scope.owner.reviewEvidence || []).slice();
+    var editing = Object.prototype.hasOwnProperty.call(entry, 'id');
+    var index = editing ? entries.findIndex(function (item) { return item.id === entry.id; }) : -1;
+    if (editing && index < 0) return { ok: false, reason: '该条依据已移除或属于其他任务' };
+    var previous = entries[index];
+    var conflict = reviewEditConflict(guard, previous);
+    if (conflict) return { ok: false, reason: conflict };
+    var next = fields.value;
+    next.id = editing ? previous.id : uid('ev_');
+    var changedAfterCheck = previous && previous.verifiedAt && !sameEvidenceContent(previous, next);
+    next.verifiedAt = entry.verified === true && !changedAfterCheck ? (previous && previous.verifiedAt || nowISO()) : null;
+    if (editing) entries[index] = next;
+    else entries.push(next);
+    return commitReviewEvidence(scope.owner, moduleId, entries, next.id);
+  }
+
+  function removeReviewEvidence(moduleId, entryId, guard) {
+    var scope = reviewEvidenceOwner(moduleId);
+    if (!scope.owner) return { ok: false, reason: scope.reason };
+    var entries = (scope.owner.reviewEvidence || []).slice();
+    var index = entries.findIndex(function (item) { return item.id === entryId; });
+    if (index < 0) return { ok: false, reason: '该条依据已移除或属于其他任务' };
+    var conflict = reviewEditConflict(guard, entries[index]);
+    if (conflict) return { ok: false, reason: conflict };
+    entries.splice(index, 1);
+    return commitReviewEvidence(scope.owner, moduleId, entries, entryId);
+  }
+
   /** 能力类型 → 显示名（既有 FIXED_MODULES 与新增 RESEARCH_TYPES） */
   function typeName(typeId, mode) {
     if (typeId === 'calculation' && mode === 'direct') return '直接计算';
@@ -1003,6 +1168,7 @@
         // 文章撰写环节默认目标期刊为 AAAI（主人 2026-10-20 指定）；可随时改。
         params: typeId === 'writing' ? { journal: 'AAAI' } : {}
       };
+      if (isEvidenceOwner(mod)) mod.reviewEvidence = [];
       state.modules.push(mod);
       created.push(deepClone(mod));
       // 流程语义是"先有 1 再有 2"：一次只放一个模块出来，等它过审核门再放下一个。
@@ -1573,6 +1739,7 @@
     appendMessage: appendMessage,
     // —— 流程模块与人工审核（规格 + 状态机）
     initFlowModules: initFlowModules,
+    initDataModelModules: initDataModelModules,
     startFlow: startFlow,
     setModuleStatus: setModuleStatus,
     submitModule: submitModule,
@@ -1582,6 +1749,10 @@
     setModuleParam: setModuleParam,
     // —— 环节文档（用户与 AI 协商的标准文档 + 人工审核）
     saveDoc: saveDoc,
+    saveReviewEvidence: saveReviewEvidence,
+    removeReviewEvidence: removeReviewEvidence,
+    getReviewEvidence: getReviewEvidence,
+    getReviewEvidenceOwnerId: getReviewEvidenceOwnerId,
     getDocHistory: getDocHistory,
     approveDoc: approveDoc,
     rejectDoc: rejectDoc,
@@ -1629,6 +1800,7 @@
       SIDEBAR_DEFAULT: SIDEBAR_DEFAULT,
       MAX_MESSAGE_CHARS: MAX_MESSAGE_CHARS,
       MAX_DOC_CHARS: MAX_DOC_CHARS,
+      REVIEW_EVIDENCE: deepClone(REVIEW_EVIDENCE_LIMITS),
       ROLES: ROLES.slice(),
       MODULE_STATUSES: MODULE_STATUSES.slice(),
       DOC_STATUSES: DOC_STATUSES.slice(),

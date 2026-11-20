@@ -90,13 +90,14 @@
     $('api-key-input').focus();
   }
 
-  function providerSnapshot() {
+  function providerSnapshot(providerId) {
     var data = readStore();
-    var saved = data.providers[data.activeProvider] || {};
-    var provider = PROVIDERS[data.activeProvider];
+    var selected = providerId || data.activeProvider;
+    var saved = data.providers[selected] || {};
+    var provider = PROVIDERS[selected];
     if (!provider || !saved.apiKey) return null;
     return {
-      provider: data.activeProvider,
+      provider: selected,
       apiKey: saved.apiKey,
       model: saved.model || provider.defaultModel,
       protocol: provider.protocol,
@@ -207,7 +208,8 @@
   }
 
   root.ApiKeys = {
-    getActiveCredential: providerSnapshot,
+    getActiveCredential: function () { return providerSnapshot(); },
+    getCredential: providerSnapshot,
     providers: PROVIDERS
   };
   bind();

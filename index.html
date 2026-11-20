@@ -8,6 +8,8 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231c263c'/%3E%3Cpath d='M9 9h5v14H9m9-14h5v14h-5' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
   <link rel="stylesheet" href="css/workspace.css">
+  <link rel="stylesheet" href="css/review-evidence.css">
+  <link rel="stylesheet" href="css/gap-discussion.css">
 </head>
 <body>
   <!-- 顶层 flex 容器：左栏 + 主区 -->
@@ -69,7 +71,7 @@
   </div>
 
   <dialog id="api-dialog"><form id="api-form"><div class="dialog-top"><span id="api-dialog-eyebrow" class="eyebrow">API KEY</span><button class="icon-btn" id="api-close-dialog" type="button" aria-label="关闭">×</button></div><h2 id="api-dialog-title">添加 API</h2><p id="api-dialog-description">密钥会保存在当前浏览器，并通过本地服务代理请求模型。</p><label for="api-key-input" id="api-key-label">API Key</label><div class="api-key-row"><input id="api-key-input" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 API Key"><button id="api-paste-key" class="quiet-button" type="button">粘贴</button><button id="api-copy-key" class="quiet-button" type="button">复制</button></div><label for="api-model-input">模型</label><input id="api-model-input" autocomplete="off" placeholder="例如：deepseek-flash"><div class="dialog-actions"><button id="api-remove-key" class="quiet-button" type="button">移除已存密钥</button><button id="api-cancel-dialog" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">保存</button></div></form></dialog>
-  <dialog id="task-dialog"><form id="task-form"><div class="dialog-top"><span class="eyebrow">NEW TASK</span><button class="icon-btn" id="task-dialog-close" type="button" aria-label="关闭">×</button></div><h2>新建任务</h2><p>新任务有独立的模块对话与文件会话；当前练习保留，可随时切回。</p><label for="task-name">任务名称</label><input id="task-name" maxlength="80" required placeholder="例如：1992 年模型计算"><label for="task-start">从哪一步开始</label><select id="task-start"><option value="download">下载数据</option><option value="clean">数据清洗（已有原始文件）</option><option value="literature">文献挖掘</option><option value="calculation">模型调整与计算（已有代码和输入数据）</option></select><div class="dialog-actions"><button id="task-dialog-cancel" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">创建任务</button></div></form></dialog>
+  <dialog id="task-dialog"><form id="task-form"><div class="dialog-top"><span class="eyebrow">NEW TASK</span><button class="icon-btn" id="task-dialog-close" type="button" aria-label="关闭">×</button></div><h2>新建任务</h2><p>每项任务独立保存模块、对话和文件记录。</p><label for="task-name">任务名称</label><input id="task-name" maxlength="80" required placeholder="例如：1992 年模型计算"><label for="task-start">任务类型</label><select id="task-start"><option value="data-model">日常数据和模型科研任务</option><option value="nine-step">九步研究流程</option></select><div class="dialog-actions"><button id="task-dialog-cancel" class="quiet-button" type="button">取消</button><button class="primary-button" type="submit">创建任务</button></div></form></dialog>
   <dialog id="rules-dialog"><div class="dialog-top"><span class="eyebrow">TASK RULES</span><button class="icon-btn" id="rules-dialog-close" type="button" aria-label="关闭">×</button></div><h2>执行规则</h2><p>这里只放你决定要执行的规则。可以自己填写，或让 AI 从对话中提取候选规则；AI 草稿须经你核对并确认。</p><div id="task-summary-confirmed" class="task-summary-confirmed" hidden></div><label for="task-summary-draft">规则草稿</label><textarea id="task-summary-draft" rows="12" placeholder="处理范围、输入文件、具体清洗/转换规则、异常处理、验收标准、输出文件……只写已经确定的内容。"></textarea><div class="task-rules-footer"><div id="task-rules-execution-status" role="status"></div><div class="task-summary-actions"><select id="task-summary-history" aria-label="查看规则历史版本"><option value="">历史版本</option></select><button id="task-rules-discuss" class="quiet-button" type="button">继续讨论完善规则</button><button id="task-summary-ai" class="quiet-button" type="button">AI 提取候选规则</button><button id="task-summary-save" class="primary-button" type="button">确认规则</button><button id="task-rules-execute" class="primary-button" type="button">按规则执行清洗</button></div><div id="task-summary-message" role="status"></div></div></dialog>
 
   <div id="toast" class="toast" role="status" hidden></div>
@@ -105,10 +107,13 @@
   <script src="js/auth-config.js"></script>
   <script src="js/auth-storage.js"></script>
   <script src="js/guard.js"></script>
-  <script src="js/store.js"></script>
+  <script src="js/store.js?v=20261120-review-evidence"></script>
   <script src="js/sidebar.js"></script>
-  <script src="js/tabs.js"></script>
-  <script src="js/chat.js"></script>
+  <script src="js/tabs.js?v=20261120-research-flow"></script>
+  <script src="js/review-evidence.js"></script>
+  <script src="js/research-model.js"></script>
+  <script src="js/gap-discussion.js"></script>
+  <script src="js/chat.js?v=20261120-review-evidence"></script>
   <script src="js/app.js"></script>
   <script src="js/api-keys.js"></script>
   <script src="js/literature-rule-review.js"></script>
@@ -119,7 +124,7 @@
   <script src="js/codex.js?v=20261031-confirmed-plan"></script>
   <script src="js/literature.js"></script>
   <script src="js/workspace.js"></script>
-  <script src="js/tasks.js?v=20261027-clean-sync-2"></script>
+  <script src="js/tasks.js?v=20261120-research-flow"></script>
   <script src="js/literature-task-workspaces.js"></script>
   <script src="js/literature-discussions.js"></script>
 </body>

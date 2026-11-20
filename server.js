@@ -535,7 +535,7 @@ async function callModelWithRetry(cfg, messages, timeoutMs, attempts = 3, budget
       if (left <= 5000) break;
       const callStarted = Date.now();
       try {
-        const text = await callModel(modelCfg, messages, Math.min(timeoutMs, left));
+        const text = await callModel(modelCfg, messages, Math.min(timeoutMs, left), undefined, trace);
         if (trace) {
           trace.usedModel = model;
           trace.fallback = mi > 0;
@@ -636,11 +636,30 @@ async function handleResearch(req, res, url) {
   let release;
   try {
   const route = url.pathname;
+  if (req.method === 'GET' && route === '/api/research/capabilities') {
+    return sendJson(res, 200, { version: 1, backends: ['api', 'codex', 'workbuddy'],
+      workBuddyConfigured: Boolean(process.env.WORKBUDDY_ACCESS_TOKEN?.trim()) });
+  }
+  if ((req.method === 'GET' || req.method === 'POST') && route === '/api/research/gap-discussion') {
+    const { listGaps, replyToGap } = require('./tools/research-gap-discussion');
+    if (req.method === 'GET') {
+      const job = literatureAuxiliary.job(url.searchParams.get('jobId'));
+      return sendJson(res, 200, listGaps(job.dir));
+    }
+    const data = JSON.parse(await readBody(req, 256 * 1024));
+    release = literatureAuxiliary.acquire();
+    const job = literatureAuxiliary.job(data.jobId);
+    const model = openResearchModel(data);
+    const result = await replyToGap({
+      jobDir: job.dir, gapId: data.gapId, question: data.question, history: data.history,
+      askModel: messages => model.callModel(null, messages, 180000)
+    });
+    return sendJson(res, 200, { ...result, config: model.info() });
+  }
   if (req.method === 'POST' && route === '/api/research/questions') {
     release = literatureAuxiliary.acquire();
     const data = JSON.parse(await readBody(req, 256 * 1024));
-    const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
-    if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
+    const model = openResearchModel(data);
     const rq = require('./tools/research-question');
     let gaps = [];
     let notes = [];
@@ -662,12 +681,12 @@ async function handleResearch(req, res, url) {
     try {
       if (data.action === 'specify') {
         const spec = await rq.buildSpecification({
-          idea, candidate: data.choice, gaps, notes, risks, modelCfg: cfg, callModel: callModelWithRetry
+          idea, candidate: data.choice, gaps, notes, risks, callModel: model.callModel
         });
-        return sendJson(res, 200, { ok: true, ...spec });
+        return sendJson(res, 200, { ok: true, ...spec, config: model.info() });
       }
-      const result = await rq.buildCandidates({ idea, gaps, notes, risks, modelCfg: cfg, callModel: callModelWithRetry });
-      return sendJson(res, 200, { ok: true, ...result, config: configInfo(cfg, configSource(data.settings, normalizeCredential(data.credential))) });
+      const result = await rq.buildCandidates({ idea, gaps, notes, risks, callModel: model.callModel });
+      return sendJson(res, 200, { ok: true, ...result, config: model.info() });
     } catch (error) {
       const message = (error && error.message) || '问题凝练失败';
       return sendJson(res, researchErrorStatus(message), { error: message });
@@ -808,22 +827,21 @@ async function handleLiterature(req, res, url) {
     // 【文献调研 · 2026-10-20】POST /api/literature/research：环节①的要点抽取与研究空白归纳。
     // 与 /api/literature/search 的分工：search 只做首批检索（产 candidates.json），
     // research 在这批候选（及已有全文）上做「逐篇要点 + 共识分歧 + 研究空白」，
-    // 走服务端已有的模型通道（resolveModelConfig + callModel），不依赖本机 Codex 登录。
+    // 生成使用当前科研模块选择的模型通道。
     if (req.method === 'POST' && route === '/api/literature/research') {
       const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
       const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
       release = literatureAuxiliary.acquire();
       const job = literatureAuxiliary.job(jobId);
-      const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
-      if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
+      const model = openResearchModel(data);
       try {
-        const result = await require('./tools/literature-research').runResearchStage({ job, modelCfg: cfg, callModel: callModelWithRetry });
+        const result = await require('./tools/literature-research').runResearchStage({ job, callModel: model.callModel });
         scholar.registerFiles(job, result.files);
         scholar.persist(job);
         return sendJson(res, 200, {
           ok: result.ok, meta: result.meta, files: result.files,
           notes: result.notes, synthesis: result.synthesis, gaps: result.gaps,
-          risks: result.risks, matrix: result.matrix, error: result.error
+          risks: result.risks, matrix: result.matrix, error: result.error, config: model.info()
         });
       } catch (error) {
         console.error('[server] literature research failed:', error);
@@ -836,11 +854,10 @@ async function handleLiterature(req, res, url) {
     if (req.method === 'POST' && route === '/api/literature/research-plan') {
       release = literatureAuxiliary.acquire();
       const data = JSON.parse(await readLiteratureBody(req, 64 * 1024));
-      const cfg = Object.assign(resolveModelConfig(data.settings), normalizeCredential(data.credential) || {});
-      if (!cfg.apiKey) return sendJson(res, 503, { error: '尚未配置 API Key：请在设置里填模型配置，或使用服务端 .env。' });
+      const model = openResearchModel(data);
       try {
-        const plan = await require('./tools/research-question').planQueries({ idea: data.idea, sources: data.sources, modelCfg: cfg, callModel: callModelWithRetry });
-        return sendJson(res, 200, { ...plan, config: configInfo(cfg, configSource(data.settings, normalizeCredential(data.credential))) });
+        const plan = await require('./tools/research-question').planQueries({ idea: data.idea, sources: data.sources, callModel: model.callModel });
+        return sendJson(res, 200, { ...plan, config: model.info() });
       } catch (error) {
         const message = (error && error.message) || '选题拆解失败';
         return sendJson(res, researchErrorStatus(message), { error: message });
@@ -1323,7 +1340,7 @@ function describeUpstreamError(rawMessage, upstreamStatus) {
 // 【E2E 修复 · 2026-10-14】超时参数化：生成代码等长输出任务需要更长时间，
 // 原硬编码 60s 会在 compose(code) 真实调用时超时（实测 60.4s 失败）。
 // 对话 60s（handleChat），文档/代码生成 180s（compose）。
-async function callModel(cfg, messages, timeoutMs, signal) {
+async function callModel(cfg, messages, timeoutMs, signal, trace) {
   let url;
   let requestBody;
   if (cfg.protocol === 'chat-completions') {
@@ -1367,10 +1384,14 @@ async function callModel(cfg, messages, timeoutMs, signal) {
   }
   const text = cfg.protocol === 'chat-completions'
     ? result && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content
-    : result && result.output_text;
+    : result && (result.output_text || (Array.isArray(result.output) ? result.output
+      .filter(item => item && item.type === 'message' && Array.isArray(item.content))
+      .flatMap(item => item.content.filter(part => part && part.type === 'output_text').map(part => part.text))
+      .join('\n') : ''));
   if (typeof text !== 'string' || !text.trim()) {
     throw new UpstreamError(502, 'AI 服务没有返回可显示的文本。', 'transient');
   }
+  if (trace && typeof result.model === 'string') trace.responseModel = result.model;
   return text.trim();
 }
 
@@ -1392,6 +1413,67 @@ function configInfo(cfg, source) {
     model: cfg.model || '',
     protocol: cfg.protocol || '',
     source: source || 'server-env'
+  };
+}
+
+// The four research actions inject this same read-only text generator.
+// Absent backend keeps the API contract used by older clients.
+function openResearchModel(data, { compose = codex.compose.bind(codex), callApi = callModelWithRetry, workBuddy } = {}) {
+  const backend = Object.hasOwn(data, 'backend') ? data.backend : 'api';
+  if (backend === 'workbuddy') {
+    const accessToken = process.env.WORKBUDDY_ACCESS_TOKEN?.trim();
+    if (!accessToken) throw Object.assign(new Error('请在服务端配置腾讯 WorkBuddy OAuth 访问令牌 WORKBUDDY_ACCESS_TOKEN。'), { status: 503 });
+    const generate = workBuddy || require('./tools/workbuddy-research').composeWorkBuddy;
+    return {
+      callModel: (_, messages, timeoutMs) => generate(messages, { accessToken, timeoutMs }),
+      info: () => ({ backend, provider: '腾讯 WorkBuddy', source: 'workbuddy', model: 'WorkBuddy 云端助理' })
+    };
+  }
+  if (backend !== 'codex' && backend !== 'api') {
+    throw Object.assign(new Error('请选择本机 Codex、腾讯 WorkBuddy 或模型 API。'), { status: 400 });
+  }
+  if (backend === 'codex') {
+    const model = data.codexModel;
+    if (model != null && (typeof model !== 'string' || model.length > 200)) {
+      throw Object.assign(new Error('Codex 模型名无效。'), { status: 400 });
+    }
+    const metadata = {};
+    return {
+      callModel: async (_, messages, timeoutMs) => {
+        const withInstructions = messages.length === 2 && messages[0]?.role === 'system' && typeof messages[0].content === 'string';
+        const prompt = messages[withInstructions ? 1 : 0];
+        if ((!withInstructions && messages.length !== 1) || prompt?.role !== 'user' || typeof prompt.content !== 'string') {
+          throw new Error('科研模型需要一份完整的研究提示。');
+        }
+        return compose(prompt.content, model?.trim() || null, { metadata, signal: AbortSignal.timeout(timeoutMs || 180000),
+          ...(withInstructions ? { instructions: messages[0].content } : {}) });
+      },
+      info: () => ({ backend, provider: '本机 Codex', source: 'codex', model: metadata.model || model || '' })
+    };
+  }
+  const settings = data.settings || {};
+  const credential = normalizeCredential(data.credential);
+  const cfg = Object.assign(resolveModelConfig(settings), credential || {});
+  if (!cfg.apiKey) {
+    throw Object.assign(new Error('模型 API 尚未配置密钥，请在设置里填写或选择本机 Codex。'), { status: 503 });
+  }
+  // A browser-selected endpoint may use its own key, or the matched server endpoint's key.
+  if (!credential && !(typeof settings.apiKey === 'string' && settings.apiKey.trim()) && settings.baseUrl && cfg.baseUrl !== resolveModelConfig({}).baseUrl) {
+    throw Object.assign(new Error('自定义模型地址需要配置对应的 API Key。'), { status: 400 });
+  }
+  let host;
+  try {
+    const endpoint = new URL(cfg.baseUrl);
+    if (!['https:', 'http:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error();
+    host = endpoint.hostname;
+  } catch (_) {
+    throw Object.assign(new Error('请填写有效的模型 API 地址。'), { status: 400 });
+  }
+  const trace = {};
+  const provider = host === 'api.openai.com' ? 'OpenAI' : host === 'api.deepseek.com' ? 'DeepSeek' : host;
+  return {
+    callModel: (_, messages, timeoutMs) => callApi(cfg, messages, timeoutMs, 3, 240000, { trace }),
+    info: () => ({ backend, provider, source: configSource(settings, credential), model: trace.responseModel || trace.usedModel || cfg.model })
   };
 }
 
@@ -2638,4 +2720,4 @@ if (require.main === module) {
 // 【X1 · 2026-10-14】测试导出（零依赖纯函数）：供 tools/test-server-exec.js require 断言。
 // isPrivateHost：SSRF 私网判定；buildComposePrompt / buildDiagnosePrompt：提示词拼装；
 // parseDiagnoseJson：diagnose 输出解析。
-module.exports = { isPrivateHost, buildComposePrompt, buildDiagnosePrompt, parseDiagnoseJson, workflowPrompt };
+module.exports = { isPrivateHost, buildComposePrompt, buildDiagnosePrompt, parseDiagnoseJson, workflowPrompt, openResearchModel };
