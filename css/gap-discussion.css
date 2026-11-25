@@ -1,0 +1,23 @@
+.gap-discussion {
+  max-width: 1100px; width: 100%; box-sizing: border-box; margin: 16px auto; padding: 16px;
+  border: 1px solid var(--border, #d6dfd6); border-radius: 10px; background: #fff; color: #23382e;
+}
+.gd-heading, .gd-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.gd-heading h3 { margin: 0; font-size: 16px; }
+.gd-field { display: grid; gap: 6px; margin: 14px 0 7px; font-weight: 600; font-size: 14px; }
+.gd-field select, .gd-field textarea {
+  width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid #bfcfc4;
+  border-radius: 5px; padding: 8px; font: inherit; font-weight: 400; color: inherit; background: white;
+}
+.gd-field textarea { min-height: 56px; resize: vertical; }
+.gd-basis { padding-left: 21px; }
+.gd-basis li + li { margin-top: 6px; }
+.gd-basis p, .gd-history p, .gd-muted, .gd-direction, .gd-versions { margin: 6px 0; }
+.gd-basis, .gd-history, .gd-direction, .gd-muted, .gd-versions, .gd-reply { overflow-wrap: anywhere; font-size: 14px; }
+.gd-level { margin-left: 8px; color: #506656; font-size: 12px; }
+.gd-error, .gd-missing { color: #8d371d; }
+.gd-history, .gd-reply, .gd-versions p { white-space: pre-wrap; }
+.gd-user { font-weight: 600; }
+.gd-history:not(:empty) { padding: 8px 12px; border-left: 3px solid #b4ccbc; background: #f7faf7; }
+.gd-actions { justify-content: flex-start; }
+.gd-versions { margin-top: 8px; }

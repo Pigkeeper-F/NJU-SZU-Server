@@ -1223,6 +1223,21 @@
     });
   }
 
+  async function researchModelPost(mod, url, body, signal) {
+    var fields = root.ResearchModel.fields(mod);
+    // Older servers silently ignore a new backend field. Verify dispatch
+    // support before giving the selected service any research material.
+    var capabilities;
+    try { capabilities = await researchGet('/api/research/capabilities'); } catch (_) {}
+    if (!capabilities || !capabilities.backends?.includes(fields.backend)) {
+      throw new Error('当前后台尚未加载多模型功能，请更新工作台后台后重试。');
+    }
+    if (fields.backend === 'workbuddy' && !capabilities.workBuddyConfigured) {
+      throw new Error('腾讯 WorkBuddy 尚未授权，请在研序服务端配置 WORKBUDDY_ACCESS_TOKEN。');
+    }
+    return researchPost(url, Object.assign({}, body, fields), signal);
+  }
+
   function researchGet(url) {
     return fetch(url, { headers: { 'X-Workbench': '1' } }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
@@ -1248,7 +1263,7 @@
     state.abort = new AbortController();
     render();
     startResearchTimer(mod);
-    researchPost('/api/literature/research-plan', { idea: state.topic, sources: state.sources, settings: readLlmSettings() || {} }, state.abort.signal)
+    researchModelPost(mod, '/api/literature/research-plan', { idea: state.topic, sources: state.sources }, state.abort.signal)
       .then(function (plan) {
         stopResearchTimer();
         state.planBusy = false;
@@ -1421,7 +1436,7 @@
     startResearchTimer(mod);
     researchPost('/api/literature/research-screen', { jobId: state.jobId, keep: keep, exclude: excluded }, state.abort.signal)
       .then(function () {
-        return researchPost('/api/literature/research', { jobId: state.jobId, settings: readLlmSettings() || {} }, state.abort.signal);
+        return researchModelPost(mod, '/api/literature/research', { jobId: state.jobId }, state.abort.signal);
       })
       .then(function (result) {
         stopResearchTimer();
@@ -1698,11 +1713,10 @@
     state.busy = true;
     state.message = '凝练中（读取上游调研产物）…';
     render();
-    researchPost('/api/research/questions', {
+    researchModelPost(mod, '/api/research/questions', {
       action: 'candidates',
       idea: state.idea,
-      upstreamJobIds: collectUpstreamArtifacts(mod.id).jobs,
-      settings: readLlmSettings() || {}
+      upstreamJobIds: collectUpstreamArtifacts(mod.id).jobs
     }).then(function (result) {
       state.busy = false;
       state.candidates = (result && result.candidates) || [];
@@ -1725,12 +1739,11 @@
     state.chosen = candidate;
     state.message = '展开问题说明书…';
     render();
-    researchPost('/api/research/questions', {
+    researchModelPost(mod, '/api/research/questions', {
       action: 'specify',
       idea: state.idea,
       choice: candidate,
-      upstreamJobIds: collectUpstreamArtifacts(mod.id).jobs,
-      settings: readLlmSettings() || {}
+      upstreamJobIds: collectUpstreamArtifacts(mod.id).jobs
     }).then(function (result) {
       state.busy = false;
       state.spec = result && result.markdown ? result.markdown : '';
@@ -1898,9 +1911,9 @@
     return bar;
   }
 
-  /** 空状态里的一键初始化：按业务流程图建 9 个模块（各自带任务说明） */
+  /** 兼容空任务的一键初始化：建立九步研究流程模块 */
   function flowInitButton() {
-    var btn = el('button', 'status-btn status-btn-primary flow-init-btn', '按业务流程初始化 9 个模块');
+    var btn = el('button', 'status-btn status-btn-primary flow-init-btn', '初始化九步研究流程模块');
     btn.type = 'button';
     btn.addEventListener('click', function () {
       var Store = getStore();
@@ -2042,12 +2055,68 @@
     return d.status === 'approved' ? 'approved' : 'draft';
   }
 
-  /** 文档相关渲染签名：内容/状态/编辑态/瞬态 UI 任一变化都使增量快速路径失效（强制全量重建） */
-  function docSigOf(mod) {
+  function reviewEvidenceOwner(mod, modules) {
+    var Store = getStore();
+    var ownerId = Store && Store.getReviewEvidenceOwnerId && Store.getReviewEvidenceOwnerId(mod.id);
+    return ownerId === mod.id ? mod : (ownerId && findModule(modules, ownerId));
+  }
+
+  function hasResearchActions(mod) {
+    return (mod.step === 'literature' && mod.type === 'literature-research') ||
+      (mod.step === 'question' && mod.type === 'question-formation');
+  }
+
+  function gapDiscussionJobId(mod, modules) {
+    var literature = mod.step === 'literature' ? mod : findModule(modules, mod.dependsOn);
+    return literature && literature.step === 'literature' && literature.params?.researchJobId || '';
+  }
+
+  // The normalised note identifies whether full text was available. A hit
+  // from title/abstract screening can seed a citation, never a finding.
+  function suggestionFromPaper(paper) {
+    var doi = String(paper.doi || '').trim().replace(/^(?:https?:\/\/(?:dx\.)?doi\.org\/|doi:\s*)/i, '');
+    var url = /^10\.\d{4,9}\/\S+$/i.test(doi) ? 'https://doi.org/' + doi : '';
+    var source = [paper.title, paper.authors, paper.year].filter(Boolean).join(' · ');
+    return {
+      source: source,
+      claim: paper.evidence === '全文' && paper.conclusion !== '文中未说明' ? String(paper.conclusion || '') : '',
+      url: url
+    };
+  }
+
+  function reviewEvidenceOptions(owner) {
+    var jobId = owner && owner.params && owner.params.researchJobId;
+    if (!jobId) return {};
+    return { loadSuggestions: async function () {
+      var key = encodeURIComponent(jobId);
+      var job = await researchGet('/api/literature/job?id=' + key);
+      var papers;
+      if (Array.isArray(job.files) && job.files.indexOf('research/notes.json') >= 0) {
+        var result = await researchGet('/api/literature/download?id=' + key + '&name=research%2Fnotes.json');
+        papers = result.notes;
+      } else {
+        var candidates = await researchGet('/api/literature/candidates?id=' + key);
+        papers = candidates.candidates;
+      }
+      if (!Array.isArray(papers)) throw new Error('文献清单格式异常，请重新读取。');
+      return papers.filter(function (paper) { return paper && paper.title; }).map(suggestionFromPaper);
+    } };
+  }
+
+  /** 文档、依据或面板状态有变化时，重新渲染模块。 */
+  function docSigOf(mod, modules) {
     if (!mod) return 'none';
     var d = mod.doc;
     var s = d ? (d.status + '|' + (d.updatedAt || '') + '|' + (d.approvedAt || '') + '|' + d.content.length) : 'none';
     s += '#' + (mod.type || '') + '#' + (mod.mode || '');
+    if (hasResearchActions(mod)) {
+      s += '#research:' + JSON.stringify([root.TaskManager?.currentTaskId?.(), mod.params?.researchBackend, gapDiscussionJobId(mod, modules)]);
+    }
+    var owner = reviewEvidenceOwner(mod, modules);
+    if (owner) {
+      var taskId = root.TaskManager && root.TaskManager.currentTaskId && root.TaskManager.currentTaskId();
+      s += '#evidence:' + JSON.stringify([taskId, owner.id, owner.params && owner.params.researchJobId, owner.reviewEvidence || []]);
+    }
     s += '#' + ((docEditingId === mod.id) ? 'E' : '-');
     // 执行记录（结果确认门）：状态/时间/产物任一变化都要全量重建（否则快速路径吞掉徽标翻转）
     var r = mod.run;
@@ -3136,7 +3205,7 @@
       (msgListState.count === 0 || messages[0].id === msgListState.firstId) &&
       (active.status || 'todo') === msgListState.status &&
       pendingNow === msgListState.pending &&
-      docSigOf(active) === msgListState.docSig;
+      docSigOf(active, modules) === msgListState.docSig;
     if (canFast) {
       try {
         var fastList = spaceEl.querySelector('.msg-list');
@@ -3195,6 +3264,19 @@
       spaceEl.appendChild(buildStatusBar(active, modules));
       var specCard = buildSpecCard(active);
       if (specCard) spaceEl.appendChild(specCard);
+      if (hasResearchActions(active)) {
+        spaceEl.appendChild(root.ResearchModel.build(active));
+        var discussion = root.GapDiscussion?.build(active, {
+          taskId: root.TaskManager?.currentTaskId(), jobId: gapDiscussionJobId(active, modules),
+          get: researchGet, post: researchPost, modelFields: function () { return root.ResearchModel.fields(active); }
+        });
+        if (discussion) spaceEl.appendChild(discussion);
+      }
+      var evidenceOwner = reviewEvidenceOwner(active, modules);
+      if (evidenceOwner && root.ReviewEvidencePanel) {
+        var evidencePanel = root.ReviewEvidencePanel.build(active, reviewEvidenceOptions(evidenceOwner));
+        if (evidencePanel) spaceEl.appendChild(evidencePanel);
+      }
       var researchPanel = buildResearchPanel(active);
       if (researchPanel) spaceEl.appendChild(researchPanel);
       var questionPanel = buildQuestionPanel(active);
@@ -3251,7 +3333,7 @@
       firstId: (active && messages.length) ? messages[0].id : null,
       status: (active && !fallback) ? (active.status || 'todo') : null,
       pending: (active && !fallback) ? !!pendingModules[active.id] : false,
-      docSig: (active && !fallback) ? docSigOf(active) : null
+      docSig: (active && !fallback) ? docSigOf(active, modules) : null
     };
     if (messageless) spaceEl.scrollTop = 0;
     else spaceEl.scrollTop = spaceEl.scrollHeight;
@@ -3337,6 +3419,20 @@
   }
 
   // -------------------------------------------------------------- 加载期绑定
+
+  // Store may render while the task manager is still booting or switching.
+  // Rebuild the two evidence views once their owning task is available.
+  function showTaskEvidence() {
+    var Store = getStore();
+    var state = Store && Store.getState();
+    var active = state && findModule(state.modules, state.activeModuleId);
+    if (active && (hasResearchActions(active) || active.step === 'writing')) render();
+  }
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('DOMContentLoaded', showTaskEvidence);
+    document.addEventListener('discussion-project-after-switch', showTaskEvidence);
+    document.addEventListener('discussion-project-switch-cancelled', showTaskEvidence);
+  }
 
   if (hintEl) hintEl.textContent = HINT_TEXT;           // 静态节点：只改文本
 

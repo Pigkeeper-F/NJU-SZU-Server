@@ -348,20 +348,22 @@
     if (busy() || pendingRules || startingExecution) { showMessage('当前任务正在处理，请等完成后再新建任务。'); return false; }
     name = String(name || '').trim();
     if (!name) return false;
-    var task = { id: id(), name: name.slice(0, 80), createdAt: new Date().toISOString(), rulesByModule: {} };
+    var workflowType = (start === 'nine-step' || start === 'research') ? 'nine-step' : 'data-model';
+    var task = { id: id(), name: name.slice(0, 80), workflowType: workflowType, createdAt: new Date().toISOString(), rulesByModule: {} };
     if (!discussionProjectEvent('discussion-project-before-switch', task.id)) { discussionProjectEvent('discussion-project-switch-cancelled', task.id); showMessage('讨论或输入草稿尚未保存，未新建项目。请先保存或下载讨论备份。'); return false; }
     if (!saveState()) { discussionProjectEvent('discussion-project-switch-cancelled', task.id); showMessage('当前讨论的本地保存失败，未新建项目。请先下载讨论备份。'); return false; }
     index.tasks.push(task);
     index.activeTaskId = task.id;
     switching = true;
     root.Store.resetAll();
-    if (start === 'research') {
-      // 【九步研究流程 · 2026-10-21】九步链（①文献调研 … ⑨校稿核验）整体建一次。
-      // 与数据链互斥：新建任务时只走其中一条，别把两条链混在一个任务里。
-      // 逐步解锁：先只建第①步，后面每过一个审核门再自动补出下一个。
-      if (typeof root.Store.startFlow === 'function') root.Store.startFlow();
+    if (workflowType === 'nine-step') {
+      // 九步任务与日常数据模型任务分开保存，一次建立九步对应的模块。
+      if (typeof root.Store.initFlowModules === 'function') root.Store.initFlowModules();
+    } else if (start === 'data-model') {
+      // 日常数据与模型科研任务包含准备、计算和结果模块，更新分支按计算方式按需建立。
+      if (typeof root.Store.initDataModelModules === 'function') root.Store.initDataModelModules();
     } else {
-      // 【数据链 · 2026-10-22】三条并列准备路径汇入「模型调整与计算」。
+      // 兼容历史调用：旧的 start 值仍只建立请求的单个入口模块。
       root.Store.addModule(({clean:'数据清洗', literature:'文献挖掘', calculation:'模型调整与计算'})[start] || '下载数据');
     }
     saveIndex();
@@ -614,7 +616,7 @@
   $('task-new').addEventListener('click', function () {
     if (busy() || pendingRules) { showMessage('当前 AI 正在回复，请等完成后再新建任务。'); return; }
     $('task-name').value = '';
-    $('task-start').value = 'clean';
+    $('task-start').value = 'data-model';
     $('task-dialog').showModal();
     $('task-name').focus();
   });
