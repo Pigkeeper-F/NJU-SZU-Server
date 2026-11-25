@@ -69,7 +69,7 @@ function getChangelog() {
 }
 // 【师生协作 · 2026-11-25】数据落服务器 + 角色 + 提交审核。
 // 同样惰性构造：命中 2026-11-18 那个 env 加载顺序的坑（顶层读 process.env 会拿到默认值）。
-const { CollabStore } = require('./tools/collab');
+const { CollabStore, ownerKeyOf } = require('./tools/collab');
 let collabStore = null;
 function getCollab() {
   if (!collabStore) {
@@ -237,27 +237,53 @@ const ALLOWED_ORIGINS = new Set([
 // 单机（无 PUBLIC_HOSTS）仍沿用原来的全局计数语义。上限可用 RATE_LIMIT_MAX 调。
 const RATE_LIMIT = { max: Number(process.env.RATE_LIMIT_MAX || 30) || 30, windowMs: 60000 };
 const rateBuckets = new Map();
-let rateCount = 0;
-let rateWindowStart = 0;
+// 单机模式的全局计数（原 rateCount / rateWindowStart，改成对象以便复用 hitCounterLimit）
+const rateGlobal = { start: 0, count: 0 };
 
-function hitRateLimit(req) {
+/**
+ * 通用计数器限流。
+ * @param {object} req
+ * @param {{max:number, windowMs:number, buckets:Map}} config buckets 由调用方持有，
+ *   保证每类接口用独立配额（AI 对话与协作接口互不影响）。
+ */
+function hitCounterLimit(req, config) {
   const now = Date.now();
   if (PUBLIC_HOSTS.length === 0) {
-    if (now - rateWindowStart > RATE_LIMIT.windowMs) { rateWindowStart = now; rateCount = 0; }
-    return ++rateCount > RATE_LIMIT.max;
+    // 单机模式：沿用原来的全局计数语义（本地自用没有"多人抢配额"的问题）
+    if (!config.global) config.global = { start: now, count: 0 };
+    if (now - config.global.start > config.windowMs) { config.global.start = now; config.global.count = 0; }
+    return ++config.global.count > config.max;
   }
   const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()
     || (req.socket && req.socket.remoteAddress) || 'unknown';
-  const bucket = rateBuckets.get(ip);
-  if (!bucket || now - bucket.start > RATE_LIMIT.windowMs) {
-    rateBuckets.set(ip, { start: now, count: 1 });
+  const bucket = config.buckets.get(ip);
+  if (!bucket || now - bucket.start > config.windowMs) {
+    config.buckets.set(ip, { start: now, count: 1 });
     // 顺手清掉过期的桶，避免长期运行后 Map 无限增长
-    if (rateBuckets.size > 512) {
-      for (const [key, value] of rateBuckets) if (now - value.start > RATE_LIMIT.windowMs) rateBuckets.delete(key);
+    if (config.buckets.size > 512) {
+      for (const [key, value] of config.buckets) if (now - value.start > config.windowMs) config.buckets.delete(key);
     }
     return false;
   }
-  return ++bucket.count > RATE_LIMIT.max;
+  return ++bucket.count > config.max;
+}
+
+function hitRateLimit(req) {
+  return hitCounterLimit(req, { max: RATE_LIMIT.max, windowMs: RATE_LIMIT.windowMs, buckets: rateBuckets, global: rateGlobal });
+}
+
+// 【师生协作 · 2026-11-25】协作接口独立配额。
+// 前端轮询是 5 秒一次（12 次/分钟），加上打开抽屉、提交、批注等操作，
+// 每分钟 120 次留足余量；仍然能挡住"脚本刷写盘"。
+const COLLAB_RATE = { max: Number(process.env.COLLAB_RATE_LIMIT_MAX || 120) || 120, windowMs: 60000 };
+const collabRateBuckets = new Map();
+const collabRateGlobal = { start: 0, count: 0 };
+
+function hitCollabRateLimit(req) {
+  return hitCounterLimit(req, {
+    max: COLLAB_RATE.max, windowMs: COLLAB_RATE.windowMs,
+    buckets: collabRateBuckets, global: collabRateGlobal
+  });
 }
 
 function checkRequestGuards(req, res) {
@@ -276,6 +302,13 @@ function checkRequestGuards(req, res) {
       sendJson(res, 429, { error: '请求过于频繁，请稍后再试。' });
       return false;
     }
+  }
+  // 【师生协作 · 2026-11-25】限流也要覆盖协作接口：登录/注册/提交/批注都写盘，
+  // 原来只限 /api/ai/，脚本可以无限打 /api/collab/submit 把磁盘写满。
+  // 用独立计数器（轮询 5 秒一次 = 12 次/分钟），免得正常轮询吃掉 AI 对话的额度。
+  if (String(req.url || '').startsWith('/api/collab/') && hitCollabRateLimit(req)) {
+    sendJson(res, 429, { error: '操作过于频繁，请稍后再试。' });
+    return false;
   }
   return true;
 }
@@ -773,8 +806,8 @@ async function handleCollab(req, res, url) {
       const list = await store.listSubmissions(projectId, {
         moduleId: url.searchParams.get('module') || undefined,
         status: url.searchParams.get('status') || undefined,
-        // 学生只看自己的提交；导师看全部
-        by: session.role === 'student' ? session.username : undefined
+        // 学生只看自己这个会话的提交（按会话 key，不按用户名——访客都叫「访客」）；导师看全部
+        byKey: session.role === 'student' ? ownerKeyOf(session) : undefined
       });
       return sendJson(res, 200, { submissions: list.map(item => store._publicSubmission(item)) });
     }
@@ -792,7 +825,7 @@ async function handleCollab(req, res, url) {
       return sendJson(res, 200, await store.changesSince(projectId, {
         since: url.searchParams.get('since'),
         role: session.role,
-        username: session.username
+        ownerKey: session.role === 'student' ? ownerKeyOf(session) : ''
       }));
     }
 

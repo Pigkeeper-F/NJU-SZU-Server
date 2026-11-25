@@ -77,6 +77,17 @@ function safeId(value, label) {
 
 function isoNow() { return new Date().toISOString(); }
 
+/**
+ * 会话的归属标识：token 的 SHA-256 前 16 位。
+ * 存哈希而不是 token 本身——即使提交文件被看到，也拿不到可用会话。
+ * 用会话而非用户名，是为了让同名的访客互不可见（实测过同名的坑）。
+ */
+function ownerKeyOf(session) {
+  const token = String((session && session.token) || '');
+  if (!token) return 'anon';
+  return crypto.createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 16);
+}
+
 /** 盐化 SHA-256，与 js/auth-storage.js 的算法保持一致，老账号密码可直接沿用。 */
 function hashPassword(password, salt) {
   return crypto.createHash('sha256').update(salt + ':' + password, 'utf8').digest('hex');
@@ -295,7 +306,11 @@ class CollabStore {
     const value = sessions[token];
     if (!value) return null;
     if (typeof value.expiresAt !== 'string' || Date.parse(value.expiresAt) < Date.now()) return null;
-    return value;
+    // 【修正 · 2026-11-25】把 token 挂进返回值。
+    // sessions 里存的记录本身不含 token，但 ownerKeyOf(session) 要靠它算归属标识；
+    // 不挂的话所有人都会算成同一个 'anon'，访客之间的提交又会串在一起。
+    // 这个字段只在服务端内部流转，不发给浏览器（各接口回包都只挑 username/role）。
+    return Object.assign({}, value, { token });
   }
 
   async logout(token) {
@@ -410,6 +425,11 @@ class CollabStore {
       version: 1,
       status: 'pending',                  // pending | approved | rejected
       submittedBy: session.username,
+      // 【修正 · 2026-11-25】归属标识不能只用 username：访客登录时大家都叫「访客」，
+      // 按用户名过滤会让访客 A 看到访客 B 的提交（实测确认串数据）。
+      // 这里存 token 的哈希（不存 token 本身，泄露哈希也无法反推会话），
+      // 每个登录会话唯一，访客之间也不互通。
+      submittedByKey: ownerKeyOf(session),
       submittedAt: isoNow(),
       studentNote: remark,
       snapshot,
@@ -466,6 +486,8 @@ class CollabStore {
       if (!record || typeof record.id !== 'string') continue;
       if (filter.moduleId && record.moduleId !== filter.moduleId) continue;
       if (filter.status && record.status !== filter.status) continue;
+      // 归属按 key 比对；老记录没有 key 时退回用户名（兼容修复前的数据）
+      if (filter.byKey && (record.submittedByKey || record.submittedBy) !== filter.byKey) continue;
       if (filter.by && record.submittedBy !== filter.by) continue;
       out.push(record);
     }
@@ -577,16 +599,21 @@ class CollabStore {
   /**
    * 增量轮询：从 since 之后有变化的提交记录。
    * 学生端靠这个看到"导师打回了"；导师端靠这个看到"学生新提交了"。
+   * @param {object} options
+   * @param {string} [options.ownerKey] 学生自己的归属标识；给了就只返回这个人的提交。
+   *   用 key 而不是 username，因为访客登录时大家都叫「访客」，按名字过滤会串数据。
    */
-  async changesSince(projectId, { since = null, role = 'student', username = '' } = {}) {
+  async changesSince(projectId, { since = null, role = 'student', ownerKey = '' } = {}) {
     const list = await this.listSubmissions(projectId, {});
     const sinceMs = since ? Date.parse(since) : 0;
     const filtered = list.filter(record => {
       const stamp = record.review.reviewedAt || record.submittedAt;
       const touched = !since || (Number.isFinite(Date.parse(stamp)) && Date.parse(stamp) > sinceMs);
       if (!touched) return false;
-      // 学生只看自己的（或访客提交的全部可见，课堂场景不细分）
-      if (role === 'student' && record.submittedBy !== username) return false;
+      // 学生只看自己这个会话的提交；导师看全部
+      if (role === 'student' && ownerKey
+          && (record.submittedByKey || '') !== ownerKey
+          && record.submittedBy !== ownerKey) return false;
       return true;
     });
     return {
@@ -603,4 +630,4 @@ class CollabStore {
   }
 }
 
-module.exports = { CollabStore, ROLES, hashPassword, randomSalt, SESSION_TTL_MS, MAX_STATE_BYTES };
+module.exports = { CollabStore, ROLES, hashPassword, randomSalt, ownerKeyOf, SESSION_TTL_MS, MAX_STATE_BYTES };

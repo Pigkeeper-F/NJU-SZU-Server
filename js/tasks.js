@@ -325,6 +325,16 @@
     if (!targetState) { showMessage('该任务的本地记录无法读取，未切换。'); render(); return false; }
     if (!discussionProjectEvent('discussion-project-before-switch', targetId)) { discussionProjectEvent('discussion-project-switch-cancelled', targetId); showMessage('讨论或输入草稿尚未保存，未切换项目。请先保存或下载讨论备份。'); render(); return false; }
     if (!saveState()) { discussionProjectEvent('discussion-project-switch-cancelled', targetId); showMessage('当前讨论的本地保存失败，未切换项目。请先下载讨论备份。'); render(); return false; }
+    // 【师生协作 · 2026-11-25】切走之前先把当前项目内容推一次服务器。
+    // 因为 collab-boot 不再把 state:reset 当同步触发（那会把目标任务的内容误推到共享项目），
+    // 所以切换前的这次显式推送是保住"切走前最后的改动"的唯一时点。
+    // 失败不阻塞切换——本地记录已经 saveState 落盘，服务器滞后比卡住用户更可接受。
+    try {
+      if (root.Collab && root.Collab.isLoggedIn && root.Collab.isLoggedIn()
+          && root.Collab.scheduleSave) {
+        root.Collab.pushState(root.Store.getState()).catch(function () {});
+      }
+    } catch (error) { /* 忽略：同步失败不影响本地切换 */ }
     switching = true;
     var previousId = index.activeTaskId;
     // Store broadcasts synchronously. Scope every observer to the destination

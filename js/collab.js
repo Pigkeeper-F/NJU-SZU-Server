@@ -300,7 +300,11 @@
   function startPolling() {
     stopPolling();
     if (!state.user) return;
-    state.pollTimer = setInterval(function () {
+
+    // 【优化 · 2026-11-25】页面在后台时不轮询：浏览器标签被藏起来（切到别的应用、
+    // 或者主动最小化），用户根本看不到更新，继续每 5 秒打一次服务器纯属浪费。
+    // 回到前台立刻补一次，保证不会因为"没轮询"而看到过期数据。
+    function tick() {
       api('/changes?since=' + encodeURIComponent(state.lastPollAt || ''))
         .then(function (data) {
           state.online = true;
@@ -317,7 +321,22 @@
             emit('session:expired', error);
           }
         });
+    }
+
+    state.pollTimer = setInterval(function () {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      tick();
     }, POLL_INTERVAL);
+
+    // 从后台切回来时立刻拉一次，不用等下一个 5 秒
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      if (!state.visibilityBound) {
+        state.visibilityBound = true;
+        document.addEventListener('visibilitychange', function () {
+          if (!document.hidden && state.user && state.pollTimer) tick();
+        });
+      }
+    }
   }
 
   function stopPolling() {

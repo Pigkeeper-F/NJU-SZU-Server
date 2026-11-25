@@ -404,3 +404,57 @@ body.sidebar-collapsed .collab-sync-chip { display: none; }
   color: var(--muted);
   margin-bottom: 5px;
 }
+
+/* ------------------------------------------------------------ 会话过期横幅 */
+.collab-relogin-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 950;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 16px;
+  background: #fff8e6;
+  border-bottom: 1px solid #f0dcb8;
+  color: #7a5c00;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.collab-relogin-text { flex: 1 1 auto; min-width: 0; }
+
+.collab-relogin-link {
+  flex: 0 0 auto;
+  padding: 3px 11px;
+  border-radius: 999px;
+  background: #7a5c00;
+  color: #fff;
+  font-size: 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.collab-relogin-link:hover { background: #5f4700; }
+
+.collab-relogin-close {
+  flex: 0 0 auto;
+  background: none;
+  border: 0;
+  color: #7a5c00;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.collab-relogin-close:hover { opacity: 1; }
+
+/* 横幅出现时把内容往下推，避免遮住顶部标题栏 */
+body:has(.collab-relogin-banner) .app-shell { padding-top: 38px; }
+
+@media (max-width: 620px) {
+  .collab-relogin-banner { flex-wrap: wrap; gap: 8px; }
+}

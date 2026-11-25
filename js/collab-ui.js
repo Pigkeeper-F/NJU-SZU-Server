@@ -429,6 +429,48 @@
     } catch (e) { /* 本地推进失败不影响服务端记录 */ }
   }
 
+  /**
+   * 【审核闭环 · 2026-11-25】学生端把导师的裁决落到本地环节状态。
+   * 规则：每个环节只看它**最新**的那条提交（旧版本已 superseded 的不算）。
+   *   approved → 本地置 approved（学生才能点「进入下一模块」）
+   *   rejected → 本地退回 doing（学生能改完重新提交）
+   * pending 不动，保持 review。
+   * 只在本地状态与目标状态不同时才写，避免无意义的事件风暴。
+   */
+  function syncLocalFromReview(submissions) {
+    if (!Array.isArray(submissions) || !submissions.length) return;
+    try {
+      var Store = root.Store;
+      if (!Store || typeof Store.getState !== 'function' || typeof Store.setModuleStatus !== 'function') return;
+      var state = Store.getState();
+      var byModule = {};
+
+      submissions.forEach(function (item) {
+        if (!item || !item.moduleId) return;
+        if (item.status === 'superseded') return;   // 旧版本不作数
+        var current = byModule[item.moduleId];
+        if (!current || String(item.submittedAt) > String(current.submittedAt)) {
+          byModule[item.moduleId] = item;
+        }
+      });
+
+      Object.keys(byModule).forEach(function (moduleId) {
+        var record = byModule[moduleId];
+        var mod = (state.modules || []).filter(function (item) { return item.id === moduleId; })[0];
+        if (!mod) return;   // 本地没有这个环节（换了任务/项目），不碰
+        var target = record.status === 'approved' ? 'approved'
+          : record.status === 'rejected' ? 'doing'
+          : null;
+        if (!target || mod.status === target) return;
+        // 已通过的不再退回（导师先通过、学生后来又在本地改过，也不该被改回去）
+        if (mod.status === 'approved' && target === 'doing') return;
+        Store.setModuleStatus(moduleId, target);
+      });
+    } catch (e) {
+      if (root.console) root.console.error('[CollabUI] 同步审核状态失败', e);
+    }
+  }
+
   /* --------------------------------------------------------- 侧栏入口 */
 
   function ensureEntry() {
@@ -487,7 +529,18 @@
         reload();
         return;
       }
-      if (event.type === 'changes' || event.type === 'todo:update') {
+      if (event.type === 'changes') {
+        // 【审核闭环 · 2026-11-25 补】学生端要把导师的裁决同步到本地环节状态，
+        // 否则学生永远卡在 review：导师点了「通过」，学生这边还是「待审核」，
+        // 既看不到"已通过"也不能进下一步（实测确认）。
+        // 只在学生角色下推进，导师端不该因为自己的操作改别人项目的本地状态。
+        if (root.Collab.isStudent && root.Collab.isStudent()) {
+          syncLocalFromReview(event.payload && event.payload.submissions);
+        }
+        reload();
+        return;
+      }
+      if (event.type === 'todo:update') {
         reload();
         return;
       }

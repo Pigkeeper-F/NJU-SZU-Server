@@ -981,6 +981,15 @@
   function approveModule(id) {
     var mod = findModule(id);
     if (!mod) return { ok: false, reason: '模块不存在' };
+    // 【审核归属 · 2026-11-25】学生不能自己批准环节。
+    // 只在"该环节已经在等审核"（review）时拦：todo/doing 阶段本来就没有待批的东西，
+    // 而 review 意味着内容已经送到导师那里了，此时学生自己点通过等于绕过审核。
+    // 放在 Store 层而不是只删按钮，是因为删按钮只能挡住不会开控制台的人
+    // （实测：直接调 window.Store.approveModule 仍能推进）。
+    if (mod.status === 'review'
+        && root.Collab && typeof root.Collab.isStudent === 'function' && root.Collab.isStudent()) {
+      return { ok: false, reason: '这一环节已提交导师审核，需要导师在「审核待办」里通过，学生不能自己批准' };
+    }
     if (mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed')) return { ok: false, reason: '下载文件尚未确认，不能跳过下载进入下游' };
     if (mod.type === 'clean-data' && (!mod.run || mod.run.status !== 'confirmed' || !cleanAcceptanceCurrent(mod))) return { ok: false, reason: '清洗结果尚未按当前方案完成核验确认，请在清洗核验区处理问题后交接' };
     var idx = indexOfModule(id);

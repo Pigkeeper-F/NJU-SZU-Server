@@ -168,8 +168,39 @@
       }
       if (event.type === 'session:expired') {
         setMode('local', '登录已过期，请重新登录后继续同步');
+        showReloginBanner();
       }
     });
+  }
+
+  /**
+   * 【优化 · 2026-11-25】会话过期时给一条明确的横幅。
+   * 只把侧栏小标签变灰是不够的——用户根本不会去盯那个标签，
+   * 结果就是"我明明改了，怎么服务器上没有"，其实早掉线了。
+   * 横幅带一个直接跳登录页的按钮，且不阻塞工作（本地仍能继续干）。
+   */
+  function showReloginBanner() {
+    if (document.getElementById('collab-relogin-banner')) return;
+    var box = el('div', 'collab-relogin-banner');
+    box.id = 'collab-relogin-banner';
+    box.setAttribute('role', 'alert');
+
+    box.appendChild(el('span', 'collab-relogin-text',
+      '与服务器的连接已过期：现在的改动只保存在本机，导师看不到。'));
+
+    var link = el('a', 'collab-relogin-link', '重新登录');
+    link.href = 'login.html';
+    box.appendChild(link);
+
+    var close = el('button', 'collab-relogin-close', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', '关闭提示');
+    close.addEventListener('click', function () {
+      if (box.parentNode) box.parentNode.removeChild(box);
+    });
+    box.appendChild(close);
+
+    document.body.appendChild(box);
   }
 
   /** 把 Store 的变更接到防抖回写。只绑一次。 */
@@ -180,9 +211,18 @@
     if (!Store || typeof Store.subscribe !== 'function') return;
     bound = true;
     Store.subscribe(function (event) {
-      // 只同步真正改变项目内容的变更；UI 类事件（选中、侧栏宽度）不值得打网络
-      var meaningful = /^(module:add|module:remove|module:rename|module:status|message:append|doc:save|doc:approve|doc:reject|run:mark|run:confirm|run:reject|state:reset)$/;
+      // 只同步真正改变项目内容的变更；UI 类事件（选中、侧栏宽度）不值得打网络。
+      // 【修正 · 2026-11-25】原白名单漏了 module:mode / module:param / flow:init
+      // / flow:start / run:invalidate —— 这些都会改项目内容，漏掉就会"改了没同步"。
+      // 反过来，state:reset 从白名单**移除**（见下）。
+      var meaningful = /^(module:add|module:remove|module:rename|module:status|module:mode|module:param|message:append|doc:save|doc:approve|doc:reject|run:mark|run:confirm|run:reject|run:invalidate|flow:init|flow:start)$/;
       if (!meaningful.test(event.type)) return;
+
+      // 【修正 · 2026-11-25 严重】state:reset 是"整个 state 被替换"，
+      // 它有两个来源：切本地任务（tasks.js）和载入服务器状态（本文件）。
+      // 如果把它当成内容变更推上去，用户切一下本地任务就会把**别人的**任务内容
+      // 写到共享项目里，覆盖掉当前真正的项目数据（实测确认这个覆盖链路存在）。
+      // 正确做法：整体替换后不推送，只接受"局部改动"作为同步触发。
       if (!root.Collab || !root.Collab.isLoggedIn()) return;
       setMode('syncing');
       root.Collab.scheduleSave(function () { return Store.getState(); });

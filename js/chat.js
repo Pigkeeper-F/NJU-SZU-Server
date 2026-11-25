@@ -1864,8 +1864,18 @@
     var downloadPending = mod.type === 'download-data' && (!mod.run || mod.run.status !== 'confirmed');
     var hint = STATUS_HINT[st] || '';
     var docApproved = !!(mod.doc && mod.doc.status === 'approved');
+    // 【审核归属 · 2026-11-25】学生端在 review 状态下没有"通过"按钮了（由导师裁决），
+    // 原来的提示「点确定（通过），会自动跳到下一个模块」会让人找不存在的按钮。
+    var isStudentRole = !!(root.Collab && root.Collab.isStudent && root.Collab.isStudent());
+    if (isStudentRole && st === 'review') {
+      hint = '已提交导师审核，等导师在「审核待办」里处理；通过后你这边会自动解锁下一环节';
+    } else if (isStudentRole && (st === 'todo' || st === 'doing')) {
+      hint = '做完这一环节后点「提交给导师审核」，导师通过才会解锁下一步';
+    }
     if (!downloadPending && docApproved && (st === 'todo' || st === 'doing')) {
-      hint = '文档已批准（验收标准已生效）→ 点「完成并提交审核」提交本环节 → 再点「通过本环节」进入下一模块';
+      hint = isStudentRole
+        ? '文档已批准（验收标准已生效）→ 点「提交给导师审核」把本环节送审'
+        : '文档已批准（验收标准已生效）→ 点「完成并提交审核」提交本环节 → 再点「通过本环节」进入下一模块';
     }
     if (mod.type === 'clean-data') hint = '确认清洗方案及核验规则 → 按方案处理 → 核验与问题决定 → 一次确认交给计算';
     bar.appendChild(el('span', 'status-hint', downloadPending ? '审核下载方案 → 平台自动获取 → 核查成果后交接' : hint));
@@ -1888,13 +1898,28 @@
         }));
       }
     } else if (st === 'review') {
-      actions.appendChild(actionButton(mod.type === 'clean-data' ? '确认结果并交给计算' : '通过本环节 → 下一模块', 'primary', function () {
-        if (mod.type === 'clean-data') { root.CodexUI && root.CodexUI.confirmCleanAcceptance(mod.id); return; }
-        getStore().approveModule(mod.id);      // 内部已把选中切到下一模块
-      }));
-      actions.appendChild(actionButton('打回重做', 'ghost', function () {
-        getStore().rejectModule(mod.id, '需要补充后再提交');
-      }));
+      // 【审核归属 · 2026-11-25 修正】review 状态的含义是「已提交，等导师裁决」。
+      // 学生自己在这个状态里看到「通过本环节」并点下去，等于自己给自己签字，
+      // 整条师生审核链就失效了（实测确认学生能绕过）。
+      // 现在按角色分开：
+      //   学生 → 只能撤回/改写后重新提交，不能自己通过；
+      //   导师或本地单机模式 → 保留原来的自审能力（没有导师时仍要能推进工作）。
+      var isStudentRole = !!(root.Collab && root.Collab.isStudent && root.Collab.isStudent());
+      if (isStudentRole) {
+        actions.appendChild(el('span', 'status-hint',
+          '已提交导师审核。等导师在「审核待办」里处理；如要补充内容，可先点「撤回修改」。'));
+        actions.appendChild(actionButton('撤回修改', 'ghost', function () {
+          getStore().rejectModule(mod.id, '学生撤回，修改后重新提交');
+        }));
+      } else {
+        actions.appendChild(actionButton(mod.type === 'clean-data' ? '确认结果并交给计算' : '通过本环节 → 下一模块', 'primary', function () {
+          if (mod.type === 'clean-data') { root.CodexUI && root.CodexUI.confirmCleanAcceptance(mod.id); return; }
+          getStore().approveModule(mod.id);      // 内部已把选中切到下一模块
+        }));
+        actions.appendChild(actionButton('打回重做', 'ghost', function () {
+          getStore().rejectModule(mod.id, '需要补充后再提交');
+        }));
+      }
     } else if (st === 'approved') {
       var next = modules.filter(function (candidate) {
         return getStore().getUpstreamModules(candidate.id).some(function (up) { return up.id === mod.id; });
