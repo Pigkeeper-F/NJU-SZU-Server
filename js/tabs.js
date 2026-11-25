@@ -49,6 +49,17 @@
     { id: 'manual-review', name: '人工审核' }
   ];
   var PREPARATION_TYPES = ['download-data', 'clean-data', 'literature-mining'];
+  var FLOW_STEP_LABELS = {
+    literature: '① 文献调研',
+    question: '② 科学问题的凝练与提取',
+    data: '③ 数据获取、清洗处理',
+    model: '④ 模型的选择与运行',
+    chart: '⑤ 图表的绘制',
+    writing: '⑥ 文章的撰写和修改',
+    submit: '⑦ 投稿前的全流程校验与投稿',
+    rebuttal: '⑧ 回复评审意见与最终校验',
+    proof: '⑨ 文章接收后校稿阶段的校验'
+  };
   var EMPTY_HINT_TEXT = '选择准备环节，或直接进入模型调整与计算';
   var DEP_FIRST_TEXT = '起点';          // 首模块（dependsOn === null）
   var DEP_ARROW = '← ';                 // 其余模块：← 上游模块名
@@ -100,7 +111,7 @@
 
   // ------------------------------------------------------------ 构建
 
-  function createTab(mod, activeId, modules) {
+  function createTab(mod, activeId, modules, labelOverride) {
     var tab = doc.createElement('div');
     tab.className = 'module-tab' + (mod.id === activeId ? ' module-tab-active' : '');
     tab.setAttribute('data-id', mod.id);
@@ -110,8 +121,8 @@
     // 模块名（全名放 title，便于省略号截断后仍可悬停查看）
     var title = doc.createElement('span');
     title.className = 'module-tab-title';
-    title.textContent = mod.name;
-    title.setAttribute('title', mod.name);
+    title.textContent = labelOverride || mod.name;
+    title.setAttribute('title', labelOverride || mod.name);
     tab.appendChild(title);
 
     if (mod.type === 'calculation') {
@@ -135,7 +146,11 @@
     var dep = doc.createElement('span');
     dep.className = 'module-dep';
     var upstream = getStore().getUpstreamModules(mod.id);
-    if (PREPARATION_TYPES.indexOf(mod.type) >= 0) {
+    if (mod.step) {
+      var flowUpstream = upstream.map(function (item) { return item.name; }).join(' / ');
+      dep.textContent = flowUpstream ? DEP_ARROW + flowUpstream : '流程起点';
+      dep.setAttribute('title', flowUpstream ? ('依赖上游环节：' + flowUpstream) : '九步研究流程起点');
+    } else if (PREPARATION_TYPES.indexOf(mod.type) >= 0) {
       dep.textContent = '并列准备 · 成果供计算使用';
       dep.setAttribute('title', '可独立开展；成果按需用于模型调整与计算');
     } else if (mod.type === 'calculation') {
@@ -171,10 +186,52 @@
 
   // ------------------------------------------------------------ 渲染
 
+  function flowTabLabel(mod, modules) {
+    var stepLabel = FLOW_STEP_LABELS[mod.step] || mod.name;
+    var sameStep = modules.filter(function (item) { return item.step === mod.step; });
+    return sameStep.length > 1 ? stepLabel + ' · ' + mod.name : stepLabel;
+  }
+
+  function renderFlowWorkbench(state) {
+    var modules = state.modules || [];
+    var activeId = state.activeModuleId;
+    tabsEl.innerHTML = '';
+    var heading = doc.createElement('div');
+    heading.className = 'workflow-group-title';
+    heading.textContent = '九步研究流程';
+    tabsEl.appendChild(heading);
+    var activeEl = null;
+    modules.forEach(function (mod) {
+      var label = flowTabLabel(mod, modules);
+      var tab = createTab(mod, activeId, modules, label);
+      tab.setAttribute('data-module-type', mod.type);
+      tabsEl.appendChild(tab);
+      if (mod.id === activeId) activeEl = tab;
+    });
+    if (addBtn) addBtn.hidden = true;
+    if (addMenuEl) addMenuEl.hidden = true;
+    if (chainEl) {
+      var chain = [];
+      modules.forEach(function (mod) {
+        var label = FLOW_STEP_LABELS[mod.step] || mod.name;
+        if (chain[chain.length - 1] !== label) chain.push(label);
+      });
+      chainEl.textContent = chain.join(' → ');
+      chainEl.setAttribute('title', chainEl.textContent);
+    }
+    if (activeEl && typeof activeEl.scrollIntoView === 'function') {
+      activeEl.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    }
+  }
+
   // Fixed navigation is presentation-only: instantiate a module on first click,
   // without running it or changing the Store's scientific/dependency gates.
   function renderWorkbench(state) {
     var modules = state.modules || [];
+    if (modules.some(function (mod) { return !!mod.step; })) {
+      renderFlowWorkbench(state);
+      return;
+    }
     var calculation = modules.filter(function (mod) { return mod.type === 'calculation'; })[0];
     tabsEl.innerHTML = '';
     FIXED_MODULES.filter(function (item) { return !item.conditional; }).forEach(function (item) {
@@ -186,10 +243,13 @@
         tab = doc.createElement('button'); tab.type = 'button'; tab.className = 'module-tab module-tab-placeholder';
         tab.setAttribute('data-add-type', item.id); tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', 'false');
         var title = doc.createElement('span'); title.className = 'module-tab-title'; title.textContent = item.name; tab.appendChild(title);
-        var blocked = ['plotting', 'result-audit', 'manual-review'].indexOf(item.id) >= 0 && (!calculation || !calculation.mode);
-        tab.disabled = blocked; tab.setAttribute('aria-disabled', String(blocked));
-        tab.title = blocked ? '先进入模型调整与计算，选择计算方式' : '进入' + item.name + '；不会自动执行';
-        var hint = doc.createElement('span'); hint.className = 'module-dep'; hint.textContent = blocked ? '先选择计算方式' : '点击进入'; tab.appendChild(hint);
+        var needsCalculation = ['plotting', 'result-audit', 'manual-review'].indexOf(item.id) >= 0;
+        tab.disabled = false; tab.setAttribute('aria-disabled', 'false');
+        tab.title = needsCalculation
+          ? '进入' + item.name + '配置；执行前检查模型计算结果'
+          : '进入' + item.name + '；不会自动执行';
+        var hint = doc.createElement('span'); hint.className = 'module-dep';
+        hint.textContent = needsCalculation ? '可先配置，执行时检查前置结果' : '点击进入'; tab.appendChild(hint);
       }
       tab.setAttribute('data-module-type', item.id);
       tabsEl.appendChild(tab);
@@ -224,7 +284,6 @@
     var activeId = state.activeModuleId;
     var moduleTypes = modules.map(function (item) { return item.type; });
     var calculation = modules.filter(function (item) { return item.type === 'calculation'; })[0];
-    var workflowLocked = false;
 
     tabsEl.innerHTML = '';
 
@@ -284,11 +343,9 @@
       addMenuEl.hidden = !nextModule && !pendingCalculationModule;
     }
     if (addBtn) {
-      workflowLocked = !!nextModule && ['plotting', 'result-audit', 'manual-review'].indexOf(nextModule.id) >= 0 && (!calculation || !calculation.mode);
       var calculationSubmoduleNeeded = calculation && ['parameter-update', 'activity-data-update'].indexOf(calculation.mode) >= 0 && !modules.some(function (item) { return item.type === calculation.mode; });
-      addBtn.disabled = workflowLocked || (!nextModule && !calculationSubmoduleNeeded);
-      if (workflowLocked) addBtn.title = '先选择计算方式';
-      else if (calculationSubmoduleNeeded) addBtn.title = '添加：' + (calculation.mode === 'parameter-update' ? '参数更新' : '活动数据更新');
+      addBtn.disabled = (!nextModule && !calculationSubmoduleNeeded);
+      if (calculationSubmoduleNeeded) addBtn.title = '添加：' + (calculation.mode === 'parameter-update' ? '参数更新' : '活动数据更新');
       else if (!nextModule) addBtn.title = '固定流程已全部添加';
       else addBtn.title = '添加环节：' + nextModule.name;
     }

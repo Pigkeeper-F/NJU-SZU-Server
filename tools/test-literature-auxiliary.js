@@ -10,6 +10,7 @@ const { EventEmitter } = require('node:events');
 const { LiteratureConnector } = require('./literature-connector');
 const { LiteratureAuxiliary } = require('./literature-auxiliary');
 const { createLiteratureRuntime } = require('./literature-runtime');
+const { openResearchModel } = require('../server');
 const ROOT = path.resolve(__dirname, '..');
 const ID = '11111111-1111-4111-8111-111111111111';
 const MISSING = '22222222-2222-4222-8222-222222222222';
@@ -37,21 +38,22 @@ async function main() {
     scholar.jobs.set(ID, job); scholar.persist(job);
     const runtime = createLiteratureRuntime({ root, port: 8123, isBusy: () => auxiliary.busy });
     let modelCalls = 0, processCalls = 0, gate = null, bodyGate = null, failModel = false;
-    const generate = async () => {
+    const generate = async ({ callModel }) => {
       modelCalls++; assert.equal(runtime.snapshot().busy, true);
       if (gate) await gate;
       if (failModel) throw new Error('fixture model failure');
+      await callModel(null, [{ role: 'user', content: 'isolated text fixture' }], 2000);
       fs.mkdirSync(path.join(dir, 'research'), { recursive: true });
       fs.writeFileSync(path.join(dir, 'research/notes.json'), '{"notes":[]}');
       return { ok: true, files: ['research/notes.json'], notes: [], synthesis: {}, gaps: [] };
     };
-    const context = vm.createContext({ ROOT: root, fs, path, os, process, console,
+    const context = vm.createContext({ ROOT: root, MAX_BODY_BYTES: 2 * 1024 * 1024, fs, path, os, process, console,
       scholar, literatureAuxiliary: auxiliary, literatureRuntime: runtime,
       readBody: async req => { if (bodyGate) await bodyGate; return JSON.stringify(req.data); },
       sendJson: (res, status, data) => Object.assign(res, { status, data }),
-      resolveModelConfig: () => ({ apiKey: 'fixture' }), normalizeCredential: () => null,
-      callModelWithRetry: () => { throw new Error('Unexpected live model'); },
-      configInfo: () => ({}), configSource: () => 'fixture', researchErrorStatus: () => 502,
+      openResearchModel: data => openResearchModel({ settings: { apiKey: 'fixture', baseUrl: 'https://fixture.invalid/v1' }, ...data },
+        { compose: async (_, model, { metadata }) => { metadata.model = model; return 'fixture text'; }, callApi: async () => 'fixture text' }),
+      researchErrorStatus: () => 502,
       require: name => name === './tools/literature-research' ? { runResearchStage: generate }
         : name === './tools/research-question' ? { planQueries: generate, buildCandidates: generate, buildSpecification: generate,
           loadResearchOutputs: () => ({ gaps: [], notes: [], topic: 'fixture' }) }
@@ -84,6 +86,18 @@ async function main() {
     for (const route of ['advance', 'delete', 'search']) assert.equal((await call('/api/literature/' + route, { id: ID })).status, 409);
     assert.equal((await call('/api/literature/runtime', {}, 'GET')).data.busy, true);
     releaseGate(); assert.equal((await pending).status, 200); gate = null;
+    for (const [route, body] of [
+      ['/api/literature/research-plan', { idea: 'fixture' }],
+      ['/api/literature/research', { jobId: ID }],
+      ['/api/research/questions', { action: 'candidates', upstreamJobIds: [ID] }],
+      ['/api/research/questions', { action: 'specify', choice: { statement: 'fixture' }, upstreamJobIds: [ID] }]
+    ]) {
+      const response = await call(route, { ...body, backend: 'codex', codexModel: 'fixture-codex' });
+      assert.equal(response.status, 200);
+      assert.equal(response.data.config.backend, 'codex');
+      assert.equal(response.data.config.model, 'fixture-codex');
+      assert.equal((await call(route, { ...body, backend: 'typo' })).status, 400);
+    }
     assert.deepEqual({ status: job.status, stage: job.stage, until: job.until, resumeStage: job.resumeStage }, before);
     assert.ok(job.files.includes('research/notes.json')); assert.equal(auxiliary.busy, false);
     failModel = true; assert.equal((await call('/api/literature/research-plan', { idea: 'fixture' })).status, 502);
