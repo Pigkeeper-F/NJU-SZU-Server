@@ -246,6 +246,75 @@ body {
 /* 两段式切换：第一段（测试码）通过后隐藏、显示第二段 */
 .stage-hidden { display: none !important; }
 
+/* ---------------------------------------------------------------
+ * 身份选择（学生 / 导师）—— 2026-11-25 师生协作
+ * 用两张并排的可点卡片而不是下拉框：身份决定界面上出现哪些按钮，
+ * 用户应该一眼看清自己选了哪个。
+ * ------------------------------------------------------------- */
+.role-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.role-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 13px;
+  border: 1px solid #e3e7ee;
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+
+.role-option:hover { border-color: #c3cbd8; }
+
+/* 原生 radio 保留可访问性（键盘/读屏），视觉隐藏 */
+.role-option input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.role-name { font-size: 14px; font-weight: 600; color: #1f2937; }
+.role-desc { font-size: 11.5px; line-height: 1.45; color: #7b8494; }
+
+.role-option:has(input:checked) {
+  border-color: var(--primary, #2563eb);
+  background: #f5f9ff;
+  box-shadow: inset 0 0 0 1px var(--primary, #2563eb);
+}
+
+.role-option:has(input:checked) .role-name { color: var(--primary, #2563eb); }
+
+/* 键盘聚焦：只有键盘操作才显示焦点环 */
+.role-option:has(input:focus-visible) {
+  outline: 2px solid var(--primary, #2563eb);
+  outline-offset: 2px;
+}
+
+/* 不支持 :has() 的旧浏览器：退化成仍可用的单选行 */
+@supports not selector(:has(*)) {
+  .role-option input[type="radio"] {
+    position: static;
+    opacity: 1;
+    width: auto;
+    height: auto;
+    pointer-events: auto;
+    margin-right: 6px;
+  }
+  .role-option { flex-direction: row; align-items: center; flex-wrap: wrap; }
+}
+
+@media (max-width: 420px) {
+  .role-picker { grid-template-columns: 1fr; }
+}
+
 /* 测试直达按钮（免登录便利入口，正式交付时可移除） */
 .btn-quiet-entry{background:#fff;border-style:dashed;color:#8b95a5}
 .btn-quiet-entry:hover{background:#f5f7fa;color:#5b6a80}

@@ -74,7 +74,9 @@
       userInput.focus();
     }
 
-    // 第二段：创建账号（标准写法见 contract.md §4.1）
+    // 第二段：创建账号
+    // 【2026-11-25】优先注册到服务器（换设备也能登录），成功后同时写一份浏览器副本；
+    // 服务器不可达时退回纯本地注册，并明确提示只在当前浏览器有效。
     function register() {
       var username = (userInput.value || "").trim();
       var password = passInput.value || "";
@@ -85,19 +87,70 @@
       if (password !== password2) { showMsg(msg, "两次输入的密码不一致", "error"); pass2Input.focus(); return; }
       if (AuthStore.findAccount(username)) { showMsg(msg, "该账号已被注册", "error"); return; }
 
-      var salt = AuthCrypto.randomSalt();
-      var ok = AuthStore.saveAccount({
-        username: username,
-        salt: salt,
-        passHash: AuthCrypto.hashPassword(password, salt),
-        createdAt: new Date().toISOString()
-      });
-      if (!ok) { showMsg(msg, "注册失败，请稍后重试", "error"); return; }
+      var role = "student";
+      var picked = document.querySelector('input[name="register-role"]:checked');
+      if (picked && picked.value === "teacher") role = "teacher";
 
-      showMsg(msg, "注册成功！正在进入工作台…", "ok");
       step2.disabled = true;
-      Session.set(username); // 【修复 · 2026-10-14】注册后自动登录，免去再输一次账号密码
-      setTimeout(function () { location.href = "index.html"; }, 1200);
+      showMsg(msg, "正在创建账号…", "ok");
+
+      function localFinish(note) {
+        var salt = AuthCrypto.randomSalt();
+        var ok = AuthStore.saveAccount({
+          username: username, salt: salt, role: role,
+          passHash: AuthCrypto.hashPassword(password, salt),
+          createdAt: new Date().toISOString()
+        });
+        if (!ok) { step2.disabled = false; showMsg(msg, "注册失败，请稍后重试", "error"); return; }
+        showMsg(msg, note || "注册成功！正在进入工作台…", "ok");
+        Session.set(username);
+        try {
+          window.localStorage.setItem("yanxu_role", role);
+          window.localStorage.setItem("yanxu_guest", "0");
+        } catch (e) { /* 忽略 */ }
+        setTimeout(function () { location.href = "index.html"; }, 1200);
+      }
+
+      // 服务器注册需要测试码：沿用第一段用户输入的码
+      var code = (codeInput.value || "").trim();
+      // 【修复 · 2026-11-25】注册接口只建账号、不发会话；必须紧接着登录一次拿到 token，
+      // 否则进工作台后 collab-boot 的 restore() 找不到 token，会一直显示「本机存储」，
+      // 学生提交的内容永远到不了服务器（实测发现）。
+      fetch("/api/collab/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: code, username: username, password: password, role: role })
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (data) {
+          if (!response.ok) {
+            var error = new Error(data.error || ("HTTP " + response.status));
+            error.status = response.status;
+            throw error;
+          }
+          return data;
+        });
+      }).then(function () {
+        // 建会话：拿到 token 后 collab-boot 才能接管同步
+        if (window.Collab) {
+          return window.Collab.login(code, role, username, password).then(function () {
+            localFinish(role === "teacher" ? "导师账号已创建（服务器已保存），正在进入…" : "注册成功（服务器已保存），正在进入…");
+          });
+        }
+        localFinish();
+      }).catch(function (error) {
+        if (error.status === 409) {
+          step2.disabled = false;
+          showMsg(msg, "该账号已被注册", "error");
+          return;
+        }
+        if (error.status === 401) {
+          step2.disabled = false;
+          showMsg(msg, "测试码已失效，请回到第一步重新验证", "error");
+          return;
+        }
+        // 网络问题：本地注册保底，但要说清局限
+        localFinish("服务器连不上，已在本机创建账号（只在当前浏览器有效）。");
+      });
     }
 
     step1.addEventListener("click", verifyCode);
@@ -124,15 +177,27 @@
     var userInput = document.getElementById("login-user");
     var passInput = document.getElementById("login-pass");
 
+    /** 读当前选中的身份；没有角色控件时按学生处理（兼容旧页面）。 */
+    function selectedRole() {
+      var picked = document.querySelector('input[name="login-role"]:checked');
+      return picked && picked.value === "teacher" ? "teacher" : "student";
+    }
+
     if (Session.get()) { location.href = "index.html"; return; } // 已登录直接进主页
 
-    // 登录规则（2026-11-18 主人指定）：
-    //   测试码必填；账号密码两者可都留空（访客进入），或都填写（校验通过后用自己的名字）。
-    //   只填一半属于输错，直接拦下而不是猜用户想干什么。
+    /**
+     * 登录规则（2026-11-25 师生协作版）：
+     *   测试码必填 + 自选身份；账号密码都留空 → 访客，都填 → 校验。
+     *   认证优先走服务器（/api/collab/login）：账号落库后换电脑也能用，
+     *   角色由服务端记录并用于权限校验。
+     *   服务器不可达时回落到旧的纯浏览器校验（离线仍能干活），
+     *   但会明确提示"本地模式"，不让人误以为身份已在服务器生效。
+     */
     function login() {
       var code = (codeInput.value || "").trim();
       var username = (userInput.value || "").trim();
       var password = passInput.value || "";
+      var role = selectedRole();
 
       if (!code) { showMsg(msg, "请输入测试码", "error"); codeInput.focus(); return; }
       if (code !== APP.testCode) {
@@ -141,21 +206,59 @@
         return;
       }
 
-      // 两者都留空 → 访客进入，不查账号表
+      // 只填一半 → 明确提示该补哪一个
+      if (username && !password) { showMsg(msg, "已填账号但没填密码：请补上密码，或把账号也清空以访客身份进入", "error"); passInput.focus(); return; }
+      if (!username && password) { showMsg(msg, "已填密码但没填账号：请补上账号，或把密码也清空以访客身份进入", "error"); userInput.focus(); return; }
+
+      btn.disabled = true;
+      showMsg(msg, "正在连接服务器…", "ok");
+
+      var collab = window.Collab;
+      if (!collab) {
+        // 没有协作层（file:// 直开等情况）→ 退回纯浏览器校验
+        legacyLogin(code, username, password);
+        return;
+      }
+
+      collab.login(code, role, username, password).then(function (user) {
+        // 服务端已认账：同步写一份到浏览器会话，让 guard.js 放行
+        Session.set(user.username);
+        // 记下角色与访客标记，工作台据此渲染不同界面
+        try {
+          window.localStorage.setItem("yanxu_role", user.role);
+          window.localStorage.setItem("yanxu_guest", user.guest ? "1" : "0");
+        } catch (e) { /* 忽略 */ }
+        showMsg(msg, user.role === "teacher" ? "导师身份登录成功，正在进入…" : "登录成功，正在进入…", "ok");
+        location.href = "index.html";
+      }).catch(function (error) {
+        btn.disabled = false;
+        if (error && error.status === 401) {
+          showMsg(msg, error.message || "账号或密码错误", "error");
+          passInput.select();
+          return;
+        }
+        // 服务器连不上：提示后按本地模式进入，避免课堂现场完全打不开
+        showMsg(msg, "服务器暂时连不上（" + (error && error.message ? error.message : "网络异常") +
+          "）。将以本地模式进入，数据只存在本机。", "error");
+        setTimeout(function () {
+          Session.set(username || GUEST_NAME);
+          try { window.localStorage.setItem("yanxu_role", role); } catch (e) { /* 忽略 */ }
+          location.href = "index.html";
+        }, 1800);
+      });
+    }
+
+    /** 纯浏览器兜底：老版本行为，账号只在本机。 */
+    function legacyLogin(code, username, password) {
       if (!username && !password) {
         Session.set(GUEST_NAME);
         showMsg(msg, "已以访客身份进入…", "ok");
         location.href = "index.html";
         return;
       }
-
-      // 只填一半 → 明确提示该补哪一个
-      if (!username) { showMsg(msg, "已填密码但没填账号：请补上账号，或把密码也清空以访客身份进入", "error"); userInput.focus(); return; }
-      if (!password) { showMsg(msg, "已填账号但没填密码：请补上密码，或把账号也清空以访客身份进入", "error"); passInput.focus(); return; }
-
       var acc = AuthStore.findAccount(username);
-      // 账号不存在与密码错误统一提示，避免枚举已注册账号
       if (!acc || acc.passHash !== AuthCrypto.hashPassword(password, acc.salt)) {
+        btn.disabled = false;
         showMsg(msg, "账号或密码错误", "error");
         passInput.select();
         return;

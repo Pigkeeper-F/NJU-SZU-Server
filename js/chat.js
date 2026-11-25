@@ -1766,6 +1766,79 @@
     return btn;
   }
 
+  /**
+   * 【师生协作 · 2026-11-25】学生提交环节给导师审。
+   * 先弹一个小窗让学生写"这次做了什么、想请老师重点看哪里"——
+   * 导师打开待办时第一眼需要这个上下文，否则只能自己翻对话猜。
+   * 提交的瞬间由服务端冻结快照，之后学生怎么改都不影响导师看到的那一版。
+   */
+  function askSubmitNote(mod) {
+    if (!root.Collab || !root.Collab.isLoggedIn()) {
+      root.alert && root.alert('还没有连接服务器，无法提交给导师。请重新登录后再试。');
+      return;
+    }
+
+    var dlg = el('dialog', 'collab-submit-dialog');
+    var form = el('form', 'collab-submit-form');
+
+    var title = el('h3', '', '提交给导师审核');
+    form.appendChild(title);
+    form.appendChild(el('p', 'collab-submit-hint',
+      '这一环节的文档、执行记录和最近对话会冻结成一份快照发给导师。提交后你继续修改不影响导师看到的内容。'));
+
+    var label = el('label', '', '本次提交说明（选填）');
+    label.setAttribute('for', 'collab-submit-note');
+    form.appendChild(label);
+
+    var note = el('textarea', 'collab-input');
+    note.id = 'collab-submit-note';
+    note.rows = 3;
+    note.placeholder = '例如：已完成初筛表 42 条，请老师重点看纳入标准是否合适';
+    form.appendChild(note);
+
+    var status = el('div', 'collab-inline-status');
+    status.setAttribute('role', 'status');
+    form.appendChild(status);
+
+    var actions = el('div', 'collab-btn-row');
+    var cancel = el('button', 'status-btn', '取消');
+    cancel.type = 'button';
+    cancel.addEventListener('click', function () {
+      if (dlg.parentNode) dlg.parentNode.removeChild(dlg);
+    });
+
+    var confirm = el('button', 'status-btn status-btn-primary', '确认提交');
+    confirm.type = 'button';
+    confirm.addEventListener('click', function () {
+      confirm.disabled = true;
+      cancel.disabled = true;
+      status.textContent = '正在提交…';
+      root.CollabUI.submitCurrent(mod, (note.value || '').trim()).then(function (record) {
+        status.textContent = '已提交（第 ' + record.version + ' 版），等待导师审核';
+        // 本地也置为待审状态，界面保持一致
+        try { getStore().submitModule(mod.id); } catch (e) { /* 忽略 */ }
+        setTimeout(function () {
+          if (dlg.parentNode) dlg.parentNode.removeChild(dlg);
+          render();
+        }, 900);
+      }).catch(function (error) {
+        confirm.disabled = false;
+        cancel.disabled = false;
+        status.textContent = '提交失败：' + (error && error.message ? error.message : '网络异常');
+      });
+    });
+
+    actions.appendChild(cancel);
+    actions.appendChild(confirm);
+    form.appendChild(actions);
+
+    dlg.appendChild(form);
+    document.body.appendChild(dlg);
+    if (typeof dlg.showModal === 'function') dlg.showModal();
+    else dlg.setAttribute('open', '');
+    note.focus();
+  }
+
   /** 状态条：状态徽标 + 审核动作（提交审核 / 通过 / 打回 / 进入下一模块） */
   function buildStatusBar(mod, modules) {
     var bar = el('div', 'status-bar');
@@ -1793,6 +1866,14 @@
         if (mod.type === 'clean-data') { root.CodexUI && root.CodexUI.confirmCleanAcceptance(mod.id); return; }
         getStore().submitModule(mod.id);
       }));
+      // 【师生协作 · 2026-11-25】学生把这一环节送导师审。
+      // 与上面「完成并提交审核」的区别：那个只改本地状态，这个把内容冻结成快照发到服务器，
+      // 导师在那边的待办里看到同一份内容并写批注。只有学生角色才出现。
+      if (root.Collab && root.Collab.isStudent && root.Collab.isStudent()) {
+        actions.appendChild(actionButton('提交给导师审核', 'ghost', function () {
+          askSubmitNote(mod);
+        }));
+      }
     } else if (st === 'review') {
       actions.appendChild(actionButton(mod.type === 'clean-data' ? '确认结果并交给计算' : '通过本环节 → 下一模块', 'primary', function () {
         if (mod.type === 'clean-data') { root.CodexUI && root.CodexUI.confirmCleanAcceptance(mod.id); return; }

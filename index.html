@@ -8,6 +8,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231c263c'/%3E%3Cpath d='M9 9h5v14H9m9-14h5v14h-5' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
   <link rel="stylesheet" href="css/workspace.css">
+  <link rel="stylesheet" href="css/collab.css">
 </head>
 <body>
   <!-- 顶层 flex 容器：左栏 + 主区 -->
@@ -122,5 +123,10 @@
   <script src="js/tasks.js?v=20261027-clean-sync-2"></script>
   <script src="js/literature-task-workspaces.js"></script>
   <script src="js/literature-discussions.js"></script>
+  <!-- 师生协作：同步层 + 审核面板（须在 store/api-keys 之后，页面其他脚本之后） -->
+  <script src="js/collab.js"></script>
+  <script src="js/collab-ui.js"></script>
+  <!-- 启动同步：登录恢复、拉服务器状态、Store 变更回写 -->
+  <script src="js/collab-boot.js"></script>
 </body>
 </html>

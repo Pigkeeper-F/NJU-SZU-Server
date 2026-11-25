@@ -29,6 +29,21 @@
       <!-- 第二段：账号 + 密码（测试码验证通过后显示） -->
       <div id="reg-form2" class="stage-hidden">
         <div class="form-row">
+          <label>我的身份</label>
+          <div class="role-picker" role="radiogroup" aria-label="选择身份">
+            <label class="role-option">
+              <input type="radio" name="register-role" value="student" checked>
+              <span class="role-name">学生</span>
+              <span class="role-desc">做研究、提交环节给导师审</span>
+            </label>
+            <label class="role-option">
+              <input type="radio" name="register-role" value="teacher">
+              <span class="role-name">导师</span>
+              <span class="role-desc">查看学生进度、写批注、通过或打回</span>
+            </label>
+          </div>
+        </div>
+        <div class="form-row">
           <label for="reg-user">账号</label>
           <input class="input" type="text" id="reg-user" placeholder="请输入账号"
                  autocomplete="off" maxlength="32">
@@ -52,6 +67,7 @@
 
   <script src="js/auth-config.js"></script>
   <script src="js/auth-storage.js"></script>
+  <script src="js/collab.js"></script>
   <script src="js/auth-pages.js"></script>
 </body>
 </html>

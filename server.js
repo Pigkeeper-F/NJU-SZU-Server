@@ -67,6 +67,16 @@ function getChangelog() {
   });
   return changelogInstance;
 }
+// 【师生协作 · 2026-11-25】数据落服务器 + 角色 + 提交审核。
+// 同样惰性构造：命中 2026-11-18 那个 env 加载顺序的坑（顶层读 process.env 会拿到默认值）。
+const { CollabStore } = require('./tools/collab');
+let collabStore = null;
+function getCollab() {
+  if (!collabStore) {
+    collabStore = new CollabStore(ROOT, { testCode: process.env.COLLAB_TEST_CODE || 'nailong' });
+  }
+  return collabStore;
+}
 const literatureRuleReviews = new LiteratureRuleReviewStore(ROOT);
 const literatureRuleReviewAssist = new LiteratureRuleReviewAssist(literatureRuleReviews, codex);
 const literatureDiscussions = new LiteratureDiscussionStore(ROOT);
@@ -642,6 +652,191 @@ function researchErrorStatus(message) {
   const text = String(message || '');
   if (/temporarily unavailable|insufficient credits|无法连接|Invalid input|overload|rate limit|too many|timeout|超时|服务不可用|余额|额度/i.test(text)) return 502;
   return 400;
+}
+
+/**
+ * 【师生协作 · 2026-11-25】/api/collab/*
+ *
+ * 认证：请求头 Authorization: Bearer <token>（登录后由前端保存）。
+ * 角色：会话里带 role，服务端据此校验——导师动作学生调不动，反之亦然。
+ * 错误：统一 { error, code }，前端按 code 分流（如 COLLAB_STATE_CONFLICT 提示刷新）。
+ */
+async function handleCollab(req, res, url) {
+  const route = url.pathname.replace(/^\/api\/collab\/?/, '').replace(/\/+$/, '');
+  const store = getCollab();
+
+  const body = async (limit = MAX_BODY_BYTES) => {
+    let raw;
+    try { raw = await readBody(req, limit); }
+    catch (error) { throw Object.assign(new Error('请求内容过大'), { statusCode: 413 }); }
+    try { return JSON.parse(raw); }
+    catch (error) { throw Object.assign(new Error('请求必须是有效 JSON'), { statusCode: 400 }); }
+  };
+
+  const tokenOf = () => {
+    const header = String(req.headers.authorization || '');
+    const match = header.match(/^Bearer\s+([a-f0-9]{64})$/i);
+    return match ? match[1].toLowerCase() : '';
+  };
+
+  // 需要登录的接口统一走这里取会话；没有就 401
+  const requireSession = async () => {
+    const session = await store.session(tokenOf());
+    if (!session) throw Object.assign(new Error('登录已失效，请重新登录'), { statusCode: 401, code: 'COLLAB_NO_SESSION' });
+    return session;
+  };
+
+  const projectOf = (session, override) => {
+    const value = override || session.projectId || 'main';
+    return String(value);
+  };
+
+  try {
+    // ---------------------------------------------------------- 登录/会话
+    if (req.method === 'POST' && route === 'login') {
+      const payload = await body(1024 * 1024);
+      const result = await store.login({
+        code: payload.code,
+        role: payload.role,
+        username: payload.username,
+        password: payload.password,
+        legacy: payload.legacy,
+        projectId: payload.projectId
+      });
+      return sendJson(res, 200, result);
+    }
+
+    if (req.method === 'POST' && route === 'register') {
+      const payload = await body(64 * 1024);
+      // 注册同样要测试码，避免随便谁都能往服务器塞账号
+      if (typeof payload.code !== 'string' || payload.code.trim() !== (process.env.COLLAB_TEST_CODE || 'nailong')) {
+        return sendJson(res, 401, { error: '测试码不正确', code: 'COLLAB_BAD_CODE' });
+      }
+      const created = await store.register({ username: payload.username, password: payload.password, role: payload.role });
+      return sendJson(res, 201, created);
+    }
+
+    if (req.method === 'GET' && route === 'session') {
+      const session = await requireSession();
+      return sendJson(res, 200, {
+        username: session.username, role: session.role, guest: Boolean(session.guest),
+        projectId: session.projectId, expiresAt: session.expiresAt
+      });
+    }
+
+    if (req.method === 'POST' && route === 'logout') {
+      await store.logout(tokenOf());
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && route === 'teachers') {
+      return sendJson(res, 200, { teachers: await store.listTeachers() });
+    }
+
+    // ---------------------------------------------------------- 项目状态
+    if (req.method === 'GET' && route === 'state') {
+      const session = await requireSession();
+      const projectId = projectOf(session, url.searchParams.get('project'));
+      return sendJson(res, 200, await store.readState(projectId));
+    }
+
+    if (req.method === 'PUT' && route === 'state') {
+      const session = await requireSession();
+      const payload = await body(MAX_BODY_BYTES);
+      const projectId = projectOf(session, payload.projectId);
+      const saved = await store.writeState(projectId, {
+        state: payload.state,
+        session,
+        baseRevision: typeof payload.baseRevision === 'number' ? payload.baseRevision : null
+      });
+      return sendJson(res, 200, saved);
+    }
+
+    // ---------------------------------------------------------- 提交
+    if (req.method === 'POST' && route === 'submit') {
+      const session = await requireSession();
+      const payload = await body(MAX_BODY_BYTES);
+      const created = await store.submit({
+        projectId: projectOf(session, payload.projectId),
+        session,
+        moduleId: payload.moduleId,
+        moduleName: payload.moduleName,
+        snapshot: payload.snapshot,
+        note: payload.note
+      });
+      return sendJson(res, 201, created);
+    }
+
+    if (req.method === 'GET' && route === 'submissions') {
+      const session = await requireSession();
+      const projectId = projectOf(session, url.searchParams.get('project'));
+      const list = await store.listSubmissions(projectId, {
+        moduleId: url.searchParams.get('module') || undefined,
+        status: url.searchParams.get('status') || undefined,
+        // 学生只看自己的提交；导师看全部
+        by: session.role === 'student' ? session.username : undefined
+      });
+      return sendJson(res, 200, { submissions: list.map(item => store._publicSubmission(item)) });
+    }
+
+    if (req.method === 'GET' && route === 'todo') {
+      const session = await requireSession();
+      if (session.role !== 'teacher') return sendJson(res, 403, { error: '只有导师有审核待办', code: 'COLLAB_WRONG_ROLE' });
+      const projectId = projectOf(session, url.searchParams.get('project'));
+      return sendJson(res, 200, { todo: await store.pendingTodo(projectId) });
+    }
+
+    if (req.method === 'GET' && route === 'changes') {
+      const session = await requireSession();
+      const projectId = projectOf(session, url.searchParams.get('project'));
+      return sendJson(res, 200, await store.changesSince(projectId, {
+        since: url.searchParams.get('since'),
+        role: session.role,
+        username: session.username
+      }));
+    }
+
+    const submissionMatch = route.match(/^submissions\/([A-Za-z0-9_-]{1,120})$/);
+    if (req.method === 'GET' && submissionMatch) {
+      const session = await requireSession();
+      const projectId = projectOf(session, url.searchParams.get('project'));
+      return sendJson(res, 200, await store.getSubmission(projectId, submissionMatch[1], { withSnapshot: true }));
+    }
+
+    // ---------------------------------------------------------- 审核
+    if (req.method === 'POST' && route === 'comment') {
+      const session = await requireSession();
+      const payload = await body(256 * 1024);
+      const comment = await store.addComment({
+        projectId: projectOf(session, payload.projectId),
+        session,
+        submissionId: payload.submissionId,
+        text: payload.text,
+        anchor: payload.anchor || null
+      });
+      return sendJson(res, 201, comment);
+    }
+
+    if (req.method === 'POST' && route === 'review') {
+      const session = await requireSession();
+      const payload = await body(256 * 1024);
+      const record = await store.review({
+        projectId: projectOf(session, payload.projectId),
+        session,
+        submissionId: payload.submissionId,
+        decision: payload.decision,
+        note: payload.note
+      });
+      return sendJson(res, 200, record);
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ error: '未知的协作接口：' + route, code: 'COLLAB_UNKNOWN_ROUTE' }));
+  } catch (error) {
+    const status = error.statusCode || 500;
+    if (status >= 500) console.error('[collab]', error);
+    sendJson(res, status, { error: error.message || '协作接口内部错误', code: error.code || 'COLLAB_ERROR' });
+  }
 }
 
 /**
@@ -2729,6 +2924,8 @@ if (require.main === module) {
         } catch (ignored) { /* 连接已断开，忽略 */ }
       });
     };
+    if (String(req.url || '').startsWith('/api/collab/')) return guarded('/api/collab', (request, response) =>
+      handleCollab(request, response, new URL(request.url, 'http://localhost')));
     if (String(req.url || '').startsWith('/api/codex/')) return guarded('/api/codex', (request, response) =>
       handleCodex(request, response, new URL(request.url, 'http://localhost')));
     if (String(req.url || '').startsWith('/api/literature/')) return guarded('/api/literature', (request, response) =>

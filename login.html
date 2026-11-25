@@ -14,6 +14,22 @@
       <div id="login-msg" class="msg" role="alert"></div>
 
       <div class="form-row">
+        <label>我的身份</label>
+        <div class="role-picker" role="radiogroup" aria-label="选择身份">
+          <label class="role-option">
+            <input type="radio" name="login-role" value="student" checked>
+            <span class="role-name">学生</span>
+            <span class="role-desc">做研究、提交环节给导师审</span>
+          </label>
+          <label class="role-option">
+            <input type="radio" name="login-role" value="teacher">
+            <span class="role-name">导师</span>
+            <span class="role-desc">查看学生进度、写批注、通过或打回</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="form-row">
         <label for="login-code">测试码</label>
         <input class="input" type="text" id="login-code" placeholder="请输入测试码（必填）"
                autocomplete="off" maxlength="64" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -29,7 +45,7 @@
         <input class="input" type="password" id="login-pass" placeholder="留空则以访客身份进入"
                autocomplete="current-password">
       </div>
-      <p class="hint">测试码必填。账号密码都留空 → 以「访客」进入；要显示自己的名字就填账号密码登录。别只填一半。</p>
+      <p class="hint">测试码必填，身份按你选的走（服务端据此校验谁能审核）。账号密码都留空 → 以「访客」进入；要显示自己的名字就填账号密码。</p>
       <div class="actions">
         <button class="btn btn-primary btn-block" type="button" id="btn-login">登录</button>
       </div>
@@ -40,6 +56,7 @@
 
   <script src="js/auth-config.js"></script>
   <script src="js/auth-storage.js"></script>
+  <script src="js/collab.js"></script>
   <script src="js/auth-pages.js"></script>
 </body>
 </html>
