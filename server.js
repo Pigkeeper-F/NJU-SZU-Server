@@ -1564,9 +1564,24 @@ function normalizeCredential(raw) {
 
   // 【公共 API · 2026-11-26】前端选了「服务器 API」：不带自己的 Key，
   // 由服务端把管理员配好的公共通道填进来。浏览器永远拿不到这个 Key。
+  //
+  // 关键：公共配置没配齐时必须返回一个**不可用**的标记，而不是 null。
+  // 返回 null 的话，调用方的 `Object.assign(resolveModelConfig(...), null || {})`
+  // 会让 resolveModelConfig 回落到服务端 .env 的 AI_API_KEY —— 那是管理员私人 Key，
+  // 学生一点就偷偷烧掉（实测踩到：状态显示"未配置"但测试连接却成功了）。
   if (raw.useServer === true) {
     const shared = publicApiConfig();
-    if (!shared.ready) return null;   // 调用方会回 503 并提示"服务器尚未配置公共 API"
+    if (!shared.ready) {
+      return {
+        apiKey: '',
+        baseUrl: '',
+        model: '',
+        protocol: 'chat-completions',
+        source: 'server-public-unconfigured',
+        // 供调用方统一判断并给出提示
+        unavailable: '服务器公共 API 尚未配置：请联系管理员在服务器 .env 里配置 PUBLIC_AI_BASE_URL / PUBLIC_AI_KEY / PUBLIC_AI_MODEL，或改用「本地 API」填自己的 Key。'
+      };
+    }
     return {
       apiKey: shared.apiKey,
       baseUrl: shared.baseUrl,
@@ -1836,25 +1851,12 @@ function openResearchModel(data, { compose = codex.compose.bind(codex), callApi 
   }
   const settings = data.settings || {};
   const credential = normalizeCredential(data.credential);
+  if (credential && credential.unavailable) throw Object.assign(new Error(credential.unavailable), { status: 503 });
   const cfg = Object.assign(resolveModelConfig(settings), credential || {});
   if (!cfg.apiKey) {
-    // 【公共 API · 2026-11-26】选了「服务器 API」但管理员没配好时，说清是哪种情况，
-    // 别让人以为是自己的 Key 填错了。
-    const wantsServer = data.credential && data.credential.useServer === true;
-    const shared = publicApiConfig();
-    throw Object.assign(new Error(wantsServer && !shared.ready
-      ? '服务器公共 API 尚未配置：请联系管理员在服务器 .env 里配置 PUBLIC_AI_BASE_URL / PUBLIC_AI_KEY / PUBLIC_AI_MODEL，或改用「本地 API」填自己的 Key。'
-      : REQUIRE_USER_KEY
-        ? '尚未配置 API Key：点击左侧「添加 API」填入你自己的 Key（本站不提供共享 Key）。'
-        : '模型 API 尚未配置密钥，请在设置里填写或选择本机 Codex。'), { status: 503 });
-  }
-  // 【公共 API · 2026-11-26 关键】选了服务器 API 但公共配置不可用时，
-  // resolveModelConfig 会回落到服务端 .env 的 AI_API_KEY —— 那可能是管理员私人的 Key。
-  // 学生不该在"服务器公共 API 未配置"的情况下偷偷消耗它，直接拒绝并说清楚。
-  if (data.credential && data.credential.useServer === true && !publicApiConfig().ready) {
-    throw Object.assign(new Error(
-      '服务器公共 API 尚未配置，已拒绝本次调用（避免误用服务器上的私人密钥）。'
-      + '请联系管理员配置 PUBLIC_AI_* 环境变量，或改用「本地 API」。'), { status: 503 });
+    throw Object.assign(new Error(REQUIRE_USER_KEY
+      ? '尚未配置 API Key：点击左侧「添加 API」填入你自己的 Key（本站不提供共享 Key）。'
+      : '模型 API 尚未配置密钥，请在设置里填写或选择本机 Codex。'), { status: 503 });
   }
   // A browser-selected endpoint may use its own key, or the matched server endpoint's key.
   if (!credential && !(typeof settings.apiKey === 'string' && settings.apiKey.trim()) && settings.baseUrl && cfg.baseUrl !== resolveModelConfig({}).baseUrl) {
@@ -2061,7 +2063,12 @@ async function handleAiTest(req, res) {
     sendJson(res, 400, { error: '请求体必须是 JSON 对象。' });
     return;
   }
-  const cfg = Object.assign(resolveModelConfig(payload.settings), normalizeCredential(payload.credential) || {});
+  const testCredential = normalizeCredential(payload.credential);
+  if (testCredential && testCredential.unavailable) {
+    sendJson(res, 503, { error: testCredential.unavailable });
+    return;
+  }
+  const cfg = Object.assign(resolveModelConfig(payload.settings), testCredential || {});
   if (!cfg.apiKey) {
     sendJson(res, 503, { error: '尚未配置 API Key：请填写设置中的模型配置，填入你自己的 Key（本站不提供共享 Key）。' });
     return;
@@ -2069,7 +2076,10 @@ async function handleAiTest(req, res) {
   const messages = normalizeMessages([{ role: 'user', text: '连通性测试：请只回复 pong' }]);
   const started = Date.now();
   try {
-    const text = await callModel(cfg, messages, 20000);
+    // 【2026-11-26】20s → 45s：reasoning 模型（如 deepseek-v4.1-flash）光"想"就要几秒到十几秒，
+    // 原来 20s 会把可用配置误判成"响应超时"（实测踩到）。这是主动测试，
+    // 用户就等着看结果，多等一会儿比误报失败好。
+    const text = await callModel(cfg, messages, 45000);
     sendJson(res, 200, {
       ok: true,
       latencyMs: Date.now() - started,

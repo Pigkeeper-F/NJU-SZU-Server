@@ -281,6 +281,92 @@
     toast(writeStore(data) ? provider.label + ' API 已保存' : 'API 已保存到本次会话，当前浏览器无法持久保存');
   }
 
+  /**
+   * 【测试连接 · 2026-11-26】用当前表单里的配置发一次最小请求，验证地址/Key/模型是否真的能用。
+   * 为什么不复用「设置」里的测试：那里用表单外的已保存配置，而用户常常是
+   * "刚填完想先试一下再保存"，测的必须是**眼前这份输入**。
+   * 服务端接口 /api/ai/test 会走同一条解析与重试链路，所以这里通过 = 保存后能用。
+   */
+  function testConnection() {
+    var btn = $('api-test-button');
+    var status = $('api-test-status');
+    if (!btn || !status) return;
+    var provider = PROVIDERS[activeProvider];
+    if (!provider) return;
+
+    var scopeRadio = document.querySelector('input[name="api-scope"]:checked');
+    var useServer = Boolean(provider.custom && scopeRadio && scopeRadio.value === 'server');
+
+    var body;
+    if (useServer) {
+      // 服务器公共 API：不带 Key，让服务端补；顺带验证公共通道是否真的可用
+      body = { credential: { useServer: true } };
+    } else {
+      var key = ($('api-key-input').value || '').trim();
+      if (!key) {
+        status.setAttribute('data-tone', 'error');
+        status.textContent = '请先填写 API Key 再测试';
+        return;
+      }
+      if (provider.custom) {
+        var baseUrl = ($('api-baseurl-input').value || '').trim();
+        if (!/^https?:\/\//i.test(baseUrl)) {
+          status.setAttribute('data-tone', 'error');
+          status.textContent = '请先填写完整的接口地址再测试';
+          return;
+        }
+        if (!($('api-model-input').value || '').trim()) {
+          status.setAttribute('data-tone', 'error');
+          status.textContent = '请先填写模型名再测试';
+          return;
+        }
+      }
+      body = {
+        credential: {
+          provider: activeProvider,
+          apiKey: key,
+          model: ($('api-model-input').value || '').trim() || provider.defaultModel,
+          baseUrl: provider.custom
+            ? ($('api-baseurl-input').value || '').trim().replace(/\/+$/, '')
+            : provider.baseUrl,
+          protocol: provider.custom
+            ? ($('api-protocol-input').value === 'responses' ? 'responses' : 'chat-completions')
+            : provider.protocol
+        }
+      };
+    }
+
+    btn.disabled = true;
+    status.removeAttribute('data-tone');
+    // reasoning 模型（deepseek-v4.1 之类）要"想"十几秒，先说明白，别让人以为卡死
+    status.textContent = '正在测试…（推理型模型可能需要十几秒）';
+    var started = Date.now();
+    fetch('/api/ai/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) {
+          var error = new Error(data.error || ('HTTP ' + response.status));
+          throw error;
+        }
+        return data;
+      });
+    }).then(function (data) {
+      btn.disabled = false;
+      status.setAttribute('data-tone', 'ok');
+      var cost = typeof data.latencyMs === 'number' ? data.latencyMs : (Date.now() - started);
+      status.textContent = '✓ 连接成功（' + Math.round(cost) + ' ms'
+        + (data.model ? '，模型 ' + data.model : '') + '）'
+        + (data.reply ? ' 回复：' + data.reply : '');
+    }).catch(function (error) {
+      btn.disabled = false;
+      status.setAttribute('data-tone', 'error');
+      status.textContent = '✗ 测试失败：' + (error && error.message ? error.message : '网络异常');
+    });
+  }
+
   function copyKey() {
     var input = $('api-key-input');
     if (!input || !input.value) return;
@@ -364,9 +450,17 @@
     // 【本地/服务器 API · 2026-11-26】切换 scope 时立刻调整可见字段
     document.querySelectorAll('input[name="api-scope"]').forEach(function (radio) {
       radio.addEventListener('change', function () {
-        if (radio.checked) applyScopeUi(radio.value);
+        if (radio.checked) {
+          applyScopeUi(radio.value);
+          // 换了通道，之前的测试结果就不作数了，清掉免得误导
+          var st = $('api-test-status');
+          if (st) { st.textContent = ''; st.removeAttribute('data-tone'); }
+        }
       });
     });
+
+    var testBtn = $('api-test-button');
+    if (testBtn) testBtn.addEventListener('click', testConnection);
 
     $('api-paste-key').addEventListener('click', pasteKey);
   }

@@ -1421,3 +1421,23 @@ body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
 .api-server-status[data-tone="error"] { color: var(--danger); font-weight: 500; }
 
 @media (max-width: 480px) { .api-scope-picker { grid-template-columns: 1fr; } }
+
+/* 【测试连接 · 2026-11-26】自定义 API 弹窗里的连接测试 */
+.api-test-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 4px 0 12px;
+  flex-wrap: wrap;
+}
+.api-test-row[hidden] { display: none; }
+.api-test-status {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  word-break: break-word;
+}
+.api-test-status[data-tone="ok"] { color: #1f6b2c; }
+.api-test-status[data-tone="error"] { color: var(--danger); font-weight: 500; }
