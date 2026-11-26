@@ -855,6 +855,8 @@
     'scopus': 'scopus',
     'google-scholar': ''      // Google Scholar 不需要机构登录
   };
+  /** 合法 target 集合：用于识别"传进来的是 target 而不是来源 key"。 */
+  var ACCESS_TARGET_SET = { cnki: true, institution: true, wos: true, scopus: true, ezproxy: true, purchase: true };
 
   /** 用户自己标记过的已登录库（只在探测不可用时才用）。 */
   function readAccessMarks() {
@@ -915,12 +917,25 @@
 
   /**
    * 某个来源现在算不算"已登录"。
+   * @param {string} key 检索来源的 key（如 'web-of-science'）**或**登录 target（如 'wos'）。
+   *   两种都接受：勾选框用来源 key，登录按钮用 target，内部统一归一化。
    * -> { known: bool, signed: bool, source: 'probe'|'mark'|'none' }
    *    known=false 表示既没探测到也没有标记 —— 界面按"未登录"提醒，但说明是自报。
    */
-  function accessStateOf(sourceKey) {
-    var target = SOURCE_TO_ACCESS[sourceKey];
-    if (target === '') return { known: true, signed: true, source: 'none' };  // Scholar 无需登录
+  function accessStateOf(key) {
+    // 【修复 · 2026-11-26】原来只认来源 key。登录按钮传的是 target（'wos'），
+    // 在映射表里查不到 → target 变 undefined → 落到下面那句 `if (!target)` →
+    // 被当成"这个库不需要登录"，于是全新浏览器里 WoS 也带着 ✓ 出现（实测过的 bug）。
+    // 现在两种形态都归一化到 target；认不出的 key 一律保守当作未登录。
+    var target = null;
+    if (Object.prototype.hasOwnProperty.call(SOURCE_TO_ACCESS, key)) {
+      target = SOURCE_TO_ACCESS[key];
+    } else if (Object.prototype.hasOwnProperty.call(ACCESS_TARGET_SET, key)) {
+      target = key;
+    }
+    if (target === null) return { known: false, signed: false, source: 'none' };
+    // 明确标记为"无需登录"的（Google Scholar）
+    if (target === '') return { known: true, signed: true, source: 'none' };
 
     // ① 探测优先
     if (accessProbe.results) {
@@ -937,7 +952,6 @@
     // ② 退回本地标记
     var marks = readAccessMarks();
     if (marks[target]) return { known: true, signed: true, source: 'mark', at: accessMarkTime(target) };
-    if (!target) return { known: true, signed: true, source: 'none' };
     return { known: false, signed: false, source: 'mark' };
   }
 
