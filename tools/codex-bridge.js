@@ -366,7 +366,7 @@ class CodexBridge {
         if (moduleType === 'plotting' && (execute || inputListing)) { await plotting.prepareRuntime(path.dirname(this.root), message => { job.events.push(message); }); if (job.status !== 'running') return; }
         const account = await this.status();
         if (job.status !== 'running') return;
-        if (!account.loggedIn) throw new Error('请先在终端执行 codex login，用 ChatGPT 账号登录。');
+        if (!account.loggedIn) throw new Error('本机 Codex 尚未登录。两个办法：① 在运行工作台的电脑上打开终端执行 codex login；② 把本环节的「研究助手」改成 API（左下角「添加 API」填自己的 Key）。');
         if (!account.model) throw new Error('Codex 没有返回当前账号可用的模型');
         const selected = requestedModel
           ? account.models.find(m => m.model === requestedModel)

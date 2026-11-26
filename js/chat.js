@@ -1065,6 +1065,23 @@
       render();
     });
     topicRow.appendChild(planBtn);
+
+    // 【修复 · 2026-11-26】进度与错误就显示在按钮旁边。
+    // 原来这些消息渲染在面板最底部（检索按钮那一带），用户在顶部点「生成检索式」，
+    // 提示出现在几百像素之外，加上重绘会把滚动位置重置——表现就是"点了啥也没出现"。
+    // 现在紧贴按钮给一行状态：进行中带秒数，失败直接说原因。
+    var planInline = el('span', 'research-plan-inline');
+    if (state.planBusy) {
+      var elapsed = state.startedAt ? Math.round((Date.now() - state.startedAt) / 1000) : 0;
+      planInline.setAttribute('data-tone', 'busy');
+      planInline.textContent = '正在生成…' + (elapsed ? ' ' + elapsed + ' 秒' : '');
+    } else if (state.planMessage) {
+      var failed = /失败|未知|请先|未配置|错误/.test(state.planMessage);
+      planInline.setAttribute('data-tone', failed ? 'error' : 'ok');
+      planInline.textContent = state.planMessage;
+    }
+    if (planInline.textContent) topicRow.appendChild(planInline);
+
     box.appendChild(topicRow);
 
     // 【多源检索 · 2026-10-22】来源多选：开放 API 源（PubMed/OpenAlex 等）免验证码，

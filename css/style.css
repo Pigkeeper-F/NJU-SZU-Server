@@ -1345,3 +1345,14 @@ body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
   color: var(--muted);
   flex: 0 0 auto;
 }
+
+/* 【2026-11-26】「生成检索式」按钮旁的就地状态：进行中 / 成功 / 失败 */
+.research-plan-inline {
+  font-size: 12px;
+  line-height: 1.5;
+  margin-left: 2px;
+  flex: 0 0 auto;
+}
+.research-plan-inline[data-tone="busy"] { color: var(--muted); }
+.research-plan-inline[data-tone="ok"] { color: #1f6b2c; }
+.research-plan-inline[data-tone="error"] { color: var(--danger); font-weight: 500; }
