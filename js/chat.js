@@ -780,6 +780,19 @@
   var literatureSourceError = '';
   // 是否已经为"当前这次尝试"发过请求。防止 render 分支与同步回调互相触发形成递归。
   var literatureSourceRequested = false;
+  // 加载中排队的回调：请求结束后统一回放，保证每个调用方都能收到结果
+  var sourceWaiters = [];
+  function flushSourceWaiters(list) {
+    var waiters = sourceWaiters.slice();
+    sourceWaiters.length = 0;
+    // 【修复 · 2026-11-26】回放前作废增量渲染状态，强制下一次 render 走全量重建。
+    // 原因：来源清单就绪属于"面板内部数据变了"，不在 canFast 的判据（消息/文档签名）里，
+    // 增量路径会直接 return，把研究面板晾在「正在读取可用来源…」。
+    msgListState.moduleId = null;
+    waiters.forEach(function (fn) {
+      try { fn(list); } catch (e) { if (root.console) root.console.error('[chat] 来源回调抛错', e); }
+    });
+  }
   // 【修复 · 2026-11-26】去掉"失败后冷却 5 秒"：复杂度大于价值。
   // 冷却期内重试会被静默挡掉，用户点了重试却毫无反应，分不清是没发请求还是又失败了。
   // 现在失败不写缓存，每次进界面/点重试都真的重发一次。
@@ -792,7 +805,13 @@
     // 用户点了毫无反应。现在重试走 force 路径，绕过所有短路条件。
     var force = arguments.length > 1 && arguments[1] === true;
     if (!force && literatureSourceCache) { cb(literatureSourceCache); return; }
-    if (!force && literatureSourceLoading) { cb(null); return; }
+
+    // 【关键修复 · 2026-11-26】加载中的调用要**排队**，不能直接 cb(null) 丢掉。
+    // 原来这里 cb(null) 一句返回就走了：调用方（面板初始化、重试按钮）拿到的
+    // 是 null 而不是最终结果，它们依赖回调里的 render()，于是界面永远停在
+    // 「正在读取可用来源…」——而缓存里其实早就已经有 5 个来源了（实测）。
+    if (!force && literatureSourceLoading) { sourceWaiters.push(cb); return; }
+
     literatureSourceLoading = true;
     literatureSourceRequested = true;
     if (force) literatureSourceError = '';
@@ -811,6 +830,7 @@
       catch (callbackError) {
         if (root.console) root.console.error('[chat] 来源就绪后的回调抛错（不影响数据已缓存）', callbackError);
       }
+      flushSourceWaiters(list);
     }).catch(function (error) {
       // 不写缓存：保留重试机会
       literatureSourceError = (error && error.message) ? error.message : '来源清单读取失败';
@@ -820,6 +840,7 @@
       catch (callbackError) {
         if (root.console) root.console.error('[chat] 来源失败回调抛错', callbackError);
       }
+      flushSourceWaiters(null);
     });
   }
   function researchSourceLabel(key) {
@@ -1020,6 +1041,48 @@
     if (!Array.isArray(state.sources) || !state.sources.length) state.sources = ['google-scholar'];
     if (!state.perSource || typeof state.perSource !== 'object') state.perSource = {};
     if (state.searchMode !== 'formal') { state.searchMode = 'test'; state.stopMode = 'count'; state.perSourceLimit = 10; }
+
+    // 【持久化 · 2026-11-26】把"人填进去会心疼"的输入存进模块参数，刷新后能接着用。
+    // 背景：面板状态原来只在内存（docUi），一刷新想法、检索式、勾选的库全没了，
+    // 刚花几十秒生成的检索式白费（主人实测报的就是这个）。
+    // 只存输入类字段；生成结果、作业进度这些能重新拉取的不存，避免数据陈旧。
+    // 恢复优先：内存里已有的（切模块再回来）优先，其次才是模块参数里的（刷新后）。
+    if (mod.params && typeof mod.params.researchDraft === 'object' && mod.params.researchDraft) {
+      var saved = mod.params.researchDraft;
+      if (!state.topic && typeof saved.topic === 'string') state.topic = saved.topic;
+      if (!state.query && typeof saved.query === 'string') state.query = saved.query;
+      if (typeof saved.perSource === 'object' && saved.perSource && !Object.keys(state.perSource).length) {
+        state.perSource = saved.perSource;
+      }
+      if (Array.isArray(saved.sources) && saved.sources.length
+          && state.sources.length === 1 && state.sources[0] === 'google-scholar') {
+        state.sources = saved.sources;
+      }
+      if (saved.searchMode === 'formal') {
+        state.searchMode = 'formal';
+        state.stopMode = saved.stopMode === 'end' ? 'end' : 'count';
+        state.perSourceLimit = Number(saved.perSourceLimit) || 100;
+      }
+    }
+
+    /** 把当前输入写回模块参数（防抖：连续输入不反复落盘）。 */
+    if (!state.__draftBound) {
+      state.__draftBound = true;
+      state.__saveDraft = function () {
+        var Store = getStore();
+        if (!Store || typeof Store.setModuleParam !== 'function') return;
+        Store.setModuleParam(mod.id, 'researchDraft', {
+          topic: String(state.topic || ''),
+          query: String(state.query || ''),
+          perSource: state.perSource || {},
+          sources: Array.isArray(state.sources) ? state.sources.slice() : ['google-scholar'],
+          searchMode: state.searchMode,
+          stopMode: state.stopMode,
+          perSourceLimit: state.perSourceLimit
+        });
+      };
+    }
+
     if (!literatureSourceCache) {
       loadLiteratureSources(function (list) { if (list && list.length) render(); });
     }
@@ -1053,7 +1116,7 @@
     topicInput.type = 'text';
     topicInput.placeholder = '研究想法（哪怕只有一句话）';
     topicInput.value = state.topic || '';
-    topicInput.addEventListener('input', function () { state.topic = topicInput.value; });
+    topicInput.addEventListener('input', function () { state.topic = topicInput.value; if (state.__saveDraft) state.__saveDraft(); });
     topicRow.appendChild(topicInput);
     // 冷启动：只有模糊想法时，让 AI 先出候选检索式
     var planBtn = el('button', 'quiet-button', state.planBusy ? '生成中…' : '生成检索式');
@@ -1122,7 +1185,12 @@
         // 原来无条件调 loadLiteratureSources：它在加载中会同步回调 cb(null)，
         // cb 里又是 render()，render 又走到这一行——形成无限同步递归，
         // 最终在 deepClone 处爆栈（实测栈：render→refreshControls→getState→deepClone）。
-        if (!literatureSourceLoading && !literatureSourceRequested) {
+        // 【修复 · 2026-11-26】只要缓存里还没有清单，就允许再触发一次加载。
+        // 原来用 literatureSourceRequested 一次性守卫，但刷新后首次 render 落在
+        // "请求已发出、还没回来"的窗口里，守卫被置 true 后再没人重画，
+        // 界面就永远停在「正在读取可用来源…」（实测：缓存里其实已经有 5 个来源了）。
+        // 现在改成：加载中不发新请求（防递归），但加载结束后缓存仍空就再试。
+        if (!literatureSourceLoading) {
           literatureSourceRequested = true;
           loadLiteratureSources(function () {
             try { render(); } catch (e) { if (root.console) root.console.error('[chat] 来源就绪后渲染失败', e); }
@@ -1153,6 +1221,7 @@
           }
           state.sources = next;
           state.message = '';
+          if (state.__saveDraft) state.__saveDraft();
           render();
         });
         wrap.appendChild(cb);
@@ -1230,7 +1299,7 @@
       ? '未单列检索式的来源用它，如 "soil organic carbon" fertilization'
       : 'Google Scholar 检索式，如 ("long-term fertilization") "soil organic carbon"';
     queryInput.value = state.query || '';
-    queryInput.addEventListener('input', function () { state.query = queryInput.value; });
+    queryInput.addEventListener('input', function () { state.query = queryInput.value; if (state.__saveDraft) state.__saveDraft(); });
     queryRow.appendChild(queryInput);
     box.appendChild(queryRow);
 
@@ -1245,7 +1314,7 @@
           input.type = 'text';
           input.placeholder = key === 'google-scholar' ? '同通用检索式' : '留空则用通用检索式';
           input.value = state.perSource[key] || '';
-          input.addEventListener('input', function () { state.perSource[key] = input.value; });
+          input.addEventListener('input', function () { state.perSource[key] = input.value; if (state.__saveDraft) state.__saveDraft(); });
           row.appendChild(input);
           perSourceBox.appendChild(row);
         })(state.sources[psi]);
@@ -1279,6 +1348,7 @@
       } else {
         state.searchMode = 'test'; state.stopMode = 'count'; state.perSourceLimit = 10;
       }
+      if (state.__saveDraft) state.__saveDraft();
       render();
     });
     modeRow.appendChild(modeSelect);
@@ -3636,7 +3706,12 @@
       (msgListState.count === 0 || messages[0].id === msgListState.firstId) &&
       (active.status || 'todo') === msgListState.status &&
       pendingNow === msgListState.pending &&
-      docSigOf(active, modules) === msgListState.docSig;
+      docSigOf(active, modules) === msgListState.docSig &&
+      // 【修复 · 2026-11-26】研究面板的"来源清单已就绪"不属于消息/文档签名。
+      // 只要当前是文献调研且来源清单还没到手，就不能走快速路径——
+      // 否则加载完成后的那次 render 会命中快速路径提前 return，
+      // 面板永远停在「正在读取可用来源…」（实测：缓存里已有 5 个来源，界面只有 3 个复选框）。
+      !(active && active.type === 'literature-research' && !literatureSourceCache);
     if (canFast) {
       try {
         var fastList = spaceEl.querySelector('.msg-list');
@@ -3908,6 +3983,16 @@
   }
 
   root.ModuleSpace = { render: render, sendText: sendText, isBusy: isBusy, discussDownloadVerification: discussDownloadVerification, snapshotContext: snapshotContext, resetContext: resetContext };
+  // 【调试 · 2026-11-26】来源清单的加载状态，排查"一直显示正在读取"用
+  root.ChatSourceDebug = function () {
+    return {
+      cacheLen: literatureSourceCache ? literatureSourceCache.length : null,
+      loading: literatureSourceLoading,
+      requested: literatureSourceRequested,
+      error: literatureSourceError,
+      chatKeys: literatureSourceCache ? literatureSourceCache.map(x => x.key) : null
+    };
+  };
   // 【调试 · 2026-11-26】把登录态判断的内部状态暴露出来，方便排查
   // "为什么某个库显示成已登录"。只读快照，不含任何凭据。
   root.ChatAccessDebug = function () {

@@ -309,7 +309,17 @@
     if (raw.params && typeof raw.params === 'object' && !Array.isArray(raw.params)) {
       for (var pk in raw.params) {
         if (!Object.prototype.hasOwnProperty.call(raw.params, pk)) continue;
-        if (typeof raw.params[pk] === 'string') params[pk] = raw.params[pk].slice(0, 500);
+        var pv = raw.params[pk];
+        if (typeof pv === 'string') {
+          params[pk] = pv.slice(0, 2000);
+        } else if (pv && typeof pv === 'object') {
+          // 【持久化 · 2026-11-26】结构化草稿（如文献调研的想法/检索式）也要保留，
+          // 原来这里只认字符串，刷新一次对象参数就被丢掉 —— 与 setModuleParam 是同一处问题的两半。
+          try {
+            var encoded = JSON.stringify(pv);
+            if (encoded.length <= 8000) params[pk] = JSON.parse(encoded);
+          } catch (e) { /* 无法序列化就跳过这一项，不污染整份参数 */ }
+        }
       }
     }
     var approvedAt = (typeof raw.approvedAt === 'string' && raw.approvedAt) ? raw.approvedAt : null;
@@ -1037,7 +1047,20 @@
     if (!mod) return false;
     if (typeof key !== 'string' || !key) return false;
     if (!mod.params || typeof mod.params !== 'object' || Array.isArray(mod.params)) mod.params = {};
-    mod.params[key] = (typeof value === 'string') ? value.slice(0, 500) : '';
+    // 【持久化 · 2026-11-26】原来只接受字符串，传对象会被静默写成空串。
+    // 需要保存面板输入（想法/检索式/勾选的库）这类结构化草稿，所以放开到普通对象/数组。
+    // 仍然限制体积（序列化后 ≤ 2000 字符），避免把整个 state 塞进一个参数里。
+    if (typeof value === 'string') {
+      mod.params[key] = value.slice(0, 2000);
+    } else if (value && typeof value === 'object') {
+      var encoded;
+      try { encoded = JSON.stringify(value); } catch (e) { return false; }
+      if (typeof encoded !== 'string' || encoded.length > 8000) return false;
+      // 存序列化后的副本：调用方之后改动原对象不会影响已保存的草稿
+      try { mod.params[key] = JSON.parse(encoded); } catch (e) { return false; }
+    } else {
+      mod.params[key] = '';
+    }
     emit('module:param', { id: id, key: key });
     return true;
   }
