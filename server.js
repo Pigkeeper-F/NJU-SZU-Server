@@ -1379,6 +1379,13 @@ async function handleLiterature(req, res, url) {
       }
       return sendJson(res, 200, await scholar.openAccessPage(data.target));
     }
+    // 【登录页清单 · 2026-11-26】把六个官方登录地址交给浏览器，由**用户本机**打开。
+    // 原因：服务器没有桌面环境，起不了那个持久化浏览器；登录本来就该发生在
+    // 用户自己的机器上（能用机构网络、能扫码），登录后的会话也存在他自己的浏览器里。
+    // 只返回固定官方 URL 与显示名，不含凭据。
+    if (req.method === 'GET' && route === '/api/literature/access-pages') {
+      return sendJson(res, 200, { targets: await scholar.listAccessPages() });
+    }
     if (req.method === 'POST' && route === '/api/literature/access-status') {
       let source = 'wanfang';
       if (Number(req.headers['content-length'] || 0) > 0) {
@@ -1508,7 +1515,15 @@ async function handleLiterature(req, res, url) {
       return;
     }
     sendJson(res, 404, { error: '接口不存在' });
-  } catch (error) { sendJson(res, error.status || error.statusCode || 400, { error: error.message, ...(error.code ? { code: error.code } : {}) }); }
+  } catch (error) {
+    // 【2026-11-26】把 hint 一并回给浏览器：像"登录要在自己的电脑上做"这类
+    // 能力边界提示，只说 error 一句话不够，用户不知道该往哪走。
+    sendJson(res, error.status || error.statusCode || 400, {
+      error: error.message,
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.hint ? { hint: error.hint } : {})
+    });
+  }
   finally { release?.(); }
 }
 

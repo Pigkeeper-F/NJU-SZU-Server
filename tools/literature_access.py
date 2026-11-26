@@ -276,13 +276,22 @@ def _status_one(source: str) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group()
     group.add_argument("--open", choices=tuple(TARGETS))
     group.add_argument("--status", nargs="?", const="wanfang",
                        choices=("all",) + STATUS_SOURCES, metavar="SOURCE")
+    # --list：只输出白名单里的登录页地址，供前端在用户自己的浏览器里直接打开。
+    # 只含固定官方 URL 与显示名，不含凭据、cookie 或任何会话信息。
+    group.add_argument("--list", action="store_true")
     args = parser.parse_args()
     try:
-        result = read_status(args.status) if args.status else open_target(args.open)
+        if args.list:
+            result = {"targets": [{"key": key, "url": value["url"], "label": value["label"]}
+                                  for key, value in TARGETS.items()]}
+        elif args.status:
+            result = read_status(args.status)
+        else:
+            result = open_target(args.open)
     except Exception as error:  # Keep the CLI contract: one JSON line or one error line.
         print(json.dumps({"opened": False, "checked": False, "message": str(error)}, ensure_ascii=False))
         return 1

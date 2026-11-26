@@ -378,7 +378,58 @@
       body: JSON.stringify(body)
     }).then(function (response) {
       return response.json().then(function (data) {
-        if (!response.ok) throw new Error(data && data.error ? data.error : '请求失败');
+        if (!response.ok) {
+          // 【2026-11-26】服务端在"这台机器打不开登录页"时会带一个 hint，
+          // 告诉用户该去哪里做这件事。原来只显示 error，用户看完仍然不知道下一步。
+          var error = new Error((data && data.error) || '请求失败');
+          if (data && data.hint) error.hint = data.hint;
+          if (data && data.code) error.code = data.code;
+          throw error;
+        }
+        return data;
+      });
+    });
+  }
+
+  /**
+   * 【登录页 · 2026-11-26 主人定】点按钮 → 在**你自己的浏览器**里打开官方登录页。
+   *
+   * 为什么不在服务器上开：那需要一个带桌面的持久化浏览器（要扫码、要输账号，
+   * 还要能用机构网络）。服务器没有桌面环境，起不来；就算起来了人也看不到窗口。
+   * 登录本来就该发生在用户自己的机器上——登录后会话存在他自己浏览器里，
+   * 之后拿着这个会话去检索即可。
+   */
+  function openAccessPageHere(label, target) {
+    // 先在当前点击事件里同步开一个空白窗，避免异步回来后被浏览器当弹窗拦截
+    var win = null;
+    try { win = window.open('', '_blank'); } catch (e) { win = null; }
+    return chatAccessGet('/api/literature/access-pages')
+      .then(function (data) {
+        var list = (data && data.targets) || [];
+        var found = list.filter(function (item) { return item.key === target; })[0] || null;
+        if (!found || !/^https?:\/\//.test(found.url)) {
+          if (win) win.close();
+          throw new Error('没有找到「' + label + '」的登录地址');
+        }
+        if (win) { win.location.href = found.url; }
+        else { window.open(found.url, '_blank', 'noopener'); }
+        return found;
+      })
+      .catch(function (error) {
+        if (win) { try { win.close(); } catch (e) { /* 忽略 */ } }
+        throw error;
+      });
+  }
+
+  /** GET 版的小工具（登录页清单用；POST 的 chatAccessFetch 不适用）。 */
+  function chatAccessGet(url) {
+    return fetch(url, { headers: { 'X-Workbench': '1' } }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok) {
+          var error = new Error((data && data.error) || '请求失败');
+          if (data && data.hint) error.hint = data.hint;
+          throw error;
+        }
         return data;
       });
     });
@@ -386,16 +437,22 @@
 
   function buildChatAccessPanel() {
     var box = el('div', 'chat-access-panel');
-    var status = el('p', 'chat-access-status', '点下方按钮打开官方登录页；在该页完成登录后点「检查登录状态」。');
+    var status = el('p', 'chat-access-status',
+      '点下方按钮会在你自己的浏览器里打开官方登录页；登录完成后回到这里继续就可以了。');
     var row = el('div', 'chat-access-actions');
     CHAT_ACCESS_TARGETS.forEach(function (pair) {
       var button = el('button', 'quiet-button', pair[0]);
       button.type = 'button';
       button.onclick = function () {
         status.textContent = '正在打开' + pair[0] + '…';
-        chatAccessFetch('/api/literature/access-page', { target: pair[1] })
-          .then(function (result) { status.textContent = '已打开' + (result.label || pair[0]) + '；在该页完成登录后点「检查登录状态」。'; })
-          .catch(function (error) { status.textContent = '打开失败：' + error.message; });
+        openAccessPageHere(pair[0], pair[1])
+          .then(function (found) {
+            status.textContent = '已在新标签页打开「' + (found.label || pair[0]) +
+              '」。在那个页面完成登录后回到这里，用同一个浏览器直接检索即可。';
+          })
+          .catch(function (error) {
+            status.textContent = '打开失败：' + error.message + (error.hint ? ' ' + error.hint : '');
+          });
       };
       row.appendChild(button);
     });

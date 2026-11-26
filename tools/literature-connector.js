@@ -1778,6 +1778,21 @@ class LiteratureConnector {
   async openAccessPage(target) {
     if (!ACCESS_TARGETS.includes(target)) throw new Error('只能打开白名单内的登录或购买页面');
     if ([...this.jobs.values()].some(item => item.status === 'running')) throw new Error('检索浏览器正在使用，请等任务暂停后再打开');
+
+    // 【部署边界 · 2026-11-26】这些登录按钮靠的是一个带持久化 profile 的**桌面浏览器**：
+    // 启动脚本用的 hidden_research_browser 是 Windows 专用（taskkill / DETACHED_PROCESS），
+    // 而且需要真实的显示环境让人扫码/输账号。服务器（Linux、无 DISPLAY）上起不来，
+    // 原来会卡到 90 秒超时才报一句含糊的错误——学生点了按钮干等，不知道发生了什么。
+    // 现在先快速判断能力，明确告诉用户"这一步要在自己的电脑上做"。
+    const capability = this.accessPageCapability();
+    if (!capability.ok) {
+      throw Object.assign(new Error(capability.reason), {
+        code: 'ACCESS_PAGE_UNAVAILABLE',
+        statusCode: 501,   // 未实现：不是用户操作错了，是这台机器做不到
+        hint: capability.hint
+      });
+    }
+
     const raw = await this.runAccessScript(['--open', target]);
     let result;
     try { result = JSON.parse(raw); } catch (_) { throw new Error('登录页未返回有效状态，请重试'); }
@@ -1790,11 +1805,68 @@ class LiteratureConnector {
   //: 读取一个来源或全部来源的登录状态；不读凭据，仅返回显示名与判定。
   async accessStatus(source = 'wanfang') {
     if (!ACCESS_STATUS_SOURCES.includes(source)) throw new Error('只能读取白名单内的登录状态');
+    // 登录状态检查同样要靠那个桌面浏览器，服务器上做不到；先明确拒绝，别让它卡到 330 秒。
+    const capability = this.accessPageCapability();
+    if (!capability.ok) {
+      throw Object.assign(new Error(capability.reason), {
+        code: 'ACCESS_PAGE_UNAVAILABLE', statusCode: 501, hint: capability.hint
+      });
+    }
     const raw = await this.runAccessScript(['--status', source], source === 'all' ? 330000 : 60000);
     let result;
     try { result = JSON.parse(raw); } catch (_) { throw new Error('登录状态未返回有效结果，请重试'); }
     if (!result || result.checked !== true) throw new Error(result?.message || '登录状态未返回，请重试');
     return result;
+  }
+
+  /**
+   * 这台机器能不能打开数据库登录页？
+   *
+   * 为什么需要这个判断：登录页要在一个**桌面浏览器**里打开，让人扫码或输账号。
+   * 启动器（tools/hidden_research_browser.py）是 Windows 专用——它用
+   * DETACHED_PROCESS / CREATE_NO_WINDOW / taskkill，Linux 上直接报错；
+   * 而且没有 DISPLAY 的服务器上就算起得来也看不到窗口。
+   * 原来没有这个检查，用户点了按钮要干等 90 秒才拿到一句含糊的失败。
+   *
+   * -> { ok: boolean, reason: string, hint: string }
+   */
+  accessPageCapability() {
+    const allowOverride = process.env.LITERATURE_ALLOW_ACCESS_PAGE === '1';
+    if (allowOverride) return { ok: true, reason: '', hint: '' };
+
+    if (process.platform !== 'win32') {
+      return {
+        ok: false,
+        reason: '这台服务器不能打开数据库登录页：登录需要在有桌面的电脑上完成。',
+        hint: '在你自己的电脑上打开工作台（npm start 后访问 localhost:8123），'
+          + '在那里完成知网/万方/WoS/Scopus 登录；登录后导出的题录可以上传到这里继续用。'
+      };
+    }
+    // Windows 但没有交互式桌面（例如以服务/无会话方式运行）也打不开窗口
+    if (!process.env.LITERATURE_ALLOW_HEADLESS_ACCESS && process.env.SESSIONNAME === undefined
+        && process.env.SSH_CONNECTION !== undefined) {
+      return {
+        ok: false,
+        reason: '当前是通过远程会话运行的，无法弹出登录窗口。',
+        hint: '在你自己电脑上的工作台里完成登录（localhost 访问），再把题录导入这里。',
+      };
+    }
+    return { ok: true, reason: '', hint: '' };
+  }
+
+  /**
+   * 取登录页白名单（key / url / label）。
+   *
+   * 用途：服务器上跑不了桌面浏览器，所以改成"把地址给前端，在用户自己的浏览器里打开"。
+   * 这样登录发生在用户本机（有桌面、能扫码、能用机构网络），登录后的会话也存在他自己的浏览器里。
+   * 只输出固定官方 URL，不含任何凭据。
+   */
+  async listAccessPages() {
+    const raw = await this.runAccessScript(['--list'], 30000);
+    let result;
+    try { result = JSON.parse(raw); } catch (_) { throw new Error('登录页清单返回格式无效'); }
+    if (!result || !Array.isArray(result.targets)) throw new Error('登录页清单为空');
+    return result.targets.map(item => ({ key: item.key, url: item.url, label: item.label }));
   }
 
   async runAccessScript(args, timeout = 90000) {
