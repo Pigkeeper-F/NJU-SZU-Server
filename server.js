@@ -1395,6 +1395,8 @@ async function handleLiterature(req, res, url) {
         model: shared.ready ? shared.model : '',
         protocol: shared.ready ? shared.protocol : '',
         baseUrl: shared.ready ? shared.baseUrl : '',
+        // 【多模型 · 2026-11-26】可选模型清单（含每个模型的提示语），前端据此渲染下拉与红字
+        models: shared.ready ? shared.models : [],
         message: shared.ready
           ? '服务器公共 API 可用'
           : '服务器尚未配置公共 API（管理员需在服务器 .env 配置 PUBLIC_AI_BASE_URL / PUBLIC_AI_KEY / PUBLIC_AI_MODEL）'
@@ -1582,10 +1584,14 @@ function normalizeCredential(raw) {
         unavailable: '服务器公共 API 尚未配置：请联系管理员在服务器 .env 里配置 PUBLIC_AI_BASE_URL / PUBLIC_AI_KEY / PUBLIC_AI_MODEL，或改用「本地 API」填自己的 Key。'
       };
     }
+    // 【多模型 · 2026-11-26】用户可以选白名单里的模型，但**只能选白名单里的**：
+    // 直接相信前端传来的 model 名，等于把站长的 key 开放给任意模型（有人会拿去跑贵的）。
+    const wanted = (typeof raw.model === 'string' ? raw.model.trim() : '');
+    const chosen = wanted && shared.allowedModels.indexOf(wanted) >= 0 ? wanted : shared.model;
     return {
       apiKey: shared.apiKey,
       baseUrl: shared.baseUrl,
-      model: shared.model,
+      model: chosen,
       protocol: shared.protocol,
       source: 'server-public'
     };
@@ -1626,8 +1632,34 @@ function publicApiConfig() {
   const apiKey = String(process.env.PUBLIC_AI_KEY || '').trim();
   const model = String(process.env.PUBLIC_AI_MODEL || '').trim();
   const protocol = process.env.PUBLIC_AI_PROTOCOL === 'responses' ? 'responses' : 'chat-completions';
-  const ready = Boolean(baseUrl && apiKey && model);
-  return { ready, baseUrl, apiKey, model, protocol };
+
+  // 【多模型 · 2026-11-26】可选的模型清单（逗号分隔）。为空就只提供 PUBLIC_AI_MODEL 一个。
+  // 只允许清单内的模型名 —— 否则用户传任意模型名，就能拿站长的 key 去跑贵模型。
+  const list = String(process.env.PUBLIC_AI_MODELS || '')
+    .split(',').map(item => item.trim()).filter(Boolean);
+  const models = list.length ? list : (model ? [model] : []);
+
+  // 每个模型可带一句提示（给界面显示）。格式：模型名|提示，逗号分隔。
+  // 例：PUBLIC_AI_MODEL_NOTES=stealth/glyph-cluster:free|此模型不稳定，且性能不好（免费缘故）
+  const notes = {};
+  String(process.env.PUBLIC_AI_MODEL_NOTES || '').split(',').forEach(function (entry) {
+    const at = entry.indexOf('|');
+    if (at <= 0) return;
+    const name = entry.slice(0, at).trim();
+    const note = entry.slice(at + 1).trim();
+    if (name && note) notes[name] = note;
+  });
+
+  // 默认模型：优先 PUBLIC_AI_MODEL（若在白名单内），否则清单第一个
+  const defaultModel = models.indexOf(model) >= 0 ? model : (models[0] || '');
+
+  const ready = Boolean(baseUrl && apiKey && defaultModel);
+  return {
+    ready, baseUrl, apiKey, model: defaultModel, protocol,
+    models: models.map(name => ({ name, note: notes[name] || '' })),
+    // 白名单：用来校验用户传来的模型名
+    allowedModels: models
+  };
 }
 
 function resolveModelConfig(rawSettings) {

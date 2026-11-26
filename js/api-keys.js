@@ -31,7 +31,9 @@
   var activeProvider = 'deepseek';
   var toastTimer = null;
   // 【本地/服务器 API · 2026-11-26】服务器公共 API 的可用性缓存
-  var serverApiStatus = { checked: false, ready: false, model: '', message: '' };
+  var serverApiStatus = { checked: false, ready: false, model: '', models: [], message: '' };
+  // 用户上次选的服务器模型（记住选择，下次打开不用重挑）
+  var SERVER_MODEL_KEY = 'yanxu_server_model';
 
   function $(id) { return document.getElementById(id); }
 
@@ -45,13 +47,14 @@
             checked: true,
             ready: response.ok && data.ready === true,
             model: data.model || '',
+            models: Array.isArray(data.models) ? data.models : [],
             message: data.message || ''
           };
           cb(serverApiStatus);
         });
       })
       .catch(function () {
-        serverApiStatus = { checked: true, ready: false, model: '', message: '无法连接服务器，公共 API 状态未知' };
+        serverApiStatus = { checked: true, ready: false, model: '', models: [], message: '无法连接服务器，公共 API 状态未知' };
         cb(serverApiStatus);
       });
   }
@@ -164,12 +167,15 @@
     var modelLabel = document.querySelector('label[for="api-model-input"]');
     var statusBox = $('api-server-status');
 
-    // 服务器 API：隐藏 Key 与地址/协议（都用管理员的），模型也由服务器定
+    // 服务器 API：隐藏 Key 与地址/协议（都用管理员的），模型改由服务器清单决定
     if (keyLabel) keyLabel.hidden = isServer;
     if (keyRow) keyRow.hidden = isServer;
     if (customFields) customFields.hidden = isServer;
     if (modelLabel) modelLabel.hidden = isServer;
     if ($('api-model-input')) $('api-model-input').hidden = isServer;
+
+    var modelRow = $('api-server-model-row');
+    if (modelRow) modelRow.hidden = !isServer;
 
     if (!statusBox) return;
     if (!isServer) { statusBox.hidden = true; statusBox.textContent = ''; return; }
@@ -179,12 +185,63 @@
     fetchServerApiStatus(function (status) {
       if (status.ready) {
         statusBox.setAttribute('data-tone', 'ok');
-        statusBox.textContent = '✓ 服务器公共 API 可用' + (status.model ? '（模型 ' + status.model + '）' : '');
+        statusBox.textContent = '✓ 服务器公共 API 可用';
+        renderServerModels(status.models || [], status.model || '');
       } else {
         statusBox.setAttribute('data-tone', 'error');
         statusBox.textContent = status.message || '服务器公共 API 不可用';
+        if (modelRow) modelRow.hidden = true;
       }
     });
+  }
+
+  /**
+   * 【多模型 · 2026-11-26】渲染服务器提供的模型下拉。
+   * 每个模型可以带一句提示（管理员配的），选中时用红字显示出来 ——
+   * 免费模型不稳、性能差，得让用户在用之前就知道，而不是跑完才纳闷。
+   */
+  function renderServerModels(models, defaultModel) {
+    var select = $('api-server-model-select');
+    var note = $('api-server-model-note');
+    if (!select) return;
+    select.textContent = '';
+    if (!models.length) {
+      var opt = document.createElement('option');
+      opt.value = defaultModel || '';
+      opt.textContent = defaultModel || '（服务器未提供模型清单）';
+      select.appendChild(opt);
+      if (note) { note.hidden = true; note.textContent = ''; }
+      return;
+    }
+    models.forEach(function (item) {
+      var option = document.createElement('option');
+      option.value = item.name;
+      option.textContent = item.name;
+      select.appendChild(option);
+    });
+    // 记住上次选的（如果还在清单里）
+    var saved = '';
+    try { saved = localStorage.getItem(SERVER_MODEL_KEY) || ''; } catch (e) { saved = ''; }
+    select.value = models.some(function (m) { return m.name === saved; })
+      ? saved
+      : (defaultModel || models[0].name);
+
+    function syncNote() {
+      var picked = models.filter(function (m) { return m.name === select.value; })[0];
+      if (!note) return;
+      if (picked && picked.note) {
+        note.hidden = false;
+        note.textContent = picked.note;
+        note.setAttribute('data-tone', 'warn');
+      } else {
+        note.hidden = true;
+        note.textContent = '';
+        note.removeAttribute('data-tone');
+      }
+      try { localStorage.setItem(SERVER_MODEL_KEY, select.value); } catch (e) { /* 忽略 */ }
+    }
+    select.onchange = syncNote;
+    syncNote();
   }
 
   function providerSnapshot(providerId) {
@@ -197,7 +254,8 @@
     // 【本地/服务器 API · 2026-11-26】选服务器公共 API：不传任何 Key，
     // 只带一个标记，由服务端补上公共配置（Key 永不下发浏览器）。
     if (provider.custom && saved.useServer === true) {
-      return { provider: selected, useServer: true, scope: 'server' };
+      // 把用户选的模型带上；服务端只接受白名单内的名字，选了别的会退回默认
+      return { provider: selected, useServer: true, scope: 'server', model: saved.model || '' };
     }
 
     if (!saved.apiKey) return null;
@@ -234,7 +292,8 @@
       }
       var dataServer = readStore();
       dataServer.activeProvider = activeProvider;
-      dataServer.providers[activeProvider] = { useServer: true, scope: 'server' };
+      var pickedModel = $('api-server-model-select') ? $('api-server-model-select').value : '';
+      dataServer.providers[activeProvider] = { useServer: true, scope: 'server', model: pickedModel || '' };
       $('api-dialog').close();
       toast(writeStore(dataServer) ? '已启用服务器公共 API' : '已启用（当前浏览器无法持久保存）');
       return;
@@ -299,8 +358,10 @@
 
     var body;
     if (useServer) {
-      // 服务器公共 API：不带 Key，让服务端补；顺带验证公共通道是否真的可用
-      body = { credential: { useServer: true } };
+      // 服务器公共 API：不带 Key，让服务端补；顺带验证公共通道是否真的可用。
+      // 带上用户选中的模型，测的就正是他要用的那个。
+      var pickedModel = $('api-server-model-select') ? $('api-server-model-select').value : '';
+      body = { credential: { useServer: true, model: pickedModel || '' } };
     } else {
       var key = ($('api-key-input').value || '').trim();
       if (!key) {

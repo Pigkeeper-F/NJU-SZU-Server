@@ -1441,3 +1441,36 @@ body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
 }
 .api-test-status[data-tone="ok"] { color: #1f6b2c; }
 .api-test-status[data-tone="error"] { color: var(--danger); font-weight: 500; }
+
+/* 【多模型 · 2026-11-26】服务器 API 的模型选择 + 提示语 */
+.api-server-model-row { margin: 0 0 10px; }
+.api-server-model-row[hidden] { display: none; }
+.api-server-model-row label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 5px;
+}
+#api-server-model-select {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+}
+/* 免费模型不稳、性能差 —— 选中时用红字明确告知，别让人跑完才纳闷 */
+.api-server-model-note {
+  margin: 6px 0 0;
+  padding: 6px 9px;
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1.55;
+  font-weight: 500;
+}
+.api-server-model-note[hidden] { display: none; }
