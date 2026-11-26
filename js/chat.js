@@ -762,17 +762,19 @@
   var literatureSourceCache = null;
   var literatureSourceLoading = false;
   var literatureSourceError = '';
-  var literatureSourceRetryAt = 0;   // 失败后冷却 5 秒再重试，避免每次 render 都打一次
+  // 是否已经为"当前这次尝试"发过请求。防止 render 分支与同步回调互相触发形成递归。
+  var literatureSourceRequested = false;
+  // 【修复 · 2026-11-26】去掉"失败后冷却 5 秒"：复杂度大于价值。
+  // 冷却期内重试会被静默挡掉，用户点了重试却毫无反应，分不清是没发请求还是又失败了。
+  // 现在失败不写缓存，每次进界面/点重试都真的重发一次。
 
   function loadLiteratureSources(done) {
     var cb = (typeof done === 'function') ? done : function () {};
     if (literatureSourceCache) { cb(literatureSourceCache); return; }
-    // 【修复 · 2026-11-26】原来这两条分支都是裸 return，不回调 done，
-    // 调用方（重试按钮）等不到回调就永远停在"读取中"，看起来像重试无效。
-    // 现在保证任何路径都回调一次，并把"为什么没好"说清楚。
+    // 正在加载中不重复发请求，但必须回调——原来裸 return 会让调用方永远等不到
     if (literatureSourceLoading) { cb(null); return; }
-    if (Date.now() < literatureSourceRetryAt) { cb(null); return; }
     literatureSourceLoading = true;
+    literatureSourceRequested = true;
     researchGet('/api/literature/sources').then(function (data) {
       var list = (data && Array.isArray(data.sources)) ? data.sources : [];
       if (!list.length) throw new Error('服务端没有返回可用的检索来源');
@@ -783,8 +785,8 @@
     }).catch(function (error) {
       // 不写缓存：保留重试机会
       literatureSourceError = (error && error.message) ? error.message : '来源清单读取失败';
-      literatureSourceRetryAt = Date.now() + 5000;
       literatureSourceLoading = false;
+      literatureSourceRequested = false;   // 允许重试按钮再发一次
       cb(null);
     });
   }
@@ -875,19 +877,30 @@
         var retry = el('button', 'quiet-button', '重试');
         retry.type = 'button';
         retry.addEventListener('click', function () {
-          // 【修复 · 2026-11-26】重试要三件事一起做，少一件就恢复不了：
-          //   1) 清掉错误信息（否则 render 又走失败分支）
-          //   2) 清掉冷却时间（否则被 5 秒节流直接挡掉）
-          //   3) 再调一次加载
+          // 【修复 · 2026-11-26】清掉错误信息，让下一次 render 走"读取中"分支。
+          // 注意这里**不主动调 render()**：App 层订阅 Store 变更会触发全量重渲染，
+          // 手动再加一次容易和它叠成递归（实测：连调 render 会撞进
+          // refreshControls → getState → deepClone 的 Maximum call stack）。
+          // 只负责发起请求，画面更新交给回调里的那一次 render。
           literatureSourceError = '';
-          literatureSourceRetryAt = 0;
-          loadLiteratureSources(function () { render(); });
-          render();   // 立刻重画成"读取中"，给用户即时反馈
+          literatureSourceRequested = false;
+          loadLiteratureSources(function () {
+            try { render(); } catch (e) { if (root.console) root.console.error('[chat] 重试后渲染失败', e); }
+          });
         });
         sourceRow.appendChild(retry);
       } else {
         sourceRow.appendChild(el('span', 'research-source-loading', '正在读取可用来源…'));
-        loadLiteratureSources(function () { render(); });
+        // 【修复 · 2026-11-26】这里必须只在"确实还没开始请求"时发起一次。
+        // 原来无条件调 loadLiteratureSources：它在加载中会同步回调 cb(null)，
+        // cb 里又是 render()，render 又走到这一行——形成无限同步递归，
+        // 最终在 deepClone 处爆栈（实测栈：render→refreshControls→getState→deepClone）。
+        if (!literatureSourceLoading && !literatureSourceRequested) {
+          literatureSourceRequested = true;
+          loadLiteratureSources(function () {
+            try { render(); } catch (e) { if (root.console) root.console.error('[chat] 来源就绪后渲染失败', e); }
+          });
+        }
       }
       box.appendChild(sourceRow);
       box.appendChild(el('div', 'research-sources-pending',
