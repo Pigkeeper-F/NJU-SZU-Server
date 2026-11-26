@@ -781,13 +781,24 @@
       literatureSourceCache = list;
       literatureSourceError = '';
       literatureSourceLoading = false;
-      cb(literatureSourceCache);
+      // 【修复 · 2026-11-26 关键】回调必须单独 try/catch。
+      // 回调里是 render()，它内部可能抛错（比如撞上 refreshControls 的深递归）；
+      // 如果让它冒泡，会被下面的 .catch 当成"请求失败"接住，
+      // 于是刚拿到的来源被 discarding、错误信息又被写回去 ——
+      // 表现就是"接口明明成功、界面还显示读取失败"，极难定位（实测卡了很久）。
+      try { cb(literatureSourceCache); }
+      catch (callbackError) {
+        if (root.console) root.console.error('[chat] 来源就绪后的回调抛错（不影响数据已缓存）', callbackError);
+      }
     }).catch(function (error) {
       // 不写缓存：保留重试机会
       literatureSourceError = (error && error.message) ? error.message : '来源清单读取失败';
       literatureSourceLoading = false;
       literatureSourceRequested = false;   // 允许重试按钮再发一次
-      cb(null);
+      try { cb(null); }
+      catch (callbackError) {
+        if (root.console) root.console.error('[chat] 来源失败回调抛错', callbackError);
+      }
     });
   }
   function researchSourceLabel(key) {
