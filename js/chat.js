@@ -43,6 +43,9 @@
   // 单条消息的 API），同模块且状态未变时只需向 .msg-list 追加新消息，避免每次状态变更
   // 全量重建整个消息列表（数百条消息时 O(n²) 卡顿）。任何不满足条件的场景落回全量。
   var msgListState = { moduleId: null, count: -1, firstId: null, status: null, pending: false, docSig: null };
+  // 【2026-11-26】记录上一次渲染结束时用户看到的滚动位置。
+  // 内容条数没变的重绘（勾选检索来源、点登录按钮等）要恢复它，不能把人拽回顶部。
+  var scrollMemo = { moduleId: null, count: -1, top: 0 };
   var MAX_INPUT_CHARS = (root.Store && root.Store.LIMITS && root.Store.LIMITS.MAX_MESSAGE_CHARS) || 20000; // 加载期与 Store 同步
   var MAX_DOC_CHARS = (root.Store && root.Store.LIMITS && root.Store.LIMITS.MAX_DOC_CHARS) || 20000;      // 环节文档上限，与 Store 同步
 
@@ -3529,6 +3532,14 @@
     var fallback = false; // activeModuleId 缺失时的渲染层兜底（不写 Store）
     var messageless = true; // 当前模块没有消息（决定渲染后滚到顶部还是底部）
 
+    // 【修复 · 2026-11-26】在**动手重建之前**把用户当前的滚动位置记下来。
+    // 关键点：重建（replaceChildren）会把 scrollTop 打回 0，所以必须在重建前抓，
+    // 在结尾再读就只能读到 0——那样"恢复位置"等于永远恢复成顶部（实测踩过）。
+    var viewBefore = {
+      moduleId: msgListState.moduleId,
+      top: spaceEl ? spaceEl.scrollTop : 0
+    };
+
     if (!active && modules.length) {
       active = modules[modules.length - 1];
       fallback = true;
@@ -3689,6 +3700,12 @@
 
     // 滚动位置：有消息滚到底部；没有消息则停在顶部，保证「本模块要做什么」说明卡与审核状态条
     // 一进入模块就能看到（否则说明卡会被滚出视野）。
+    // 【修复 · 2026-11-26】但不是每次重绘都该跳。
+    // 用户勾个检索来源、点个登录按钮都会触发 render，原来一律把滚动位置重置，
+    // 页面就"跳到最上端"——主人实测报的就是这个。
+    // 现在区分两种情况：
+    //   · 消息条数变了（真来了新内容）→ 自动滚到底，保持原有便利；
+    //   · 消息没变（只是勾选/状态变）→ 恢复用户原来看到的滚动位置。
     // 记录本轮全量渲染结果，供下一次增量快速路径比对
     msgListState = {
       moduleId: (active && !fallback) ? active.id : null,
@@ -3698,8 +3715,22 @@
       pending: (active && !fallback) ? !!pendingModules[active.id] : false,
       docSig: (active && !fallback) ? docSigOf(active, modules) : null
     };
-    if (messageless) spaceEl.scrollTop = 0;
-    else spaceEl.scrollTop = spaceEl.scrollHeight;
+
+    var sameModule = (viewBefore.moduleId === (active && !fallback ? active.id : null));
+    var messageCountChanged = !sameModule || scrollMemo.count !== messages.length;
+    if (messageCountChanged) {
+      if (messageless) spaceEl.scrollTop = 0;
+      else spaceEl.scrollTop = spaceEl.scrollHeight;
+    } else {
+      // 内容条数没变（勾选来源、点登录按钮、状态翻转等）：恢复重建前用户看的位置。
+      // 用重建前抓的 viewBefore.top，而不是上一次渲染存的 meMo——后者在重建后已经是 0。
+      spaceEl.scrollTop = viewBefore.top;
+    }
+    scrollMemo = {
+      moduleId: (active && !fallback) ? active.id : null,
+      count: messages.length,
+      top: spaceEl.scrollTop
+    };
   }
 
   // ------------------------------------------------------------------ 发送
