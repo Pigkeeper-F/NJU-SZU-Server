@@ -30,8 +30,31 @@
 
   var activeProvider = 'deepseek';
   var toastTimer = null;
+  // 【本地/服务器 API · 2026-11-26】服务器公共 API 的可用性缓存
+  var serverApiStatus = { checked: false, ready: false, model: '', message: '' };
 
   function $(id) { return document.getElementById(id); }
+
+  /** 查询服务器公共 API 是否可用（只回状态，不含 Key）。 */
+  function fetchServerApiStatus(done) {
+    var cb = (typeof done === 'function') ? done : function () {};
+    fetch('/api/literature/public-api', { headers: { 'X-Workbench': '1' } })
+      .then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (data) {
+          serverApiStatus = {
+            checked: true,
+            ready: response.ok && data.ready === true,
+            model: data.model || '',
+            message: data.message || ''
+          };
+          cb(serverApiStatus);
+        });
+      })
+      .catch(function () {
+        serverApiStatus = { checked: true, ready: false, model: '', message: '无法连接服务器，公共 API 状态未知' };
+        cb(serverApiStatus);
+      });
+  }
 
   function readStore() {
     try {
@@ -110,8 +133,58 @@
       }
     }
 
+    // 【本地/服务器 API · 2026-11-26】只有自定义才有这个选择：
+    // 内置的 DeepSeek/OpenAI 一定是本地（用用户自己的 Key）。
+    var scopePicker = document.querySelector('.api-scope-picker');
+    if (scopePicker) {
+      scopePicker.hidden = !provider.custom;
+      if (provider.custom) {
+        var scope = saved.scope === 'server' ? 'server' : 'local';
+        var radio = document.querySelector('input[name="api-scope"][value="' + scope + '"]');
+        if (radio) radio.checked = true;
+        applyScopeUi(scope);
+      }
+    }
+
     $('api-dialog').showModal();
-    $('api-key-input').focus();
+    if (provider.custom && saved.scope === 'server') {
+      // 选服务器 API 时不需要聚焦 Key 输入
+      $('api-dialog').querySelector('.primary-button').focus();
+    } else {
+      $('api-key-input').focus();
+    }
+  }
+
+  /** 按当前选中的 scope 显示/隐藏字段，并说明服务器 API 是否可用。 */
+  function applyScopeUi(scope) {
+    var isServer = scope === 'server';
+    var keyRow = $('api-key-input') ? $('api-key-input').closest('.api-key-row') || $('api-key-input') : null;
+    var keyLabel = $('api-key-label');
+    var customFields = $('api-custom-fields');
+    var modelLabel = document.querySelector('label[for="api-model-input"]');
+    var statusBox = $('api-server-status');
+
+    // 服务器 API：隐藏 Key 与地址/协议（都用管理员的），模型也由服务器定
+    if (keyLabel) keyLabel.hidden = isServer;
+    if (keyRow) keyRow.hidden = isServer;
+    if (customFields) customFields.hidden = isServer;
+    if (modelLabel) modelLabel.hidden = isServer;
+    if ($('api-model-input')) $('api-model-input').hidden = isServer;
+
+    if (!statusBox) return;
+    if (!isServer) { statusBox.hidden = true; statusBox.textContent = ''; return; }
+    statusBox.hidden = false;
+    statusBox.textContent = '正在查询服务器公共 API…';
+    statusBox.removeAttribute('data-tone');
+    fetchServerApiStatus(function (status) {
+      if (status.ready) {
+        statusBox.setAttribute('data-tone', 'ok');
+        statusBox.textContent = '✓ 服务器公共 API 可用' + (status.model ? '（模型 ' + status.model + '）' : '');
+      } else {
+        statusBox.setAttribute('data-tone', 'error');
+        statusBox.textContent = status.message || '服务器公共 API 不可用';
+      }
+    });
   }
 
   function providerSnapshot(providerId) {
@@ -119,7 +192,15 @@
     var selected = providerId || data.activeProvider;
     var saved = data.providers[selected] || {};
     var provider = PROVIDERS[selected];
-    if (!provider || !saved.apiKey) return null;
+    if (!provider) return null;
+
+    // 【本地/服务器 API · 2026-11-26】选服务器公共 API：不传任何 Key，
+    // 只带一个标记，由服务端补上公共配置（Key 永不下发浏览器）。
+    if (provider.custom && saved.useServer === true) {
+      return { provider: selected, useServer: true, scope: 'server' };
+    }
+
+    if (!saved.apiKey) return null;
     var snapshot = {
       provider: selected,
       apiKey: saved.apiKey,
@@ -136,6 +217,29 @@
     event.preventDefault();
     var provider = PROVIDERS[activeProvider];
     if (!provider) return;
+
+    // 【本地/服务器 API · 2026-11-26】自定义可以选"用服务器公共 API"：
+    // 这时不需要 Key、地址、模型，只记一个 useServer 标记。
+    var scopeRadio = document.querySelector('input[name="api-scope"]:checked');
+    var useServer = Boolean(provider.custom && scopeRadio && scopeRadio.value === 'server');
+
+    if (useServer) {
+      if (!serverApiStatus.checked || !serverApiStatus.ready) {
+        var box = $('api-server-status');
+        if (box) {
+          box.setAttribute('data-tone', 'error');
+          box.textContent = serverApiStatus.message || '服务器公共 API 不可用，无法保存；请改用「本地 API」填自己的 Key。';
+        }
+        return;   // 不保存不可用的配置，避免之后请求莫名失败
+      }
+      var dataServer = readStore();
+      dataServer.activeProvider = activeProvider;
+      dataServer.providers[activeProvider] = { useServer: true, scope: 'server' };
+      $('api-dialog').close();
+      toast(writeStore(dataServer) ? '已启用服务器公共 API' : '已启用（当前浏览器无法持久保存）');
+      return;
+    }
+
     var key = $('api-key-input').value.trim();
     if (!key) {
       $('api-key-input').setCustomValidity('请粘贴 API Key');
@@ -165,6 +269,7 @@
     if (provider.custom) {
       record.baseUrl = ($('api-baseurl-input').value || '').trim().replace(/\/+$/, '');
       record.protocol = $('api-protocol-input').value === 'responses' ? 'responses' : 'chat-completions';
+      record.scope = 'local';
     }
     data.providers[activeProvider] = record;
     $('api-key-input').setCustomValidity('');
@@ -255,6 +360,14 @@
     $('api-copy-key').addEventListener('click', copyKey);
     var removeBtn = $('api-remove-key');
     if (removeBtn) removeBtn.addEventListener('click', function () { removeKey(); });
+
+    // 【本地/服务器 API · 2026-11-26】切换 scope 时立刻调整可见字段
+    document.querySelectorAll('input[name="api-scope"]').forEach(function (radio) {
+      radio.addEventListener('change', function () {
+        if (radio.checked) applyScopeUi(radio.value);
+      });
+    });
+
     $('api-paste-key').addEventListener('click', pasteKey);
   }
 

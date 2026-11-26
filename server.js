@@ -1386,6 +1386,20 @@ async function handleLiterature(req, res, url) {
     if (req.method === 'GET' && route === '/api/literature/access-pages') {
       return sendJson(res, 200, { targets: await scholar.listAccessPages() });
     }
+    // 【公共 API · 2026-11-26】告诉前端"服务器公共 API 能不能用"。
+    // 只回状态与模型名，**绝不回 Key**（Key 只在服务端补，浏览器永远看不到）。
+    if (req.method === 'GET' && route === '/api/literature/public-api') {
+      const shared = publicApiConfig();
+      return sendJson(res, 200, {
+        ready: shared.ready,
+        model: shared.ready ? shared.model : '',
+        protocol: shared.ready ? shared.protocol : '',
+        baseUrl: shared.ready ? shared.baseUrl : '',
+        message: shared.ready
+          ? '服务器公共 API 可用'
+          : '服务器尚未配置公共 API（管理员需在服务器 .env 配置 PUBLIC_AI_BASE_URL / PUBLIC_AI_KEY / PUBLIC_AI_MODEL）'
+      });
+    }
     if (req.method === 'POST' && route === '/api/literature/access-status') {
       let source = 'wanfang';
       if (Number(req.headers['content-length'] || 0) > 0) {
@@ -1547,6 +1561,21 @@ function errorText(payload) {
 
 function normalizeCredential(raw) {
   if (!raw || typeof raw !== 'object') return null;
+
+  // 【公共 API · 2026-11-26】前端选了「服务器 API」：不带自己的 Key，
+  // 由服务端把管理员配好的公共通道填进来。浏览器永远拿不到这个 Key。
+  if (raw.useServer === true) {
+    const shared = publicApiConfig();
+    if (!shared.ready) return null;   // 调用方会回 503 并提示"服务器尚未配置公共 API"
+    return {
+      apiKey: shared.apiKey,
+      baseUrl: shared.baseUrl,
+      model: shared.model,
+      protocol: shared.protocol,
+      source: 'server-public'
+    };
+  }
+
   const provider = PROVIDERS[raw.provider] ? raw.provider : 'openai';
   const preset = PROVIDERS[provider];
   const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : '';
@@ -1564,6 +1593,28 @@ function normalizeCredential(raw) {
 // 【部署 · 2026-11-18】REQUIRE_USER_KEY=1（多人服务器模式）：只用请求里带的 Key，
 // 绝不回落到服务端 .env。否则任何访问者都能匿名消耗站长的额度。
 const REQUIRE_USER_KEY = process.env.REQUIRE_USER_KEY === '1';
+/**
+ * 【公共 API · 2026-11-26】管理员在服务器上配一套公共模型通道，供个人测试用。
+ * 学生的「自定义 API」里可以选「本地 API」（自己的 Key）或「服务器 API」（用这套公共的）。
+ *
+ * 配置项（.env，全部可选；配齐 baseUrl + apiKey + model 才算可用）：
+ *   PUBLIC_AI_BASE_URL=https://your-gateway/v1
+ *   PUBLIC_AI_KEY=sk-...
+ *   PUBLIC_AI_MODEL=gpt-5.6-sol
+ *   PUBLIC_AI_PROTOCOL=chat-completions   # 或 responses
+ *
+ * **Key 绝不下发给浏览器**：前端只知道"可用/不可用"，实际请求由服务端补上 Key。
+ * 这样即使页面被人看源码，也拿不到公共 Key。
+ */
+function publicApiConfig() {
+  const baseUrl = String(process.env.PUBLIC_AI_BASE_URL || '').trim().replace(/\/+$/, '');
+  const apiKey = String(process.env.PUBLIC_AI_KEY || '').trim();
+  const model = String(process.env.PUBLIC_AI_MODEL || '').trim();
+  const protocol = process.env.PUBLIC_AI_PROTOCOL === 'responses' ? 'responses' : 'chat-completions';
+  const ready = Boolean(baseUrl && apiKey && model);
+  return { ready, baseUrl, apiKey, model, protocol };
+}
+
 function resolveModelConfig(rawSettings) {
   const s = (rawSettings && typeof rawSettings === 'object') ? rawSettings : {};
   const cliKey = (typeof s.apiKey === 'string') ? s.apiKey.trim() : '';
@@ -1787,9 +1838,23 @@ function openResearchModel(data, { compose = codex.compose.bind(codex), callApi 
   const credential = normalizeCredential(data.credential);
   const cfg = Object.assign(resolveModelConfig(settings), credential || {});
   if (!cfg.apiKey) {
-    throw Object.assign(new Error(REQUIRE_USER_KEY
-      ? '尚未配置 API Key：点击左侧「添加 API」填入你自己的 Key（本站不提供共享 Key）。'
-      : '模型 API 尚未配置密钥，请在设置里填写或选择本机 Codex。'), { status: 503 });
+    // 【公共 API · 2026-11-26】选了「服务器 API」但管理员没配好时，说清是哪种情况，
+    // 别让人以为是自己的 Key 填错了。
+    const wantsServer = data.credential && data.credential.useServer === true;
+    const shared = publicApiConfig();
+    throw Object.assign(new Error(wantsServer && !shared.ready
+      ? '服务器公共 API 尚未配置：请联系管理员在服务器 .env 里配置 PUBLIC_AI_BASE_URL / PUBLIC_AI_KEY / PUBLIC_AI_MODEL，或改用「本地 API」填自己的 Key。'
+      : REQUIRE_USER_KEY
+        ? '尚未配置 API Key：点击左侧「添加 API」填入你自己的 Key（本站不提供共享 Key）。'
+        : '模型 API 尚未配置密钥，请在设置里填写或选择本机 Codex。'), { status: 503 });
+  }
+  // 【公共 API · 2026-11-26 关键】选了服务器 API 但公共配置不可用时，
+  // resolveModelConfig 会回落到服务端 .env 的 AI_API_KEY —— 那可能是管理员私人的 Key。
+  // 学生不该在"服务器公共 API 未配置"的情况下偷偷消耗它，直接拒绝并说清楚。
+  if (data.credential && data.credential.useServer === true && !publicApiConfig().ready) {
+    throw Object.assign(new Error(
+      '服务器公共 API 尚未配置，已拒绝本次调用（避免误用服务器上的私人密钥）。'
+      + '请联系管理员配置 PUBLIC_AI_* 环境变量，或改用「本地 API」。'), { status: 503 });
   }
   // A browser-selected endpoint may use its own key, or the matched server endpoint's key.
   if (!credential && !(typeof settings.apiKey === 'string' && settings.apiKey.trim()) && settings.baseUrl && cfg.baseUrl !== resolveModelConfig({}).baseUrl) {

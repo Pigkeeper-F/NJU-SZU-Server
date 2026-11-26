@@ -1371,3 +1371,53 @@ body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
   background: var(--panel);
   color: var(--text);
 }
+
+/* 【本地/服务器 API · 2026-11-26】自定义 API 弹窗里的来源切换 */
+.api-scope-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+.api-scope-picker[hidden] { display: none; }
+
+.api-scope-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+}
+.api-scope-option:hover { border-color: var(--accent-line); }
+.api-scope-option input[type="radio"] {
+  position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none;
+}
+.api-scope-name { font-size: 13px; font-weight: 600; }
+.api-scope-desc { font-size: 11px; line-height: 1.4; color: var(--muted); }
+.api-scope-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+@supports not selector(:has(*)) {
+  .api-scope-option input[type="radio"] {
+    position: static; opacity: 1; width: auto; height: auto; pointer-events: auto; margin-right: 5px;
+  }
+  .api-scope-option { flex-direction: row; align-items: center; flex-wrap: wrap; }
+}
+
+.api-server-status {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.api-server-status[data-tone="ok"] { color: #1f6b2c; }
+.api-server-status[data-tone="error"] { color: var(--danger); font-weight: 500; }
+
+@media (max-width: 480px) { .api-scope-picker { grid-template-columns: 1fr; } }
