@@ -289,13 +289,19 @@
       actions.insertBefore(startBtn, cancelBtn);
 
       // 监听确认进度：全部确认后显示开始按钮
+      // 【修复 · 2026-11-26】原来这个定时器每 400ms 无条件 setStatus 一次，即使文案没变，
+      // 等于每秒 2.5 次强制重排 —— 用户滚轮滑动时滚动条会被带着抖（主人报的「闪切屏」）。
+      // 现在：全部确认后立刻停表，不再空转。
       var observer = setInterval(function () {
         if (settled) { clearInterval(observer); return; }
         if (!review || !Array.isArray(review.items)) return;
         var all = review.items.length && review.items.every(function (item) { return item.status === 'confirmed'; });
         startBtn.hidden = !all;
         confirmAllBtn.hidden = all;
-        if (all) setStatus('全部 ' + review.items.length + ' 项已确认，可以开始检索。', 'ok');
+        if (all) {
+          clearInterval(observer);
+          setStatus('全部 ' + review.items.length + ' 项已确认，可以开始检索。', 'ok');
+        }
       }, 400);
       dlg.addEventListener('close', function () { clearInterval(observer); });
     });

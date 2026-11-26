@@ -1477,8 +1477,9 @@ body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
 
 /* 【逐项核查 · 2026-11-26】九步流程文献调研的核查弹窗 */
 .rre-dialog {
-  max-width: 640px;
-  width: calc(100vw - 32px);
+  /* 收口用 min()：窗口窄时按 100vw-32px，宽时最多 640px。
+     原来只写 max-width + width: calc(100vw-32px)，在 1024 窗口下会溢出。 */
+  width: min(640px, calc(100vw - 32px));
   max-height: 86vh;
   padding: 0;
   border: 1px solid var(--border);
@@ -1486,12 +1487,27 @@ body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
   box-shadow: var(--shadow);
   background: var(--panel);
   color: var(--text);
+  /* 【修复 · 2026-11-26】dialog 的 UA 样式是 overflow:auto，而表单高度 86vh
+     比对话框内容盒正好高 2px（86vh 减去上下各 1px 边框）。于是滚轮滚到底时
+     双层容器互相抢事件：.rre-body 滚到头 → dialog 自己滚 2px → 再弹回 0，
+     来回抖就是主人看到的「一直在闪切屏」。让 dialog 不参与滚动，只留一层。 */
+  overflow: hidden;
 }
+/* 注意：display 必须限定在 [open] 上。直接写 .rre-dialog{display:flex} 会盖掉
+   UA 的 dialog:not([open]){display:none}，让关掉的弹窗还占着屏幕（实测 offsetWidth>0）。 */
+.rre-dialog[open] { display: flex; flex-direction: column; }
 .rre-dialog::backdrop { background: rgba(16, 24, 40, 0.34); }
-.rre-form { display: flex; flex-direction: column; max-height: 86vh; padding: 20px 22px 16px; }
+.rre-form {
+  display: flex; flex-direction: column;
+  flex: 1 1 auto; min-height: 0;      /* 由 dialog 的 max-height 收口，不自己定 86vh */
+  padding: 20px 22px 16px;
+  overflow: hidden;
+}
 .rre-form h3 { margin: 0 0 8px; font-size: 16px; }
 .rre-hint { margin: 0 0 14px; font-size: 12.5px; line-height: 1.65; color: var(--muted); }
-.rre-body { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-right: 4px; }
+/* overscroll-behavior: contains 让滚轮到头就停住，不把事件冒泡给外层容器
+   （少了这行，滚到底会连环触发祖先滚动，观感上就是"闪一下"）。 */
+.rre-body { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-right: 4px; overscroll-behavior: contain; }
 .rre-loading, .rre-error { padding: 18px 4px; font-size: 13px; color: var(--muted); }
 .rre-error { color: var(--danger); }
 
