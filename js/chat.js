@@ -391,50 +391,6 @@
     });
   }
 
-  /**
-   * 【登录页 · 2026-11-26 主人定】点按钮 → 在**你自己的浏览器**里打开官方登录页。
-   *
-   * 为什么不在服务器上开：那需要一个带桌面的持久化浏览器（要扫码、要输账号，
-   * 还要能用机构网络）。服务器没有桌面环境，起不来；就算起来了人也看不到窗口。
-   * 登录本来就该发生在用户自己的机器上——登录后会话存在他自己浏览器里，
-   * 之后拿着这个会话去检索即可。
-   */
-  function openAccessPageHere(label, target) {
-    // 先在当前点击事件里同步开一个空白窗，避免异步回来后被浏览器当弹窗拦截
-    var win = null;
-    try { win = window.open('', '_blank'); } catch (e) { win = null; }
-    return chatAccessGet('/api/literature/access-pages')
-      .then(function (data) {
-        var list = (data && data.targets) || [];
-        var found = list.filter(function (item) { return item.key === target; })[0] || null;
-        if (!found || !/^https?:\/\//.test(found.url)) {
-          if (win) win.close();
-          throw new Error('没有找到「' + label + '」的登录地址');
-        }
-        if (win) { win.location.href = found.url; }
-        else { window.open(found.url, '_blank', 'noopener'); }
-        return found;
-      })
-      .catch(function (error) {
-        if (win) { try { win.close(); } catch (e) { /* 忽略 */ } }
-        throw error;
-      });
-  }
-
-  /** GET 版的小工具（登录页清单用；POST 的 chatAccessFetch 不适用）。 */
-  function chatAccessGet(url) {
-    return fetch(url, { headers: { 'X-Workbench': '1' } }).then(function (response) {
-      return response.json().then(function (data) {
-        if (!response.ok) {
-          var error = new Error((data && data.error) || '请求失败');
-          if (data && data.hint) error.hint = data.hint;
-          throw error;
-        }
-        return data;
-      });
-    });
-  }
-
   function buildChatAccessPanel() {
     var box = el('div', 'chat-access-panel');
     var status = el('p', 'chat-access-status',
@@ -874,6 +830,163 @@
     return { reference: '参考文献', citing: '被引文献', similar: '相似文献' }[String(key || '')] || String(key || '');
   }
 
+  /* ============================================================
+   * 【知识库登录 · 2026-11-26】检索来源那一行的「登录」按钮 + 未登录提醒
+   * ------------------------------------------------------------
+   * 登录态怎么判断，分两轨（主人 2026-11-26 定）：
+   *   ① 能探测就探测：本机 Windows + 桌面环境下，服务端能起浏览器读真实登录态，
+   *      调 POST /api/literature/access-status 拿 signedIn。
+   *   ② 探测不了就用标记：服务器没有桌面环境（实测返回 ACCESS_PAGE_UNAVAILABLE），
+   *      这时退回「用户自己点了『我已登录』」的本地标记 —— 存在浏览器 localStorage。
+   *      界面上会写明这是自报状态，不假装是服务器核验过的。
+   *
+   * 登录页地址由 GET /api/literature/access-pages 提供（固定官方 URL 白名单）。
+   * ============================================================ */
+
+  var ACCESS_MARK_KEY = 'yanxu_access_marks';        // { cnki: true, wanfang: true, ... }
+  var ACCESS_LABEL_KEY = 'yanxu_access_marks_at';    // { cnki: ISO 时间 }
+  var accessProbe = { state: 'idle', at: 0, results: null, unsupported: false };
+
+  /** 库里对应的登录目标：勾选框的 key → 登录按钮用的 target */
+  var SOURCE_TO_ACCESS = {
+    'cnki': 'cnki',
+    'wanfang': 'institution',
+    'web-of-science': 'wos',
+    'scopus': 'scopus',
+    'google-scholar': ''      // Google Scholar 不需要机构登录
+  };
+
+  /** 用户自己标记过的已登录库（只在探测不可用时才用）。 */
+  function readAccessMarks() {
+    try {
+      var raw = root.localStorage.getItem(ACCESS_MARK_KEY);
+      var parsed = raw ? JSON.parse(raw) : null;
+      return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+    } catch (e) { return {}; }
+  }
+  function writeAccessMark(key, on) {
+    try {
+      var marks = readAccessMarks();
+      var at = {};
+      try { at = JSON.parse(root.localStorage.getItem(ACCESS_LABEL_KEY) || '{}') || {}; } catch (e) { at = {}; }
+      if (on) { marks[key] = true; at[key] = new Date().toISOString(); }
+      else { delete marks[key]; delete at[key]; }
+      root.localStorage.setItem(ACCESS_MARK_KEY, JSON.stringify(marks));
+      root.localStorage.setItem(ACCESS_LABEL_KEY, JSON.stringify(at));
+      return true;
+    } catch (e) { return false; }
+  }
+  function accessMarkTime(key) {
+    try {
+      var at = JSON.parse(root.localStorage.getItem(ACCESS_LABEL_KEY) || '{}') || {};
+      var iso = at[key];
+      if (!iso) return '';
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return '';
+      return (d.getMonth() + 1) + '-' + (d.getDate() < 10 ? '0' : '') + d.getDate();
+    } catch (e) { return ''; }
+  }
+
+  /** 探测一次真实登录状态；不支持就标记 unsupported，界面据此退回本地标记。 */
+  function probeAccessStatus(done) {
+    var cb = (typeof done === 'function') ? done : function () {};
+    if (accessProbe.state === 'done') { cb(accessProbe); return; }
+    if (accessProbe.state === 'loading') { cb(accessProbe); return; }
+    accessProbe.state = 'loading';
+    chatAccessFetch('/api/literature/access-status', { source: 'all' })
+      .then(function (result) {
+        accessProbe.state = 'done';
+        accessProbe.at = Date.now();
+        accessProbe.unsupported = false;
+        accessProbe.results = Array.isArray(result.results) ? result.results : [];
+        cb(accessProbe);
+      })
+      .catch(function (error) {
+        accessProbe.state = 'done';
+        accessProbe.at = Date.now();
+        accessProbe.results = null;
+        // 服务端明确说"这台机器做不到"→ 用本地标记；其他错误也走同一条退路，
+        // 但不静默：界面会写明"未能核验，按标记判断"。
+        accessProbe.unsupported = true;
+        accessProbe.reason = (error && error.message) || '无法读取登录状态';
+        cb(accessProbe);
+      });
+  }
+
+  /**
+   * 某个来源现在算不算"已登录"。
+   * -> { known: bool, signed: bool, source: 'probe'|'mark'|'none' }
+   *    known=false 表示既没探测到也没有标记 —— 界面按"未登录"提醒，但说明是自报。
+   */
+  function accessStateOf(sourceKey) {
+    var target = SOURCE_TO_ACCESS[sourceKey];
+    if (target === '') return { known: true, signed: true, source: 'none' };  // Scholar 无需登录
+
+    // ① 探测优先
+    if (accessProbe.results) {
+      var labels = { cnki: '知网', wanfang: '万方', wos: 'Web of Science', scopus: 'Scopus' };
+      var wanted = labels[target] || '';
+      for (var i = 0; i < accessProbe.results.length; i++) {
+        var item = accessProbe.results[i];
+        if (item && item.label === wanted) {
+          return { known: true, signed: item.signedIn === true, source: 'probe' };
+        }
+      }
+    }
+
+    // ② 退回本地标记
+    var marks = readAccessMarks();
+    if (marks[target]) return { known: true, signed: true, source: 'mark', at: accessMarkTime(target) };
+    if (!target) return { known: true, signed: true, source: 'none' };
+    return { known: false, signed: false, source: 'mark' };
+  }
+
+  /** 当前勾选里有哪几个"未登录/未知"的库（用来渲染红字）。 */
+  function unreadySelected(sources) {
+    var out = [];
+    for (var i = 0; i < sources.length; i++) {
+      var st = accessStateOf(sources[i]);
+      if (!st.signed) out.push({ key: sources[i], label: researchSourceLabel(sources[i]), state: st });
+    }
+    return out;
+  }
+
+  /** 打开某个库的官方登录页（在用户自己的浏览器里）。 */
+  function openAccessPageHere(label, target) {
+    // 先同步开空白窗，避免异步 fetch 回来后被浏览器当弹窗拦截
+    var win = null;
+    try { win = window.open('', '_blank'); } catch (e) { win = null; }
+    return chatAccessGet('/api/literature/access-pages')
+      .then(function (data) {
+        var list = (data && data.targets) || [];
+        var found = list.filter(function (item) { return item.key === target; })[0] || null;
+        if (!found || !/^https?:\/\//.test(found.url)) {
+          if (win) { try { win.close(); } catch (e) { /* 忽略 */ } }
+          throw new Error('没有找到「' + label + '」的登录地址');
+        }
+        if (win) { win.location.href = found.url; }
+        else { window.open(found.url, '_blank', 'noopener'); }
+        return found;
+      })
+      .catch(function (error) {
+        if (win) { try { win.close(); } catch (e) { /* 忽略 */ } }
+        throw error;
+      });
+  }
+
+  function chatAccessGet(url) {
+    return fetch(url, { headers: { 'X-Workbench': '1' } }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok) {
+          var error = new Error((data && data.error) || '请求失败');
+          if (data && data.hint) error.hint = data.hint;
+          throw error;
+        }
+        return data;
+      });
+    });
+  }
+
   function buildResearchPanel(mod) {
     if (!mod || mod.type !== 'literature-research') return null;
     var state = uiOf(mod.id).research || (uiOf(mod.id).research = {
@@ -892,6 +1005,12 @@
     if (state.searchMode !== 'formal') { state.searchMode = 'test'; state.stopMode = 'count'; state.perSourceLimit = 10; }
     if (!literatureSourceCache) {
       loadLiteratureSources(function (list) { if (list && list.length) render(); });
+    }
+    // 【知识库登录 · 2026-11-26】进面板时试着探测一次真实登录状态。
+    // 成功 → 按服务器核验；失败（服务器无桌面）→ 自动退回本地标记，界面会写明。
+    // 只探一次：accessProbe 里记着状态，不会每帧重打接口。
+    if (accessProbe.state === 'idle') {
+      probeAccessStatus(function () { render(); });
     }
     // 刷新后恢复：作业 id 记在模块参数上，候选清单按它重新拉回（否则初筛界面会丢）
     if (!state.jobId && mod.params && typeof mod.params.researchJobId === 'string') {
@@ -1009,6 +1128,64 @@
       })(sourceOptions[si]);
     }
     if (!pendingNote) box.appendChild(sourceRow);
+
+    // 【知识库登录 · 2026-11-26】未登录提醒（红字）挂在检索来源这一行右侧，
+    // 紧跟在勾选框后面，用户勾上就知道还差哪一步。
+    if (!pendingNote) {
+      var unready = unreadySelected(state.sources);
+      if (unready.length) {
+        var warn = el('span', 'research-source-warn',
+          '暂无' + unready.map(function (item) { return item.label; }).join('、') + '知识库权限，请在下方登录对应知识库');
+        sourceRow.appendChild(warn);
+      }
+    }
+
+    // 【知识库登录 · 2026-11-26】登录按钮行：放在「检索来源」与「通用检索式」之间。
+    // 只列需要机构权限的四个库；Google Scholar 不用登录，所以不放按钮。
+    if (!pendingNote) {
+      var loginRow = el('div', 'research-login-row');
+      loginRow.appendChild(el('span', 'research-login-label', '登录对应知识库：'));
+      var ACCESS_BUTTONS = [
+        ['cnki', '知网', 'cnki'],
+        ['wanfang', '万方', 'institution'],
+        ['wos', 'Web of Science', 'wos'],
+        ['scopus', 'Scopus', 'scopus']
+      ];
+      ACCESS_BUTTONS.forEach(function (spec) {
+        var sourceKey = spec[0], label = spec[1], target = spec[2];
+        var st = accessStateOf(sourceKey);
+        var btn = el('button', 'quiet-button research-login-btn');
+        btn.type = 'button';
+        btn.setAttribute('data-source', sourceKey);
+        btn.setAttribute('data-signed', st.signed ? 'true' : 'false');
+        // 已登录的库按钮变淡并加勾，一眼看出还差哪个
+        btn.textContent = (st.signed ? '✓ ' : '') + label;
+        if (st.signed) btn.title = st.source === 'probe' ? '服务器已核验：该库已登录' : '你标记为已登录';
+        else btn.title = '在你自己浏览器打开「' + label + '」的官方登录页';
+        btn.addEventListener('click', function () {
+          // 点击 = 打开登录页；同时记一个本地标记，供"探测不可用"时使用。
+          // 标记只是"你说你登了"，不是服务器核验结果——界面上会写明。
+          openAccessPageHere(label, target).then(function () {
+            writeAccessMark(target, true);
+            state.message = '已打开「' + label + '」登录页，请在新标签页完成登录，然后回到这里继续';
+            render();
+          }).catch(function (error) {
+            state.message = '打开登录页失败：' + (error && error.message ? error.message : '网络异常');
+            render();
+          });
+        });
+        loginRow.appendChild(btn);
+      });
+
+      // 小字说明判断依据：探测到了就说"服务器已核验"，没探测到就说清是自报
+      var basis = el('span', 'research-login-basis');
+      if (accessProbe.results) basis.textContent = '（状态：服务器已核验）';
+      else if (accessProbe.unsupported) basis.textContent = '（服务器无法核验，按你自己标记判断）';
+      else basis.textContent = '（点按钮会打开该库官方登录页）';
+      loginRow.appendChild(basis);
+
+      box.appendChild(loginRow);
+    }
 
     var multiSource = state.sources.length > 1 || state.sources[0] !== 'google-scholar';
     var queryRow = el('label', 'research-field');

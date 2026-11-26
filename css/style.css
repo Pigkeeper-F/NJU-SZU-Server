@@ -1296,3 +1296,52 @@ body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
   line-height: 1.6;
   color: var(--muted);
 }
+
+/* ------------------------------------------------------------------
+ * 【知识库登录 · 2026-11-26】检索来源右侧的未登录提醒 + 登录按钮行
+ * ---------------------------------------------------------------- */
+.research-source-warn {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1.5;
+  /* 允许换行：勾了三个库时这句会很长，不能撑破面板 */
+  white-space: normal;
+}
+
+.research-login-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin: -2px 0 10px;
+}
+
+.research-login-label {
+  font-size: 12px;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+.research-login-btn {
+  font-size: 12px;
+  padding: 3px 10px;
+  line-height: 1.5;
+}
+
+/* 已登录：变淡 + 绿勾，和"还差哪个"形成对比 */
+.research-login-btn[data-signed="true"] {
+  color: #1f6b2c;
+  border-color: #c9e5cb;
+  background: #eaf5ea;
+}
+
+.research-login-basis {
+  font-size: 11px;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
