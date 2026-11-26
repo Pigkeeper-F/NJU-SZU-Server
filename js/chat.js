@@ -1668,6 +1668,47 @@
       var custom = String(state.perSource[sources[qi]] || '').trim();
       if (custom) sourceQueries[sources[qi]] = custom;
     }
+
+    // 先构造 config —— 它与「逐项核查」里看到的内容必须**完全一致**，
+    // 服务端会逐字节比对，不一致会回 REVIEW_CONFIG_MISMATCH。
+    var searchConfig = {
+      topic: state.topic, query: query, sources: sources,
+      sourceQueries: sourceQueries, limit: 10
+    };
+    if (state.searchMode === 'formal') {
+      searchConfig.searchMode = 'formal';
+      searchConfig.stopMode = state.stopMode === 'end' ? 'end' : 'count';
+      searchConfig.perSourceLimit = state.stopMode === 'end' ? null : Number(state.perSourceLimit || 100);
+    }
+
+    // 【逐项核查 · 2026-11-26】服务端 /api/literature/search 强制要求 reviewId，
+    // 而 reviewId 只能由人工逐项确认产生。九步面板原来没有这个入口，
+    // 于是点「检索」必然报「请先完成逐项核查」——按钮看起来是死的。
+    // 现在先弹核查；确认完拿到凭证才继续，取消就什么都不做。
+    var reviewGate = root.ResearchRuleReview;
+    if (!reviewGate || typeof reviewGate.open !== 'function') {
+      state.message = '逐项核查组件未加载，无法开始检索（请刷新页面）';
+      render();
+      return;
+    }
+    state.message = '请先逐项核查检索配置…';
+    render();
+    reviewGate.open(searchConfig, 'discover', '').then(function (ticket) {
+      if (!ticket) {                      // 用户取消：恢复原状，不制造假进度
+        state.message = '已取消核查，未开始检索';
+        render();
+        return;
+      }
+      startResearchSearch(mod, state, searchConfig, ticket);
+    }).catch(function (error) {
+      state.message = '核查失败：' + (error && error.message ? error.message : '未知错误');
+      render();
+    });
+  }
+
+  /** 真正发起检索（拿到核查凭证之后）。 */
+  function startResearchSearch(mod, state, searchConfig, ticket) {
+    var sources = searchConfig.sources.slice();
     state.busy = true;
     state.phase = '正在检索 ' + sources.map(researchSourceLabel).join('、');
     state.startedAt = Date.now();
@@ -1682,23 +1723,22 @@
 
     var jobId = '';
     var finalJob = null;
-    var searchConfig = {
-      topic: state.topic, query: query, sources: sources,
-      sourceQueries: sourceQueries, limit: 10
-    };
-    if (state.searchMode === 'formal') {
-      searchConfig.searchMode = 'formal';
-      searchConfig.stopMode = state.stopMode === 'end' ? 'end' : 'count';
-      searchConfig.perSourceLimit = state.stopMode === 'end' ? null : Number(state.perSourceLimit || 100);
-    }
     var pollLimitMs = state.searchMode === 'formal'
       ? (state.stopMode === 'end' ? 45 * 60 * 1000 : 20 * 60 * 1000)
       : 4 * 60 * 1000;
     var pollLimitText = state.searchMode === 'formal'
       ? (state.stopMode === 'end' ? '45 分钟' : '20 分钟')
       : '4 分钟';
+    // 【逐项核查 · 2026-11-26】带上核查凭证：服务端据此确认"这份配置被人逐项看过"。
+    // reviewRevision 也要带，服务端会核对版本，防止确认后被改过。
     researchPost('/api/literature/search', {
-      config: searchConfig
+      config: searchConfig,
+      reviewId: ticket.reviewId,
+      reviewRevision: ticket.revision,
+      sessionId: ticket.sessionId || '',
+      // workspaceId 必须显式给字符串：不传是 undefined，服务端 text() 校验会判 400
+      workspaceId: '',
+      until: ticket.until || 'discover'
     }, state.abort.signal).then(function (started) {
       jobId = started && started.id ? started.id : '';
       if (!jobId) throw new Error('检索作业没有返回标识');
