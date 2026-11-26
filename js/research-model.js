@@ -35,6 +35,13 @@
     if (choice !== 'api') throw new Error('请重新选择本环节的研究助手。');
     const groups = root.Store.llmSettings;
     const settings = groups.resolve(groups.read());
+    // 【修复 · 2026-11-26】这一档原来只看左下角齿轮里的模型分组，
+    // 完全忽略「添加 API」里存的凭据 —— 用户在弹窗里填了自定义网关，
+    // 选 API 后仍然报"尚未配置 API Key"（服务器上实测到的就是这个）。
+    // 现在优先用「添加 API」里的凭据（含自定义 baseUrl），没有才退回模型分组。
+    var apiCredential = root.ApiKeys && root.ApiKeys.getActiveCredential
+      ? root.ApiKeys.getActiveCredential() : null;
+    if (apiCredential) return { backend: 'api', credential: apiCredential };
     return { backend: 'api', settings: settings || {} };
   }
 
