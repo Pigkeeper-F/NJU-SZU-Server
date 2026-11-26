@@ -3806,4 +3806,18 @@
   }
 
   root.ModuleSpace = { render: render, sendText: sendText, isBusy: isBusy, discussDownloadVerification: discussDownloadVerification, snapshotContext: snapshotContext, resetContext: resetContext };
+  // 【调试 · 2026-11-26】把登录态判断的内部状态暴露出来，方便排查
+  // "为什么某个库显示成已登录"。只读快照，不含任何凭据。
+  root.ChatAccessDebug = function () {
+    return {
+      probeState: accessProbe.state,
+      probeUnsupported: accessProbe.unsupported,
+      probeReason: accessProbe.reason || '',
+      probeResults: accessProbe.results ? accessProbe.results.map(function (r) { return { label: r.label, signedIn: r.signedIn }; }) : null,
+      marks: readAccessMarks(),
+      resolved: ['cnki', 'wanfang', 'web-of-science', 'scopus'].map(function (k) {
+        var st = accessStateOf(k); return { key: k, signed: st.signed, known: st.known, source: st.source };
+      })
+    };
+  };
 })(typeof window !== 'undefined' ? window : this);
