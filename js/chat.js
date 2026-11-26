@@ -1065,21 +1065,33 @@
       }
     }
 
-    /** 把当前输入写回模块参数（防抖：连续输入不反复落盘）。 */
+    /** 把当前输入写回模块参数（防抖 600ms，且静默写入）。 */
     if (!state.__draftBound) {
       state.__draftBound = true;
-      state.__saveDraft = function () {
-        var Store = getStore();
-        if (!Store || typeof Store.setModuleParam !== 'function') return;
-        Store.setModuleParam(mod.id, 'researchDraft', {
-          topic: String(state.topic || ''),
-          query: String(state.query || ''),
-          perSource: state.perSource || {},
-          sources: Array.isArray(state.sources) ? state.sources.slice() : ['google-scholar'],
-          searchMode: state.searchMode,
-          stopMode: state.stopMode,
-          perSourceLimit: state.perSourceLimit
-        });
+      state.__saveDraft = function (immediate) {
+        // ① 防抖：连打时不要每个字符都写一次 localStorage。
+        //    勾选框/下拉这类"点一下就定下来"的传 true 立即写。
+        // ② 静默写入（setModuleParamSilent）：走 setModuleParam 会 emit，
+        //    App 订阅到就全量重渲染，输入框被重建 —— 于是"只能输入一个字"、
+        //    还伴随页面跳回顶部（实测主人报的就是这两个症状）。
+        if (state.__draftTimer) clearTimeout(state.__draftTimer);
+        var run = function () {
+          var Store = getStore();
+          if (!Store) return;
+          var write = Store.setModuleParamSilent || Store.setModuleParam;
+          if (typeof write !== 'function') return;
+          write.call(Store, mod.id, 'researchDraft', {
+            topic: String(state.topic || ''),
+            query: String(state.query || ''),
+            perSource: state.perSource || {},
+            sources: Array.isArray(state.sources) ? state.sources.slice() : ['google-scholar'],
+            searchMode: state.searchMode,
+            stopMode: state.stopMode,
+            perSourceLimit: state.perSourceLimit
+          });
+        };
+        if (immediate === true) run();
+        else state.__draftTimer = setTimeout(function () { state.__draftTimer = null; run(); }, 600);
       };
     }
 
@@ -1221,7 +1233,7 @@
           }
           state.sources = next;
           state.message = '';
-          if (state.__saveDraft) state.__saveDraft();
+          if (state.__saveDraft) state.__saveDraft(true);
           render();
         });
         wrap.appendChild(cb);

@@ -1042,6 +1042,31 @@
    * 设置环节参数（如文章撰写环节的「目标期刊」）。
    * 只接受字符串键值，单值截断 500 字符；非法入参返回 false，不改状态。
    */
+  /**
+   * 静默写模块参数：只落盘，不发 emit。
+   * 【2026-11-26】给"边输入边保存"用的。走 setModuleParam 会 emit('module:param')，
+   * App 订阅到就全量重渲染 —— 输入框被重建，于是每按一个键就丢焦点、
+   * 页面还跳回顶部（实测主人遇到的"只能输入一个字"）。这里只更新内存并持久化。
+   */
+  function setModuleParamSilent(id, key, value) {
+    var mod = findModule(id);
+    if (!mod) return false;
+    if (typeof key !== 'string' || !key) return false;
+    if (!mod.params || typeof mod.params !== 'object' || Array.isArray(mod.params)) mod.params = {};
+    if (typeof value === 'string') {
+      mod.params[key] = value.slice(0, 2000);
+    } else if (value && typeof value === 'object') {
+      var encoded;
+      try { encoded = JSON.stringify(value); } catch (e) { return false; }
+      if (typeof encoded !== 'string' || encoded.length > 8000) return false;
+      try { mod.params[key] = JSON.parse(encoded); } catch (e) { return false; }
+    } else {
+      mod.params[key] = '';
+    }
+    persist();   // 只写 localStorage，不广播
+    return true;
+  }
+
   function setModuleParam(id, key, value) {
     var mod = findModule(id);
     if (!mod) return false;
@@ -1779,6 +1804,7 @@
     rejectModule: rejectModule,
     // —— 环节参数（2026-10-20：文章撰写环节的「目标期刊」等）
     setModuleParam: setModuleParam,
+    setModuleParamSilent: setModuleParamSilent,
     // —— 环节文档（用户与 AI 协商的标准文档 + 人工审核）
     saveDoc: saveDoc,
     saveReviewEvidence: saveReviewEvidence,
