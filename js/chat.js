@@ -755,20 +755,37 @@
   }
 
   // 【多源检索 · 2026-10-22】来源清单从服务端注册表取（不在前端写死），缓存一次。
+  // 【修复 · 2026-11-26】原来失败时把缓存写成"只有 Google Scholar"的降级数组，
+  // 之后永远不再重试——用户看到的就永远是一个来源，而且完全不知道为什么
+  // （实测：接口本身返回 5 个来源，但界面只剩一个，找不到原因）。
+  // 改成：失败不写缓存（下次进这个界面自动重试），并把失败状态记下来告知界面。
   var literatureSourceCache = null;
   var literatureSourceLoading = false;
+  var literatureSourceError = '';
+  var literatureSourceRetryAt = 0;   // 失败后冷却 5 秒再重试，避免每次 render 都打一次
+
   function loadLiteratureSources(done) {
-    if (literatureSourceCache) { done(literatureSourceCache); return; }
-    if (literatureSourceLoading) return;
+    var cb = (typeof done === 'function') ? done : function () {};
+    if (literatureSourceCache) { cb(literatureSourceCache); return; }
+    // 【修复 · 2026-11-26】原来这两条分支都是裸 return，不回调 done，
+    // 调用方（重试按钮）等不到回调就永远停在"读取中"，看起来像重试无效。
+    // 现在保证任何路径都回调一次，并把"为什么没好"说清楚。
+    if (literatureSourceLoading) { cb(null); return; }
+    if (Date.now() < literatureSourceRetryAt) { cb(null); return; }
     literatureSourceLoading = true;
     researchGet('/api/literature/sources').then(function (data) {
-      literatureSourceCache = (data && Array.isArray(data.sources)) ? data.sources : [];
+      var list = (data && Array.isArray(data.sources)) ? data.sources : [];
+      if (!list.length) throw new Error('服务端没有返回可用的检索来源');
+      literatureSourceCache = list;
+      literatureSourceError = '';
       literatureSourceLoading = false;
-      done(literatureSourceCache);
-    }).catch(function () {
-      literatureSourceCache = [{ key: 'google-scholar', label: 'Google Scholar', access: 'browser' }];
+      cb(literatureSourceCache);
+    }).catch(function (error) {
+      // 不写缓存：保留重试机会
+      literatureSourceError = (error && error.message) ? error.message : '来源清单读取失败';
+      literatureSourceRetryAt = Date.now() + 5000;
       literatureSourceLoading = false;
-      done(literatureSourceCache);
+      cb(null);
     });
   }
   function researchSourceLabel(key) {
@@ -841,11 +858,42 @@
 
     // 【多源检索 · 2026-10-22】来源多选：开放 API 源（PubMed/OpenAlex 等）免验证码，
     // 与 Scholar 同批合并，重复条目按 DOI/标题去掉。
-    var sourceOptions = (literatureSourceCache && literatureSourceCache.length)
-      ? literatureSourceCache
-      : [{ key: 'google-scholar', label: 'Google Scholar', access: 'browser' }];
+    // 【修复 · 2026-11-26】还没拿到来源清单时，不再假装"只有 Google Scholar 可选"——
+    // 那会让用户以为平台只支持一个库（实测就是这个误解）。
+    // 改为：加载中显示「正在读取来源…」，失败显示「读取失败 + 重试」。
     var sourceRow = el('div', 'research-sources');
     sourceRow.appendChild(el('span', 'research-label', '检索来源'));
+
+    // pendingNote：来源清单还没到手。为真时不渲染检索式/检索按钮，
+    // 但仍然渲染「导入清单」（离线兜底路径不依赖来源清单）。
+    var pendingNote = false;
+    if (!literatureSourceCache) {
+      pendingNote = true;
+      if (literatureSourceError) {
+        sourceRow.appendChild(el('span', 'research-source-error',
+          '来源清单读取失败：' + literatureSourceError));
+        var retry = el('button', 'quiet-button', '重试');
+        retry.type = 'button';
+        retry.addEventListener('click', function () {
+          // 【修复 · 2026-11-26】重试要三件事一起做，少一件就恢复不了：
+          //   1) 清掉错误信息（否则 render 又走失败分支）
+          //   2) 清掉冷却时间（否则被 5 秒节流直接挡掉）
+          //   3) 再调一次加载
+          literatureSourceError = '';
+          literatureSourceRetryAt = 0;
+          loadLiteratureSources(function () { render(); });
+          render();   // 立刻重画成"读取中"，给用户即时反馈
+        });
+        sourceRow.appendChild(retry);
+      } else {
+        sourceRow.appendChild(el('span', 'research-source-loading', '正在读取可用来源…'));
+        loadLiteratureSources(function () { render(); });
+      }
+      box.appendChild(sourceRow);
+      box.appendChild(el('div', 'research-sources-pending',
+        '来源清单就绪后才能填写检索式并检索。先用下面的导入清单也可以继续工作。'));
+    }
+    var sourceOptions = literatureSourceCache || [];
     for (var si = 0; si < sourceOptions.length; si++) {
       (function (source) {
         var wrap = el('label', 'research-source');
@@ -873,7 +921,7 @@
         sourceRow.appendChild(wrap);
       })(sourceOptions[si]);
     }
-    box.appendChild(sourceRow);
+    if (!pendingNote) box.appendChild(sourceRow);
 
     var multiSource = state.sources.length > 1 || state.sources[0] !== 'google-scholar';
     var queryRow = el('label', 'research-field');
@@ -999,7 +1047,10 @@
     var actions = el('div', 'research-actions');
     var runBtn = el('button', 'status-btn status-btn-primary', state.busy ? '调研中…' : '检索');
     runBtn.type = 'button';
-    runBtn.disabled = state.busy === true;
+    // 【修复 · 2026-11-26】来源清单没拿到时禁用检索：否则点了只会拿默认的
+    // Google Scholar 去查，用户以为平台不支持其他库（实测的误解就是这样来的）。
+    runBtn.disabled = state.busy === true || pendingNote;
+    if (pendingNote) runBtn.title = '来源清单还没读取到，暂时不能检索';
     runBtn.addEventListener('click', function () {
       state.topic = topicInput.value.trim();
       state.query = queryInput.value.trim();

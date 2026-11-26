@@ -1285,3 +1285,14 @@ body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
   body.literature-reading-view #module-space .status-actions { margin-left: 0; }
   body.literature-reading-view #module-space .spec-row { flex-wrap: wrap; }
 }
+
+/* 【修复 · 2026-11-26】来源清单读取中/失败时的提示。
+   原来取不到就把缓存写成"只有 Google Scholar"，用户会以为平台只支持一个库。 */
+.research-source-loading { font-size: 12px; color: var(--muted); }
+.research-source-error { font-size: 12px; color: var(--danger); }
+.research-sources-pending {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
