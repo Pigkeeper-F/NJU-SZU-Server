@@ -15,6 +15,16 @@
       defaultModel: 'gpt-5-mini',
       protocol: 'responses',
       baseUrl: 'https://api.openai.com/v1'
+    },
+    // 【自定义 · 2026-11-26】任何 OpenAI 兼容网关（自建代理、第三方中转、本地 vLLM 等）。
+    // 地址、模型、协议都由用户填，不再写死。
+    // 默认空 baseUrl：强制用户自己填，避免误用成某个具体厂商。
+    custom: {
+      label: '自定义',
+      defaultModel: '',
+      protocol: 'chat-completions',
+      baseUrl: '',
+      custom: true
     }
   };
 
@@ -82,10 +92,24 @@
     var provider = PROVIDERS[providerId];
     $('api-dialog-eyebrow').textContent = provider.label.toUpperCase();
     $('api-dialog-title').textContent = '添加 ' + provider.label + ' API';
-    $('api-dialog-description').textContent = '保存后，AI 对话会优先使用这个 ' + provider.label + ' 密钥。';
+    $('api-dialog-description').textContent = provider.custom
+      ? '填任意 OpenAI 兼容接口：地址、模型、协议都按你用的网关来。密钥只保存在当前浏览器。'
+      : '保存后，AI 对话会优先使用这个 ' + provider.label + ' 密钥。';
     $('api-key-label').textContent = provider.label + ' API Key';
     $('api-key-input').value = saved.apiKey || '';
     $('api-model-input').value = saved.model || provider.defaultModel;
+
+    // 【自定义 · 2026-11-26】只有自定义才显示这两个字段，内置供应商的地址/协议是固定的
+    var customBox = $('api-custom-fields');
+    if (customBox) {
+      customBox.hidden = !provider.custom;
+      if (provider.custom) {
+        $('api-baseurl-input').value = saved.baseUrl || '';
+        $('api-protocol-input').value = saved.protocol || provider.protocol;
+        $('api-model-input').placeholder = '例如 deepseek-chat / gpt-4o-mini';
+      }
+    }
+
     $('api-dialog').showModal();
     $('api-key-input').focus();
   }
@@ -96,13 +120,16 @@
     var saved = data.providers[selected] || {};
     var provider = PROVIDERS[selected];
     if (!provider || !saved.apiKey) return null;
-    return {
+    var snapshot = {
       provider: selected,
       apiKey: saved.apiKey,
       model: saved.model || provider.defaultModel,
-      protocol: provider.protocol,
-      baseUrl: provider.baseUrl
+      protocol: provider.custom ? (saved.protocol || provider.protocol) : provider.protocol,
+      baseUrl: provider.custom ? (saved.baseUrl || '') : provider.baseUrl
     };
+    // 自定义没填地址 → 视为未配置完成，不能拿去发请求
+    if (provider.custom && !snapshot.baseUrl) return null;
+    return snapshot;
   }
 
   function saveDialog(event) {
@@ -115,13 +142,36 @@
       $('api-key-input').reportValidity();
       return;
     }
+    // 自定义必须填地址和模型，否则请求发不到地方
+    if (provider.custom) {
+      var baseUrl = ($('api-baseurl-input').value || '').trim();
+      if (!/^https?:\/\//i.test(baseUrl)) {
+        $('api-baseurl-input').setCustomValidity('请填完整的接口地址，例如 https://your-gateway/v1');
+        $('api-baseurl-input').reportValidity();
+        return;
+      }
+      if (!($('api-model-input').value || '').trim()) {
+        $('api-model-input').setCustomValidity('请填写模型名');
+        $('api-model-input').reportValidity();
+        return;
+      }
+    }
     var data = readStore();
     data.activeProvider = activeProvider;
-    data.providers[activeProvider] = {
+    var record = {
       apiKey: key,
       model: $('api-model-input').value.trim() || provider.defaultModel
     };
+    if (provider.custom) {
+      record.baseUrl = ($('api-baseurl-input').value || '').trim().replace(/\/+$/, '');
+      record.protocol = $('api-protocol-input').value === 'responses' ? 'responses' : 'chat-completions';
+    }
+    data.providers[activeProvider] = record;
     $('api-key-input').setCustomValidity('');
+    if (provider.custom) {
+      $('api-baseurl-input').setCustomValidity('');
+      $('api-model-input').setCustomValidity('');
+    }
     $('api-dialog').close();
     toast(writeStore(data) ? provider.label + ' API 已保存' : 'API 已保存到本次会话，当前浏览器无法持久保存');
   }
@@ -174,7 +224,8 @@
     } else {
       writeStore(data);
     }
-    toast(provider === 'openai' ? '已移除 OpenAI 密钥，改用设置里的模型配置' : '已移除 DeepSeek 密钥，改用设置里的模型配置');
+    var label = (PROVIDERS[provider] && PROVIDERS[provider].label) || '该';
+    toast('已移除 ' + label + ' 密钥，改用设置里的模型配置');
   }
 
   function bind() {

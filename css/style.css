@@ -1356,3 +1356,18 @@ body.literature-reading-view #module-space .spec-label { flex-basis: 5em; }
 .research-plan-inline[data-tone="busy"] { color: var(--muted); }
 .research-plan-inline[data-tone="ok"] { color: #1f6b2c; }
 .research-plan-inline[data-tone="error"] { color: var(--danger); font-weight: 500; }
+
+/* 【自定义 API · 2026-11-26】地址与协议字段（只对"自定义"供应商显示） */
+#api-custom-fields { display: block; }
+#api-custom-fields[hidden] { display: none; }
+#api-protocol-input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+}
