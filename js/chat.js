@@ -770,11 +770,16 @@
 
   function loadLiteratureSources(done) {
     var cb = (typeof done === 'function') ? done : function () {};
-    if (literatureSourceCache) { cb(literatureSourceCache); return; }
-    // 正在加载中不重复发请求，但必须回调——原来裸 return 会让调用方永远等不到
-    if (literatureSourceLoading) { cb(null); return; }
+    // 【修复 · 2026-11-26】force 参数：重试按钮必须能强制重发。
+    // 之前靠 literatureSourceRequested / literatureSourceLoading 两个标志防重入，
+    // 结果一旦某个标志卡住（比如上一次的 finally 没跑到），重试就永远被短路，
+    // 用户点了毫无反应。现在重试走 force 路径，绕过所有短路条件。
+    var force = arguments.length > 1 && arguments[1] === true;
+    if (!force && literatureSourceCache) { cb(literatureSourceCache); return; }
+    if (!force && literatureSourceLoading) { cb(null); return; }
     literatureSourceLoading = true;
     literatureSourceRequested = true;
+    if (force) literatureSourceError = '';
     researchGet('/api/literature/sources').then(function (data) {
       var list = (data && Array.isArray(data.sources)) ? data.sources : [];
       if (!list.length) throw new Error('服务端没有返回可用的检索来源');
@@ -893,11 +898,12 @@
           // 手动再加一次容易和它叠成递归（实测：连调 render 会撞进
           // refreshControls → getState → deepClone 的 Maximum call stack）。
           // 只负责发起请求，画面更新交给回调里的那一次 render。
+          // 重试走 force：绕过所有短路条件，确保真的会重发请求
           literatureSourceError = '';
           literatureSourceRequested = false;
           loadLiteratureSources(function () {
             try { render(); } catch (e) { if (root.console) root.console.error('[chat] 重试后渲染失败', e); }
-          });
+          }, true);
         });
         sourceRow.appendChild(retry);
       } else {
@@ -3255,7 +3261,16 @@
    * 无模块 / 未选中模块时禁用输入框，并给出对应占位提示。
    */
   function render() {
-    if (root.TaskManager && root.TaskManager.refreshControls) root.TaskManager.refreshControls();
+    // 【修复 · 2026-11-26】refreshControls 必须隔离。
+    // 它会深拷贝整个 state（store.getState → deepClone），在模块多、消息多时
+    // 可能抛 Maximum call stack；一抛错整个 render 就死掉，界面永远停在旧内容。
+    // 实测表现：文献调研的来源列表读取成功但界面一直显示"读取失败"，
+    // 因为 render 在进入研究面板渲染之前就已经中断了——排查了很久才定位到。
+    // 这里让它失败不影响主渲染：它只管侧栏那几个按钮的可用状态。
+    if (root.TaskManager && root.TaskManager.refreshControls) {
+      try { root.TaskManager.refreshControls(); }
+      catch (error) { if (root.console) root.console.error('[chat] refreshControls 失败（已隔离，不影响主渲染）', error); }
+    }
     if (!spaceEl) spaceEl = document.getElementById('module-space');
     if (!spaceEl) return;
 
