@@ -1739,14 +1739,24 @@ function describeUpstreamError(rawMessage, upstreamStatus) {
 async function callModel(cfg, messages, timeoutMs, signal, trace) {
   let url;
   let requestBody;
+  // 【reasoning 模型 · 2026-11-26】不指定 max_tokens 时上游默认值往往很小，
+  // 而推理型模型（commandcode 的两个 :free、deepseek-v4.1 等）会把额度全用在
+  // reasoning 上，正文 content 返回空字符串——实测踩过：300 tokens 全被思考吃掉。
+  // 给一个足够大的上限，让"想完还能写出正文"。用户若显式要求更小，仍可覆盖。
+  const reasoningCap = Number(process.env.AI_MAX_TOKENS || 0) || 4000;
   if (cfg.protocol === 'chat-completions') {
     url = cfg.baseUrl + '/chat/completions';
-    requestBody = { model: cfg.model, messages: cfg.sysPrompt ? [{ role: 'system', content: cfg.sysPrompt }].concat(messages) : messages };
+    requestBody = {
+      model: cfg.model,
+      messages: cfg.sysPrompt ? [{ role: 'system', content: cfg.sysPrompt }].concat(messages) : messages,
+      max_tokens: reasoningCap
+    };
   } else {
     url = cfg.baseUrl + '/responses';
     requestBody = {
       model: cfg.model,
-      input: messages.map((message) => ({ role: message.role, content: message.content }))
+      input: messages.map((message) => ({ role: message.role, content: message.content })),
+      max_output_tokens: reasoningCap
     };
     if (cfg.sysPrompt) requestBody.instructions = cfg.sysPrompt;
   }
@@ -1771,6 +1781,32 @@ async function callModel(cfg, messages, timeoutMs, signal, trace) {
 
   let result;
   try { result = await upstream.json(); } catch (error) { result = null; }
+
+  // 【token 参数兼容 · 2026-11-26】新版 OpenAI 推理模型不认 max_tokens，
+  // 只认 max_completion_tokens。上一步我们为了给 reasoning 模型留足预算主动传了
+  // max_tokens，在那种上游会直接 400。这里检测到这类报错就换参数名重发一次，
+  // 而不是把"参数名不对"当成"你的 Key/配置有问题"抛给用户。
+  if (!upstream.ok && upstream.status === 400 && cfg.protocol === 'chat-completions'
+      && requestBody.max_tokens !== undefined) {
+    const raw = errorText(result).toLowerCase();
+    if (raw.includes('max_tokens') || raw.includes('max_completion_tokens')) {
+      const retryBody = Object.assign({}, requestBody);
+      delete retryBody.max_tokens;
+      retryBody.max_completion_tokens = reasoningCap;
+      try {
+        upstream = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
+          body: JSON.stringify(retryBody),
+          signal: signal || AbortSignal.timeout(timeoutMs || 60000)
+        });
+        try { result = await upstream.json(); } catch (error) { result = null; }
+      } catch (error) {
+        throw new UpstreamError(502, '无法连接 AI 服务（' + (cfg.baseUrl || '未配置地址') + '）。', 'fatal-network');
+      }
+    }
+  }
+
   if (!upstream.ok) {
     const described = describeUpstreamError(errorText(result), upstream.status);
     // 状态码语义：拥塞/限流（transient）算上游故障 → 502（前端提示"稍后重试"）；
@@ -1785,6 +1821,17 @@ async function callModel(cfg, messages, timeoutMs, signal, trace) {
       .flatMap(item => item.content.filter(part => part && part.type === 'output_text').map(part => part.text))
       .join('\n') : ''));
   if (typeof text !== 'string' || !text.trim()) {
+    // 【2026-11-26】区分两种"空回复"：推理模型把预算全花在思考上（可用，只是要更多额度），
+    // 与上游真的什么都没给。前者给可操作的建议，别让用户以为是自己的配置错了。
+    const usage = (result && result.usage) || {};
+    const details = usage.completion_tokens_details || {};
+    const reasoningSpent = Number(details.reasoning_tokens || 0);
+    const finished = result && result.choices && result.choices[0] && result.choices[0].finish_reason;
+    if (reasoningSpent > 0 && finished === 'length') {
+      throw new UpstreamError(502,
+        '模型把全部输出额度用在了推理上，没留下正文（这个模型思考很占额度）。'
+        + '可以换一个非推理模型，或调大 AI_MAX_TOKENS 后重试。', 'transient');
+    }
     throw new UpstreamError(502, 'AI 服务没有返回可显示的文本。', 'transient');
   }
   if (trace && typeof result.model === 'string') trace.responseModel = result.model;
