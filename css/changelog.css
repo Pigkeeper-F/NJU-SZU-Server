@@ -3,6 +3,25 @@
  * 只做这一页需要的排版：时间线、类型徽标、筛选条、状态条。
  * ========================================================================== */
 
+/* 【修复 · 2026-11-26】这一页复用了 style.css，而那份里给 body 设了
+ * overflow: hidden、给 html/body 设了 height: 100%（工作台要靠它们锁住整屏布局）。
+ * 日志页是长文档，必须能滚，所以在这里覆盖回来。只作用于本页，不影响工作台。
+ *
+ * 两种写法并存：
+ *   - body.changelog-page：直接命中本页（兼容所有浏览器）
+ *   - html:has(.changelog-page)：覆盖 style.css 里 `html, body { height: 100% }` 的 html 一半
+ *     （:has() 不支持时这条失效，但 html 的 height:100% 本身不会阻止滚动，
+ *      真正卡住滚动的是 body 的 overflow:hidden，那条已由上面覆盖） */
+html:has(.changelog-page) {
+  height: auto;
+  overflow: auto;
+}
+
+body.changelog-page {
+  height: auto;
+  overflow: visible;
+}
+
 .changelog-page {
   background: var(--bg);
   color: var(--text);
@@ -57,6 +76,9 @@
 /* ------------------------------------------------------------- 主体 */
 .cl-main {
   flex: 1;
+  /* flex 子项的默认 min-height:auto 会让它在内容多时撑出容器，
+     配合祖先的 height 限制可能被裁掉；显式置 0 让内容自然把页面撑高。 */
+  min-height: 0;
   width: 100%;
   max-width: var(--content-max);
   margin: 0 auto;
