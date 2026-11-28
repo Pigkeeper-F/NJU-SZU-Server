@@ -11,6 +11,7 @@
         "script": "SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/scripts/google_scholar_search.py"
       },
       "idPrefix": "GSC",
+      "probeUrl": "https://scholar.google.com/",
       "notes": "首批连接器（2026-10-15）；可能要求人机验证，不自动绕过"
     },
     {
@@ -23,6 +24,7 @@
         "script": "tools/literature_browser.py"
       },
       "idPrefix": "CNKI",
+      "probeUrl": "https://kns.cnki.net/",
       "notes": "官方页面人工登录与权限核对后检索"
     },
     {
@@ -35,6 +37,7 @@
         "script": "tools/literature_extra_sources.py"
       },
       "idPrefix": "WF",
+      "probeUrl": "https://g.wanfangdata.com.cn/",
       "notes": "官方页面人工登录、验证与访问权限核对后检索"
     },
     {
@@ -47,6 +50,7 @@
         "script": "tools/literature_browser.py"
       },
       "idPrefix": "WOS",
+      "probeUrl": "https://www.webofscience.com/",
       "notes": "核心合集；官方页面人工登录与机构权限核对后检索"
     },
     {
@@ -59,6 +63,7 @@
         "script": "tools/literature_extra_sources.py"
       },
       "idPrefix": "SCOPUS",
+      "probeUrl": "https://www.scopus.com/",
       "notes": "Documents 的 Title Abstract Keywords 检索；官方页面人工登录与机构权限核对"
     },
     {
@@ -77,6 +82,7 @@
         "NCBI_EMAIL"
       ],
       "rateLimit": "3 请求/秒（配置 NCBI_API_KEY 后 10 请求/秒）",
+      "probeUrl": "https://pubmed.ncbi.nlm.nih.gov/",
       "notes": "NCBI E-utilities 公开题录与摘要检索通常无需登录；必要时同来源官方网页续跑"
     },
     {

@@ -1239,6 +1239,13 @@
         wrap.appendChild(cb);
         wrap.appendChild(el('span', 'research-source-label', source.label || source.key));
         if (source.access === 'api') wrap.appendChild(el('span', 'research-source-tag', '免验证'));
+        // 【来源可达性 · 2026-11-28】服务器到不了的库提前标出来。勾了也能继续
+        // （检索时会跳过并说明），但用户应该在点之前就知道这台机器用不了它。
+        if (source.reachable === false) {
+          wrap.appendChild(el('span', 'research-source-unreachable', '本机不可达'));
+          wrap.title = (source.label || source.key) + ' 在这台机器上无法访问，勾选后会被跳过；'
+            + '请换一台能访问该库的机器，或配置 LITERATURE_PROXY 代理。';
+        }
         sourceRow.appendChild(wrap);
       })(sourceOptions[si]);
     }
@@ -1448,9 +1455,23 @@
         (function (meta) {
           var status = String(meta.status || '');
           var failed = status !== 'ok' && status !== 'no_results';
+          // 【来源可达性 · 2026-11-28】「本机网络到不了这个库」和「登录/验证没过」
+          // 是两件事：前者换谁也修不好，只能换机器或配代理；后者点登录就行。
+          // 后端把原因写进 reason（source_unreachable），这里据此给出可执行的下一步，
+          // 不再让用户对着一条"失败"猜。
+          var detail = String(meta.error || '');
+          if (failed && meta.reason === 'source_unreachable') {
+            detail = '本机网络无法访问该站' + (detail ? '（' + detail + '）' : '')
+              + '；请换一台能访问的机器检索，或取消勾选此来源';
+          } else if (failed) {
+            detail = detail || status || '未知原因';
+          }
           var text = (meta.label || meta.source_key || '来源') + '：'
-            + (failed ? ('失败 — ' + (meta.error || status || '未知原因')) : (Number(meta.count || 0) + ' 条'));
-          srcBox.appendChild(el('span', 'research-source-result' + (failed ? ' research-source-result-fail' : ''), text));
+            + (failed ? ('失败 — ' + detail) : (Number(meta.count || 0) + ' 条'));
+          var cls = 'research-source-result'
+            + (meta.reason === 'source_unreachable' ? ' research-source-result-unreachable' : '')
+            + (failed ? ' research-source-result-fail' : '');
+          srcBox.appendChild(el('span', cls, text));
         })(state.sourceResults[sri]);
       }
       box.appendChild(srcBox);
@@ -1865,14 +1886,26 @@
       var perSource = state.sourceResults.length > 1
         ? '（' + state.sourceResults.map(function (meta) {
           var status = String((meta && meta.status) || '');
+          // 【来源可达性 · 2026-11-28】跳过的来源要说"跳过"而不是"失败"，
+          // 否则用户以为是自己配置错了，其实是这台机器根本连不上。
+          if (meta && meta.reason === 'source_unreachable') return (meta.label || meta.source_key) + ' 跳过（网络不可达）';
           return (meta.label || meta.source_key || '来源') + ' '
             + (status === 'ok' ? (Number(meta.count || 0) + ' 条') : '失败');
         }).join('、') + '）'
         : '';
+      // 全部来源都被跳过时，别只留一个干巴巴的"0 篇"——说清是网络原因，
+      // 否则用户会反复怀疑检索式写错了。
+      var allSkipped = state.sourceResults.length > 0 && state.sourceResults.every(function (meta) {
+        return meta && meta.reason === 'source_unreachable';
+      });
       state.message = state.candidates.length
         ? ('检索到 ' + state.candidates.length + ' 篇' + perSource + '，请初筛后生成要点')
-        : ('检索没有结果——换条检索式或放宽条件'
-          + (failed.length ? '（' + failed.map(function (meta) { return (meta.label || meta.source_key) + '：' + (meta.error || meta.status); }).join('；') + '）' : ''));
+        : (allSkipped
+          ? ('所有勾选的来源在这台机器上都无法访问（' + state.sourceResults.map(function (meta) {
+            return meta.label || meta.source_key;
+          }).join('、') + '）。请换一台能访问这些库的机器检索，或取消勾选后继续')
+          : ('检索没有结果——换条检索式或放宽条件'
+            + (failed.length ? '（' + failed.map(function (meta) { return (meta.label || meta.source_key) + '：' + (meta.error || meta.status); }).join('；') + '）' : '')));
       if (finalJob && finalJob.status === 'needs_attention') {
         state.message = (state.candidates.length ? ('已保存 ' + state.candidates.length + ' 篇候选') : '尚未保存候选')
           + '；部分来源需要人工登录/验证，可到「文献挖掘」面板继续原任务。';

@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 
+import literature_reachability as _reachability
+
 
 PAGE_TIMEOUT_SECONDS = 60
 _WORKER = Path(__file__).resolve().with_name("literature_source_worker.py")
@@ -51,6 +53,14 @@ def run_source(source, query, scrape_current, limit, year_from=None, year_to=Non
     never exposed through the web API, frozen configuration, or stage CLI.
     Killing this worker does not target the persistent browser or other tasks.
     """
+    # 先花 2.5 秒判断这个来源到底能不能连。连不上就立刻回，不必让 worker
+    # 空跑到 60 秒超时——那既让用户干等，又会让浏览器卡在加载不出的页面上，
+    # 连带把 Playwright 的 CDP 握手一起拖死（实测：Scholar 从境内主机不可达时，
+    # 「检索浏览器操作未完成」就是这么来的）。
+    unreachable = _reachability.unreachable_result(source)
+    if unreachable is not None:
+        return unreachable
+
     payload = {"protocol": 1, "source": source, "query": query, "scrape_current": scrape_current,
                "limit": limit, "year_from": year_from, "year_to": year_to,
                "job_dir": str(Path(job_dir).resolve()), "page_index": page_index, "full_page": full_page,

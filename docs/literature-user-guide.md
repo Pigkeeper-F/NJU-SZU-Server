@@ -14,6 +14,12 @@
 > 后重启（`python SOC-database-pipeline-clean/.codex/skills/soc-paper-fetch/scripts/browser.py stop` 再 `launch`），
 > 会回到可见窗口模式；登录态保存在 profile 里，切回后台模式仍然有效。
 
+> **国内服务器访问不了 Google Scholar。** 实测从境内主机连 Google 全域在 50ms 内直接失败
+> （`curl` 返回 `000`），网页加载不出来，于是调度器 60 秒后判「当前来源加载超过1分钟」，
+> 同时检索浏览器因页面卡死导致 CDP 握手超时，报「检索浏览器操作未完成」——两个报错是同一件事。
+> 两条出路：设 `LITERATURE_PROXY=http://host:port`（或 `socks5://host:port`）让 Chromium 走代理出口，
+> 或只在能上外网的本机跑 `google-scholar`，服务器跑知网/万方/WoS/Scopus（这些境内可达）。
+
 ## 2. 新建文献任务
 
 1. 左侧栏点「任务」展开 → 点「**＋ 新建任务**」。

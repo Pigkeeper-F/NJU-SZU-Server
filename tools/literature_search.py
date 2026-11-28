@@ -121,7 +121,12 @@ def candidate_prefix(source_key: str, batch_index: int) -> str:
     key = str(source_key or "google-scholar")
     prefix = SOURCE_PREFIXES.get(key, re.sub(r"[^A-Za-z0-9]", "", key).upper()[:6] or "SRC")
     return prefix if batch_index <= 1 else f"{prefix}-B{batch_index}"
-ATTENTION_REASONS = {"login", "verification", "access_required", "results_unrecognized", "rate_limited", "access_blocked"}
+ATTENTION_REASONS = {"login", "verification", "access_required", "results_unrecognized", "rate_limited", "access_blocked", "source_unreachable"}
+
+#: 环境原因、人力改不了的失败。这些来源记一条错误就跳过，**不把整个任务停下来**
+#: 等人处理——用户换个网络也修不好它，而其他来源还等着跑。
+#: （对比：login/verification 必须停下，因为用户点一下登录就真能继续。）
+SKIPPABLE_REASONS = {"source_unreachable"}
 
 
 def normalize_doi(value: object) -> str:
@@ -784,15 +789,32 @@ def _prepare_source_schedule(config: dict, state: dict, *, resume: bool, scrape_
     return [source for source in selected if source not in queue], resumed_source
 
 
+def _source_settled(entry: dict | None) -> bool:
+    """该来源是否已经有结论、不再需要用户处理。
+
+    除了成功，**跳过（skipped）也算结清** —— 网络不可达这种来源没有任何
+    "处理"可做，若不当作结清，任务跑完还会把 pending_source 指回它，
+    界面就一直催用户去登录一个根本打不开的站。
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("status") in {"ok", "no_results"}:
+        return True
+    return bool(entry.get("skipped"))
+
+
 def _next_pending_source(config: dict, state: dict) -> str | None:
     queue = state.get("deferred_sources", [])
     order = [source for source in config["sources"] if source not in queue] + queue
-    return next((source for source in order if (state["sources"].get(source) or {}).get("status") not in {"ok", "no_results"}), None)
+    return next((source for source in order
+                 if not _source_settled(state["sources"].get(source))), None)
 
 
 def _pause_deferred_sources(output_dir: Path, config: dict, state: dict) -> bool:
+    # 只保留真正还需处理的：成功的与跳过的都已结清，继续挂着只会让界面
+    # 反复催人去处理一个打不开的来源。
     queue = [source for source in state.get("deferred_sources", [])
-             if (state["sources"].get(source) or {}).get("status") not in {"ok", "no_results"}]
+             if not _source_settled(state["sources"].get(source))]
     if not queue:
         return False
     state["deferred_sources"] = queue
@@ -991,6 +1013,16 @@ def run_formal(config: dict, output_dir: Path, scrape_current: bool = False, *,
                 reason = search.get("reason", "verification" if search.get("status") == "captcha" else "results_unrecognized")
                 if reason not in ATTENTION_REASONS:
                     reason = "results_unrecognized"
+                if reason in SKIPPABLE_REASONS:
+                    # 同 run()：网络到不了的来源记错误后跳过，不拖住其他来源。
+                    entry.update(status="attention", reason=reason, skipped=True,
+                                 stop_reason="skipped",
+                                 message=search.get("message") or "本机网络不可达，已跳过")
+                    state.update(pending_source=_next_pending_source(config, state), pending_reason=None)
+                    persist()
+                    emit("stage", stage="search", source=source, skipped=True,
+                         message=entry["message"])
+                    break
                 return stop(entry, source, reason=reason, message=search.get("message") or "当前来源需要人工处理；登录或验证后检查并继续。")
             if search.get("status") not in {"ok", "no_results"}:
                 return stop(entry, source, message=search.get("message") or "本页检索失败，已完成页已保留。", error=True)
@@ -1143,11 +1175,25 @@ def run(config: dict, output_dir: Path, scrape_current: bool = False, *, batch_i
             reason = search.get("reason", "verification" if search.get("status") == "captcha" else "results_unrecognized")
             if reason not in ATTENTION_REASONS:
                 reason = "results_unrecognized"
-            state["sources"][source] = {"status": "attention", "reason": reason, "query": query,
-                                         "message": str(search.get("message") or ""),
-                                         "url": safe_url(search.get("url")), "results": [],
-                                         "transport": metadata_transport(search.get("transport")),
-                                         "applied_filters": [], "deferred_rules": deferred_rules(config)}
+            entry = {"status": "attention", "reason": reason, "query": query,
+                     "message": str(search.get("message") or ""),
+                     "url": safe_url(search.get("url")), "results": [],
+                     "transport": metadata_transport(search.get("transport")),
+                     "applied_filters": [], "deferred_rules": deferred_rules(config)}
+            state["sources"][source] = entry
+            if reason in SKIPPABLE_REASONS:
+                # 【来源可达性 · 2026-11-28】本机网络到不了这个库：记一条醒目错误、
+                # 不占住 pending_slot，继续跑剩下的来源。原来一律 return 0 停下，
+                # 于是勾了 Scholar 就再也搜不了知网——明明后者是通的。
+                entry["skipped"] = True
+                state.update(pending_source=None, pending_reason=None)
+                _common.atomic_write_json(checkpoint_path, state)
+                checkpoint_report(output_dir, config, state)
+                emit("stage", stage="search", source=source, skipped=True,
+                     message=str(search.get("message") or f"{_sources.label_of(source)} 在本机网络不可达，已跳过"))
+                state["pending_source"] = _next_pending_source(config, state)
+                _common.atomic_write_json(checkpoint_path, state)
+                continue
             state["pending_reason"] = reason
             _common.atomic_write_json(checkpoint_path, state)
             result = checkpoint_report(output_dir, config, state)

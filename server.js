@@ -315,7 +315,43 @@ function checkRequestGuards(req, res) {
 
 function sendJson(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+
   res.end(JSON.stringify(value));
+}
+
+// 【来源可达性 · 2026-11-28】探测本机能否访问各检索来源的官方主机。
+// 结果进程内缓存：同一台机器的网络状况不会每秒钟变，而 /sources 是高频接口。
+// 探测交给 Python（tools/literature_reachability.py），与检索时用的是同一份逻辑，
+// 避免"勾选时显示可用、真检索却跳过"这种前后不一致。
+let sourceReachabilityCache = { at: 0, map: null };
+const SOURCE_REACHABILITY_TTL_MS = 10 * 60 * 1000;
+
+function probeSourceReachability() {
+  const now = Date.now();
+  if (sourceReachabilityCache.map && now - sourceReachabilityCache.at < SOURCE_REACHABILITY_TTL_MS) {
+    return sourceReachabilityCache.map;
+  }
+  let map = {};
+  try {
+    const { spawnSync } = require('node:child_process');
+    const python = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+    const probe = spawnSync(python, [
+      '-c',
+      'import sys, json; sys.path.insert(0, "tools");'
+      + 'import literature_reachability as r;'
+      + 'print(json.dumps({k: r.reachable(k)[0] for k in r._probe_hosts()}))'
+    ], { cwd: ROOT, timeout: 20000, encoding: 'utf8' });
+    if (probe.status === 0 && probe.stdout) {
+      const parsed = JSON.parse(probe.stdout);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) map = parsed;
+    }
+  } catch (error) {
+    // 探测失败就当作全部可达：宁可让用户点了再看到明确错误，
+    // 也不要因为探测本身出错而禁用整个来源列表。
+    if (console && console.warn) console.warn('[server] 来源可达性探测失败，按全部可达处理:', error && error.message);
+  }
+  sourceReachabilityCache = { at: now, map };
+  return map;
 }
 
 function readBody(req, limit = MAX_BODY_BYTES, binary = false) {
@@ -1438,14 +1474,18 @@ async function handleLiterature(req, res, url) {
     }
     // 【多源检索 · 2026-10-22】GET /api/literature/sources：可执行的检索来源（含开放 API 源）。
     // 前端据此渲染来源多选，不再把来源清单写死在某一个页面里。
+    // 【来源可达性 · 2026-11-28】顺带回 reachable：服务器到不了的库（典型是境内
+    // 机房的 Google Scholar）在勾选前就标出来，不让用户点了才发现失败。
     if (req.method === 'GET' && route === '/api/literature/sources') {
       const registry = require('./tools/literature-sources');
+      const reachableMap = probeSourceReachability();
       return sendJson(res, 200, {
         sources: registry.executableSources().map((item) => ({
           key: item.key,
           label: item.label,
           access: item.access,
-          manual: item.access === 'manual'
+          manual: item.access === 'manual',
+          reachable: reachableMap[item.key] !== false
         }))
       });
     }
@@ -1476,6 +1516,9 @@ async function handleLiterature(req, res, url) {
             url: String(entry.url || ''),
             count: Number(entry.count || 0),
             status: String(entry.status || ''),
+            // 【来源可达性 · 2026-11-28】reason 让前端区分「网络到不了」和
+            // 「登录/验证没过」——两者的下一步完全不同，不能都只显示"失败"。
+            reason: String(entry.reason || ''),
             error: String(entry.message || '')
           };
         });

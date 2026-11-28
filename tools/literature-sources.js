@@ -101,8 +101,19 @@ function assertExecutable(sources) {
   return true;
 }
 
+//: 来源 → 判断"本机能否访问该站"用的官方地址（注册表 probeUrl）。
+//: 给 tools/literature_reachability.py 读取，保证探测目标只有一处真相。
+//: 没有 probeUrl 的来源不编造——探测层会当作未知来源放行，交给适配器自己报错。
+function probeUrls() {
+  const out = {};
+  for (const item of SOURCES) {
+    if (typeof item.probeUrl === 'string' && item.probeUrl) out[item.key] = item.probeUrl;
+  }
+  return out;
+}
+
 module.exports = {
   SOURCES, listSources, isKnown, stateOf, executableSources, manualSources,
   sourceOf, idPrefixOf, adapterOf, accessOf, reasonOf, manualStepsOf,
-  unconnectedDetails, assertExecutable
+  unconnectedDetails, assertExecutable, probeUrls
 };

@@ -108,6 +108,21 @@ def manual_steps_of(key: object) -> list[str]:
     return [str(step) for step in steps] if isinstance(steps, list) else []
 
 
+def probe_urls() -> dict[str, str]:
+    """来源 → 判断"本机能否访问该站"用的官方地址（注册表 ``probeUrl``）。
+
+    给 literature_reachability 做可达性探测用。没有 probeUrl 的来源不编造，
+    探测层会当作未知来源放行 —— 宁可让适配器自己报错，也不拦错。
+    """
+    out: dict[str, str] = {}
+    for item in list_sources():
+        url = item.get("probeUrl")
+        key = item.get("key")
+        if isinstance(url, str) and url and isinstance(key, str) and key:
+            out[key] = url
+    return out
+
+
 def import_formats_of(key: object) -> list[str]:
     """人工来源支持的清单导入格式（ris / bibtex / csv）。"""
     item = get_source(key)

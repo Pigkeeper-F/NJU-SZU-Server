@@ -49,6 +49,18 @@ def headless_requested() -> bool:
     return True
 
 
+def proxy_requested() -> str:
+    """Egress proxy for sites this host cannot reach directly.
+
+    Google Scholar (and Google generally) is unreachable from a mainland China
+    server: connections die in ~50ms. Set LITERATURE_PROXY to an
+    ``http://host:port`` / ``socks5://host:port`` URL so Chromium can go out
+    through it. Empty means direct connection, which is the historical
+    behaviour and still correct on a machine that can reach everything.
+    """
+    return (os.environ.get("LITERATURE_PROXY") or "").strip()
+
+
 def launch() -> dict:
     ensure_dirs()
     if cdp_alive():
@@ -71,6 +83,12 @@ def launch() -> dict:
         "--disable-background-networking",
         "--disable-features=ChromeWhatsNewUI,Translate",
     ]
+    proxies = proxy_requested()
+    if proxies:
+        # Apply to every scheme: the adapters hop between https (Scholar/CNKI)
+        # and plain http (some publishers), and a partial mapping silently
+        # leaves the blocked ones direct.
+        args.append(f"--proxy-server={proxies}")
     if headless:
         # New headless keeps the full renderer + download pipeline, so the
         # adapters behave the same while no window is shown at all.

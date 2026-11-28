@@ -754,7 +754,11 @@ body.sidebar-collapsed .sidebar-projects { display: none; }
   background: var(--panel-2);
 }
 .research-field { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.research-label { flex: 0 0 40px; font-size: 12.5px; color: var(--muted); }
+/* 【来源可达性 · 2026-11-28】原来写死 40px，中文「检索来源」四个字要 ~50px，
+   于是这个标签自己折成两行（"检索来/源"）。改成 min-content 起点 +
+   不收缩：短标签（规模/模型）仍对齐，长标签不会被挤断。 */
+.research-label { flex: 0 0 auto; min-width: 40px; white-space: nowrap; font-size: 12.5px; color: var(--muted); }
+
 .research-select { flex: 0 1 280px; max-width: 100%; }
 .research-input {
   flex: 1 1 auto;
@@ -945,6 +949,18 @@ body.sidebar-collapsed .sidebar-changelog-btn { margin: 0 4px 6px; width: calc(1
   border: 1px solid var(--border);
   color: var(--muted);
 }
+/* 【来源可达性 · 2026-11-28】本机网络到不了的库：用警示色，不是普通灰标签——
+   用户需要一眼看出"这不是我没登录，是这台机器根本连不上"。 */
+.research-source-unreachable {
+  font-size: 10.5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-weight: 500;
+}
+.research-source-result-unreachable { color: var(--danger); }
 .research-per-source { margin-bottom: 4px; }
 .research-source-results {
   display: flex;
