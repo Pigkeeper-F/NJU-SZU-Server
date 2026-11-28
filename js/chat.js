@@ -1065,6 +1065,32 @@
       }
     }
 
+    // 【待处理来源 · 2026-11-28】刷新后要能接着处理"等人工验证"的那一步。
+    // 处理验证码必然要刷新/切标签，所以这个状态不能只活在内存里：
+    // 有已保存的作业 id 就回拉一次候选，从中恢复哪些来源还在等人工。
+    // 只认 reason=verification / login —— 被跳过（网络不可达）的不算待处理。
+    if (!state.pendingLogin && mod.params && typeof mod.params.researchJobId === 'string'
+        && mod.params.researchJobId && !state.__pendingRestored) {
+      state.__pendingRestored = true;
+      researchGet('/api/literature/candidates?id=' + encodeURIComponent(mod.params.researchJobId))
+        .then(function (data) {
+          var list = (data && Array.isArray(data.sources)) ? data.sources : [];
+          var waiting = list.filter(function (meta) {
+            var status = String((meta && meta.status) || '');
+            return status !== 'ok' && status !== 'no_results' && meta
+              && (meta.reason === 'verification' || meta.reason === 'login');
+          });
+          if (!waiting.length) return;
+          state.pendingLogin = {
+            jobId: mod.params.researchJobId,
+            labels: waiting.map(function (meta) { return meta.label || meta.source_key; }),
+            needsVerification: waiting.some(function (meta) { return meta.reason === 'verification'; })
+          };
+          render();
+        })
+        .catch(function () { /* 拉不到就算了，不打扰用户 */ });
+    }
+
     /** 把当前输入写回模块参数（防抖 600ms，且静默写入）。 */
     if (!state.__draftBound) {
       state.__draftBound = true;
@@ -1445,6 +1471,31 @@
       render();
     });
     actions.appendChild(runBtn);
+    // 【待处理来源 · 2026-11-28】有来源要求人工登录/过验证码时，直接给一个按钮打开
+    // 那个页面。原来只写一句「可到文献挖掘面板继续」，但用户就在九步面板里，
+    // 不知道该去哪点——实测主人 2026-11-28 卡在这里。
+    if (state.pendingLogin && state.pendingLogin.jobId) {
+      var openBtn = el('button', 'quiet-button research-open-pending',
+        '打开待处理页面（' + state.pendingLogin.labels.join('、') + '）');
+      openBtn.type = 'button';
+      openBtn.title = state.pendingLogin.needsVerification
+        ? '在该页面完成验证码后回到这里点「检索」继续'
+        : '在该页面登录机构账号后回到这里点「检索」继续';
+      openBtn.addEventListener('click', function () {
+        openBtn.disabled = true;
+        openBtn.textContent = '正在打开…';
+        researchPost('/api/literature/browser', { id: state.pendingLogin.jobId })
+          .then(function (result) {
+            state.message = '已打开「' + ((result && result.label) || '待处理页面') + '」，'
+              + (state.pendingLogin.needsVerification ? '完成验证码' : '登录') + '后回来点「检索」继续';
+          })
+          .catch(function (error) {
+            state.message = '打开待处理页面失败：' + ((error && error.message) || '网络异常');
+          })
+          .then(function () { render(); });
+      });
+      actions.appendChild(openBtn);
+    }
     if (state.message) actions.appendChild(el('span', 'research-status', state.message));
     box.appendChild(actions);
 
@@ -1907,8 +1958,28 @@
           : ('检索没有结果——换条检索式或放宽条件'
             + (failed.length ? '（' + failed.map(function (meta) { return (meta.label || meta.source_key) + '：' + (meta.error || meta.status); }).join('；') + '）' : '')));
       if (finalJob && finalJob.status === 'needs_attention') {
+        // 【待处理来源 · 2026-11-28】原来只说「部分来源需要人工登录/验证」——
+        // 用户既不知道是哪个库，也不知道该点哪里。实测（主人 2026-11-28）
+        // 就是卡在这句话上：知网要过滑块，但界面上没有任何按钮能打开那个页面。
+        // 现在点名具体来源，并在面板里直接给一个「打开待处理页面」按钮。
+        var pendingMeta = state.sourceResults.filter(function (meta) {
+          var status = String((meta && meta.status) || '');
+          // 跳过的不算"需要你处理"——那是网络原因，处理不了。
+          return status !== 'ok' && status !== 'no_results' && meta && meta.reason !== 'source_unreachable';
+        });
+        var pendingLabels = pendingMeta.map(function (meta) { return meta.label || meta.source_key; });
+        state.pendingLogin = pendingMeta.length && jobId ? {
+          jobId: jobId,
+          labels: pendingLabels,
+          // verification=要过滑块/验证码，login=要登录机构账号。两者都是"人去看一眼"。
+          needsVerification: pendingMeta.some(function (meta) { return meta.reason === 'verification'; })
+        } : null;
         state.message = (state.candidates.length ? ('已保存 ' + state.candidates.length + ' 篇候选') : '尚未保存候选')
-          + '；部分来源需要人工登录/验证，可到「文献挖掘」面板继续原任务。';
+          + (pendingLabels.length
+            ? '；' + pendingLabels.join('、') + ' 需要你人工' 
+              + (pendingMeta.some(function (m) { return m.reason === 'verification'; }) ? '完成验证码' : '登录')
+              + '，点下面「打开待处理页面」处理完再回来继续'
+            : '；部分来源需要人工处理，点「打开待处理页面」查看');
       }
       render();
     }).catch(function (error) {
