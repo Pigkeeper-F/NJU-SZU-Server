@@ -1505,7 +1505,10 @@
       for (var sri = 0; sri < state.sourceResults.length; sri++) {
         (function (meta) {
           var status = String(meta.status || '');
-          var failed = status !== 'ok' && status !== 'no_results';
+          // 【待处理来源 · 2026-11-29】pending 是"还没轮到它跑"，不是失败。
+          // 原来一律标红写"失败 — pending"，看起来像出错，实际只是排队。
+          var isPending = status === 'pending' || status === 'running';
+          var failed = !isPending && status !== 'ok' && status !== 'no_results';
           // 【来源可达性 · 2026-11-28】「本机网络到不了这个库」和「登录/验证没过」
           // 是两件事：前者换谁也修不好，只能换机器或配代理；后者点登录就行。
           // 后端把原因写进 reason（source_unreachable），这里据此给出可执行的下一步，
@@ -1518,7 +1521,8 @@
             detail = detail || status || '未知原因';
           }
           var text = (meta.label || meta.source_key || '来源') + '：'
-            + (failed ? ('失败 — ' + detail) : (Number(meta.count || 0) + ' 条'));
+            + (isPending ? '排队中'
+              : (failed ? ('失败 — ' + detail) : (Number(meta.count || 0) + ' 条')));
           var cls = 'research-source-result'
             + (meta.reason === 'source_unreachable' ? ' research-source-result-unreachable' : '')
             + (failed ? ' research-source-result-fail' : '');
@@ -1965,6 +1969,8 @@
         var pendingMeta = state.sourceResults.filter(function (meta) {
           var status = String((meta && meta.status) || '');
           // 跳过的不算"需要你处理"——那是网络原因，处理不了。
+          // pending/running 也不算：还没轮到它跑，没发生任何需要人的事。
+          if (status === 'pending' || status === 'running') return false;
           return status !== 'ok' && status !== 'no_results' && meta && meta.reason !== 'source_unreachable';
         });
         var pendingLabels = pendingMeta.map(function (meta) { return meta.label || meta.source_key; });
